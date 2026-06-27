@@ -10,3 +10,4 @@ dependencies = []
 
 [tool.scikit-build]
 cmake.version = "CMakeLists.txt"
+cmake.args = ["-A", "x64"]
