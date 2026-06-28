@@ -1,20 +1,24 @@
 import lumapy
 import time
 
-eng = lumapy.Engine()
+engine = lumapy.Engine()
 
-eng.init()
+engine.init(1024, 720, "test")
 
-@eng.onError
+@engine.onError
 def error(msg):
     print(msg)
 
 def fun():
-    for x in range(100):
-        time.sleep(0.1)
-        for i in range(10):
-            eng.log(str(i))
-    eng.stop()
+    i = 0
+    while engine.running():
+        if engine.isKeyPressed(ord("A")):
+            i += 1
+            engine.log(str(i))
 
-eng.run(fun)
+        if engine.isKeyPressed(ord("X")):
+            engine.stop()
+
+
+engine.run(fun)
 print("koniec")

@@ -13,54 +13,70 @@ class Logger
 public:
 	Logger()
 	{
-		_log_thread = std::jthread([this](std::stop_token stop_token)
+		log_thread_ = std::jthread([this](std::stop_token stop_token)
 			{
-				while (!stop_token.stop_requested())
+				while (true)
 				{
-					_error_semaphore.acquire();
+					error_semaphore_.acquire();
 
-					py::gil_scoped_acquire gil;
-					std::lock_guard<std::mutex> lock(_callbacks_mutex);
-					while (std::optional<std::string> msg = _error_messages.pop())
-					{
+					if (stop_token.stop_requested())
+						break;
 
-						for (const auto& callback : _error_callbacks)
-						{
-							callback(*msg);
-						}
-					}
+					drain_messages();
 				}
+
+				drain_messages();
 			});
 	}
 
 	~Logger()
 	{
-		_log_thread.request_stop();
-		_error_semaphore.release();
-		if (_log_thread.joinable())
-		{
-			py::gil_scoped_release release;
-			_log_thread.join();
-		}
+		shutdown();
+	}
+
+	void shutdown()
+	{
+		if (!log_thread_.joinable())
+			return;
+
+		log_thread_.request_stop();
+		error_semaphore_.release(); 
+
+		py::gil_scoped_release release;
+		log_thread_.join();
 	}
 
 	void register_callback(py::function callback)
 	{
 		std::lock_guard<std::mutex> lock(_callbacks_mutex);
-		_error_callbacks.push_back(callback);
+		error_callbacks_.push_back(callback);
 	}
 	
 	void log(const std::string& message)
 	{
-		_error_messages.push(message);
-		_error_semaphore.release();
+		error_messages_.push(message);
+		error_semaphore_.release();
 	}
 private:
-	MpscQueue<std::string> _error_messages{};
-	std::counting_semaphore<> _error_semaphore{ 0 };
+
+	void drain_messages()
+	{
+		py::gil_scoped_acquire gil;
+		std::lock_guard<std::mutex> lock(_callbacks_mutex);
+		while (std::optional<std::string> msg = error_messages_.pop())
+		{
+			for (const auto& callback : error_callbacks_)
+			{
+				callback(*msg);
+			}
+		}
+	}
+
+	MpscQueue<std::string> error_messages_{};
+	std::counting_semaphore<> error_semaphore_{ 0 };
 
 	std::mutex _callbacks_mutex;
-	std::vector<py::function> _error_callbacks{};
+	std::vector<py::function> error_callbacks_{};
 
-	std::jthread _log_thread;
+	std::jthread log_thread_;
 };

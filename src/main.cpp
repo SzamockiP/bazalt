@@ -8,6 +8,7 @@
 #include <cstdlib>
 
 #include "Logger.hpp"
+#include "window.hpp"
 
 extern "C" void sigint_handler(int signum)
 {
@@ -29,13 +30,13 @@ public:
 
     py::function on_error(py::function callback)
     {
-        _logger.register_callback(callback);
+        logger_.register_callback(callback);
         return callback;
     }
 
-    void init() 
+    void init(int width, int height, const std::string& title)
     {
-
+        window_ = std::make_unique<Window>( width, height, title );
     }
 
     void run(py::function function)
@@ -43,62 +44,80 @@ public:
 
         std::signal(SIGINT, sigint_handler);
 
-        _is_running.store(true, std::memory_order_relaxed);
+        is_running_.store(true, std::memory_order_relaxed);
 
+        {
+            py::gil_scoped_release release;
 
-        _logic_thread = std::jthread([this, function]()
+            logic_thread_ = std::jthread([this, function]()
+                {
+                    py::gil_scoped_acquire acquire;
+
+                    try
+                    {
+                        function();
+                    }
+                    catch (const std::exception& e)
+                    {
+                        logger_.log(e.what());
+                        stop();
+                    }
+
+                    stop();
+                });
+
+            while (is_running_.load(std::memory_order_relaxed))
             {
-                py::gil_scoped_acquire acquire;
-
-                try
+                window_->poll_events();
+                if (window_->should_close())
                 {
-                    function();
-                }
-                catch (const std::exception& e)
-                {
-                    _logger.log(e.what());
                     stop();
                 }
+            }
 
-                stop();
-            });
-
-        py::gil_scoped_release release;
-
-        while (_is_running.load(std::memory_order_relaxed))
-        {
-            _logger.log("[Logger]");
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (logic_thread_.joinable())
+            {
+                logic_thread_.request_stop();
+                logic_thread_.join();
+            }
         }
-
-        if (_logic_thread.joinable())
-        {
-            _logic_thread.request_stop();
-            _logic_thread.join();
-        }
+        
+        logger_.shutdown();
 
         std::signal(SIGINT, SIG_DFL);
     }
 
     bool running() const
     {
-        return _is_running.load(std::memory_order_relaxed);
+        return is_running_.load(std::memory_order_relaxed);
     }
 
     void stop()
     {
-        _is_running.store(false, std::memory_order_relaxed);
+        is_running_.store(false, std::memory_order_relaxed);
     }
 
     void log(const std::string& msg)
     {
-        _logger.log(msg);
+        logger_.log(msg);
+    }
+
+    MouseState get_mouse_state() const
+    {
+        return window_->get_mouse_state();
+    }
+
+    bool is_key_pressed(int key) const
+    {
+        return window_->is_key_pressed(key);
     }
 
 private:
-    std::atomic<bool> _is_running{false};
-    Logger _logger;
-    std::jthread _logic_thread;
+    std::atomic<bool> is_running_{false};
+    Logger logger_;
+    std::jthread logic_thread_;
+
+    std::unique_ptr<Window> window_;
 };
 
 PYBIND11_MODULE(lumapy, m){
@@ -111,5 +130,7 @@ PYBIND11_MODULE(lumapy, m){
         .def("running", &Engine::running)
         .def("stop", &Engine::stop)
         .def("onError", &Engine::on_error)
-        .def("log", &Engine::log);
+        .def("log", &Engine::log)
+        .def("getMouseState", &Engine::get_mouse_state)
+        .def("isKeyPressed", &Engine::is_key_pressed);
 }
