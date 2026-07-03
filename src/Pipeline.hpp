@@ -81,6 +81,20 @@ public:
         return *this;
     }
 
+    PipelineBuilder& depthTest(bool enable) {
+        depth_test_ = enable;
+        return *this;
+    }
+
+    PipelineBuilder& pushConstant(uint32_t size, ShaderStage stage) {
+        VkPushConstantRange range{};
+        range.stageFlags = (stage == ShaderStage::VERTEX) ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+        range.offset = 0;
+        range.size = size;
+        push_constant_ranges_.push_back(range);
+        return *this;
+    }
+
     std::expected<std::shared_ptr<Pipeline>, std::string> build() {
         if (!vertex_shader_ || !fragment_shader_) {
             return std::unexpected("Vertex and fragment shaders must be provided");
@@ -187,9 +201,19 @@ public:
         colorBlending.attachmentCount = 1;
         colorBlending.pAttachments = &colorBlendAttachment;
 
+        VkPipelineDepthStencilStateCreateInfo depthStencil{};
+        depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        depthStencil.depthTestEnable = depth_test_ ? VK_TRUE : VK_FALSE;
+        depthStencil.depthWriteEnable = depth_test_ ? VK_TRUE : VK_FALSE;
+        depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        depthStencil.depthBoundsTestEnable = VK_FALSE;
+        depthStencil.stencilTestEnable = VK_FALSE;
+
         // Pipeline Layout
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutInfo.pushConstantRangeCount = static_cast<uint32_t>(push_constant_ranges_.size());
+        pipelineLayoutInfo.pPushConstantRanges = push_constant_ranges_.data();
 
         VkPipelineLayout pipelineLayout;
         if (vkCreatePipelineLayout(renderer_.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
@@ -202,6 +226,9 @@ public:
         VkFormat colorFormat = renderer_.swapchain_format();
         pipelineRenderingCreateInfo.colorAttachmentCount = 1;
         pipelineRenderingCreateInfo.pColorAttachmentFormats = &colorFormat;
+        if (renderer_.depth_format() != VK_FORMAT_UNDEFINED) {
+            pipelineRenderingCreateInfo.depthAttachmentFormat = renderer_.depth_format();
+        }
 
         VkGraphicsPipelineCreateInfo pipelineInfo{};
         pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -213,6 +240,7 @@ public:
         pipelineInfo.pViewportState = &viewportState;
         pipelineInfo.pRasterizationState = &rasterizer;
         pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pDepthStencilState = &depthStencil;
         pipelineInfo.pColorBlendState = &colorBlending;
         pipelineInfo.pDynamicState = &dynamicState;
         pipelineInfo.layout = pipelineLayout;
@@ -233,4 +261,6 @@ private:
     std::shared_ptr<ShaderModule> vertex_shader_;
     std::shared_ptr<ShaderModule> fragment_shader_;
     std::vector<Format> formats_;
+    bool depth_test_ = false;
+    std::vector<VkPushConstantRange> push_constant_ranges_;
 };

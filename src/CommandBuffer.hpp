@@ -78,6 +78,32 @@ public:
             1, &barrier
         );
 
+        if (renderer_.depth_image() != VK_NULL_HANDLE) {
+            VkImageMemoryBarrier depthBarrier{};
+            depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            depthBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            depthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+            depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            depthBarrier.image = renderer_.depth_image();
+            depthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            depthBarrier.subresourceRange.baseMipLevel = 0;
+            depthBarrier.subresourceRange.levelCount = 1;
+            depthBarrier.subresourceRange.baseArrayLayer = 0;
+            depthBarrier.subresourceRange.layerCount = 1;
+            depthBarrier.srcAccessMask = 0;
+            depthBarrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+            vkCmdPipelineBarrier(
+                current_cmd_,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                0,
+                0, nullptr,
+                0, nullptr,
+                1, &depthBarrier
+            );
+        }
+
         VkRenderingAttachmentInfo colorAttachment{};
         colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
         colorAttachment.imageView = renderer_.swapchain_image_views()[renderer_.current_image_index()];
@@ -91,6 +117,16 @@ public:
             colorAttachment.clearValue.color = {0.0f, 0.0f, 0.0f, 1.0f};
         }
 
+        VkRenderingAttachmentInfo depthAttachment{};
+        if (renderer_.depth_image_view() != VK_NULL_HANDLE) {
+            depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            depthAttachment.imageView = renderer_.depth_image_view();
+            depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+            depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            depthAttachment.clearValue.depthStencil = {1.0f, 0};
+        }
+
         VkRenderingInfo renderingInfo{};
         renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
         renderingInfo.renderArea.offset = {0, 0};
@@ -98,6 +134,9 @@ public:
         renderingInfo.layerCount = 1;
         renderingInfo.colorAttachmentCount = 1;
         renderingInfo.pColorAttachments = &colorAttachment;
+        if (renderer_.depth_image_view() != VK_NULL_HANDLE) {
+            renderingInfo.pDepthAttachment = &depthAttachment;
+        }
 
         vkCmdBeginRendering(current_cmd_, &renderingInfo);
     }
@@ -169,6 +208,11 @@ public:
 
     void drawIndexed(uint32_t indexCount) {
         vkCmdDrawIndexed(current_cmd_, indexCount, 1, 0, 0, 0);
+    }
+
+    void pushConstants(std::shared_ptr<Pipeline> pipeline, ShaderStage stage, uint32_t offset, uint32_t size, const void* data) {
+        VkShaderStageFlags stageFlags = (stage == ShaderStage::VERTEX) ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+        vkCmdPushConstants(current_cmd_, pipeline->layout(), stageFlags, offset, size, data);
     }
 
     VkCommandBuffer get() const { return current_cmd_; }

@@ -173,6 +173,49 @@ public:
 			}
 		}
 
+		// Depth Image
+		VkFormat depth_format = VK_FORMAT_D32_SFLOAT;
+		renderer->depth_format_ = depth_format;
+
+		VkImageCreateInfo imageInfo = {};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.extent.width = renderer->vkb_swapchain_.extent.width;
+		imageInfo.extent.height = renderer->vkb_swapchain_.extent.height;
+		imageInfo.extent.depth = 1;
+		imageInfo.mipLevels = 1;
+		imageInfo.arrayLayers = 1;
+		imageInfo.format = depth_format;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+		VmaAllocationCreateInfo allocImageInfo = {};
+		allocImageInfo.usage = VMA_MEMORY_USAGE_AUTO;
+
+		if (vmaCreateImage(renderer->allocator_, &imageInfo, &allocImageInfo, &renderer->depth_image_, &renderer->depth_image_allocation_, nullptr) != VK_SUCCESS)
+		{
+			return std::unexpected("Vulkan: Failed to create depth image");
+		}
+
+		VkImageViewCreateInfo viewInfo = {};
+		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		viewInfo.image = renderer->depth_image_;
+		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		viewInfo.format = depth_format;
+		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		viewInfo.subresourceRange.baseMipLevel = 0;
+		viewInfo.subresourceRange.levelCount = 1;
+		viewInfo.subresourceRange.baseArrayLayer = 0;
+		viewInfo.subresourceRange.layerCount = 1;
+
+		if (vkCreateImageView(renderer->vkb_device_.device, &viewInfo, nullptr, &renderer->depth_image_view_) != VK_SUCCESS)
+		{
+			return std::unexpected("Vulkan: Failed to create depth image view");
+		}
+
 		logger.log("Vulkan: Initialized (" +
 			std::string(renderer->vkb_physical_device_.properties.deviceName) + ")");
 
@@ -202,6 +245,13 @@ public:
 		if (command_pool_)
 		{
 			vkDestroyCommandPool(vkb_device_.device, command_pool_, nullptr);
+		}
+
+		if (depth_image_view_) {
+			vkDestroyImageView(vkb_device_.device, depth_image_view_, nullptr);
+		}
+		if (depth_image_ && depth_image_allocation_) {
+			vmaDestroyImage(allocator_, depth_image_, depth_image_allocation_);
 		}
 
 		if (allocator_)
@@ -241,6 +291,9 @@ public:
 	const std::vector<VkImageView>& swapchain_image_views() const { return swapchain_image_views_; }
 	VmaAllocator allocator() const { return allocator_; }
 	VkCommandPool command_pool() const { return command_pool_; }
+	VkFormat depth_format() const { return depth_format_; }
+	VkImage depth_image() const { return depth_image_; }
+	VkImageView depth_image_view() const { return depth_image_view_; }
 
 	std::uint32_t current_frame() const { return current_frame_; }
 	std::uint32_t current_image_index() const { return image_index_; }
@@ -353,4 +406,9 @@ private:
 
 	std::uint32_t current_frame_ = 0;
 	std::uint32_t image_index_ = 0;
+
+	VkImage depth_image_ = VK_NULL_HANDLE;
+	VmaAllocation depth_image_allocation_ = VK_NULL_HANDLE;
+	VkImageView depth_image_view_ = VK_NULL_HANDLE;
+	VkFormat depth_format_ = VK_FORMAT_UNDEFINED;
 };
