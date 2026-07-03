@@ -158,10 +158,18 @@ public:
 		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 		{
 			if (vkCreateSemaphore(renderer->vkb_device_.device, &semaphoreInfo, nullptr, &renderer->image_available_semaphores_[i]) != VK_SUCCESS ||
-				vkCreateSemaphore(renderer->vkb_device_.device, &semaphoreInfo, nullptr, &renderer->render_finished_semaphores_[i]) != VK_SUCCESS ||
 				vkCreateFence(renderer->vkb_device_.device, &fenceInfo, nullptr, &renderer->in_flight_fences_[i]) != VK_SUCCESS)
 			{
-				return std::unexpected("Vulkan: Failed to create synchronization objects");
+				return std::unexpected("Vulkan: Failed to create CPU synchronization objects");
+			}
+		}
+
+		renderer->render_finished_semaphores_.resize(renderer->swapchain_images_.size());
+		for (size_t i = 0; i < renderer->swapchain_images_.size(); i++)
+		{
+			if (vkCreateSemaphore(renderer->vkb_device_.device, &semaphoreInfo, nullptr, &renderer->render_finished_semaphores_[i]) != VK_SUCCESS)
+			{
+				return std::unexpected("Vulkan: Failed to create render finished semaphores");
 			}
 		}
 
@@ -182,9 +190,13 @@ public:
 
 		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
 		{
-			if (render_finished_semaphores_[i]) vkDestroySemaphore(vkb_device_.device, render_finished_semaphores_[i], nullptr);
 			if (image_available_semaphores_[i]) vkDestroySemaphore(vkb_device_.device, image_available_semaphores_[i], nullptr);
 			if (in_flight_fences_[i]) vkDestroyFence(vkb_device_.device, in_flight_fences_[i], nullptr);
+		}
+		
+		for (auto sem : render_finished_semaphores_)
+		{
+			if (sem) vkDestroySemaphore(vkb_device_.device, sem, nullptr);
 		}
 
 		if (command_pool_)
@@ -267,7 +279,7 @@ public:
 		submitInfo.commandBufferCount = 1;
 		submitInfo.pCommandBuffers = &cmd;
 
-		VkSemaphore signalSemaphores[] = { render_finished_semaphores_[current_frame_] };
+		VkSemaphore signalSemaphores[] = { render_finished_semaphores_[image_index_] };
 		submitInfo.signalSemaphoreCount = 1;
 		submitInfo.pSignalSemaphores = signalSemaphores;
 
@@ -336,7 +348,7 @@ private:
 	VkCommandPool command_pool_ = VK_NULL_HANDLE;
 
 	VkSemaphore image_available_semaphores_[MAX_FRAMES_IN_FLIGHT]{};
-	VkSemaphore render_finished_semaphores_[MAX_FRAMES_IN_FLIGHT]{};
+	std::vector<VkSemaphore> render_finished_semaphores_;
 	VkFence in_flight_fences_[MAX_FRAMES_IN_FLIGHT]{};
 
 	std::uint32_t current_frame_ = 0;
