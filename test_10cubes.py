@@ -177,8 +177,14 @@ if __name__ == "__main__":
         indices.extend([i*4+0, i*4+1, i*4+2, i*4+2, i*4+3, i*4+0])
     ibuf = engine.createBuffer(indices, lp.BufferType.INDEX, lp.DataType.UINT32)
 
-    # UBO size: 204 floats
-    ubuf = engine.createBuffer([0.0]*204, lp.BufferType.UNIFORM, lp.DataType.FLOAT)
+    # Calculate UBO size dynamically using glm.sizeof to avoid hardcoding sizes.
+    # std140 layout aligns vec3 to 16 bytes (so we treat them as vec4 for sizing)
+    ubo_size_bytes = (
+        glm.sizeof(glm.mat4) * 2 +  # view, proj
+        glm.sizeof(glm.mat4) * 10 + # models array
+        glm.sizeof(glm.vec4) * 3    # lightPos, viewPos, lightColor
+    )
+    ubuf = engine.createBuffer(ubo_size_bytes, lp.BufferType.UNIFORM)
 
     cmd = engine.createCommandBuffer()
     

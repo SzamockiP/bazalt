@@ -163,6 +163,16 @@ public:
         }
     }
 
+    py::object create_empty_buffer(size_t size_in_bytes, BufferType type) {
+        auto res = Buffer::create(*renderer_, nullptr, size_in_bytes, type);
+        if (res) {
+            return py::cast(res.value());
+        } else {
+            logger_.log(res.error());
+            throw std::runtime_error(res.error());
+        }
+    }
+
     py::object create_command_buffer() {
         auto res = CommandBuffer::create(*renderer_);
         if (res) {
@@ -306,6 +316,7 @@ PYBIND11_MODULE(lumapy, m) {
         .def("getMouseState", &Engine::get_mouse_state)
         .def("isKeyPressed", &Engine::is_key_pressed)
         .def("createBuffer", &Engine::create_buffer)
+        .def("createBuffer", &Engine::create_empty_buffer)
         .def("createCommandBuffer", &Engine::create_command_buffer)
         .def("createPipeline", &Engine::create_pipeline)
         .def("compileShader", &Engine::compile_shader)
