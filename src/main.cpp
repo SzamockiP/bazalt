@@ -230,7 +230,10 @@ PYBIND11_MODULE(lumapy, m) {
         .def_readonly("dx", &MouseState::dx)
         .def_readonly("dy", &MouseState::dy);
 
-    py::class_<Buffer, std::shared_ptr<Buffer>>(m, "Buffer");
+    py::class_<Buffer, std::shared_ptr<Buffer>>(m, "Buffer")
+        .def("update", [](Buffer& buffer, std::string_view data) {
+            buffer.update(data.data(), data.size());
+        });
     
     py::class_<ShaderModule, std::shared_ptr<ShaderModule>>(m, "ShaderModule");
 
@@ -242,6 +245,7 @@ PYBIND11_MODULE(lumapy, m) {
         .def("vertexFormat", &PipelineBuilder::vertexFormat)
         .def("depthTest", &PipelineBuilder::depthTest)
         .def("pushConstant", &PipelineBuilder::pushConstant)
+        .def("uniformBuffer", &PipelineBuilder::uniformBuffer)
         .def("build", [](PipelineBuilder& builder) -> py::object {
             auto res = builder.build();
             if (res) {
@@ -264,7 +268,8 @@ PYBIND11_MODULE(lumapy, m) {
         .def("drawIndexed", &CommandBuffer::drawIndexed)
         .def("pushConstants", [](CommandBuffer& cmd, std::shared_ptr<Pipeline> pipeline, ShaderStage stage, uint32_t offset, std::string_view data) {
             cmd.pushConstants(pipeline, stage, offset, static_cast<uint32_t>(data.size()), data.data());
-        });
+        })
+        .def("bindUniformBuffer", &CommandBuffer::bindUniformBuffer);
 
     py::class_<Engine>(m, "Engine")
         .def(py::init<>())

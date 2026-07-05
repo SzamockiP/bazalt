@@ -22,7 +22,7 @@ def error(msg):
 @engine.onFrame
 def on_update():
     global camera_pos, camera_front, camera_up, yaw, pitch
-    global last_mouse_dx, last_mouse_dy, last_time
+    global last_mouse_dx, last_mouse_dy, last_time, ubuf
 
     current_time = time.time()
     dt = current_time - last_time
@@ -83,10 +83,11 @@ def on_update():
     cmd.setScissor()
     cmd.bindPipeline(pipeline)
     
-    # Transpozycja jest tu potrzebna, ponieważ funkcja bytes() w bibliotece PyGLM 
-    # układa dane w pamięci "wierszami" (row-major). GLSL natywnie oczekuje układu column-major.
-    # (Ewentualną alternatywą byłoby zrezygnowanie z transpozycji tutaj i dopisanie "layout(row_major)" w GLSL)
-    cmd.pushConstants(pipeline, lp.ShaderStage.VERTEX, 0, bytes(glm.transpose(mvp)))
+    # Uaktualniamy nasz Uniform Buffer w każdej klatce (layout row-major/column-major tak jak wcześniej)
+    ubuf.update(bytes(glm.transpose(mvp)))
+
+    # Podpinamy zaktualizowany UBO pod binding = 0
+    cmd.bindUniformBuffer(0, ubuf, pipeline)
 
     cmd.bindVertexBuffer(vbuf)
     cmd.bindIndexBuffer(ibuf)
@@ -105,7 +106,8 @@ if __name__ == "__main__":
         .fragmentShader(frag_spv)
         .vertexFormat([lp.Format.FLOAT3, lp.Format.FLOAT3])
         .depthTest(True)
-        .pushConstant(64, lp.ShaderStage.VERTEX)
+        # .pushConstant(64, lp.ShaderStage.VERTEX) # Wykomentowane push constant
+        .uniformBuffer(0, lp.ShaderStage.VERTEX)   # Dodany Uniform Buffer na binding=0
         .build())
 
     # Format: pos x, y, z, color r, g, b
@@ -138,6 +140,9 @@ if __name__ == "__main__":
         4, 5, 1, 1, 0, 4
     ]
     ibuf = engine.createBuffer(indices, lp.BufferType.INDEX, lp.DataType.UINT32)
+
+    # Inicjujemy Uniform Buffer (16 floatów, czyli 64 bajty na mat4)
+    ubuf = engine.createBuffer([0.0]*16, lp.BufferType.UNIFORM, lp.DataType.FLOAT)
 
     cmd = engine.createCommandBuffer()
 

@@ -15,8 +15,12 @@ enum class Format {
 
 class Pipeline {
 public:
-    Pipeline(VkDevice device, VkPipeline pipeline, VkPipelineLayout layout)
-        : device_(device), pipeline_(pipeline), layout_(layout) {}
+    Pipeline(VkDevice device, VkPipeline pipeline, VkPipelineLayout layout, 
+             VkDescriptorSetLayout descLayout = VK_NULL_HANDLE, 
+             VkDescriptorPool descPool = VK_NULL_HANDLE, 
+             VkDescriptorSet descSet = VK_NULL_HANDLE)
+        : device_(device), pipeline_(pipeline), layout_(layout),
+          desc_layout_(descLayout), desc_pool_(descPool), desc_set_(descSet) {}
 
     ~Pipeline() {
         if (pipeline_ != VK_NULL_HANDLE) {
@@ -25,15 +29,25 @@ public:
         if (layout_ != VK_NULL_HANDLE) {
             vkDestroyPipelineLayout(device_, layout_, nullptr);
         }
+        if (desc_pool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_, desc_pool_, nullptr);
+        }
+        if (desc_layout_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device_, desc_layout_, nullptr);
+        }
     }
 
     Pipeline(const Pipeline&) = delete;
     Pipeline& operator=(const Pipeline&) = delete;
 
     Pipeline(Pipeline&& other) noexcept
-        : device_(other.device_), pipeline_(other.pipeline_), layout_(other.layout_) {
+        : device_(other.device_), pipeline_(other.pipeline_), layout_(other.layout_),
+          desc_layout_(other.desc_layout_), desc_pool_(other.desc_pool_), desc_set_(other.desc_set_) {
         other.pipeline_ = VK_NULL_HANDLE;
         other.layout_ = VK_NULL_HANDLE;
+        other.desc_layout_ = VK_NULL_HANDLE;
+        other.desc_pool_ = VK_NULL_HANDLE;
+        other.desc_set_ = VK_NULL_HANDLE;
     }
 
     Pipeline& operator=(Pipeline&& other) noexcept {
@@ -44,22 +58,39 @@ public:
             if (layout_ != VK_NULL_HANDLE) {
                 vkDestroyPipelineLayout(device_, layout_, nullptr);
             }
+            if (desc_pool_ != VK_NULL_HANDLE) {
+                vkDestroyDescriptorPool(device_, desc_pool_, nullptr);
+            }
+            if (desc_layout_ != VK_NULL_HANDLE) {
+                vkDestroyDescriptorSetLayout(device_, desc_layout_, nullptr);
+            }
             device_ = other.device_;
             pipeline_ = other.pipeline_;
             layout_ = other.layout_;
+            desc_layout_ = other.desc_layout_;
+            desc_pool_ = other.desc_pool_;
+            desc_set_ = other.desc_set_;
+            
             other.pipeline_ = VK_NULL_HANDLE;
             other.layout_ = VK_NULL_HANDLE;
+            other.desc_layout_ = VK_NULL_HANDLE;
+            other.desc_pool_ = VK_NULL_HANDLE;
+            other.desc_set_ = VK_NULL_HANDLE;
         }
         return *this;
     }
 
     VkPipeline get() const { return pipeline_; }
     VkPipelineLayout layout() const { return layout_; }
+    VkDescriptorSet descriptor_set() const { return desc_set_; }
 
 private:
     VkDevice device_;
     VkPipeline pipeline_;
     VkPipelineLayout layout_;
+    VkDescriptorSetLayout desc_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool desc_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet desc_set_ = VK_NULL_HANDLE;
 };
 
 class PipelineBuilder {
@@ -95,6 +126,17 @@ public:
         return *this;
     }
 
+    PipelineBuilder& uniformBuffer(uint32_t binding, ShaderStage stage) {
+        VkDescriptorSetLayoutBinding layoutBinding{};
+        layoutBinding.binding = binding;
+        layoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        layoutBinding.descriptorCount = 1;
+        layoutBinding.stageFlags = (stage == ShaderStage::VERTEX) ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+        layoutBinding.pImmutableSamplers = nullptr;
+        descriptor_bindings_.push_back(layoutBinding);
+        return *this;
+    }
+
     std::expected<std::shared_ptr<Pipeline>, std::string> build() {
         if (!vertex_shader_ || !fragment_shader_) {
             return std::unexpected("Vertex and fragment shaders must be provided");
@@ -115,6 +157,49 @@ public:
         fragShaderStageInfo.module = fragment_shader_->get();
         fragShaderStageInfo.pName = "main";
         shaderStages.push_back(fragShaderStageInfo);
+
+        // Descriptor Sets
+        VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+        VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+
+        if (!descriptor_bindings_.empty()) {
+            VkDescriptorSetLayoutCreateInfo layoutInfo{};
+            layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            layoutInfo.bindingCount = static_cast<uint32_t>(descriptor_bindings_.size());
+            layoutInfo.pBindings = descriptor_bindings_.data();
+
+            if (vkCreateDescriptorSetLayout(renderer_.device(), &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS) {
+                return std::unexpected("Failed to create descriptor set layout!");
+            }
+
+            VkDescriptorPoolSize poolSize{};
+            poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            poolSize.descriptorCount = static_cast<uint32_t>(descriptor_bindings_.size());
+
+            VkDescriptorPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolInfo.poolSizeCount = 1;
+            poolInfo.pPoolSizes = &poolSize;
+            poolInfo.maxSets = 1;
+
+            if (vkCreateDescriptorPool(renderer_.device(), &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
+                vkDestroyDescriptorSetLayout(renderer_.device(), descriptorSetLayout, nullptr);
+                return std::unexpected("Failed to create descriptor pool!");
+            }
+
+            VkDescriptorSetAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocInfo.descriptorPool = descriptorPool;
+            allocInfo.descriptorSetCount = 1;
+            allocInfo.pSetLayouts = &descriptorSetLayout;
+
+            if (vkAllocateDescriptorSets(renderer_.device(), &allocInfo, &descriptorSet) != VK_SUCCESS) {
+                vkDestroyDescriptorPool(renderer_.device(), descriptorPool, nullptr);
+                vkDestroyDescriptorSetLayout(renderer_.device(), descriptorSetLayout, nullptr);
+                return std::unexpected("Failed to allocate descriptor set!");
+            }
+        }
 
         // Vertex Input
         VkVertexInputBindingDescription bindingDescription{};
@@ -214,9 +299,16 @@ public:
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pipelineLayoutInfo.pushConstantRangeCount = static_cast<uint32_t>(push_constant_ranges_.size());
         pipelineLayoutInfo.pPushConstantRanges = push_constant_ranges_.data();
+        
+        if (descriptorSetLayout != VK_NULL_HANDLE) {
+            pipelineLayoutInfo.setLayoutCount = 1;
+            pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
+        }
 
         VkPipelineLayout pipelineLayout;
         if (vkCreatePipelineLayout(renderer_.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+            if (descriptorPool) vkDestroyDescriptorPool(renderer_.device(), descriptorPool, nullptr);
+            if (descriptorSetLayout) vkDestroyDescriptorSetLayout(renderer_.device(), descriptorSetLayout, nullptr);
             return std::unexpected("Failed to create pipeline layout!");
         }
 
@@ -250,10 +342,12 @@ public:
         VkPipeline graphicsPipeline;
         if (vkCreateGraphicsPipelines(renderer_.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
             vkDestroyPipelineLayout(renderer_.device(), pipelineLayout, nullptr);
+            if (descriptorPool) vkDestroyDescriptorPool(renderer_.device(), descriptorPool, nullptr);
+            if (descriptorSetLayout) vkDestroyDescriptorSetLayout(renderer_.device(), descriptorSetLayout, nullptr);
             return std::unexpected("Failed to create graphics pipeline!");
         }
 
-        return std::make_shared<Pipeline>(renderer_.device(), graphicsPipeline, pipelineLayout);
+        return std::make_shared<Pipeline>(renderer_.device(), graphicsPipeline, pipelineLayout, descriptorSetLayout, descriptorPool, descriptorSet);
     }
 
 private:
@@ -263,4 +357,5 @@ private:
     std::vector<Format> formats_;
     bool depth_test_ = false;
     std::vector<VkPushConstantRange> push_constant_ranges_;
+    std::vector<VkDescriptorSetLayoutBinding> descriptor_bindings_;
 };

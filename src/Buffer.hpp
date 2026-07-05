@@ -60,13 +60,57 @@ public:
     VkBuffer get() const { return buffer_; }
     size_t size() const { return size_; }
 
+    void update(const void* update_data, size_t update_size) {
+        if (update_size > size_) {
+            throw std::runtime_error("Update size exceeds buffer size");
+        }
+        void* mappedData;
+        if (vmaMapMemory(allocator_, allocation_, &mappedData) == VK_SUCCESS) {
+            std::memcpy(mappedData, update_data, update_size);
+            vmaUnmapMemory(allocator_, allocation_);
+        } else {
+            throw std::runtime_error("Failed to map memory for buffer update");
+        }
+    }
+
     static std::expected<std::shared_ptr<Buffer>, std::string> create(Renderer& renderer, const void* data, size_t data_size, BufferType type) {
         VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bool use_staging = true;
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
         switch (type) {
             case BufferType::VERTEX: usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
             case BufferType::INDEX: usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT; break;
-            case BufferType::UNIFORM: usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT; break;
+            case BufferType::UNIFORM: 
+                usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT; 
+                allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+                allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+                use_staging = false;
+                break;
             case BufferType::STORAGE: usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT; break;
+        }
+
+        if (!use_staging) {
+            VkBufferCreateInfo bufferInfo{};
+            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bufferInfo.size = data_size;
+            bufferInfo.usage = usage;
+            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+            VkBuffer buffer;
+            VmaAllocation allocation;
+            if (vmaCreateBuffer(renderer.allocator(), &bufferInfo, &allocInfo, &buffer, &allocation, nullptr) != VK_SUCCESS) {
+                return std::unexpected("Failed to create host-visible buffer");
+            }
+
+            if (data != nullptr && data_size > 0) {
+                void* mappedData;
+                vmaMapMemory(renderer.allocator(), allocation, &mappedData);
+                std::memcpy(mappedData, data, data_size);
+                vmaUnmapMemory(renderer.allocator(), allocation);
+            }
+            return std::make_shared<Buffer>(renderer.allocator(), buffer, allocation, data_size);
         }
 
         // Create staging buffer
@@ -89,10 +133,12 @@ public:
         }
 
         // Copy data to staging buffer
-        void* mappedData;
-        vmaMapMemory(renderer.allocator(), stagingAllocation, &mappedData);
-        std::memcpy(mappedData, data, data_size);
-        vmaUnmapMemory(renderer.allocator(), stagingAllocation);
+        if (data != nullptr && data_size > 0) {
+            void* mappedData;
+            vmaMapMemory(renderer.allocator(), stagingAllocation, &mappedData);
+            std::memcpy(mappedData, data, data_size);
+            vmaUnmapMemory(renderer.allocator(), stagingAllocation);
+        }
 
         // Create device-local buffer
         VkBufferCreateInfo bufferInfo{};
@@ -100,9 +146,6 @@ public:
         bufferInfo.size = data_size;
         bufferInfo.usage = usage;
         bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-        VmaAllocationCreateInfo allocInfo{};
-        allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
         VkBuffer buffer;
         VmaAllocation allocation;

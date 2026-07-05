@@ -5,11 +5,11 @@ layout(location = 1) in vec3 inColor;
 
 layout(location = 0) out vec3 fragColor;
 
-layout(push_constant) uniform PushConstants {
+layout(binding = 0) uniform UBO {
     mat4 mvp;
-} pc;
+} ubo;
 
 void main() {
-    gl_Position = pc.mvp * vec4(inPosition, 1.0);
+    gl_Position = ubo.mvp * vec4(inPosition, 1.0);
     fragColor = inColor;
 }

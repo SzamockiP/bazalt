@@ -215,6 +215,31 @@ public:
         vkCmdPushConstants(current_cmd_, pipeline->layout(), stageFlags, offset, size, data);
     }
 
+    void bindUniformBuffer(uint32_t binding, std::shared_ptr<Buffer> buffer, std::shared_ptr<Pipeline> pipeline) {
+        VkDescriptorSet descSet = pipeline->descriptor_set();
+        if (descSet == VK_NULL_HANDLE) {
+            throw std::runtime_error("Pipeline has no descriptor set allocated");
+        }
+
+        VkDescriptorBufferInfo bufferInfo{};
+        bufferInfo.buffer = buffer->get();
+        bufferInfo.offset = 0;
+        bufferInfo.range = buffer->size();
+
+        VkWriteDescriptorSet descriptorWrite{};
+        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrite.dstSet = descSet;
+        descriptorWrite.dstBinding = binding;
+        descriptorWrite.dstArrayElement = 0;
+        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        descriptorWrite.descriptorCount = 1;
+        descriptorWrite.pBufferInfo = &bufferInfo;
+
+        vkUpdateDescriptorSets(renderer_.device(), 1, &descriptorWrite, 0, nullptr);
+
+        vkCmdBindDescriptorSets(current_cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout(), 0, 1, &descSet, 0, nullptr);
+    }
+
     VkCommandBuffer get() const { return current_cmd_; }
 
 private:
