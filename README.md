@@ -1,38 +1,32 @@
 # LumaPy
 
-LumaPy to biblioteka dla języka Python służąca do szybkiego prototypowania i tworzenia aplikacji graficznych wykorzystujących API Vulkan, pod maską wykorzystująca C++ dla maksymalnej wydajności.
+LumaPy is a Python library for rapid prototyping and building graphical applications using the Vulkan API.
 
-## Wymagania
+## Requirements
 - Python 3.10+
 - CMake (3.28+)
-- Kompilator C++ wspierający standard C++23 (np. MSVC, GCC, Clang)
+- A C++ compiler supporting the C++23 standard (e.g. MSVC, GCC, Clang)
 - Vulkan SDK
 
-## Instalacja
+## Installation
 
-1. Sklonuj repozytorium:
-   ```bash
-   git clone https://github.com/twoj-profil/lumapy.git
-   cd lumapy
-   ```
-
-2. Utwórz wirtualne środowisko i aktywuj je:
+1. Create and activate a virtual environment:
    ```bash
    python -m venv venv
-   # Na systemie Windows:
+   # On Windows:
    .\venv\Scripts\activate
-   # Na systemie Linux/macOS:
+   # On Linux/macOS:
    source venv/bin/activate
    ```
 
-3. Zainstaluj bibliotekę w trybie developerskim za pomocą `pip`:
+2. Install the library in developer mode using `pip`:
    ```bash
    pip install -e .
    ```
 
-## Uruchamianie przykładów
+## Running examples
 
-Po pomyślnej instalacji przejdź do folderu `examples/` i uruchom jeden z przygotowanych przykładów, np.:
+After successful installation, navigate to the `examples/` folder and run one of the provided examples, e.g.:
 
 ```bash
 cd examples
