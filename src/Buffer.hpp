@@ -146,15 +146,16 @@ private:
     size_t size_ = 0;
 };
 
-class UniformBuffer : public Buffer {
+class DynamicBuffer : public Buffer {
 public:
-    UniformBuffer(Renderer& renderer, 
+    DynamicBuffer(Renderer& renderer, 
                   std::array<VkBuffer, Renderer::MAX_FRAMES_IN_FLIGHT> buffers, 
                   std::array<VmaAllocation, Renderer::MAX_FRAMES_IN_FLIGHT> allocations, 
-                  size_t size)
-        : renderer_(renderer), buffers_(buffers), allocations_(allocations), size_(size) {}
+                  size_t size,
+                  BufferType type)
+        : renderer_(renderer), buffers_(buffers), allocations_(allocations), size_(size), type_(type) {}
 
-    ~UniformBuffer() override {
+    ~DynamicBuffer() override {
         for (size_t i = 0; i < Renderer::MAX_FRAMES_IN_FLIGHT; ++i) {
             if (buffers_[i] != VK_NULL_HANDLE) {
                 vmaDestroyBuffer(renderer_.allocator(), buffers_[i], allocations_[i]);
@@ -162,14 +163,15 @@ public:
         }
     }
 
-    UniformBuffer(const UniformBuffer&) = delete;
-    UniformBuffer& operator=(const UniformBuffer&) = delete;
+    DynamicBuffer(const DynamicBuffer&) = delete;
+    DynamicBuffer& operator=(const DynamicBuffer&) = delete;
 
     VkBuffer get() const override { 
         return buffers_[renderer_.current_frame()]; 
     }
     
     size_t size() const override { return size_; }
+    BufferType buffer_type() const { return type_; }
 
     void update(const void* data, size_t size) override {
         if (size > size_) {
@@ -185,8 +187,11 @@ public:
         }
     }
 
-    static std::expected<std::shared_ptr<UniformBuffer>, std::string> create(Renderer& renderer, const void* data, size_t data_size) {
-        VkBufferUsageFlags usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    static std::expected<std::shared_ptr<DynamicBuffer>, std::string> create(Renderer& renderer, const void* data, size_t data_size, BufferType type) {
+        VkBufferUsageFlags usage = (type == BufferType::STORAGE) 
+            ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT 
+            : VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
         VmaAllocationCreateInfo allocInfo{};
         allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
         allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
@@ -202,7 +207,7 @@ public:
 
         for (size_t i = 0; i < Renderer::MAX_FRAMES_IN_FLIGHT; ++i) {
             if (vmaCreateBuffer(renderer.allocator(), &bufferInfo, &allocInfo, &buffers[i], &allocations[i], nullptr) != VK_SUCCESS) {
-                return std::unexpected("Failed to create uniform buffer");
+                return std::unexpected(std::string("Failed to create ") + (type == BufferType::STORAGE ? "storage" : "uniform") + " buffer");
             }
 
             if (data != nullptr && data_size > 0) {
@@ -212,7 +217,7 @@ public:
                 vmaUnmapMemory(renderer.allocator(), allocations[i]);
             }
         }
-        return std::make_shared<UniformBuffer>(renderer, buffers, allocations, data_size);
+        return std::make_shared<DynamicBuffer>(renderer, buffers, allocations, data_size, type);
     }
 
 private:
@@ -220,11 +225,15 @@ private:
     std::array<VkBuffer, Renderer::MAX_FRAMES_IN_FLIGHT> buffers_ = {VK_NULL_HANDLE};
     std::array<VmaAllocation, Renderer::MAX_FRAMES_IN_FLIGHT> allocations_ = {VK_NULL_HANDLE};
     size_t size_ = 0;
+    BufferType type_ = BufferType::UNIFORM;
 };
 
+// Keep backward-compatible alias
+using UniformBuffer = DynamicBuffer;
+
 inline std::expected<std::shared_ptr<Buffer>, std::string> Buffer::create(Renderer& renderer, const void* data, size_t data_size, BufferType type) {
-    if (type == BufferType::UNIFORM) {
-        return UniformBuffer::create(renderer, data, data_size);
+    if (type == BufferType::UNIFORM || type == BufferType::STORAGE) {
+        return DynamicBuffer::create(renderer, data, data_size, type);
     } else {
         return StaticBuffer::create(renderer, data, data_size, type);
     }

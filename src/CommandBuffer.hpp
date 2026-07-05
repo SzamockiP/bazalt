@@ -229,6 +229,15 @@ public:
     }
 
     void bindUniformBuffer(uint32_t binding, std::shared_ptr<Buffer> buffer, std::shared_ptr<Pipeline> pipeline) {
+        bindDescriptorBuffer_(binding, buffer, pipeline);
+    }
+
+    void bindStorageBuffer(uint32_t binding, std::shared_ptr<Buffer> buffer, std::shared_ptr<Pipeline> pipeline) {
+        bindDescriptorBuffer_(binding, buffer, pipeline);
+    }
+
+private:
+    void bindDescriptorBuffer_(uint32_t binding, std::shared_ptr<Buffer> buffer, std::shared_ptr<Pipeline> pipeline) {
         commands_.push_back([binding, buffer, pipeline](VkCommandBuffer cmd, Renderer& renderer) {
             uint32_t frame = renderer.current_frame();
             VkDescriptorSet descSet = pipeline->descriptor_set(frame);
@@ -249,7 +258,7 @@ public:
                 descriptorWrite.dstSet = descSet;
                 descriptorWrite.dstBinding = binding;
                 descriptorWrite.dstArrayElement = 0;
-                descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                descriptorWrite.descriptorType = pipeline->descriptor_type_for_binding(binding);
                 descriptorWrite.descriptorCount = 1;
                 descriptorWrite.pBufferInfo = &bufferInfo;
 
@@ -260,6 +269,8 @@ public:
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout(), 0, 1, &descSet, 0, nullptr);
         });
     }
+
+public:
 
     VkCommandBuffer get() const { 
         return command_buffers_[renderer_.current_frame()]; 

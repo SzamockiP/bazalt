@@ -328,6 +328,7 @@ PYBIND11_MODULE(lumapy, m) {
         .def("depthTest", &PipelineBuilder::depthTest)
         .def("pushConstant", &PipelineBuilder::pushConstant)
         .def("uniformBuffer", &PipelineBuilder::uniformBuffer)
+        .def("storageBuffer", &PipelineBuilder::storageBuffer)
         .def("build", [](PipelineBuilder& builder) -> py::object {
             auto res = builder.build();
             if (res) {
@@ -352,7 +353,8 @@ PYBIND11_MODULE(lumapy, m) {
         .def("pushConstants", [](CommandBuffer& cmd, std::shared_ptr<Pipeline> pipeline, ShaderStage stage, uint32_t offset, std::string_view data) {
             cmd.pushConstants(pipeline, stage, offset, static_cast<uint32_t>(data.size()), data.data());
         })
-        .def("bindUniformBuffer", &CommandBuffer::bindUniformBuffer);
+        .def("bindUniformBuffer", &CommandBuffer::bindUniformBuffer)
+        .def("bindStorageBuffer", &CommandBuffer::bindStorageBuffer);
 
     py::class_<Engine>(m, "Engine")
         .def(py::init<>())
