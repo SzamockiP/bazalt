@@ -1,5 +1,6 @@
 import lumapy as lp
 import glm
+import numpy as np
 import time
 import math
 import collections
@@ -66,15 +67,15 @@ def on_update():
     camera_right = glm.normalize(glm.cross(camera_front, glm.vec3(0.0, 1.0, 0.0)))
     camera_up = glm.normalize(glm.cross(camera_right, camera_front))
 
-    # Keyboard Input (W=87, A=65, S=83, D=68)
+    # Keyboard Input (W, A, S, D)
     speed = 2.5 * dt
-    if engine.isKeyPressed(87): 
+    if engine.isKeyPressed(lp.KEY_W): 
         camera_pos += speed * camera_front
-    if engine.isKeyPressed(83): 
+    if engine.isKeyPressed(lp.KEY_S): 
         camera_pos -= speed * camera_front
-    if engine.isKeyPressed(65): 
+    if engine.isKeyPressed(lp.KEY_A): 
         camera_pos -= speed * camera_right
-    if engine.isKeyPressed(68): 
+    if engine.isKeyPressed(lp.KEY_D): 
         camera_pos += speed * camera_right
 
     # Calculate Matrices
@@ -95,6 +96,7 @@ def on_update():
 
 if __name__ == "__main__":
     engine.init(1024, 720, "LumaPy Demo - 3D Cube")
+    engine.setCursorMode(lp.CURSOR_DISABLED)
 
     vert_spv = engine.compileShader("cube.vert", lp.ShaderStage.VERTEX)
     frag_spv = engine.compileShader("cube.frag", lp.ShaderStage.FRAGMENT)
@@ -104,12 +106,14 @@ if __name__ == "__main__":
         .fragmentShader(frag_spv)
         .vertexFormat([lp.Format.FLOAT3, lp.Format.FLOAT3])
         .depthTest(True)
+        .cullMode(lp.CullMode.BACK, lp.FrontFace.COUNTER_CLOCKWISE)
+        .blend(False)
         # .pushConstant(64, lp.ShaderStage.VERTEX) # Wykomentowane push constant
         .uniformBuffer(0, lp.ShaderStage.VERTEX)   # Dodany Uniform Buffer na binding=0
         .build())
 
     # Format: pos x, y, z, color r, g, b
-    vertices = [
+    vertices = np.array([
         # Front face
         -0.5, -0.5,  0.5,   1.0, 0.0, 0.0,
          0.5, -0.5,  0.5,   0.0, 1.0, 0.0,
@@ -120,10 +124,10 @@ if __name__ == "__main__":
          0.5, -0.5, -0.5,   0.0, 1.0, 1.0,
          0.5,  0.5, -0.5,   1.0, 1.0, 1.0,
         -0.5,  0.5, -0.5,   0.0, 0.0, 0.0,
-    ]
-    vbuf = engine.createBuffer(vertices, lp.BufferType.VERTEX, lp.DataType.FLOAT)
+    ], dtype=np.float32)
+    vbuf = engine.createBuffer(vertices, lp.BufferType.VERTEX)
 
-    indices = [
+    indices = np.array([
         # Front
         0, 1, 2, 2, 3, 0,
         # Back
@@ -136,11 +140,11 @@ if __name__ == "__main__":
         3, 2, 6, 6, 7, 3,
         # Bottom
         4, 5, 1, 1, 0, 4
-    ]
-    ibuf = engine.createBuffer(indices, lp.BufferType.INDEX, lp.DataType.UINT32)
+    ], dtype=np.uint32)
+    ibuf = engine.createBuffer(indices, lp.BufferType.INDEX)
 
     # Inicjujemy Uniform Buffer (16 floatów, czyli 64 bajty na mat4)
-    ubuf = engine.createBuffer([0.0]*16, lp.BufferType.UNIFORM, lp.DataType.FLOAT)
+    ubuf = engine.createBuffer(np.zeros(16, dtype=np.float32), lp.BufferType.UNIFORM)
 
     cmd = engine.createCommandBuffer()
     
