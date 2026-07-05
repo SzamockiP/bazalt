@@ -2,6 +2,7 @@ import lumapy as lp
 import glm
 import time
 import math
+import collections
 
 # Zmienne globalne stanu (zamiast użycia klasy App)
 camera_pos = glm.vec3(0.0, 0.0, 3.0)
@@ -12,6 +13,7 @@ pitch = 0.0
 last_mouse_dx = 0.0
 last_mouse_dy = 0.0
 last_time = time.time()
+frame_times = collections.deque(maxlen=100)
 
 engine = lp.Engine()
 
@@ -22,11 +24,17 @@ def error(msg):
 @engine.onFrame
 def on_update():
     global camera_pos, camera_front, camera_up, yaw, pitch
-    global last_mouse_dx, last_mouse_dy, last_time, ubuf
+    global last_mouse_dx, last_mouse_dy, last_time, ubuf, frame_times
 
     current_time = time.time()
     dt = current_time - last_time
     last_time = current_time
+
+    frame_times.append(dt)
+    if len(frame_times) == 100:
+        avg_dt = sum(frame_times) / 100.0
+        avg_fps = 1.0 / avg_dt if avg_dt > 0 else 0
+        engine.setTitle(f"LumaPy Demo - 3D Cube | {dt*1000:.2f} ms/frame | {avg_fps:.1f} FPS")
 
     mouse = engine.getMouseState()
     sensitivity = 0.002

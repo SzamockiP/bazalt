@@ -1,4 +1,6 @@
 import lumapy as lp
+import time
+import collections
 
 class App:
     engine = lp.Engine()
@@ -9,6 +11,16 @@ class App:
 
     @engine.onFrame
     def on_update(self):
+        current_time = time.time()
+        dt = current_time - self.last_time
+        self.last_time = current_time
+        
+        self.frame_times.append(dt)
+        if len(self.frame_times) == 100:
+            avg_dt = sum(self.frame_times) / 100.0
+            avg_fps = 1.0 / avg_dt if avg_dt > 0 else 0
+            self.engine.setTitle(f"LumaPy Demo - Triangle | {dt*1000:.2f} ms/frame | {avg_fps:.1f} FPS")
+
         self.cmd.begin()
         self.cmd.beginRendering(clear_color=[0.1, 0.2, 0.3, 1.0])
         self.cmd.setViewport()
@@ -21,6 +33,8 @@ class App:
         self.engine.submit(self.cmd)
 
     def __init__(self):
+        self.last_time = time.time()
+        self.frame_times = collections.deque(maxlen=100)
         self.engine.init(1024, 720, "LumaPy Demo - Triangle")
 
         vert_spv = self.engine.compileShader("triangle.vert", lp.ShaderStage.VERTEX)

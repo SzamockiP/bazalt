@@ -110,6 +110,13 @@ public:
         logger_.log(msg);
     }
 
+    void set_title(const std::string& title)
+    {
+        if (window_) {
+            window_->set_title(title);
+        }
+    }
+
     py::function on_frame(py::function fun)
     {
         frame_function_ = fun;
@@ -280,6 +287,7 @@ PYBIND11_MODULE(lumapy, m) {
         .def("onError", &Engine::on_error)
         .def("onFrame", &Engine::on_frame)
         .def("log", &Engine::log)
+        .def("setTitle", &Engine::set_title)
         .def("getMouseState", &Engine::get_mouse_state)
         .def("isKeyPressed", &Engine::is_key_pressed)
         .def("createBuffer", &Engine::create_buffer)

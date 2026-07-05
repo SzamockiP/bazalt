@@ -92,6 +92,12 @@ public:
 
     GLFWwindow* get_native_handle() const { return window_.get(); }
 
+    void set_title(const std::string& title)
+    {
+        title_ = title;
+        glfwSetWindowTitle(window_.get(), title_.c_str());
+    }
+
 private:
     std::unique_ptr<GLFWwindow, WindowDeleter> window_;
     int width_;
