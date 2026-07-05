@@ -4,6 +4,7 @@
 #include <memory>
 #include <stdexcept>
 #include <expected>
+#include <array>
 #include "ShaderCompiler.hpp"
 #include "Renderer.hpp"
 
@@ -18,9 +19,9 @@ public:
     Pipeline(VkDevice device, VkPipeline pipeline, VkPipelineLayout layout, 
              VkDescriptorSetLayout descLayout = VK_NULL_HANDLE, 
              VkDescriptorPool descPool = VK_NULL_HANDLE, 
-             VkDescriptorSet descSet = VK_NULL_HANDLE)
+             std::array<VkDescriptorSet, Renderer::MAX_FRAMES_IN_FLIGHT> descSets = {VK_NULL_HANDLE})
         : device_(device), pipeline_(pipeline), layout_(layout),
-          desc_layout_(descLayout), desc_pool_(descPool), desc_set_(descSet) {}
+          desc_layout_(descLayout), desc_pool_(descPool), desc_sets_(descSets) {}
 
     ~Pipeline() {
         if (pipeline_ != VK_NULL_HANDLE) {
@@ -42,12 +43,13 @@ public:
 
     Pipeline(Pipeline&& other) noexcept
         : device_(other.device_), pipeline_(other.pipeline_), layout_(other.layout_),
-          desc_layout_(other.desc_layout_), desc_pool_(other.desc_pool_), desc_set_(other.desc_set_) {
+          desc_layout_(other.desc_layout_), desc_pool_(other.desc_pool_), desc_sets_(other.desc_sets_),
+          bound_buffers_(other.bound_buffers_) {
         other.pipeline_ = VK_NULL_HANDLE;
         other.layout_ = VK_NULL_HANDLE;
         other.desc_layout_ = VK_NULL_HANDLE;
         other.desc_pool_ = VK_NULL_HANDLE;
-        other.desc_set_ = VK_NULL_HANDLE;
+        other.desc_sets_.fill(VK_NULL_HANDLE);
     }
 
     Pipeline& operator=(Pipeline&& other) noexcept {
@@ -69,20 +71,24 @@ public:
             layout_ = other.layout_;
             desc_layout_ = other.desc_layout_;
             desc_pool_ = other.desc_pool_;
-            desc_set_ = other.desc_set_;
+            desc_sets_ = other.desc_sets_;
+            bound_buffers_ = other.bound_buffers_;
             
             other.pipeline_ = VK_NULL_HANDLE;
             other.layout_ = VK_NULL_HANDLE;
             other.desc_layout_ = VK_NULL_HANDLE;
             other.desc_pool_ = VK_NULL_HANDLE;
-            other.desc_set_ = VK_NULL_HANDLE;
+            other.desc_sets_.fill(VK_NULL_HANDLE);
         }
         return *this;
     }
 
     VkPipeline get() const { return pipeline_; }
     VkPipelineLayout layout() const { return layout_; }
-    VkDescriptorSet descriptor_set() const { return desc_set_; }
+    VkDescriptorSet descriptor_set(uint32_t frame) const { return desc_sets_[frame]; }
+
+    VkBuffer get_bound_buffer(uint32_t frame) const { return bound_buffers_[frame]; }
+    void set_bound_buffer(uint32_t frame, VkBuffer buffer) { bound_buffers_[frame] = buffer; }
 
 private:
     VkDevice device_;
@@ -90,7 +96,8 @@ private:
     VkPipelineLayout layout_;
     VkDescriptorSetLayout desc_layout_ = VK_NULL_HANDLE;
     VkDescriptorPool desc_pool_ = VK_NULL_HANDLE;
-    VkDescriptorSet desc_set_ = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, Renderer::MAX_FRAMES_IN_FLIGHT> desc_sets_ = {VK_NULL_HANDLE};
+    std::array<VkBuffer, Renderer::MAX_FRAMES_IN_FLIGHT> bound_buffers_ = {VK_NULL_HANDLE};
 };
 
 class PipelineBuilder {
@@ -161,7 +168,7 @@ public:
         // Descriptor Sets
         VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
         VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+        std::array<VkDescriptorSet, Renderer::MAX_FRAMES_IN_FLIGHT> descriptorSets = {VK_NULL_HANDLE};
 
         if (!descriptor_bindings_.empty()) {
             VkDescriptorSetLayoutCreateInfo layoutInfo{};
@@ -175,26 +182,27 @@ public:
 
             VkDescriptorPoolSize poolSize{};
             poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            poolSize.descriptorCount = static_cast<uint32_t>(descriptor_bindings_.size());
+            poolSize.descriptorCount = static_cast<uint32_t>(descriptor_bindings_.size() * Renderer::MAX_FRAMES_IN_FLIGHT);
 
             VkDescriptorPoolCreateInfo poolInfo{};
             poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
             poolInfo.poolSizeCount = 1;
             poolInfo.pPoolSizes = &poolSize;
-            poolInfo.maxSets = 1;
+            poolInfo.maxSets = Renderer::MAX_FRAMES_IN_FLIGHT;
 
             if (vkCreateDescriptorPool(renderer_.device(), &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
                 vkDestroyDescriptorSetLayout(renderer_.device(), descriptorSetLayout, nullptr);
                 return std::unexpected("Failed to create descriptor pool!");
             }
 
+            std::vector<VkDescriptorSetLayout> layouts(Renderer::MAX_FRAMES_IN_FLIGHT, descriptorSetLayout);
             VkDescriptorSetAllocateInfo allocInfo{};
             allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
             allocInfo.descriptorPool = descriptorPool;
-            allocInfo.descriptorSetCount = 1;
-            allocInfo.pSetLayouts = &descriptorSetLayout;
+            allocInfo.descriptorSetCount = Renderer::MAX_FRAMES_IN_FLIGHT;
+            allocInfo.pSetLayouts = layouts.data();
 
-            if (vkAllocateDescriptorSets(renderer_.device(), &allocInfo, &descriptorSet) != VK_SUCCESS) {
+            if (vkAllocateDescriptorSets(renderer_.device(), &allocInfo, descriptorSets.data()) != VK_SUCCESS) {
                 vkDestroyDescriptorPool(renderer_.device(), descriptorPool, nullptr);
                 vkDestroyDescriptorSetLayout(renderer_.device(), descriptorSetLayout, nullptr);
                 return std::unexpected("Failed to allocate descriptor set!");
@@ -267,7 +275,7 @@ public:
         rasterizer.rasterizerDiscardEnable = VK_FALSE;
         rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
         rasterizer.lineWidth = 1.0f;
-        rasterizer.cullMode = VK_CULL_MODE_NONE; // No culling for prototyping
+        rasterizer.cullMode = VK_CULL_MODE_NONE;
         rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
         rasterizer.depthBiasEnable = VK_FALSE;
 
@@ -347,7 +355,7 @@ public:
             return std::unexpected("Failed to create graphics pipeline!");
         }
 
-        return std::make_shared<Pipeline>(renderer_.device(), graphicsPipeline, pipelineLayout, descriptorSetLayout, descriptorPool, descriptorSet);
+        return std::make_shared<Pipeline>(renderer_.device(), graphicsPipeline, pipelineLayout, descriptorSetLayout, descriptorPool, descriptorSets);
     }
 
 private:

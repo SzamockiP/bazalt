@@ -216,26 +216,32 @@ public:
     }
 
     void bindUniformBuffer(uint32_t binding, std::shared_ptr<Buffer> buffer, std::shared_ptr<Pipeline> pipeline) {
-        VkDescriptorSet descSet = pipeline->descriptor_set();
+        uint32_t frame = renderer_.current_frame();
+        VkDescriptorSet descSet = pipeline->descriptor_set(frame);
         if (descSet == VK_NULL_HANDLE) {
             throw std::runtime_error("Pipeline has no descriptor set allocated");
         }
 
-        VkDescriptorBufferInfo bufferInfo{};
-        bufferInfo.buffer = buffer->get();
-        bufferInfo.offset = 0;
-        bufferInfo.range = buffer->size();
+        VkBuffer target_buffer = buffer->get();
 
-        VkWriteDescriptorSet descriptorWrite{};
-        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrite.dstSet = descSet;
-        descriptorWrite.dstBinding = binding;
-        descriptorWrite.dstArrayElement = 0;
-        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        descriptorWrite.descriptorCount = 1;
-        descriptorWrite.pBufferInfo = &bufferInfo;
+        if (pipeline->get_bound_buffer(frame) != target_buffer) {
+            VkDescriptorBufferInfo bufferInfo{};
+            bufferInfo.buffer = target_buffer;
+            bufferInfo.offset = 0;
+            bufferInfo.range = buffer->size();
 
-        vkUpdateDescriptorSets(renderer_.device(), 1, &descriptorWrite, 0, nullptr);
+            VkWriteDescriptorSet descriptorWrite{};
+            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrite.dstSet = descSet;
+            descriptorWrite.dstBinding = binding;
+            descriptorWrite.dstArrayElement = 0;
+            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptorWrite.descriptorCount = 1;
+            descriptorWrite.pBufferInfo = &bufferInfo;
+
+            vkUpdateDescriptorSets(renderer_.device(), 1, &descriptorWrite, 0, nullptr);
+            pipeline->set_bound_buffer(frame, target_buffer);
+        }
 
         vkCmdBindDescriptorSets(current_cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout(), 0, 1, &descSet, 0, nullptr);
     }
