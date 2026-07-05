@@ -134,11 +134,20 @@ public:
     }
 
     PipelineBuilder& uniformBuffer(uint32_t binding, ShaderStage stage) {
+        VkShaderStageFlags stageFlag = (stage == ShaderStage::VERTEX) ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+        
+        for (auto& b : descriptor_bindings_) {
+            if (b.binding == binding) {
+                b.stageFlags |= stageFlag;
+                return *this;
+            }
+        }
+
         VkDescriptorSetLayoutBinding layoutBinding{};
         layoutBinding.binding = binding;
         layoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         layoutBinding.descriptorCount = 1;
-        layoutBinding.stageFlags = (stage == ShaderStage::VERTEX) ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+        layoutBinding.stageFlags = stageFlag;
         layoutBinding.pImmutableSamplers = nullptr;
         descriptor_bindings_.push_back(layoutBinding);
         return *this;

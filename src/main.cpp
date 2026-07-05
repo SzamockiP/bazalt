@@ -163,6 +163,16 @@ public:
         }
     }
 
+    py::object create_empty_buffer(size_t size_bytes, BufferType type) {
+        std::expected<std::shared_ptr<Buffer>, std::string> res = Buffer::create(*renderer_, nullptr, size_bytes, type);
+        if (res) {
+            return py::cast(res.value());
+        } else {
+            logger_.log(res.error());
+            throw std::runtime_error(res.error());
+        }
+    }
+
     py::object create_command_buffer() {
         auto res = CommandBuffer::create(*renderer_);
         if (res) {
@@ -188,10 +198,24 @@ public:
     }
 
     void submit(std::shared_ptr<CommandBuffer> cmd) {
-        if (cmd->get() != VK_NULL_HANDLE) {
-            vkEndCommandBuffer(cmd->get());
+        VkCommandBuffer vkCmd = cmd->get();
+        vkResetCommandBuffer(vkCmd, 0);
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        
+        if (vkBeginCommandBuffer(vkCmd, &beginInfo) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to begin recording command buffer!");
         }
-        renderer_->end_frame(cmd->get());
+
+        cmd->execute(vkCmd);
+
+        if (vkEndCommandBuffer(vkCmd) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to record command buffer!");
+        }
+
+        renderer_->end_frame(vkCmd);
     }
 
 private:
@@ -273,6 +297,7 @@ PYBIND11_MODULE(lumapy, m) {
         .def("bindIndexBuffer", &CommandBuffer::bindIndexBuffer)
         .def("draw", &CommandBuffer::draw)
         .def("drawIndexed", &CommandBuffer::drawIndexed)
+        .def("drawIndexedInstanced", &CommandBuffer::drawIndexedInstanced)
         .def("pushConstants", [](CommandBuffer& cmd, std::shared_ptr<Pipeline> pipeline, ShaderStage stage, uint32_t offset, std::string_view data) {
             cmd.pushConstants(pipeline, stage, offset, static_cast<uint32_t>(data.size()), data.data());
         })
@@ -291,6 +316,7 @@ PYBIND11_MODULE(lumapy, m) {
         .def("getMouseState", &Engine::get_mouse_state)
         .def("isKeyPressed", &Engine::is_key_pressed)
         .def("createBuffer", &Engine::create_buffer)
+        .def("createEmptyBuffer", &Engine::create_empty_buffer)
         .def("createCommandBuffer", &Engine::create_command_buffer)
         .def("createPipeline", &Engine::create_pipeline)
         .def("compileShader", &Engine::compile_shader)
