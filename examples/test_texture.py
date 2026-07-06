@@ -1,6 +1,6 @@
-import lumapy as lp
+import bazalt as bz
 
-engine = lp.Engine()
+engine = bz.Engine()
 
 @engine.onError
 def error(msg):
@@ -11,10 +11,10 @@ def on_update():
     engine.submit(cmd)
 
 if __name__ == "__main__":
-    engine.init(800, 600, "LumaPy Demo - Textured Quad")
+    engine.init(800, 600, "Bazalt Demo - Textured Quad")
 
-    vert_spv = engine.compileShader("quad_tex.vert", lp.ShaderStage.VERTEX)
-    frag_spv = engine.compileShader("quad_tex.frag", lp.ShaderStage.FRAGMENT)
+    vert_spv = engine.compileShader("quad_tex.vert", bz.ShaderStage.VERTEX)
+    frag_spv = engine.compileShader("quad_tex.frag", bz.ShaderStage.FRAGMENT)
 
     # Load texture
     texture = engine.loadTexture("bricks.png")
@@ -22,8 +22,8 @@ if __name__ == "__main__":
     pipeline = (engine.createPipeline()
         .vertexShader(vert_spv)
         .fragmentShader(frag_spv)
-        .vertexFormat([lp.Format.FLOAT2, lp.Format.FLOAT2])
-        .texture(0, lp.ShaderStage.FRAGMENT)
+        .vertexFormat([bz.Format.FLOAT2, bz.Format.FLOAT2])
+        .texture(0, bz.ShaderStage.FRAGMENT)
         .build())
 
     # Format: pos x, y, uv u, v
@@ -33,12 +33,12 @@ if __name__ == "__main__":
          0.5,  0.5,  1.0, 1.0,
         -0.5,  0.5,  0.0, 1.0,
     ]
-    vbuf = engine.createBuffer(vertices, lp.BufferType.VERTEX, lp.DataType.FLOAT)
+    vbuf = engine.createBuffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
 
     indices = [
         0, 1, 2, 2, 3, 0
     ]
-    ibuf = engine.createBuffer(indices, lp.BufferType.INDEX, lp.DataType.UINT32)
+    ibuf = engine.createBuffer(indices, bz.BufferType.INDEX, bz.DataType.UINT32)
 
     cmd = engine.createCommandBuffer()
     

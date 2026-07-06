@@ -25,7 +25,7 @@ public:
 
 		// Instance + Debug Messenger 
 		auto inst_ret = vkb::InstanceBuilder{}
-			.set_app_name("LumaPy Engine")
+			.set_app_name("Bazalt Engine")
 			.set_app_version(1, 0, 0)
 			.require_api_version(1, 3, 0)
 			.request_validation_layers()

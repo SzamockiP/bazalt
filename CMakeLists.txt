@@ -91,4 +91,4 @@ else()
     target_compile_options(_core PRIVATE -Wno-interference-size)
 endif()
 
-install(TARGETS _core DESTINATION lumapy)
+install(TARGETS _core DESTINATION bazalt)

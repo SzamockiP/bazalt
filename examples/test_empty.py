@@ -1,7 +1,7 @@
-import lumapy as lp
+import bazalt as bz
 import time
 
-engine = lp.Engine()
+engine = bz.Engine()
 
 @engine.onError
 def error(msg):
@@ -25,7 +25,7 @@ def on_update():
     # Update window title once per second to avoid OS overhead of setting title every frame
     if fps_timer >= 1.0:
         avg_fps = frame_count / fps_timer
-        engine.setTitle(f"LumaPy Demo - Empty | {1000.0/avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
+        engine.setTitle(f"Bazalt Demo - Empty | {1000.0/avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
         frame_count = 0
         fps_timer = 0.0
 
@@ -34,7 +34,7 @@ def on_update():
 if __name__ == "__main__":
     # Disable VSync in engine initialization if supported (assuming standard config, or if we can)
     # The current engine.init just takes width, height, title. VSync might be hardcoded in Swapchain.
-    engine.init(1024, 720, "LumaPy Demo - Empty")
+    engine.init(1024, 720, "Bazalt Demo - Empty")
 
     cmd = engine.createCommandBuffer()
     

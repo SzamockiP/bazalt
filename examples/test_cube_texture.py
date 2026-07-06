@@ -1,4 +1,4 @@
-import lumapy as lp
+import bazalt as bz
 import glm
 import time
 import math
@@ -12,7 +12,7 @@ last_mouse_dx = 0.0
 last_mouse_dy = 0.0
 last_time = time.time()
 
-engine = lp.Engine()
+engine = bz.Engine()
 
 @engine.onError
 def error(msg):
@@ -71,10 +71,10 @@ def on_update():
     engine.submit(cmd)
 
 if __name__ == "__main__":
-    engine.init(1024, 720, "LumaPy Demo - Textured Multi-Cube")
+    engine.init(1024, 720, "Bazalt Demo - Textured Multi-Cube")
 
-    vert_spv = engine.compileShader("cube_tex.vert", lp.ShaderStage.VERTEX)
-    frag_spv = engine.compileShader("cube_tex.frag", lp.ShaderStage.FRAGMENT)
+    vert_spv = engine.compileShader("cube_tex.vert", bz.ShaderStage.VERTEX)
+    frag_spv = engine.compileShader("cube_tex.frag", bz.ShaderStage.FRAGMENT)
 
     tex1 = engine.loadTexture("bricks.png")
     tex2 = engine.loadTexture("crate.jpg")
@@ -82,11 +82,11 @@ if __name__ == "__main__":
     pipeline = (engine.createPipeline()
         .vertexShader(vert_spv)
         .fragmentShader(frag_spv)
-        .vertexFormat([lp.Format.FLOAT3, lp.Format.FLOAT3]) # pos, uv+texIndex
+        .vertexFormat([bz.Format.FLOAT3, bz.Format.FLOAT3]) # pos, uv+texIndex
         .depthTest(True)
-        .uniformBuffer(0, lp.ShaderStage.VERTEX)
-        .texture(1, lp.ShaderStage.FRAGMENT)
-        .texture(2, lp.ShaderStage.FRAGMENT)
+        .uniformBuffer(0, bz.ShaderStage.VERTEX)
+        .texture(1, bz.ShaderStage.FRAGMENT)
+        .texture(2, bz.ShaderStage.FRAGMENT)
         .build())
 
     # Format: pos x, y, z, uv u, v, texIndex
@@ -123,7 +123,7 @@ if __name__ == "__main__":
          0.5,  0.5,  0.5,   1.0, 1.0, 1.0,
         -0.5,  0.5,  0.5,   0.0, 1.0, 1.0,
     ]
-    vbuf = engine.createBuffer(vertices, lp.BufferType.VERTEX, lp.DataType.FLOAT)
+    vbuf = engine.createBuffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
 
     indices = [
         0, 1, 2, 2, 3, 0,       # Front
@@ -133,9 +133,9 @@ if __name__ == "__main__":
         16, 17, 18, 18, 19, 16, # Top
         23, 22, 21, 21, 20, 23  # Bottom
     ]
-    ibuf = engine.createBuffer(indices, lp.BufferType.INDEX, lp.DataType.UINT32)
+    ibuf = engine.createBuffer(indices, bz.BufferType.INDEX, bz.DataType.UINT32)
 
-    ubuf = engine.createBuffer([0.0]*16, lp.BufferType.UNIFORM, lp.DataType.FLOAT)
+    ubuf = engine.createBuffer([0.0]*16, bz.BufferType.UNIFORM, bz.DataType.FLOAT)
 
     cmd = engine.createCommandBuffer()
     

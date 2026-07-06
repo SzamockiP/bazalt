@@ -1,4 +1,4 @@
-import lumapy as lp
+import bazalt as bz
 import glm
 import numpy as np
 import time
@@ -17,7 +17,7 @@ last_time = time.time()
 frame_count = 0
 fps_timer = 0.0
 
-engine = lp.Engine()
+engine = bz.Engine()
 
 @engine.onError
 def error(msg):
@@ -37,7 +37,7 @@ def on_update():
 
     if fps_timer >= 1.0:
         avg_fps = frame_count / fps_timer
-        engine.setTitle(f"LumaPy Demo - 3D Cube | {1000.0/avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
+        engine.setTitle(f"Bazalt Demo - 3D Cube | {1000.0/avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
         frame_count = 0
         fps_timer = 0.0
 
@@ -69,13 +69,13 @@ def on_update():
 
     # Keyboard Input (W, A, S, D)
     speed = 2.5 * dt
-    if engine.isKeyPressed(lp.KEY_W): 
+    if engine.isKeyPressed(bz.KEY_W): 
         camera_pos += speed * camera_front
-    if engine.isKeyPressed(lp.KEY_S): 
+    if engine.isKeyPressed(bz.KEY_S): 
         camera_pos -= speed * camera_front
-    if engine.isKeyPressed(lp.KEY_A): 
+    if engine.isKeyPressed(bz.KEY_A): 
         camera_pos -= speed * camera_right
-    if engine.isKeyPressed(lp.KEY_D): 
+    if engine.isKeyPressed(bz.KEY_D): 
         camera_pos += speed * camera_right
 
     # Calculate Matrices
@@ -95,21 +95,21 @@ def on_update():
     engine.submit(cmd)
 
 if __name__ == "__main__":
-    engine.init(1024, 720, "LumaPy Demo - 3D Cube")
-    engine.setCursorMode(lp.CURSOR_DISABLED)
+    engine.init(1024, 720, "Bazalt Demo - 3D Cube")
+    engine.setCursorMode(bz.CURSOR_DISABLED)
 
-    vert_spv = engine.compileShader("cube.vert", lp.ShaderStage.VERTEX)
-    frag_spv = engine.compileShader("cube.frag", lp.ShaderStage.FRAGMENT)
+    vert_spv = engine.compileShader("cube.vert", bz.ShaderStage.VERTEX)
+    frag_spv = engine.compileShader("cube.frag", bz.ShaderStage.FRAGMENT)
 
     pipeline = (engine.createPipeline()
         .vertexShader(vert_spv)
         .fragmentShader(frag_spv)
-        .vertexFormat([lp.Format.FLOAT3, lp.Format.FLOAT3])
+        .vertexFormat([bz.Format.FLOAT3, bz.Format.FLOAT3])
         .depthTest(True)
-        .cullMode(lp.CullMode.BACK, lp.FrontFace.COUNTER_CLOCKWISE)
+        .cullMode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE)
         .blend(False)
-        # .pushConstant(64, lp.ShaderStage.VERTEX) # Wykomentowane push constant
-        .uniformBuffer(0, lp.ShaderStage.VERTEX)   # Dodany Uniform Buffer na binding=0
+        # .pushConstant(64, bz.ShaderStage.VERTEX) # Wykomentowane push constant
+        .uniformBuffer(0, bz.ShaderStage.VERTEX)   # Dodany Uniform Buffer na binding=0
         .build())
 
     # Format: pos x, y, z, color r, g, b
@@ -125,7 +125,7 @@ if __name__ == "__main__":
          0.5,  0.5, -0.5,   1.0, 1.0, 1.0,
         -0.5,  0.5, -0.5,   0.0, 0.0, 0.0,
     ], dtype=np.float32)
-    vbuf = engine.createBuffer(vertices, lp.BufferType.VERTEX)
+    vbuf = engine.createBuffer(vertices, bz.BufferType.VERTEX)
 
     indices = np.array([
         # Front
@@ -141,10 +141,10 @@ if __name__ == "__main__":
         # Bottom
         4, 5, 1, 1, 0, 4
     ], dtype=np.uint32)
-    ibuf = engine.createBuffer(indices, lp.BufferType.INDEX)
+    ibuf = engine.createBuffer(indices, bz.BufferType.INDEX)
 
     # Inicjujemy Uniform Buffer (16 floatów, czyli 64 bajty na mat4)
-    ubuf = engine.createBuffer(np.zeros(16, dtype=np.float32), lp.BufferType.UNIFORM)
+    ubuf = engine.createBuffer(np.zeros(16, dtype=np.float32), bz.BufferType.UNIFORM)
 
     cmd = engine.createCommandBuffer()
     

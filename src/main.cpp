@@ -319,7 +319,7 @@ private:
 };
 
 PYBIND11_MODULE(_core, m) {
-    m.doc() = "LumaPy native core module";
+    m.doc() = "Bazalt native core module";
 
     py::enum_<BufferType>(m, "BufferType")
         .value("VERTEX", BufferType::VERTEX)

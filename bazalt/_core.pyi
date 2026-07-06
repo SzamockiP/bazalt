@@ -1,4 +1,4 @@
-"""Type stubs for lumapy._core (native Vulkan renderer)."""
+"""Type stubs for bazalt._core (native Vulkan renderer)."""
 
 from __future__ import annotations
 

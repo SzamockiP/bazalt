@@ -1,9 +1,9 @@
-import lumapy as lp
+import bazalt as bz
 import time
 import collections
 
 class App:
-    engine = lp.Engine()
+    engine = bz.Engine()
 
     @engine.onError
     def on_error(self, msg: str):
@@ -20,7 +20,7 @@ class App:
         
         if self.fps_timer >= 1.0:
             avg_fps = self.frame_count / self.fps_timer
-            self.engine.setTitle(f"LumaPy Demo - Triangle | {1000.0/avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
+            self.engine.setTitle(f"Bazalt Demo - Triangle | {1000.0/avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
             self.frame_count = 0
             self.fps_timer = 0.0
 
@@ -30,15 +30,15 @@ class App:
         self.last_time = time.time()
         self.frame_count = 0
         self.fps_timer = 0.0
-        self.engine.init(1024, 720, "LumaPy Demo - Triangle")
+        self.engine.init(1024, 720, "Bazalt Demo - Triangle")
 
-        vert_spv = self.engine.compileShader("triangle.vert", lp.ShaderStage.VERTEX)
-        frag_spv = self.engine.compileShader("triangle.frag", lp.ShaderStage.FRAGMENT)
+        vert_spv = self.engine.compileShader("triangle.vert", bz.ShaderStage.VERTEX)
+        frag_spv = self.engine.compileShader("triangle.frag", bz.ShaderStage.FRAGMENT)
 
         self.pipeline = (self.engine.createPipeline()
             .vertexShader(vert_spv)
             .fragmentShader(frag_spv)
-            .vertexFormat([lp.Format.FLOAT3, lp.Format.FLOAT3])
+            .vertexFormat([bz.Format.FLOAT3, bz.Format.FLOAT3])
             .build())
 
         # Format: pos x, y, z, color r, g, b
@@ -47,10 +47,10 @@ class App:
             -0.5,  0.5, 0.0,   0.0, 1.0, 0.0,
              0.5,  0.5, 0.0,   0.0, 0.0, 1.0,
         ]
-        self.vbuf = self.engine.createBuffer(vertices, lp.BufferType.VERTEX, lp.DataType.FLOAT)
+        self.vbuf = self.engine.createBuffer(vertices, bz.BufferType.VERTEX, bz.DataType.FLOAT)
 
         indices = [0, 1, 2]
-        self.ibuf = self.engine.createBuffer(indices, lp.BufferType.INDEX, lp.DataType.UINT32)
+        self.ibuf = self.engine.createBuffer(indices, bz.BufferType.INDEX, bz.DataType.UINT32)
 
         self.cmd = self.engine.createCommandBuffer()
 

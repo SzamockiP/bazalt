@@ -1,7 +1,7 @@
-"""LumaPy — Python library for rapid GPU shader prototyping using Vulkan."""
+"""Bazalt — Python library for rapid GPU shader prototyping using Vulkan."""
 
-from lumapy._core import *  # noqa: F401, F403
-from lumapy._core import (  # noqa: F401 — explicit re-exports for IDE visibility
+from bazalt._core import *  # noqa: F401, F403
+from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibility
     Engine,
     Buffer,
     ShaderModule,

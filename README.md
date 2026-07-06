@@ -1,6 +1,6 @@
-# LumaPy
+# Bazalt
 
-LumaPy is a Python library for rapid prototyping and building graphical applications using the Vulkan API.
+Bazalt is a Python library for rapid prototyping and building graphical applications using the Vulkan API.
 
 ## Requirements
 - Python 3.10+

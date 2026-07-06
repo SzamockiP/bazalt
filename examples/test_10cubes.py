@@ -1,4 +1,4 @@
-import lumapy as lp
+import bazalt as bz
 import glm
 import time
 import math
@@ -16,7 +16,7 @@ last_time = time.time()
 frame_count = 0
 fps_timer = 0.0
 
-engine = lp.Engine()
+engine = bz.Engine()
 
 @engine.onError
 def error(msg):
@@ -37,7 +37,7 @@ def on_update():
 
     if fps_timer >= 1.0:
         avg_fps = frame_count / fps_timer
-        engine.setTitle(f"LumaPy Demo - 10 Cubes Lighting | {1000.0/avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
+        engine.setTitle(f"Bazalt Demo - 10 Cubes Lighting | {1000.0/avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
         frame_count = 0
         fps_timer = 0.0
 
@@ -132,18 +132,18 @@ def on_update():
     engine.submit(cmd)
 
 if __name__ == "__main__":
-    engine.init(1024, 720, "LumaPy Demo - 10 Cubes Lighting")
+    engine.init(1024, 720, "Bazalt Demo - 10 Cubes Lighting")
 
-    vert_spv = engine.compileShader("10cubes.vert", lp.ShaderStage.VERTEX)
-    frag_spv = engine.compileShader("10cubes.frag", lp.ShaderStage.FRAGMENT)
+    vert_spv = engine.compileShader("10cubes.vert", bz.ShaderStage.VERTEX)
+    frag_spv = engine.compileShader("10cubes.frag", bz.ShaderStage.FRAGMENT)
 
     pipeline = (engine.createPipeline()
         .vertexShader(vert_spv)
         .fragmentShader(frag_spv)
-        .vertexFormat([lp.Format.FLOAT3, lp.Format.FLOAT3, lp.Format.FLOAT3]) # pos, normal, color
+        .vertexFormat([bz.Format.FLOAT3, bz.Format.FLOAT3, bz.Format.FLOAT3]) # pos, normal, color
         .depthTest(True)
-        .uniformBuffer(0, lp.ShaderStage.VERTEX)   
-        .uniformBuffer(0, lp.ShaderStage.FRAGMENT) 
+        .uniformBuffer(0, bz.ShaderStage.VERTEX)   
+        .uniformBuffer(0, bz.ShaderStage.FRAGMENT) 
         .build())
 
     # Format: pos x, y, z, normal x, y, z, color r, g, b
@@ -180,14 +180,14 @@ if __name__ == "__main__":
         -0.5, -0.5,  0.5,   0.0, -1.0,  0.0,   1.0, 0.0, 1.0,
     ]
     # No more DataType.FLOAT required, inferred automatically!
-    vbuf = engine.createBuffer(vertices, lp.BufferType.VERTEX)
+    vbuf = engine.createBuffer(vertices, bz.BufferType.VERTEX)
 
     indices = []
     for i in range(6):
         indices.extend([i*4+0, i*4+1, i*4+2, i*4+2, i*4+3, i*4+0])
     
     # Automatically inferred as UINT32 for indices
-    ibuf = engine.createBuffer(indices, lp.BufferType.INDEX)
+    ibuf = engine.createBuffer(indices, bz.BufferType.INDEX)
 
     # Calculate UBO size dynamically using glm.sizeof to avoid hardcoding sizes.
     # std140 layout aligns vec3 to 16 bytes (so we treat them as vec4 for sizing)
@@ -196,7 +196,7 @@ if __name__ == "__main__":
         glm.sizeof(glm.mat4) * 11 + # 10 models + 1 light model
         glm.sizeof(glm.vec4) * 3    # lightPos, viewPos, lightColor
     )
-    ubuf = engine.createBuffer(ubo_size_bytes, lp.BufferType.UNIFORM)
+    ubuf = engine.createBuffer(ubo_size_bytes, bz.BufferType.UNIFORM)
 
     cmd = engine.createCommandBuffer()
     
