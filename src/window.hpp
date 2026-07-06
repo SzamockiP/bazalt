@@ -54,7 +54,7 @@ public:
         glfwSetCursorPosCallback(window->window_.get(), mouse_callback);
         glfwSetFramebufferSizeCallback(window->window_.get(), framebuffer_resize_callback);
 
-        glfwSetInputMode(window->window_.get(), GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        glfwSetInputMode(window->window_.get(), GLFW_CURSOR, GLFW_CURSOR_NORMAL);
 
         return window;
     };
@@ -109,6 +109,18 @@ public:
 
     void get_framebuffer_size(int& width, int& height) const {
         glfwGetFramebufferSize(window_.get(), &width, &height);
+    }
+
+    int get_width() const {
+        int w, h;
+        glfwGetWindowSize(window_.get(), &w, &h);
+        return w;
+    }
+
+    int get_height() const {
+        int w, h;
+        glfwGetWindowSize(window_.get(), &w, &h);
+        return h;
     }
 
 private:

@@ -5,6 +5,7 @@
 #include <print>
 #include <atomic>
 #include <expected>
+#include <chrono>
 
 #include "Logger.hpp"
 #include "window.hpp"
@@ -54,11 +55,17 @@ public:
 
     void run(py::object app_instance = py::none())
     {
+        delta_time_ = 0.0f;
+        elapsed_time_ = 0.0f;
+        frame_count_ = 0;
         is_running_.store(true, std::memory_order_relaxed);
 
         try
         {
             py::gil_scoped_release release;
+
+            auto start_time = std::chrono::high_resolution_clock::now();
+            auto last_frame_time = start_time;
 
             while (is_running_.load(std::memory_order_relaxed))
             {
@@ -75,6 +82,12 @@ public:
                         throw py::error_already_set();
                     }
                     
+                    auto now = std::chrono::high_resolution_clock::now();
+                    delta_time_ = std::chrono::duration<float>(now - last_frame_time).count();
+                    elapsed_time_ = std::chrono::duration<float>(now - start_time).count();
+                    last_frame_time = now;
+                    frame_count_++;
+
                     renderer_->begin_frame();
 
                     if (renderer_->frame_skipped()) {
@@ -147,6 +160,20 @@ public:
     void set_cursor_mode(int mode)
     {
         window_->set_cursor_mode(mode);
+    }
+
+    float get_delta_time() const { return delta_time_; }
+    float get_time() const { return elapsed_time_; }
+    uint64_t get_frame_count() const { return frame_count_; }
+
+    int get_width() const {
+        if (window_) return window_->get_width();
+        return 0;
+    }
+
+    int get_height() const {
+        if (window_) return window_->get_height();
+        return 0;
     }
 
     py::object create_buffer(py::list list, BufferType type, std::optional<DataType> dataType = std::nullopt) {
@@ -285,10 +312,14 @@ private:
     std::unique_ptr<Renderer> renderer_;
 
     py::function frame_function_;
+
+    float delta_time_ = 0.0f;
+    float elapsed_time_ = 0.0f;
+    uint64_t frame_count_ = 0;
 };
 
-PYBIND11_MODULE(lumapy, m) {
-    m.doc() = "LumaPy module";
+PYBIND11_MODULE(_core, m) {
+    m.doc() = "LumaPy native core module";
 
     py::enum_<BufferType>(m, "BufferType")
         .value("VERTEX", BufferType::VERTEX)
@@ -441,7 +472,12 @@ PYBIND11_MODULE(lumapy, m) {
         .def("createPipeline", &Engine::create_pipeline)
         .def("compileShader", &Engine::compile_shader)
         .def("loadTexture", &Engine::load_texture)
-        .def("submit", &Engine::submit);
+        .def("submit", &Engine::submit)
+        .def("getDeltaTime", &Engine::get_delta_time)
+        .def("getTime", &Engine::get_time)
+        .def("getFrameCount", &Engine::get_frame_count)
+        .def("getWidth", &Engine::get_width)
+        .def("getHeight", &Engine::get_height);
 
     m.attr("KEY_SPACE") = GLFW_KEY_SPACE;
     m.attr("KEY_APOSTROPHE") = GLFW_KEY_APOSTROPHE;
