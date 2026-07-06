@@ -1,0 +1,87 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  build_wheels:
+    name: Wheels · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Vulkan SDK (Windows — installed on the host) ──────────
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $VERSION = "1.4.309.0"
+          $INSTALLER = "VulkanSDK-$VERSION-Installer.exe"
+          Invoke-WebRequest `
+            -Uri "https://sdk.lunarg.com/sdk/download/$VERSION/windows/$INSTALLER" `
+            -OutFile $INSTALLER
+          Start-Process -FilePath ".\$INSTALLER" `
+            -ArgumentList "--accept-licenses --default-answer --confirm-command install" `
+            -Wait
+          echo "VULKAN_SDK=C:\VulkanSDK\$VERSION" >> $env:GITHUB_ENV
+
+      # ── Build ───────────────────────────────────────────────────
+      - uses: pypa/cibuildwheel@v2.23
+        env:
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "*-musllinux* *-win32 *-manylinux_i686"
+          CIBW_ARCHS_WINDOWS: AMD64
+          CIBW_ARCHS_LINUX: x86_64
+
+          # Linux: install Vulkan SDK tarball + X11/Wayland deps
+          # inside the manylinux Docker container (not the host).
+          CIBW_BEFORE_ALL_LINUX: |
+            set -e
+            VULKAN_VERSION=1.4.309.0
+            yum install -y wget tar xz \
+              libX11-devel libXrandr-devel libXinerama-devel \
+              libXcursor-devel libXi-devel \
+              wayland-devel libxkbcommon-devel
+            wget -q "https://sdk.lunarg.com/sdk/download/${VULKAN_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz" \
+              -O /tmp/vulkansdk.tar.xz
+            mkdir -p /opt/vulkan-sdk
+            tar xf /tmp/vulkansdk.tar.xz -C /opt/vulkan-sdk --strip-components=1
+            rm /tmp/vulkansdk.tar.xz
+
+          CIBW_ENVIRONMENT_LINUX: >
+            VULKAN_SDK=/opt/vulkan-sdk/x86_64
+            PATH=/opt/vulkan-sdk/x86_64/bin:$PATH
+            LD_LIBRARY_PATH=/opt/vulkan-sdk/x86_64/lib:${LD_LIBRARY_PATH:-}
+            CMAKE_PREFIX_PATH=/opt/vulkan-sdk/x86_64
+
+      # ── Upload ──────────────────────────────────────────────────
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: ./wheelhouse/*.whl
+
+  # ── Publish to PyPI on release ────────────────────────────────
+  publish:
+    needs: build_wheels
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

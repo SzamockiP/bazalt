@@ -64,9 +64,9 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb)
 
-add_library(lumapy MODULE src/main.cpp src/MpscQueue.hpp src/Logger.hpp src/window.hpp src/Renderer.hpp src/vma_impl.cpp src/stb_impl.cpp)
+add_library(_core MODULE src/main.cpp src/MpscQueue.hpp src/Logger.hpp src/window.hpp src/Renderer.hpp src/vma_impl.cpp src/stb_impl.cpp)
 
-target_link_libraries(lumapy PRIVATE 
+target_link_libraries(_core PRIVATE 
     pybind11::module
     glfw
     volk
@@ -74,12 +74,14 @@ target_link_libraries(lumapy PRIVATE
     vk-bootstrap::vk-bootstrap
     Vulkan::shaderc_combined
 )
-target_include_directories(lumapy PRIVATE ${stb_SOURCE_DIR})
-set_target_properties(lumapy PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}" SUFFIX "${PYTHON_MODULE_EXTENSION}")
+target_include_directories(_core PRIVATE ${stb_SOURCE_DIR})
+set_target_properties(_core PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}" SUFFIX "${PYTHON_MODULE_EXTENSION}")
 
-target_compile_features(lumapy PRIVATE cxx_std_23)
+target_compile_features(_core PRIVATE cxx_std_23)
 if(MSVC)
-    target_compile_options(lumapy PRIVATE /Zc:__cplusplus)
+    target_compile_options(_core PRIVATE /Zc:__cplusplus)
+else()
+    target_compile_options(_core PRIVATE -Wno-interference-size)
 endif()
 
-install(TARGETS lumapy DESTINATION .)
+install(TARGETS _core DESTINATION lumapy)

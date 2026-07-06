@@ -4,3 +4,14 @@ out/
 build/
 
 CMakeSettings.json
+
+# Python
+__pycache__/
+*.egg-info/
+dist/
+*.pyd
+*.so
+.eggs/
+
+# scikit-build
+_skbuild/
