@@ -109,7 +109,7 @@ if __name__ == "__main__":
         .cullMode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE)
         .blend(False)
         # .pushConstant(64, bz.ShaderStage.VERTEX) # Wykomentowane push constant
-        .uniformBuffer(0, bz.ShaderStage.VERTEX)   # Dodany Uniform Buffer na binding=0
+        .uniformBuffer(0, bz.ShaderStage.VERTEX, set=0)   # Dodany Uniform Buffer na binding=0, set=0
         .build())
 
     # Format: pos x, y, z, color r, g, b
@@ -146,6 +146,11 @@ if __name__ == "__main__":
     # Inicjujemy Uniform Buffer (16 floatów, czyli 64 bajty na mat4)
     ubuf = engine.createBuffer(np.zeros(16, dtype=np.float32), bz.BufferType.UNIFORM)
 
+    # Create Descriptor Pool and allocate frame descriptor set
+    pool = engine.createDescriptorPool(max_sets=2, uniform_buffers=2)
+    desc_set = pool.allocateFrameDescriptorSet(pipeline, set=0)
+    desc_set.setBuffer(0, ubuf)
+
     cmd = engine.createCommandBuffer()
     
     # Nagrywamy liste komend tylko RAZ!
@@ -154,7 +159,7 @@ if __name__ == "__main__":
     cmd.setViewport()
     cmd.setScissor()
     cmd.bindPipeline(pipeline)
-    cmd.bindUniformBuffer(0, ubuf, pipeline)
+    cmd.bindDescriptorSet(desc_set, pipeline, set=0)
     cmd.bindVertexBuffer(vbuf)
     cmd.bindIndexBuffer(ibuf)
     cmd.drawIndexed(36)

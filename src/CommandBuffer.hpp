@@ -9,6 +9,7 @@
 #include "Pipeline.hpp"
 #include "Buffer.hpp"
 #include "Texture.hpp"
+#include "DescriptorSet.hpp"
 
 class CommandBuffer {
 public:
@@ -235,15 +236,15 @@ public:
         });
     }
 
-    void drawIndexed(uint32_t indexCount) {
-        commands_.push_back([indexCount](VkCommandBuffer cmd, Renderer& renderer) {
-            vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0);
+    void drawIndexed(uint32_t indexCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
+        commands_.push_back([indexCount, firstIndex, vertexOffset](VkCommandBuffer cmd, Renderer& renderer) {
+            vkCmdDrawIndexed(cmd, indexCount, 1, firstIndex, vertexOffset, 0);
         });
     }
 
-    void drawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount) {
-        commands_.push_back([indexCount, instanceCount](VkCommandBuffer cmd, Renderer& renderer) {
-            vkCmdDrawIndexed(cmd, indexCount, instanceCount, 0, 0, 0);
+    void drawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
+        commands_.push_back([indexCount, instanceCount, firstIndex, vertexOffset](VkCommandBuffer cmd, Renderer& renderer) {
+            vkCmdDrawIndexed(cmd, indexCount, instanceCount, firstIndex, vertexOffset, 0);
         });
     }
 
@@ -255,46 +256,16 @@ public:
         });
     }
 
-    void bindUniformBuffer(uint32_t binding, std::shared_ptr<Buffer> buffer, std::shared_ptr<Pipeline> pipeline) {
-        bindDescriptorBuffer_(binding, buffer, pipeline);
-    }
-
-    void bindStorageBuffer(uint32_t binding, std::shared_ptr<Buffer> buffer, std::shared_ptr<Pipeline> pipeline) {
-        bindDescriptorBuffer_(binding, buffer, pipeline);
-    }
-
-    void bindTexture(uint32_t binding, std::shared_ptr<Texture> texture, std::shared_ptr<Pipeline> pipeline) {
-        commands_.push_back([binding, texture, pipeline](VkCommandBuffer cmd, Renderer& renderer) {
-            uint32_t frame = renderer.current_frame();
-            VkDescriptorSet descSet = pipeline->descriptor_set(frame);
-            if (descSet == VK_NULL_HANDLE) {
-                throw std::runtime_error("Pipeline has no descriptor set allocated");
-            }
-
-            VkDescriptorImageInfo imageInfo{
-                .sampler = texture->sampler(),
-                .imageView = texture->image_view(),
-                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-            };
-
-            VkWriteDescriptorSet descriptorWrite{
-                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .pNext = nullptr,
-                .dstSet = descSet,
-                .dstBinding = binding,
-                .dstArrayElement = 0,
-                .descriptorCount = 1,
-                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                .pImageInfo = &imageInfo,
-                .pBufferInfo = nullptr,
-                .pTexelBufferView = nullptr
-            };
-
-            vkUpdateDescriptorSets(renderer.device(), 1, &descriptorWrite, 0, nullptr);
-
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout(), 0, 1, &descSet, 0, nullptr);
+    void bindDescriptorSet(std::shared_ptr<DescriptorSet> descSet,
+                           std::shared_ptr<Pipeline> pipeline,
+                           uint32_t setIndex) {
+        commands_.push_back([descSet, pipeline, setIndex](VkCommandBuffer cmd, Renderer& renderer) {
+            VkDescriptorSet set = descSet->get(renderer.current_frame());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                pipeline->layout(), setIndex, 1, &set, 0, nullptr);
         });
     }
+
     VkCommandBuffer get() const { 
         return command_buffers_[renderer_.current_frame()]; 
     }
@@ -305,46 +276,7 @@ public:
         }
     }
 
-
 private:
-    void bindDescriptorBuffer_(uint32_t binding, std::shared_ptr<Buffer> buffer, std::shared_ptr<Pipeline> pipeline) {
-        commands_.push_back([binding, buffer, pipeline](VkCommandBuffer cmd, Renderer& renderer) {
-            uint32_t frame = renderer.current_frame();
-            VkDescriptorSet descSet = pipeline->descriptor_set(frame);
-            if (descSet == VK_NULL_HANDLE) {
-                throw std::runtime_error("Pipeline has no descriptor set allocated");
-            }
-
-            VkBuffer target_buffer = buffer->get();
-
-            if (pipeline->get_bound_buffer(frame) != target_buffer) {
-                VkDescriptorBufferInfo bufferInfo{
-                    .buffer = target_buffer,
-                    .offset = 0,
-                    .range = buffer->size()
-                };
-
-                VkWriteDescriptorSet descriptorWrite{
-                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                    .pNext = nullptr,
-                    .dstSet = descSet,
-                    .dstBinding = binding,
-                    .dstArrayElement = 0,
-                    .descriptorCount = 1,
-                    .descriptorType = pipeline->descriptor_type_for_binding(binding),
-                    .pImageInfo = nullptr,
-                    .pBufferInfo = &bufferInfo,
-                    .pTexelBufferView = nullptr
-                };
-
-                vkUpdateDescriptorSets(renderer.device(), 1, &descriptorWrite, 0, nullptr);
-                pipeline->set_bound_buffer(frame, target_buffer);
-            }
-
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->layout(), 0, 1, &descSet, 0, nullptr);
-        });
-    }
-
     CommandBuffer(Renderer& renderer) : renderer_(renderer) {}
 
     Renderer& renderer_;

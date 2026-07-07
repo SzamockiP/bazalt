@@ -23,7 +23,7 @@ if __name__ == "__main__":
         .vertexShader(vert_spv)
         .fragmentShader(frag_spv)
         .vertexFormat([bz.Format.FLOAT2, bz.Format.FLOAT2])
-        .texture(0, bz.ShaderStage.FRAGMENT)
+        .texture(0, bz.ShaderStage.FRAGMENT, set=0)
         .build())
 
     # Format: pos x, y, uv u, v
@@ -40,6 +40,11 @@ if __name__ == "__main__":
     ]
     ibuf = engine.createBuffer(indices, bz.BufferType.INDEX, bz.DataType.UINT32)
 
+    # Create Descriptor Pool and allocate descriptor set
+    pool = engine.createDescriptorPool(max_sets=1, samplers=1)
+    desc_set = pool.allocateDescriptorSet(pipeline, set=0)
+    desc_set.setTexture(0, texture)
+
     cmd = engine.createCommandBuffer()
     
     cmd.begin()
@@ -47,7 +52,7 @@ if __name__ == "__main__":
     cmd.setViewport()
     cmd.setScissor()
     cmd.bindPipeline(pipeline)
-    cmd.bindTexture(0, texture, pipeline)
+    cmd.bindDescriptorSet(desc_set, pipeline, set=0)
     cmd.bindVertexBuffer(vbuf)
     cmd.bindIndexBuffer(ibuf)
     cmd.drawIndexed(6)

@@ -15,6 +15,7 @@
 #include "Pipeline.hpp"
 #include "CommandBuffer.hpp"
 #include "Texture.hpp"
+#include "DescriptorSet.hpp"
 
 namespace py = pybind11;
 
@@ -279,6 +280,16 @@ public:
         }
     }
 
+    py::object create_descriptor_pool(uint32_t maxSets, uint32_t samplers, uint32_t uniformBuffers, uint32_t storageBuffers) {
+        auto res = DescriptorPool::create(renderer_->device(), maxSets, samplers, uniformBuffers, storageBuffers);
+        if (res) {
+            return py::cast(res.value());
+        } else {
+            logger_.log(res.error());
+            throw std::runtime_error(res.error());
+        }
+    }
+
     void submit(std::shared_ptr<CommandBuffer> cmd) {
         VkCommandBuffer vkCmd = cmd->get();
         vkResetCommandBuffer(vkCmd, 0);
@@ -420,9 +431,12 @@ PYBIND11_MODULE(_core, m) {
         .def("cullMode", &PipelineBuilder::cullMode)
         .def("blend", &PipelineBuilder::blend)
         .def("pushConstant", &PipelineBuilder::pushConstant)
-        .def("uniformBuffer", &PipelineBuilder::uniformBuffer)
-        .def("storageBuffer", &PipelineBuilder::storageBuffer)
-        .def("texture", &PipelineBuilder::texture)
+        .def("uniformBuffer", &PipelineBuilder::uniformBuffer,
+             py::arg("binding"), py::arg("stage"), py::arg("set"))
+        .def("storageBuffer", &PipelineBuilder::storageBuffer,
+             py::arg("binding"), py::arg("stage"), py::arg("set"))
+        .def("texture", &PipelineBuilder::texture,
+             py::arg("binding"), py::arg("stage"), py::arg("set"))
         .def("build", [](PipelineBuilder& builder) -> py::object {
             auto res = builder.build();
             if (res) {
@@ -431,6 +445,30 @@ PYBIND11_MODULE(_core, m) {
                 throw std::runtime_error(res.error());
             }
         });
+
+    py::class_<DescriptorSet, std::shared_ptr<DescriptorSet>>(m, "DescriptorSet")
+        .def("setTexture", &DescriptorSet::setTexture,
+             py::arg("binding"), py::arg("texture"))
+        .def("setBuffer", &DescriptorSet::setBuffer,
+             py::arg("binding"), py::arg("buffer"));
+
+    py::class_<DescriptorPool, std::shared_ptr<DescriptorPool>>(m, "DescriptorPool")
+        .def("allocateDescriptorSet", [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object {
+            auto res = pool.allocateDescriptorSet(pipeline, setIndex);
+            if (res) {
+                return py::cast(res.value());
+            } else {
+                throw std::runtime_error(res.error());
+            }
+        }, py::arg("pipeline"), py::arg("set"))
+        .def("allocateFrameDescriptorSet", [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object {
+            auto res = pool.allocateFrameDescriptorSet(pipeline, setIndex);
+            if (res) {
+                return py::cast(res.value());
+            } else {
+                throw std::runtime_error(res.error());
+            }
+        }, py::arg("pipeline"), py::arg("set"));
 
     py::class_<CommandBuffer, std::shared_ptr<CommandBuffer>>(m, "CommandBuffer")
         .def("begin", &CommandBuffer::begin)
@@ -442,14 +480,16 @@ PYBIND11_MODULE(_core, m) {
         .def("bindVertexBuffer", &CommandBuffer::bindVertexBuffer)
         .def("bindIndexBuffer", &CommandBuffer::bindIndexBuffer)
         .def("draw", &CommandBuffer::draw)
-        .def("drawIndexed", &CommandBuffer::drawIndexed)
-        .def("drawIndexedInstanced", &CommandBuffer::drawIndexedInstanced)
+        .def("drawIndexed", &CommandBuffer::drawIndexed,
+             py::arg("indexCount"), py::arg("firstIndex") = 0, py::arg("vertexOffset") = 0)
+        .def("drawIndexedInstanced", &CommandBuffer::drawIndexedInstanced,
+             py::arg("indexCount"), py::arg("instanceCount"),
+             py::arg("firstIndex") = 0, py::arg("vertexOffset") = 0)
         .def("pushConstants", [](CommandBuffer& cmd, std::shared_ptr<Pipeline> pipeline, ShaderStage stage, uint32_t offset, std::string_view data) {
             cmd.pushConstants(pipeline, stage, offset, static_cast<uint32_t>(data.size()), data.data());
         })
-        .def("bindUniformBuffer", &CommandBuffer::bindUniformBuffer)
-        .def("bindStorageBuffer", &CommandBuffer::bindStorageBuffer)
-        .def("bindTexture", &CommandBuffer::bindTexture);
+        .def("bindDescriptorSet", &CommandBuffer::bindDescriptorSet,
+             py::arg("descriptorSet"), py::arg("pipeline"), py::arg("set"));
 
     py::class_<Engine>(m, "Engine")
         .def(py::init<>())
@@ -472,6 +512,9 @@ PYBIND11_MODULE(_core, m) {
         .def("createPipeline", &Engine::create_pipeline)
         .def("compileShader", &Engine::compile_shader)
         .def("loadTexture", &Engine::load_texture)
+        .def("createDescriptorPool", &Engine::create_descriptor_pool,
+             py::arg("max_sets"), py::arg("samplers") = 0,
+             py::arg("uniform_buffers") = 0, py::arg("storage_buffers") = 0)
         .def("submit", &Engine::submit)
         .def("getDeltaTime", &Engine::get_delta_time)
         .def("getTime", &Engine::get_time)

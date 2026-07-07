@@ -84,9 +84,9 @@ if __name__ == "__main__":
         .fragmentShader(frag_spv)
         .vertexFormat([bz.Format.FLOAT3, bz.Format.FLOAT3]) # pos, uv+texIndex
         .depthTest(True)
-        .uniformBuffer(0, bz.ShaderStage.VERTEX)
-        .texture(1, bz.ShaderStage.FRAGMENT)
-        .texture(2, bz.ShaderStage.FRAGMENT)
+        .uniformBuffer(0, bz.ShaderStage.VERTEX, set=0)
+        .texture(0, bz.ShaderStage.FRAGMENT, set=1)
+        .texture(1, bz.ShaderStage.FRAGMENT, set=1)
         .build())
 
     # Format: pos x, y, z, uv u, v, texIndex
@@ -137,6 +137,20 @@ if __name__ == "__main__":
 
     ubuf = engine.createBuffer([0.0]*16, bz.BufferType.UNIFORM, bz.DataType.FLOAT)
 
+    # Create Descriptor Pool and allocate descriptor sets
+    # Set 0 (Frame set): 1 UBO
+    # Set 1 (Static set): 2 Samplers
+    pool = engine.createDescriptorPool(max_sets=3, samplers=2, uniform_buffers=2)
+    
+    # Camera / Global state (set=0)
+    frame_set = pool.allocateFrameDescriptorSet(pipeline, set=0)
+    frame_set.setBuffer(0, ubuf)
+    
+    # Material / Textures (set=1)
+    material_set = pool.allocateDescriptorSet(pipeline, set=1)
+    material_set.setTexture(0, tex1)
+    material_set.setTexture(1, tex2)
+
     cmd = engine.createCommandBuffer()
     
     cmd.begin()
@@ -144,9 +158,8 @@ if __name__ == "__main__":
     cmd.setViewport()
     cmd.setScissor()
     cmd.bindPipeline(pipeline)
-    cmd.bindUniformBuffer(0, ubuf, pipeline)
-    cmd.bindTexture(1, tex1, pipeline)
-    cmd.bindTexture(2, tex2, pipeline)
+    cmd.bindDescriptorSet(frame_set, pipeline, set=0)
+    cmd.bindDescriptorSet(material_set, pipeline, set=1)
     cmd.bindVertexBuffer(vbuf)
     cmd.bindIndexBuffer(ibuf)
     cmd.drawIndexed(36)

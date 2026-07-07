@@ -29,6 +29,8 @@ public:
 
     virtual VkBuffer get() const = 0;
     virtual size_t size() const = 0;
+    virtual bool is_dynamic() const { return false; }
+    virtual VkBuffer get_for_frame(uint32_t /*frame*/) const { return get(); }
     
     virtual void update(const void* data, size_t size) {
         throw std::runtime_error("Update not supported for this buffer type");
@@ -196,6 +198,8 @@ public:
     }
     
     size_t size() const override { return size_; }
+    bool is_dynamic() const override { return true; }
+    VkBuffer get_for_frame(uint32_t frame) const override { return buffers_[frame]; }
     BufferType buffer_type() const { return type_; }
 
     void update(const void* data, size_t size) override {

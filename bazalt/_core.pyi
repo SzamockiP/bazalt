@@ -94,6 +94,28 @@ class Pipeline:
     """Compiled graphics pipeline (immutable after creation)."""
     ...
 
+class DescriptorSet:
+    """A descriptor set binding resources to a pipeline."""
+    
+    def setTexture(self, binding: int, texture: Texture) -> None:
+        """Write a texture to this descriptor set."""
+        ...
+        
+    def setBuffer(self, binding: int, buffer: Buffer) -> None:
+        """Write a buffer to this descriptor set."""
+        ...
+
+class DescriptorPool:
+    """A pool from which descriptor sets can be allocated."""
+    
+    def allocateDescriptorSet(self, pipeline: Pipeline, set: int) -> DescriptorSet:
+        """Allocate a static descriptor set (1 internal copy) for materials/textures."""
+        ...
+        
+    def allocateFrameDescriptorSet(self, pipeline: Pipeline, set: int) -> DescriptorSet:
+        """Allocate a per-frame descriptor set for per-frame updated buffers."""
+        ...
+
 class PipelineBuilder:
     """Fluent builder for constructing graphics pipelines.
 
@@ -133,15 +155,15 @@ class PipelineBuilder:
         """
         ...
 
-    def uniformBuffer(self, binding: int, stage: ShaderStage) -> PipelineBuilder:
+    def uniformBuffer(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder:
         """Declare a uniform buffer descriptor binding."""
         ...
 
-    def storageBuffer(self, binding: int, stage: ShaderStage) -> PipelineBuilder:
+    def storageBuffer(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder:
         """Declare a storage buffer descriptor binding."""
         ...
 
-    def texture(self, binding: int, stage: ShaderStage) -> PipelineBuilder:
+    def texture(self, binding: int, stage: ShaderStage, set: int) -> PipelineBuilder:
         """Declare a combined image sampler descriptor binding."""
         ...
 
@@ -198,11 +220,11 @@ class CommandBuffer:
         """Record a non-indexed draw call."""
         ...
 
-    def drawIndexed(self, indexCount: int) -> None:
+    def drawIndexed(self, indexCount: int, firstIndex: int = 0, vertexOffset: int = 0) -> None:
         """Record an indexed draw call (1 instance)."""
         ...
 
-    def drawIndexedInstanced(self, indexCount: int, instanceCount: int) -> None:
+    def drawIndexedInstanced(self, indexCount: int, instanceCount: int, firstIndex: int = 0, vertexOffset: int = 0) -> None:
         """Record an indexed, instanced draw call."""
         ...
 
@@ -223,22 +245,10 @@ class CommandBuffer:
         """
         ...
 
-    def bindUniformBuffer(
-        self, binding: int, buffer: Buffer, pipeline: Pipeline
+    def bindDescriptorSet(
+        self, descriptorSet: DescriptorSet, pipeline: Pipeline, set: int
     ) -> None:
-        """Bind a uniform buffer to a descriptor set binding."""
-        ...
-
-    def bindStorageBuffer(
-        self, binding: int, buffer: Buffer, pipeline: Pipeline
-    ) -> None:
-        """Bind a storage buffer to a descriptor set binding."""
-        ...
-
-    def bindTexture(
-        self, binding: int, texture: Texture, pipeline: Pipeline
-    ) -> None:
-        """Bind a texture (combined image sampler) to a descriptor set binding."""
+        """Bind a descriptor set to the specified set index."""
         ...
 
 # ── Engine ─────────────────────────────────────────────────────────────
@@ -384,6 +394,12 @@ class Engine:
 
     def loadTexture(self, path: str) -> Texture:
         """Load an image file as a GPU texture (supports PNG, JPG, BMP, etc.)."""
+        ...
+        
+    def createDescriptorPool(
+        self, max_sets: int, samplers: int = 0, uniform_buffers: int = 0, storage_buffers: int = 0
+    ) -> DescriptorPool:
+        """Create a descriptor pool for allocating descriptor sets."""
         ...
 
     def submit(self, cmd: CommandBuffer) -> None:

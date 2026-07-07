@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <expected>
 #include <array>
+#include <map>
 #include <unordered_map>
 #include "ShaderCompiler.hpp"
 #include "Renderer.hpp"
@@ -29,16 +30,14 @@ enum class FrontFace {
 
 class Pipeline {
 public:
-    // Maps binding index -> VkDescriptorType so CommandBuffer knows what type to write
+    // Maps binding index -> VkDescriptorType so DescriptorSet knows what type to write
     using BindingTypeMap = std::unordered_map<uint32_t, VkDescriptorType>;
 
     Pipeline(VkDevice device, VkPipeline pipeline, VkPipelineLayout layout, 
-             VkDescriptorSetLayout descLayout = VK_NULL_HANDLE, 
-             VkDescriptorPool descPool = VK_NULL_HANDLE, 
-             std::array<VkDescriptorSet, Renderer::MAX_FRAMES_IN_FLIGHT> descSets = {VK_NULL_HANDLE},
-             BindingTypeMap bindingTypes = {})
+             std::vector<VkDescriptorSetLayout> descLayouts = {},
+             std::map<uint32_t, BindingTypeMap> bindingTypes = {})
         : device_(device), pipeline_(pipeline), layout_(layout),
-          desc_layout_(descLayout), desc_pool_(descPool), desc_sets_(descSets),
+          desc_layouts_(std::move(descLayouts)),
           binding_types_(std::move(bindingTypes)) {}
 
     ~Pipeline() {
@@ -48,11 +47,10 @@ public:
         if (layout_ != VK_NULL_HANDLE) {
             vkDestroyPipelineLayout(device_, layout_, nullptr);
         }
-        if (desc_pool_ != VK_NULL_HANDLE) {
-            vkDestroyDescriptorPool(device_, desc_pool_, nullptr);
-        }
-        if (desc_layout_ != VK_NULL_HANDLE) {
-            vkDestroyDescriptorSetLayout(device_, desc_layout_, nullptr);
+        for (auto dl : desc_layouts_) {
+            if (dl != VK_NULL_HANDLE) {
+                vkDestroyDescriptorSetLayout(device_, dl, nullptr);
+            }
         }
     }
 
@@ -61,13 +59,10 @@ public:
 
     Pipeline(Pipeline&& other) noexcept
         : device_(other.device_), pipeline_(other.pipeline_), layout_(other.layout_),
-          desc_layout_(other.desc_layout_), desc_pool_(other.desc_pool_), desc_sets_(other.desc_sets_),
-          bound_buffers_(other.bound_buffers_), binding_types_(std::move(other.binding_types_)) {
+          desc_layouts_(std::move(other.desc_layouts_)),
+          binding_types_(std::move(other.binding_types_)) {
         other.pipeline_ = VK_NULL_HANDLE;
         other.layout_ = VK_NULL_HANDLE;
-        other.desc_layout_ = VK_NULL_HANDLE;
-        other.desc_pool_ = VK_NULL_HANDLE;
-        other.desc_sets_.fill(VK_NULL_HANDLE);
     }
 
     Pipeline& operator=(Pipeline&& other) noexcept {
@@ -78,54 +73,52 @@ public:
             if (layout_ != VK_NULL_HANDLE) {
                 vkDestroyPipelineLayout(device_, layout_, nullptr);
             }
-            if (desc_pool_ != VK_NULL_HANDLE) {
-                vkDestroyDescriptorPool(device_, desc_pool_, nullptr);
-            }
-            if (desc_layout_ != VK_NULL_HANDLE) {
-                vkDestroyDescriptorSetLayout(device_, desc_layout_, nullptr);
+            for (auto dl : desc_layouts_) {
+                if (dl != VK_NULL_HANDLE) {
+                    vkDestroyDescriptorSetLayout(device_, dl, nullptr);
+                }
             }
             device_ = other.device_;
             pipeline_ = other.pipeline_;
             layout_ = other.layout_;
-            desc_layout_ = other.desc_layout_;
-            desc_pool_ = other.desc_pool_;
-            desc_sets_ = other.desc_sets_;
-            bound_buffers_ = other.bound_buffers_;
+            desc_layouts_ = std::move(other.desc_layouts_);
             binding_types_ = std::move(other.binding_types_);
             
             other.pipeline_ = VK_NULL_HANDLE;
             other.layout_ = VK_NULL_HANDLE;
-            other.desc_layout_ = VK_NULL_HANDLE;
-            other.desc_pool_ = VK_NULL_HANDLE;
-            other.desc_sets_.fill(VK_NULL_HANDLE);
         }
         return *this;
     }
 
     VkPipeline get() const { return pipeline_; }
     VkPipelineLayout layout() const { return layout_; }
-    VkDescriptorSet descriptor_set(uint32_t frame) const { return desc_sets_[frame]; }
 
-    VkBuffer get_bound_buffer(uint32_t frame) const { return bound_buffers_[frame]; }
-    void set_bound_buffer(uint32_t frame, VkBuffer buffer) { bound_buffers_[frame] = buffer; }
+    VkDescriptorSetLayout descriptor_set_layout(uint32_t setIndex) const {
+        if (setIndex < desc_layouts_.size()) {
+            return desc_layouts_[setIndex];
+        }
+        return VK_NULL_HANDLE;
+    }
 
-    VkDescriptorType descriptor_type_for_binding(uint32_t binding) const {
-        auto it = binding_types_.find(binding);
+    uint32_t descriptor_set_layout_count() const {
+        return static_cast<uint32_t>(desc_layouts_.size());
+    }
+
+    const BindingTypeMap& binding_types(uint32_t setIndex) const {
+        static const BindingTypeMap empty;
+        auto it = binding_types_.find(setIndex);
         if (it != binding_types_.end()) {
             return it->second;
         }
-        return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; // default fallback
+        return empty;
     }
 
 private:
     VkDevice device_;
     VkPipeline pipeline_;
     VkPipelineLayout layout_;
-    VkDescriptorSetLayout desc_layout_ = VK_NULL_HANDLE;
-    VkDescriptorPool desc_pool_ = VK_NULL_HANDLE;
-    std::array<VkDescriptorSet, Renderer::MAX_FRAMES_IN_FLIGHT> desc_sets_ = {VK_NULL_HANDLE};
-    std::array<VkBuffer, Renderer::MAX_FRAMES_IN_FLIGHT> bound_buffers_ = {VK_NULL_HANDLE};
-    BindingTypeMap binding_types_;
+    std::vector<VkDescriptorSetLayout> desc_layouts_;
+    std::map<uint32_t, BindingTypeMap> binding_types_;
 };
 
 class PipelineBuilder {
@@ -173,16 +166,16 @@ public:
         return *this;
     }
 
-    PipelineBuilder& uniformBuffer(uint32_t binding, ShaderStage stage) {
-        return addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+    PipelineBuilder& uniformBuffer(uint32_t binding, ShaderStage stage, uint32_t set) {
+        return addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, set);
     }
 
-    PipelineBuilder& storageBuffer(uint32_t binding, ShaderStage stage) {
-        return addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    PipelineBuilder& storageBuffer(uint32_t binding, ShaderStage stage, uint32_t set) {
+        return addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, set);
     }
 
-    PipelineBuilder& texture(uint32_t binding, ShaderStage stage) {
-        return addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    PipelineBuilder& texture(uint32_t binding, ShaderStage stage, uint32_t set) {
+        return addDescriptorBinding_(binding, stage, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, set);
     }
 
     std::expected<std::shared_ptr<Pipeline>, std::string> build() {
@@ -214,68 +207,63 @@ public:
         };
         shaderStages.push_back(fragShaderStageInfo);
 
-        // Descriptor Sets
-        VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
-        VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-        std::array<VkDescriptorSet, Renderer::MAX_FRAMES_IN_FLIGHT> descriptorSets = {VK_NULL_HANDLE};
-        Pipeline::BindingTypeMap bindingTypes;
+        // Descriptor Set Layouts — one per set index
+        std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
+        std::map<uint32_t, Pipeline::BindingTypeMap> allBindingTypes;
 
         if (!descriptor_bindings_.empty()) {
-            VkDescriptorSetLayoutCreateInfo layoutInfo{
-                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                .pNext = nullptr,
-                .flags = 0,
-                .bindingCount = static_cast<uint32_t>(descriptor_bindings_.size()),
-                .pBindings = descriptor_bindings_.data()
-            };
-
-            if (vkCreateDescriptorSetLayout(renderer_.device(), &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS) {
-                return std::unexpected("Failed to create descriptor set layout!");
+            // Find max set index
+            uint32_t maxSetIndex = 0;
+            for (const auto& [idx, _] : descriptor_bindings_) {
+                if (idx > maxSetIndex) maxSetIndex = idx;
             }
 
-            // Build binding type map and count descriptors per type for pool sizes
-            std::unordered_map<VkDescriptorType, uint32_t> typeCounts;
-            for (const auto& b : descriptor_bindings_) {
-                typeCounts[b.descriptorType] += Renderer::MAX_FRAMES_IN_FLIGHT;
-                bindingTypes[b.binding] = b.descriptorType;
-            }
+            for (uint32_t s = 0; s <= maxSetIndex; s++) {
+                auto it = descriptor_bindings_.find(s);
+                if (it != descriptor_bindings_.end() && !it->second.empty()) {
+                    VkDescriptorSetLayoutCreateInfo layoutInfo{
+                        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                        .pNext = nullptr,
+                        .flags = 0,
+                        .bindingCount = static_cast<uint32_t>(it->second.size()),
+                        .pBindings = it->second.data()
+                    };
 
-            std::vector<VkDescriptorPoolSize> poolSizes;
-            for (const auto& [type, count] : typeCounts) {
-                VkDescriptorPoolSize ps{
-                    .type = type,
-                    .descriptorCount = count
-                };
-                poolSizes.push_back(ps);
-            }
+                    VkDescriptorSetLayout layout;
+                    if (vkCreateDescriptorSetLayout(renderer_.device(), &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
+                        // Cleanup already created layouts
+                        for (auto dl : descriptorSetLayouts) {
+                            vkDestroyDescriptorSetLayout(renderer_.device(), dl, nullptr);
+                        }
+                        return std::unexpected("Failed to create descriptor set layout for set " + std::to_string(s));
+                    }
+                    descriptorSetLayouts.push_back(layout);
 
-            VkDescriptorPoolCreateInfo poolInfo{
-                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-                .pNext = nullptr,
-                .flags = 0,
-                .maxSets = Renderer::MAX_FRAMES_IN_FLIGHT,
-                .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
-                .pPoolSizes = poolSizes.data()
-            };
+                    // Build binding types map for this set
+                    Pipeline::BindingTypeMap btm;
+                    for (const auto& b : it->second) {
+                        btm[b.binding] = b.descriptorType;
+                    }
+                    allBindingTypes[s] = std::move(btm);
+                } else {
+                    // Create empty layout for gap set indices
+                    VkDescriptorSetLayoutCreateInfo layoutInfo{
+                        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                        .pNext = nullptr,
+                        .flags = 0,
+                        .bindingCount = 0,
+                        .pBindings = nullptr
+                    };
 
-            if (vkCreateDescriptorPool(renderer_.device(), &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
-                vkDestroyDescriptorSetLayout(renderer_.device(), descriptorSetLayout, nullptr);
-                return std::unexpected("Failed to create descriptor pool!");
-            }
-
-            std::vector<VkDescriptorSetLayout> layouts(Renderer::MAX_FRAMES_IN_FLIGHT, descriptorSetLayout);
-            VkDescriptorSetAllocateInfo allocInfo{
-                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-                .pNext = nullptr,
-                .descriptorPool = descriptorPool,
-                .descriptorSetCount = Renderer::MAX_FRAMES_IN_FLIGHT,
-                .pSetLayouts = layouts.data()
-            };
-
-            if (vkAllocateDescriptorSets(renderer_.device(), &allocInfo, descriptorSets.data()) != VK_SUCCESS) {
-                vkDestroyDescriptorPool(renderer_.device(), descriptorPool, nullptr);
-                vkDestroyDescriptorSetLayout(renderer_.device(), descriptorSetLayout, nullptr);
-                return std::unexpected("Failed to allocate descriptor set!");
+                    VkDescriptorSetLayout layout;
+                    if (vkCreateDescriptorSetLayout(renderer_.device(), &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
+                        for (auto dl : descriptorSetLayouts) {
+                            vkDestroyDescriptorSetLayout(renderer_.device(), dl, nullptr);
+                        }
+                        return std::unexpected("Failed to create empty descriptor set layout for set " + std::to_string(s));
+                    }
+                    descriptorSetLayouts.push_back(layout);
+                }
             }
         }
 
@@ -429,21 +417,17 @@ public:
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
-            .setLayoutCount = 0, // Set conditionally below
-            .pSetLayouts = nullptr,
+            .setLayoutCount = static_cast<uint32_t>(descriptorSetLayouts.size()),
+            .pSetLayouts = descriptorSetLayouts.empty() ? nullptr : descriptorSetLayouts.data(),
             .pushConstantRangeCount = static_cast<uint32_t>(push_constant_ranges_.size()),
             .pPushConstantRanges = push_constant_ranges_.data()
         };
-        
-        if (descriptorSetLayout != VK_NULL_HANDLE) {
-            pipelineLayoutInfo.setLayoutCount = 1;
-            pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
-        }
 
         VkPipelineLayout pipelineLayout;
         if (vkCreatePipelineLayout(renderer_.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
-            if (descriptorPool) vkDestroyDescriptorPool(renderer_.device(), descriptorPool, nullptr);
-            if (descriptorSetLayout) vkDestroyDescriptorSetLayout(renderer_.device(), descriptorSetLayout, nullptr);
+            for (auto dl : descriptorSetLayouts) {
+                vkDestroyDescriptorSetLayout(renderer_.device(), dl, nullptr);
+            }
             return std::unexpected("Failed to create pipeline layout!");
         }
 
@@ -484,19 +468,23 @@ public:
         VkPipeline graphicsPipeline;
         if (vkCreateGraphicsPipelines(renderer_.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
             vkDestroyPipelineLayout(renderer_.device(), pipelineLayout, nullptr);
-            if (descriptorPool) vkDestroyDescriptorPool(renderer_.device(), descriptorPool, nullptr);
-            if (descriptorSetLayout) vkDestroyDescriptorSetLayout(renderer_.device(), descriptorSetLayout, nullptr);
+            for (auto dl : descriptorSetLayouts) {
+                vkDestroyDescriptorSetLayout(renderer_.device(), dl, nullptr);
+            }
             return std::unexpected("Failed to create graphics pipeline!");
         }
 
-        return std::make_shared<Pipeline>(renderer_.device(), graphicsPipeline, pipelineLayout, descriptorSetLayout, descriptorPool, descriptorSets, std::move(bindingTypes));
+        return std::make_shared<Pipeline>(renderer_.device(), graphicsPipeline, pipelineLayout,
+                                          std::move(descriptorSetLayouts), std::move(allBindingTypes));
     }
 
 private:
-    PipelineBuilder& addDescriptorBinding_(uint32_t binding, ShaderStage stage, VkDescriptorType descriptorType) {
+    PipelineBuilder& addDescriptorBinding_(uint32_t binding, ShaderStage stage, VkDescriptorType descriptorType, uint32_t setIndex) {
         VkShaderStageFlags stageFlag = (stage == ShaderStage::VERTEX) ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
         
-        for (auto& b : descriptor_bindings_) {
+        auto& bindings = descriptor_bindings_[setIndex];
+        
+        for (auto& b : bindings) {
             if (b.binding == binding) {
                 b.stageFlags |= stageFlag;
                 return *this;
@@ -510,7 +498,7 @@ private:
             .stageFlags = stageFlag,
             .pImmutableSamplers = nullptr
         };
-        descriptor_bindings_.push_back(layoutBinding);
+        bindings.push_back(layoutBinding);
         return *this;
     }
 
@@ -523,5 +511,5 @@ private:
     FrontFace front_face_ = FrontFace::COUNTER_CLOCKWISE;
     bool blend_enable_ = false;
     std::vector<VkPushConstantRange> push_constant_ranges_;
-    std::vector<VkDescriptorSetLayoutBinding> descriptor_bindings_;
+    std::map<uint32_t, std::vector<VkDescriptorSetLayoutBinding>> descriptor_bindings_;
 };

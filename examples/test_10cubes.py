@@ -142,8 +142,8 @@ if __name__ == "__main__":
         .fragmentShader(frag_spv)
         .vertexFormat([bz.Format.FLOAT3, bz.Format.FLOAT3, bz.Format.FLOAT3]) # pos, normal, color
         .depthTest(True)
-        .uniformBuffer(0, bz.ShaderStage.VERTEX)   
-        .uniformBuffer(0, bz.ShaderStage.FRAGMENT) 
+        .uniformBuffer(0, bz.ShaderStage.VERTEX, set=0)   
+        .uniformBuffer(0, bz.ShaderStage.FRAGMENT, set=0) 
         .build())
 
     # Format: pos x, y, z, normal x, y, z, color r, g, b
@@ -198,6 +198,11 @@ if __name__ == "__main__":
     )
     ubuf = engine.createBuffer(ubo_size_bytes, bz.BufferType.UNIFORM)
 
+    # Create Descriptor Pool and allocate frame descriptor set
+    pool = engine.createDescriptorPool(max_sets=2, uniform_buffers=2)
+    desc_set = pool.allocateFrameDescriptorSet(pipeline, set=0)
+    desc_set.setBuffer(0, ubuf)
+
     cmd = engine.createCommandBuffer()
     
     cmd.begin()
@@ -205,7 +210,7 @@ if __name__ == "__main__":
     cmd.setViewport()
     cmd.setScissor()
     cmd.bindPipeline(pipeline)
-    cmd.bindUniformBuffer(0, ubuf, pipeline)
+    cmd.bindDescriptorSet(desc_set, pipeline, set=0)
     cmd.bindVertexBuffer(vbuf)
     cmd.bindIndexBuffer(ibuf)
     # Draw 36 indices, with 11 instances (10 cubes + 1 light source)

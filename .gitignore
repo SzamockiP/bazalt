@@ -2,6 +2,7 @@ venv/
 .vs/
 out/
 build/
+examples/assets/
 
 CMakeSettings.json
 
@@ -15,3 +16,4 @@ dist/
 
 # scikit-build
 _skbuild/
+
