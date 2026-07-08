@@ -46,7 +46,9 @@ class Camera:
 
 class App:
     def __init__(self):
+        # 1. Initialize the engine
         self.engine = bz.Engine()
+        # 2. Create a window (width, height, title)
         self.engine.init(1024, 720, "Bazalt Demo - Textured Multi-Cube")
         self.engine.setCursorMode(bz.CURSOR_DISABLED)
 
@@ -69,9 +71,11 @@ class App:
         print(msg)
 
     def setup_pipeline(self):
+        # Compile GLSL shaders
         vert_spv = self.engine.compileShader("cube_tex.vert", bz.ShaderStage.VERTEX)
         frag_spv = self.engine.compileShader("cube_tex.frag", bz.ShaderStage.FRAGMENT)
 
+        # Create a graphics pipeline using a builder pattern
         self.pipeline = (self.engine.createPipeline()
             .vertexShader(vert_spv)
             .fragmentShader(frag_spv)
@@ -143,6 +147,7 @@ class App:
         tex1 = self.engine.loadTexture("../assets/wall.png")
         tex2 = self.engine.loadTexture("../assets/container.png")
 
+        # Create Descriptor Pool and allocate descriptor sets
         self.pool = self.engine.createDescriptorPool(max_sets=4, samplers=2, uniform_buffers=2)
         
         # Set 0 (Frame set): 1 UBO
@@ -158,6 +163,7 @@ class App:
         self.crate_set.setTexture(0, tex2)
 
     def record_commands(self):
+        # Create and record a command buffer
         self.cmd = self.engine.createCommandBuffer()
         self.cmd.begin()
         self.cmd.beginRendering(clear_color=[0.1, 0.2, 0.3, 1.0])
@@ -208,6 +214,8 @@ class App:
         mvp = proj * view * model
         
         self.ubuf.update(bytes(glm.transpose(mvp)))
+        
+        # Submit our pre-recorded command buffer to the GPU each frame
         self.engine.submit(self.cmd)
 
     def run(self):

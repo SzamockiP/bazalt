@@ -47,7 +47,9 @@ class Camera:
 
 class App:
     def __init__(self):
+        # 1. Initialize the engine
         self.engine = bz.Engine()
+        # 2. Create a window (width, height, title)
         self.engine.init(1024, 720, "Bazalt Demo - 3D Cube")
         self.engine.setCursorMode(bz.CURSOR_DISABLED)
 
@@ -70,9 +72,11 @@ class App:
         print(msg)
 
     def setup_pipeline(self):
+        # Compile GLSL shaders
         vert_spv = self.engine.compileShader("cube.vert", bz.ShaderStage.VERTEX)
         frag_spv = self.engine.compileShader("cube.frag", bz.ShaderStage.FRAGMENT)
 
+        # Create a graphics pipeline using a builder pattern
         self.pipeline = (self.engine.createPipeline()
             .vertexShader(vert_spv)
             .fragmentShader(frag_spv)
@@ -132,20 +136,25 @@ class App:
         self.ubuf = self.engine.createBuffer(np.zeros(16, dtype=np.float32), bz.BufferType.UNIFORM)
 
     def setup_descriptors(self):
+        # Create Descriptor Pool and allocate descriptor set for uniform buffer
         self.pool = self.engine.createDescriptorPool(max_sets=2, uniform_buffers=2)
         self.desc_set = self.pool.allocateFrameDescriptorSet(self.pipeline, set=0)
         self.desc_set.setBuffer(0, self.ubuf)
 
     def record_commands(self):
+        # Create and record a command buffer
         self.cmd = self.engine.createCommandBuffer()
         self.cmd.begin()
         self.cmd.beginRendering(clear_color=[0.1, 0.2, 0.3, 1.0])
         self.cmd.setViewport()
         self.cmd.setScissor()
+        # Bind resources
         self.cmd.bindPipeline(self.pipeline)
         self.cmd.bindDescriptorSet(self.desc_set, self.pipeline, set=0)
         self.cmd.bindVertexBuffer(self.vbuf)
         self.cmd.bindIndexBuffer(self.ibuf)
+        
+        # Draw 36 indices (12 triangles = 6 quads = 1 cube)
         self.cmd.drawIndexed(36)
         self.cmd.endRendering()
 
@@ -174,6 +183,8 @@ class App:
         mvp = proj * view * model
         
         self.ubuf.update(bytes(glm.transpose(mvp)))
+        
+        # Submit our pre-recorded command buffer to the GPU each frame
         self.engine.submit(self.cmd)
 
     def run(self):

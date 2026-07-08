@@ -3,6 +3,7 @@ import time
 
 engine = bz.Engine()
 
+# Optional: Register an error callback
 @engine.onError
 def error(msg):
     print(msg)
@@ -11,6 +12,7 @@ last_time = time.time()
 frame_count = 0
 fps_timer = 0.0
 
+# Register a per-frame callback
 @engine.onFrame
 def on_update():
     global last_time, frame_count, fps_timer
@@ -29,6 +31,7 @@ def on_update():
         frame_count = 0
         fps_timer = 0.0
 
+    # Submit our pre-recorded command buffer to the GPU each frame
     engine.submit(cmd)
 
 if __name__ == "__main__":
@@ -38,6 +41,7 @@ if __name__ == "__main__":
     
     # We only record the command buffer once!
     cmd.begin()
+    # Start rendering pass with a dark gray clear color
     cmd.beginRendering(clear_color=[0.1, 0.1, 0.1, 1.0])
     cmd.endRendering()
 

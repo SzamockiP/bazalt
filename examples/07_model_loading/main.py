@@ -71,7 +71,9 @@ def load_materials(mtl_path):
 
 class DemoApp:
     def __init__(self):
+        # 1. Initialize the engine
         self.engine = bz.Engine()
+        # 2. Create a window (width, height, title)
         self.engine.init(1024, 720, "Bazalt Demo - Model Loader")
         self.engine.setCursorMode(bz.CURSOR_DISABLED)
         
@@ -97,9 +99,11 @@ class DemoApp:
         print(f"[Engine Error]: {msg}")
 
     def setup_pipeline(self, script_dir):
+        # Compile GLSL shaders
         vert_spv = self.engine.compileShader(os.path.join(script_dir, "model.vert"), bz.ShaderStage.VERTEX)
         frag_spv = self.engine.compileShader(os.path.join(script_dir, "model.frag"), bz.ShaderStage.FRAGMENT)
 
+        # Create a graphics pipeline using a builder pattern
         self.pipeline = (self.engine.createPipeline()
             .vertexShader(vert_spv)
             .fragmentShader(frag_spv)
@@ -192,6 +196,7 @@ class DemoApp:
         self.ibuf = self.engine.createBuffer(np.concatenate(all_faces).flatten().astype(np.uint32), bz.BufferType.INDEX)
 
     def setup_descriptors(self):
+        # Create Descriptor Pool and allocate descriptor set
         self.pool = self.engine.createDescriptorPool(
             max_sets=3 + len(self.loaded_textures), 
             uniform_buffers=2, 
@@ -211,6 +216,7 @@ class DemoApp:
         self.texture_sets[self.default_texture] = default_tex_set
 
     def record_commands(self):
+        # Create and record a command buffer
         self.cmd = self.engine.createCommandBuffer()
         self.cmd.begin()
         self.cmd.beginRendering(clear_color=[0.1, 0.2, 0.3, 1.0])
@@ -252,6 +258,8 @@ class DemoApp:
         view, proj, model = self.camera.get_matrices(1024.0 / 720.0)
         
         self.ubuf.update(view.to_bytes() + proj.to_bytes() + model.to_bytes())
+        
+        # Submit our pre-recorded command buffer to the GPU each frame
         self.engine.submit(self.cmd)
 
     def run(self):

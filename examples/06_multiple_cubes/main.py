@@ -46,7 +46,9 @@ class Camera:
 
 class App:
     def __init__(self):
+        # 1. Initialize the engine
         self.engine = bz.Engine()
+        # 2. Create a window (width, height, title)
         self.engine.init(1024, 720, "Bazalt Demo - 10 Cubes Lighting")
         self.engine.setCursorMode(bz.CURSOR_DISABLED)
 
@@ -70,9 +72,11 @@ class App:
         print(msg)
 
     def setup_pipeline(self):
+        # Compile GLSL shaders
         vert_spv = self.engine.compileShader("10cubes.vert", bz.ShaderStage.VERTEX)
         frag_spv = self.engine.compileShader("10cubes.frag", bz.ShaderStage.FRAGMENT)
 
+        # Create a graphics pipeline using a builder pattern
         self.pipeline = (self.engine.createPipeline()
             .vertexShader(vert_spv)
             .fragmentShader(frag_spv)
@@ -132,11 +136,13 @@ class App:
         self.ubuf = self.engine.createBuffer(ubo_size_bytes, bz.BufferType.UNIFORM)
 
     def setup_descriptors(self):
+        # Create Descriptor Pool and allocate descriptor set
         self.pool = self.engine.createDescriptorPool(max_sets=2, uniform_buffers=2)
         self.desc_set = self.pool.allocateFrameDescriptorSet(self.pipeline, set=0)
         self.desc_set.setBuffer(0, self.ubuf)
 
     def record_commands(self):
+        # Create and record a command buffer
         self.cmd = self.engine.createCommandBuffer()
         self.cmd.begin()
         self.cmd.beginRendering(clear_color=[0.05, 0.05, 0.05, 1.0])
@@ -210,6 +216,8 @@ class App:
         data.extend([1.0, 0.9, 0.8, 0.0])
         
         self.ubuf.update(data)
+        
+        # Submit our pre-recorded command buffer to the GPU each frame
         self.engine.submit(self.cmd)
 
     def run(self):

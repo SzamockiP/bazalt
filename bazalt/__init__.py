@@ -8,6 +8,8 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     Texture,
     Pipeline,
     PipelineBuilder,
+    DescriptorPool,
+    DescriptorSet,
     CommandBuffer,
     MouseState,
     BufferType,
@@ -18,7 +20,7 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     FrontFace,
 )
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 __all__ = [
     # Core
@@ -29,6 +31,8 @@ __all__ = [
     "Texture",
     "Pipeline",
     "PipelineBuilder",
+    "DescriptorPool",
+    "DescriptorSet",
     "CommandBuffer",
     # Data types
     "MouseState",
