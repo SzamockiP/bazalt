@@ -2,7 +2,7 @@
 #include <volk.h>
 #include <vk_mem_alloc.h>
 #include <span>
-#include <stdexcept>
+#include <string>
 #include <memory>
 #include <expected>
 #include <cstring>
@@ -38,8 +38,13 @@ public:
     virtual bool is_dynamic() const { return false; }
     virtual VkBuffer get_for_frame(uint32_t /*frame*/) const { return get(); }
 
-    virtual void update(const void* data, size_t size) {
-        throw std::runtime_error("Update not supported for this buffer type");
+    // Fails through the unified Error channel, not a raw exception: at the
+    // pybind boundary this surfaces as bz.ResourceError, so `except BazaltError`
+    // actually catches it.
+    virtual std::expected<void, Error> update(const void* /*data*/, size_t /*size*/) {
+        return std::unexpected(err_resource(
+            "update() is only supported on DYNAMIC buffers; "
+            "create the buffer with MemoryUsage.DYNAMIC instead"));
     }
 
     // Remembered so bindIndexBuffer doesn't have to assume. It used to hardcode
@@ -197,18 +202,21 @@ public:
     VkBuffer get_for_frame(uint32_t frame) const override { return buffers_[frame]; }
     BufferType buffer_type() const { return type_; }
 
-    void update(const void* data, size_t size) override {
+    std::expected<void, Error> update(const void* data, size_t size) override {
         if (size > size_) {
-            throw std::runtime_error("Update size exceeds buffer size");
+            return std::unexpected(err_resource(
+                "Update of " + std::to_string(size) + " bytes exceeds the buffer size of " +
+                std::to_string(size_) + " bytes"));
         }
         uint32_t frame = context_->current_frame();
         void* mappedData;
-        if (vmaMapMemory(context_->allocator(), allocations_[frame], &mappedData) == VK_SUCCESS) {
-            std::memcpy(mappedData, data, size);
-            vmaUnmapMemory(context_->allocator(), allocations_[frame]);
-        } else {
-            throw std::runtime_error("Failed to map memory for buffer update");
+        if (auto e = check(vmaMapMemory(context_->allocator(), allocations_[frame], &mappedData),
+                           "map dynamic buffer memory for update", ErrorCode::Resource)) {
+            return std::unexpected(*e);
         }
+        std::memcpy(mappedData, data, size);
+        vmaUnmapMemory(context_->allocator(), allocations_[frame]);
+        return {};
     }
 
     static std::expected<std::shared_ptr<DynamicBuffer>, Error> create(Context& context, const void* data, size_t data_size, BufferType type) {

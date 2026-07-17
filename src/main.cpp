@@ -117,6 +117,19 @@ T unwrap(std::expected<T, Error>&& result, Logger* logger)
     raise_error(result.error());
 }
 
+void unwrap(std::expected<void, Error>&& result, Logger* logger)
+{
+    if (result)
+    {
+        return;
+    }
+    if (logger)
+    {
+        logger->log(result.error());
+    }
+    raise_error(result.error());
+}
+
 // True when the buffer's bytes are packed in C order.
 //
 // Dimensions of extent 1 are skipped: their stride is unconstrained and numpy
@@ -352,11 +365,11 @@ PYBIND11_MODULE(_core, m) {
 
     py::class_<Buffer, std::shared_ptr<Buffer>>(m, "Buffer")
         .def("update", [](Buffer& buffer, std::string_view data) {
-            buffer.update(data.data(), data.size());
+            unwrap(buffer.update(data.data(), data.size()), nullptr);
         })
         .def("update", [](Buffer& buffer, py::buffer b) {
             py::buffer_info info = b.request();
-            buffer.update(info.ptr, contiguous_nbytes(info, "Buffer.update"));
+            unwrap(buffer.update(info.ptr, contiguous_nbytes(info, "Buffer.update")), nullptr);
         })
         .def("update", [](Buffer& buffer, py::list list, std::optional<DataType> dataType = std::nullopt) {
             if (list.empty()) return;
@@ -378,21 +391,21 @@ PYBIND11_MODULE(_core, m) {
             if (actualType == DataType::FLOAT) {
                 std::vector<float> data(count);
                 for(size_t i=0; i<count; ++i) data[i] = list[i].cast<float>();
-                buffer.update(data.data(), count * sizeof(float));
+                unwrap(buffer.update(data.data(), count * sizeof(float)), nullptr);
             } else if (actualType == DataType::UINT32) {
                 std::vector<uint32_t> data(count);
                 for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint32_t>();
-                buffer.update(data.data(), count * sizeof(uint32_t));
+                unwrap(buffer.update(data.data(), count * sizeof(uint32_t)), nullptr);
             } else if (actualType == DataType::UINT16) {
                 // create_buffer accepted UINT16 while update rejected it, so a
                 // UINT16 buffer could be created and then never written to.
                 std::vector<uint16_t> data(count);
                 for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint16_t>();
-                buffer.update(data.data(), count * sizeof(uint16_t));
+                unwrap(buffer.update(data.data(), count * sizeof(uint16_t)), nullptr);
             } else if (actualType == DataType::INT32) {
                 std::vector<int32_t> data(count);
                 for(size_t i=0; i<count; ++i) data[i] = list[i].cast<int32_t>();
-                buffer.update(data.data(), count * sizeof(int32_t));
+                unwrap(buffer.update(data.data(), count * sizeof(int32_t)), nullptr);
             }
         }, py::arg("list"), py::arg("data_type") = py::none());
     
@@ -426,10 +439,12 @@ PYBIND11_MODULE(_core, m) {
         }, py::arg("target"));
 
     py::class_<DescriptorSet, std::shared_ptr<DescriptorSet>>(m, "DescriptorSet")
-        .def("set_texture", &DescriptorSet::setTexture,
-             py::arg("binding"), py::arg("texture"))
-        .def("set_buffer", &DescriptorSet::setBuffer,
-             py::arg("binding"), py::arg("buffer"));
+        .def("set_texture", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Texture> texture) {
+            unwrap(self.setTexture(binding, std::move(texture)), nullptr);
+        }, py::arg("binding"), py::arg("texture"))
+        .def("set_buffer", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Buffer> buffer) {
+            unwrap(self.setBuffer(binding, std::move(buffer)), nullptr);
+        }, py::arg("binding"), py::arg("buffer"));
 
     py::class_<DescriptorPool, std::shared_ptr<DescriptorPool>>(m, "DescriptorPool")
         .def("allocate_set", [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object {

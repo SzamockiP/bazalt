@@ -88,3 +88,41 @@ def test_pipeline_without_shaders_is_a_shader_error(ctx):
     target = bz.RenderTarget(ctx, 16, 16)
     with pytest.raises(bz.ShaderError):
         ctx.pipeline_builder().build(target)
+
+
+def test_static_buffer_update_is_a_resource_error(ctx):
+    """update() on a STATIC buffer used to raise a bare RuntimeError, invisible
+    to `except bz.BazaltError`."""
+    buf = ctx.create_buffer([1.0, 2.0, 3.0], bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+    with pytest.raises(bz.ResourceError) as info:
+        buf.update([4.0, 5.0, 6.0])
+    assert "DYNAMIC" in str(info.value)
+
+
+def test_oversized_dynamic_update_is_a_resource_error(ctx):
+    """The message must name both sizes, or the user is left guessing."""
+    buf = ctx.create_buffer([0.0, 0.0, 0.0, 0.0], bz.BufferType.UNIFORM,
+                            bz.MemoryUsage.DYNAMIC)  # 16 bytes
+    with pytest.raises(bz.ResourceError) as info:
+        buf.update([0.0] * 16)  # 64 bytes
+    assert "64" in str(info.value) and "16" in str(info.value)
+
+
+def test_dynamic_buffer_in_static_set_is_a_resource_error(ctx, triangle_shaders):
+    """A DYNAMIC buffer has one backing buffer per frame; a static set can only
+    point at one of them. The error must steer towards allocate_frame_set."""
+    vert, frag = triangle_shaders
+    target = bz.RenderTarget(ctx, 16, 16)
+    pipeline = (ctx.pipeline_builder()
+                .vertex_shader(vert)
+                .fragment_shader(frag)
+                .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+                .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
+                .build(target))
+    pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4)
+    static_set = pool.allocate_set(pipeline, set=0)
+    dynamic = ctx.create_buffer([0.0] * 4, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+
+    with pytest.raises(bz.ResourceError) as info:
+        static_set.set_buffer(0, dynamic)
+    assert "allocate_frame_set" in str(info.value)

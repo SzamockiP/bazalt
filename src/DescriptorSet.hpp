@@ -3,7 +3,6 @@
 #include <vector>
 #include <memory>
 #include <expected>
-#include <stdexcept>
 #include <unordered_map>
 #include "Context.hpp"
 #include "Pipeline.hpp"
@@ -19,8 +18,8 @@ public:
           binding_types_(std::move(bindingTypes)), is_frame_set_(isFrameSet) {}
 
     // Write a texture to this descriptor set (all copies)
-    void setTexture(uint32_t binding, std::shared_ptr<Texture> texture) {
-        if (!context_) return;
+    std::expected<void, Error> setTexture(uint32_t binding, std::shared_ptr<Texture> texture) {
+        if (!context_) return {};
 
         VkDescriptorImageInfo imageInfo{
             .sampler = texture->sampler(),
@@ -44,18 +43,19 @@ public:
             vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
         textures_.push_back(texture);
+        return {};
     }
 
     // Write a buffer to this descriptor set
     // For frame descriptor sets + DynamicBuffer: writes per-frame buffer to each copy
-    // For static descriptor sets + DynamicBuffer: throws RuntimeError
-    void setBuffer(uint32_t binding, std::shared_ptr<Buffer> buffer) {
-        if (!context_) return;
+    // For static descriptor sets + DynamicBuffer: bz.ResourceError
+    std::expected<void, Error> setBuffer(uint32_t binding, std::shared_ptr<Buffer> buffer) {
+        if (!context_) return {};
 
         if (!is_frame_set_ && buffer->is_dynamic()) {
-            throw std::runtime_error(
-                "Cannot bind DynamicBuffer to a static DescriptorSet. "
-                "Use allocateFrameDescriptorSet() instead.");
+            return std::unexpected(err_resource(
+                "Cannot bind a DYNAMIC buffer to a static DescriptorSet. "
+                "Use allocate_frame_set() instead."));
         }
 
         auto it = binding_types_.find(binding);
@@ -86,6 +86,7 @@ public:
             vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
         buffers_.push_back(buffer);
+        return {};
     }
 
     // Get the VkDescriptorSet for the given frame
