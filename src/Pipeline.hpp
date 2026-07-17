@@ -202,138 +202,38 @@ public:
     }
 
     // Build the pipeline with explicit color/depth formats (decoupled from renderer)
+    //
+    // A short sequence of named steps. The ~300-line monolith this replaces mixed
+    // descriptor-layout creation, vertex-input translation and fixed state into
+    // one scroll, with the cleanup loop copy-pasted into every failure branch.
     std::expected<std::shared_ptr<Pipeline>, Error> build(VkFormat colorFormat, VkFormat depthFormat) {
         if (!vertex_shader_ || !fragment_shader_) {
             return std::unexpected(err_shader("Vertex and fragment shaders must be provided"));
         }
 
-        std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
-        
-        VkPipelineShaderStageCreateInfo vertShaderStageInfo{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .stage = VK_SHADER_STAGE_VERTEX_BIT,
-            .module = vertex_shader_->get(),
-            .pName = "main",
-            .pSpecializationInfo = nullptr
-        };
-        shaderStages.push_back(vertShaderStageInfo);
+        const std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = shader_stages_();
 
-        VkPipelineShaderStageCreateInfo fragShaderStageInfo{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-            .module = fragment_shader_->get(),
-            .pName = "main",
-            .pSpecializationInfo = nullptr
-        };
-        shaderStages.push_back(fragShaderStageInfo);
-
-        // Descriptor Set Layouts — one per set index
+        // Descriptor set layouts — owned by the guard until the Pipeline exists.
         std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
         std::map<uint32_t, Pipeline::BindingTypeMap> allBindingTypes;
-
-        // Owns the layouts until the Pipeline does; every failure path below
-        // used to repeat this loop by hand.
         ScopeGuard cleanup_layouts([&] {
             for (auto dl : descriptorSetLayouts) {
                 vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
             }
         });
-
-        if (!descriptor_bindings_.empty()) {
-            // Find max set index
-            uint32_t maxSetIndex = 0;
-            for (const auto& [idx, _] : descriptor_bindings_) {
-                if (idx > maxSetIndex) maxSetIndex = idx;
-            }
-
-            for (uint32_t s = 0; s <= maxSetIndex; s++) {
-                auto it = descriptor_bindings_.find(s);
-                if (it != descriptor_bindings_.end() && !it->second.empty()) {
-                    VkDescriptorSetLayoutCreateInfo layoutInfo{
-                        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                        .pNext = nullptr,
-                        .flags = 0,
-                        .bindingCount = static_cast<uint32_t>(it->second.size()),
-                        .pBindings = it->second.data()
-                    };
-
-                    VkDescriptorSetLayout layout;
-                    if (auto e = check(vkCreateDescriptorSetLayout(context_.device(), &layoutInfo, nullptr, &layout),
-                                       "create descriptor set layout for set " + std::to_string(s))) {
-                        return std::unexpected(*e);
-                    }
-                    descriptorSetLayouts.push_back(layout);
-
-                    // Build binding types map for this set
-                    Pipeline::BindingTypeMap btm;
-                    for (const auto& b : it->second) {
-                        btm[b.binding] = b.descriptorType;
-                    }
-                    allBindingTypes[s] = std::move(btm);
-                } else {
-                    // Create empty layout for gap set indices
-                    VkDescriptorSetLayoutCreateInfo layoutInfo{
-                        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                        .pNext = nullptr,
-                        .flags = 0,
-                        .bindingCount = 0,
-                        .pBindings = nullptr
-                    };
-
-                    VkDescriptorSetLayout layout;
-                    if (auto e = check(vkCreateDescriptorSetLayout(context_.device(), &layoutInfo, nullptr, &layout),
-                                       "create empty descriptor set layout for set " + std::to_string(s))) {
-                        return std::unexpected(*e);
-                    }
-                    descriptorSetLayouts.push_back(layout);
-                }
-            }
+        if (auto r = create_set_layouts_(descriptorSetLayouts, allBindingTypes); !r) {
+            return std::unexpected(r.error());
         }
 
-        // Vertex Input
-        VkVertexInputBindingDescription bindingDescription{
-            .binding = 0,
-            .stride = 0, // Set later
-            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
-        };
-
-        std::vector<VkVertexInputAttributeDescription> attributeDescriptions(formats_.size());
-        uint32_t offset = 0;
-        for (size_t i = 0; i < formats_.size(); i++) {
-            attributeDescriptions[i].binding = 0;
-            attributeDescriptions[i].location = static_cast<uint32_t>(i);
-            
-            switch (formats_[i]) {
-                case VertexFormat::FLOAT2:
-                    attributeDescriptions[i].format = VK_FORMAT_R32G32_SFLOAT;
-                    attributeDescriptions[i].offset = offset;
-                    offset += 8;
-                    break;
-                case VertexFormat::FLOAT3:
-                    attributeDescriptions[i].format = VK_FORMAT_R32G32B32_SFLOAT;
-                    attributeDescriptions[i].offset = offset;
-                    offset += 12;
-                    break;
-                case VertexFormat::FLOAT4:
-                    attributeDescriptions[i].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-                    attributeDescriptions[i].offset = offset;
-                    offset += 16;
-                    break;
-            }
-        }
-        bindingDescription.stride = offset;
-
+        // Vertex input — the CreateInfo points into vertexInput, so it lives here.
+        const VertexInput vertexInput = vertex_input_();
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        if (!formats_.empty()) {
+        if (!vertexInput.attributes.empty()) {
             vertexInputInfo.vertexBindingDescriptionCount = 1;
-            vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
-            vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
-            vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+            vertexInputInfo.pVertexBindingDescriptions = &vertexInput.binding;
+            vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(vertexInput.attributes.size());
+            vertexInputInfo.pVertexAttributeDescriptions = vertexInput.attributes.data();
         }
 
         VkPipelineInputAssemblyStateCreateInfo inputAssembly{
@@ -367,28 +267,7 @@ public:
             .pScissors = nullptr
         };
 
-        VkCullModeFlags vkCullMode = VK_CULL_MODE_NONE;
-        if (cull_mode_ == CullMode::BACK) vkCullMode = VK_CULL_MODE_BACK_BIT;
-        else if (cull_mode_ == CullMode::FRONT) vkCullMode = VK_CULL_MODE_FRONT_BIT;
-        else if (cull_mode_ == CullMode::FRONT_AND_BACK) vkCullMode = VK_CULL_MODE_FRONT_AND_BACK;
-
-        VkFrontFace vkFrontFace = (front_face_ == FrontFace::CLOCKWISE) ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
-
-        VkPipelineRasterizationStateCreateInfo rasterizer{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .depthClampEnable = VK_FALSE,
-            .rasterizerDiscardEnable = VK_FALSE,
-            .polygonMode = VK_POLYGON_MODE_FILL,
-            .cullMode = vkCullMode,
-            .frontFace = vkFrontFace,
-            .depthBiasEnable = VK_FALSE,
-            .depthBiasConstantFactor = 0.0f,
-            .depthBiasClamp = 0.0f,
-            .depthBiasSlopeFactor = 0.0f,
-            .lineWidth = 1.0f
-        };
+        const VkPipelineRasterizationStateCreateInfo rasterizer = rasterization_state_();
 
         VkPipelineMultisampleStateCreateInfo multisampling{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
@@ -402,16 +281,7 @@ public:
             .alphaToOneEnable = VK_FALSE
         };
 
-        VkPipelineColorBlendAttachmentState colorBlendAttachment{
-            .blendEnable = blend_enable_ ? VK_TRUE : VK_FALSE,
-            .srcColorBlendFactor = blend_enable_ ? VK_BLEND_FACTOR_SRC_ALPHA : VK_BLEND_FACTOR_ONE,
-            .dstColorBlendFactor = blend_enable_ ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
-            .colorBlendOp = VK_BLEND_OP_ADD,
-            .srcAlphaBlendFactor = blend_enable_ ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE,
-            .dstAlphaBlendFactor = blend_enable_ ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
-            .alphaBlendOp = VK_BLEND_OP_ADD,
-            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
-        };
+        const VkPipelineColorBlendAttachmentState colorBlendAttachment = color_blend_attachment_();
 
         VkPipelineColorBlendStateCreateInfo colorBlending{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -424,37 +294,13 @@ public:
             .blendConstants = {0.0f, 0.0f, 0.0f, 0.0f}
         };
 
-        VkPipelineDepthStencilStateCreateInfo depthStencil{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .depthTestEnable = depth_test_ ? VK_TRUE : VK_FALSE,
-            .depthWriteEnable = depth_test_ ? VK_TRUE : VK_FALSE,
-            .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
-            .depthBoundsTestEnable = VK_FALSE,
-            .stencilTestEnable = VK_FALSE,
-            .front = {},
-            .back = {},
-            .minDepthBounds = 0.0f,
-            .maxDepthBounds = 1.0f
-        };
+        const VkPipelineDepthStencilStateCreateInfo depthStencil = depth_stencil_state_();
 
-        // Pipeline Layout
-        VkPipelineLayoutCreateInfo pipelineLayoutInfo{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .setLayoutCount = static_cast<uint32_t>(descriptorSetLayouts.size()),
-            .pSetLayouts = descriptorSetLayouts.empty() ? nullptr : descriptorSetLayouts.data(),
-            .pushConstantRangeCount = static_cast<uint32_t>(push_constant_ranges_.size()),
-            .pPushConstantRanges = push_constant_ranges_.data()
-        };
-
-        VkPipelineLayout pipelineLayout;
-        if (auto e = check(vkCreatePipelineLayout(context_.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout),
-                           "create pipeline layout")) {
-            return std::unexpected(*e);
+        auto layout = create_layout_(descriptorSetLayouts);
+        if (!layout) {
+            return std::unexpected(layout.error());
         }
+        VkPipelineLayout pipelineLayout = layout.value();
         ScopeGuard cleanup_pipeline_layout([&] {
             vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr);
         });
@@ -522,6 +368,191 @@ public:
     }
 
 private:
+    // ── build() steps ─────────────────────────────────────────────────────────
+
+    std::array<VkPipelineShaderStageCreateInfo, 2> shader_stages_() const {
+        return { {
+            {
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .stage = VK_SHADER_STAGE_VERTEX_BIT,
+                .module = vertex_shader_->get(),
+                .pName = "main",
+                .pSpecializationInfo = nullptr
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+                .module = fragment_shader_->get(),
+                .pName = "main",
+                .pSpecializationInfo = nullptr
+            }
+        } };
+    }
+
+    // One VkDescriptorSetLayout per set index up to the highest one used; gap
+    // set indices get an empty layout so shader set numbers stay meaningful.
+    // Partially created layouts are the caller's guard's problem.
+    std::expected<void, Error> create_set_layouts_(
+        std::vector<VkDescriptorSetLayout>& layouts,
+        std::map<uint32_t, Pipeline::BindingTypeMap>& bindingTypes)
+    {
+        if (descriptor_bindings_.empty()) {
+            return {};
+        }
+
+        uint32_t maxSetIndex = 0;
+        for (const auto& [idx, _] : descriptor_bindings_) {
+            if (idx > maxSetIndex) maxSetIndex = idx;
+        }
+
+        for (uint32_t s = 0; s <= maxSetIndex; s++) {
+            auto it = descriptor_bindings_.find(s);
+            const bool has_bindings = it != descriptor_bindings_.end() && !it->second.empty();
+
+            VkDescriptorSetLayoutCreateInfo layoutInfo{
+                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .bindingCount = has_bindings ? static_cast<uint32_t>(it->second.size()) : 0,
+                .pBindings = has_bindings ? it->second.data() : nullptr
+            };
+
+            VkDescriptorSetLayout layout;
+            if (auto e = check(vkCreateDescriptorSetLayout(context_.device(), &layoutInfo, nullptr, &layout),
+                               "create descriptor set layout for set " + std::to_string(s))) {
+                return std::unexpected(*e);
+            }
+            layouts.push_back(layout);
+
+            if (has_bindings) {
+                Pipeline::BindingTypeMap btm;
+                for (const auto& b : it->second) {
+                    btm[b.binding] = b.descriptorType;
+                }
+                bindingTypes[s] = std::move(btm);
+            }
+        }
+        return {};
+    }
+
+    struct VertexInput {
+        VkVertexInputBindingDescription binding{};
+        std::vector<VkVertexInputAttributeDescription> attributes;
+    };
+
+    // Translates the VertexFormat list into a binding + attribute descriptions
+    // with packed offsets.
+    VertexInput vertex_input_() const {
+        VertexInput result;
+        result.binding = {
+            .binding = 0,
+            .stride = 0,  // accumulated below
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
+        };
+
+        result.attributes.resize(formats_.size());
+        uint32_t offset = 0;
+        for (size_t i = 0; i < formats_.size(); i++) {
+            result.attributes[i].binding = 0;
+            result.attributes[i].location = static_cast<uint32_t>(i);
+            result.attributes[i].offset = offset;
+
+            switch (formats_[i]) {
+                case VertexFormat::FLOAT2:
+                    result.attributes[i].format = VK_FORMAT_R32G32_SFLOAT;
+                    offset += 8;
+                    break;
+                case VertexFormat::FLOAT3:
+                    result.attributes[i].format = VK_FORMAT_R32G32B32_SFLOAT;
+                    offset += 12;
+                    break;
+                case VertexFormat::FLOAT4:
+                    result.attributes[i].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+                    offset += 16;
+                    break;
+            }
+        }
+        result.binding.stride = offset;
+        return result;
+    }
+
+    VkPipelineRasterizationStateCreateInfo rasterization_state_() const {
+        VkCullModeFlags vkCullMode = VK_CULL_MODE_NONE;
+        if (cull_mode_ == CullMode::BACK) vkCullMode = VK_CULL_MODE_BACK_BIT;
+        else if (cull_mode_ == CullMode::FRONT) vkCullMode = VK_CULL_MODE_FRONT_BIT;
+        else if (cull_mode_ == CullMode::FRONT_AND_BACK) vkCullMode = VK_CULL_MODE_FRONT_AND_BACK;
+
+        return {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .depthClampEnable = VK_FALSE,
+            .rasterizerDiscardEnable = VK_FALSE,
+            .polygonMode = VK_POLYGON_MODE_FILL,
+            .cullMode = vkCullMode,
+            .frontFace = front_face_ == FrontFace::CLOCKWISE
+                ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            .depthBiasEnable = VK_FALSE,
+            .depthBiasConstantFactor = 0.0f,
+            .depthBiasClamp = 0.0f,
+            .depthBiasSlopeFactor = 0.0f,
+            .lineWidth = 1.0f
+        };
+    }
+
+    VkPipelineColorBlendAttachmentState color_blend_attachment_() const {
+        return {
+            .blendEnable = blend_enable_ ? VK_TRUE : VK_FALSE,
+            .srcColorBlendFactor = blend_enable_ ? VK_BLEND_FACTOR_SRC_ALPHA : VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = blend_enable_ ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = blend_enable_ ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp = VK_BLEND_OP_ADD,
+            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
+        };
+    }
+
+    VkPipelineDepthStencilStateCreateInfo depth_stencil_state_() const {
+        return {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .depthTestEnable = depth_test_ ? VK_TRUE : VK_FALSE,
+            .depthWriteEnable = depth_test_ ? VK_TRUE : VK_FALSE,
+            .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+            .depthBoundsTestEnable = VK_FALSE,
+            .stencilTestEnable = VK_FALSE,
+            .front = {},
+            .back = {},
+            .minDepthBounds = 0.0f,
+            .maxDepthBounds = 1.0f
+        };
+    }
+
+    std::expected<VkPipelineLayout, Error> create_layout_(const std::vector<VkDescriptorSetLayout>& layouts) {
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .setLayoutCount = static_cast<uint32_t>(layouts.size()),
+            .pSetLayouts = layouts.empty() ? nullptr : layouts.data(),
+            .pushConstantRangeCount = static_cast<uint32_t>(push_constant_ranges_.size()),
+            .pPushConstantRanges = push_constant_ranges_.data()
+        };
+
+        VkPipelineLayout pipelineLayout;
+        if (auto e = check(vkCreatePipelineLayout(context_.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout),
+                           "create pipeline layout")) {
+            return std::unexpected(*e);
+        }
+        return pipelineLayout;
+    }
+
     PipelineBuilder& addDescriptorBinding_(uint32_t binding, ShaderStage stage, VkDescriptorType descriptorType, uint32_t setIndex) {
         VkShaderStageFlags stageFlag = static_cast<VkShaderStageFlags>(to_vk(stage));
         
