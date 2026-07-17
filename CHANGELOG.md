@@ -11,7 +11,21 @@ A source-quality release: bug fixes, refactoring, and C++23 adoption.
 No public Python API changes.
 
 ### Fixed
-- (in progress)
+- `read_pixels()` could return discarded content: the internal "has been
+  rendered to" flag was never set, so the readback barrier always declared
+  the image layout as `UNDEFINED`, which permits the driver to drop the
+  rendered pixels. The flag now flips when rendering work is actually
+  submitted, and `read_pixels()` on a never-rendered target raises
+  `ResourceError` instead of returning uninitialised VRAM.
+- `Buffer.update` on a STATIC buffer, oversized updates, and binding a
+  DYNAMIC buffer to a static `DescriptorSet` now raise `bz.ResourceError`
+  instead of a bare `RuntimeError` that `except bz.BazaltError` missed.
+- Every `VkResult` on the one-shot upload/readback path (allocate, submit,
+  wait, map) is now checked; a device loss during an upload surfaces as
+  `DeviceLostError` at the failing call instead of garbage later.
+- Swapchain creation failures propagate the real `VkResult` instead of
+  collapsing to a bare "Failed to create swapchain"; mid-frame failures
+  log the `VkResult` name.
 
 ### Changed
 - CI now builds `release/**` branches and smoke-tests every built wheel

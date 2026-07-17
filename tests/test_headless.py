@@ -42,9 +42,40 @@ def test_render_target_reports_its_size(ctx):
 
 def test_read_pixels_shape_and_dtype(ctx):
     target = bz.RenderTarget(ctx, 32, 16)
+    # A clear-only pass counts as rendering; reading a never-rendered target
+    # is an error (see test_read_pixels_before_any_render_is_an_error).
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.begin_rendering(target, clear_color=CLEAR)
+    cmd.end_rendering(target)
+    ctx.submit(cmd)
+
     pixels = target.read_pixels()
     assert pixels.shape == (16, 32, 4)
     assert pixels.dtype == np.uint8
+
+
+def test_read_pixels_before_any_render_is_an_error(ctx):
+    """Before the first submit the image is UNDEFINED — reading it back would
+    return whatever the driver left in VRAM, which *sometimes* looks right.
+
+    read_pixels used to do exactly that (the rendered_ flag was never set)."""
+    target = bz.RenderTarget(ctx, 32, 32)
+    with pytest.raises(bz.ResourceError) as info:
+        target.read_pixels()
+    assert "never been rendered" in str(info.value)
+
+
+def test_recorded_but_unsubmitted_commands_do_not_count_as_rendering(ctx):
+    """Only a submit flips the rendered flag; recording alone must not."""
+    target = bz.RenderTarget(ctx, 32, 32)
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.begin_rendering(target, clear_color=CLEAR)
+    cmd.end_rendering(target)
+    # No ctx.submit(cmd).
+    with pytest.raises(bz.ResourceError):
+        target.read_pixels()
 
 
 def test_clear_colour_reaches_the_image(ctx, triangle_shaders, triangle_buffers):
@@ -106,8 +137,14 @@ def test_two_targets_from_one_context(ctx, triangle_shaders, triangle_buffers):
 
 
 def test_target_is_reusable_after_readback(ctx, triangle_shaders, triangle_buffers):
-    """read_pixels must leave the image in final_layout so it stays samplable."""
+    """read_pixels must leave the image in final_layout so it stays samplable.
+
+    Also the observable contract of the layout fix: the source barrier now
+    declares the true layout instead of UNDEFINED, so the driver may not
+    discard the rendered contents between two reads."""
     target = bz.RenderTarget(ctx, 32, 32)
     first = draw_triangle(ctx, target, triangle_shaders, triangle_buffers)
     second = target.read_pixels()
     assert np.array_equal(first, second)
+    assert not np.allclose(first[16, 16, :3], CLEAR_RGB, atol=2), \
+        "both reads agreeing on a blank image would prove nothing"

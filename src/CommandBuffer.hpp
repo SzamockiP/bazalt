@@ -212,6 +212,11 @@ public:
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                 0, 0, nullptr, 0, nullptr, 1, &barrier
             );
+
+            // Runs at execute() time, inside a real submit — so the target learns
+            // its image has left UNDEFINED exactly when that becomes true, and a
+            // recorded-but-never-submitted command buffer marks nothing.
+            target->on_rendering_recorded();
         });
     }
 

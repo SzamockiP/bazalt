@@ -46,6 +46,13 @@ public:
 	// needs SHADER_READ_ONLY_OPTIMAL. This being a virtual is what removes the
 	// hardcoded present transition from CommandBuffer.
 	virtual VkImageLayout final_layout() const = 0;
+
+	// Called by CommandBuffer when the end-of-rendering barrier is recorded into
+	// a real submit. An OffscreenTarget uses this to learn that its image has
+	// left UNDEFINED — the submit paths never see the target (it lives inside the
+	// recorded lambdas), so the notification has to come from the recording
+	// itself. No-op for targets that don't care.
+	virtual void on_rendering_recorded() {}
 };
 
 // Everything a recorded command needs that isn't known until replay.
@@ -180,6 +187,16 @@ public:
 	// one. 0.5 replaces the stall with the timeline-based UploadManager.
 	std::expected<std::vector<std::uint8_t>, Error> read_pixels()
 	{
+		// Refuse rather than return uninitialised VRAM: before the first submit the
+		// image is UNDEFINED, and a barrier claiming otherwise would let the driver
+		// hand back garbage that *sometimes* looks right.
+		if (!rendered_)
+		{
+			return std::unexpected(err_resource(
+				"read_pixels() called on a RenderTarget that has never been rendered "
+				"to; submit a command buffer targeting it first"));
+		}
+
 		const VkDeviceSize size = static_cast<VkDeviceSize>(extent_.width) * extent_.height * 4;
 
 		VkBufferCreateInfo bufferInfo{
@@ -245,21 +262,28 @@ public:
 	}
 
 	bool rendered_at_least_once() const { return rendered_; }
-	void mark_rendered() { rendered_ = true; }
+
+	// Flipped by the end-of-rendering barrier at execute() time — i.e. only when
+	// work targeting this image is actually submitted. This used to be a public
+	// mark_rendered() that nothing ever called, which left rendered_ permanently
+	// false and read_pixels() transitioning from UNDEFINED — a spec-sanctioned
+	// licence for the driver to discard the just-rendered contents.
+	void on_rendering_recorded() override { rendered_ = true; }
 
 private:
 	explicit OffscreenTarget(std::shared_ptr<Context> context) : context_(std::move(context)) {}
 
 	void transition(VkCommandBuffer cmd, VkImageLayout from, VkImageLayout to)
 	{
-		// Before anything has been rendered the image is still UNDEFINED; claiming
-		// it is in final_layout() would be a validation error.
+		// `from` is always truthful here: read_pixels() refuses to run before the
+		// first render, so the image is guaranteed to be in final_layout() by the
+		// time this barrier is recorded.
 		VkImageMemoryBarrier barrier{
 			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
 			.pNext = nullptr,
 			.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
 			.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
-			.oldLayout = rendered_ ? from : VK_IMAGE_LAYOUT_UNDEFINED,
+			.oldLayout = from,
 			.newLayout = to,
 			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
 			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
