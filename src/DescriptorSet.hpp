@@ -1,9 +1,10 @@
 #pragma once
 #include <volk.h>
-#include <vector>
-#include <memory>
 #include <expected>
+#include <format>
+#include <memory>
 #include <unordered_map>
+#include <vector>
 #include "Context.hpp"
 #include "Pipeline.hpp"
 #include "Texture.hpp"
@@ -19,7 +20,21 @@ public:
 
     // Write a texture to this descriptor set (all copies)
     std::expected<void, Error> set_texture(uint32_t binding, std::shared_ptr<Texture> texture) {
-        if (!context_) return {};
+        if (!context_) return std::unexpected(err_init("Context destroyed"));
+        if (!texture) return std::unexpected(err_resource("set_texture: texture is null"));
+
+        // A typo in the binding index used to surface only as a validation error
+        // at submit time (or not at all with the layers off). Diagnose it here.
+        auto it = binding_types_.find(binding);
+        if (it == binding_types_.end()) {
+            return std::unexpected(err_resource(std::format(
+                "Binding {} does not exist in this descriptor set's layout", binding)));
+        }
+        if (it->second != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+            return std::unexpected(err_resource(std::format(
+                "Binding {} is not a sampler binding; use set_buffer() for buffer bindings",
+                binding)));
+        }
 
         VkDescriptorImageInfo imageInfo{
             .sampler = texture->sampler(),
@@ -50,7 +65,8 @@ public:
     // For frame descriptor sets + DynamicBuffer: writes per-frame buffer to each copy
     // For static descriptor sets + DynamicBuffer: bz.ResourceError
     std::expected<void, Error> set_buffer(uint32_t binding, std::shared_ptr<Buffer> buffer) {
-        if (!context_) return {};
+        if (!context_) return std::unexpected(err_init("Context destroyed"));
+        if (!buffer) return std::unexpected(err_resource("set_buffer: buffer is null"));
 
         if (!is_frame_set_ && buffer->is_dynamic()) {
             return std::unexpected(err_resource(
@@ -58,10 +74,20 @@ public:
                 "Use allocate_frame_set() instead."));
         }
 
+        // No silent fallback: an unknown binding used to be *assumed* to be a
+        // UNIFORM_BUFFER, so a typo'd index produced a descriptor write the
+        // layout never declared — garbage diagnosed (at best) at submit time.
         auto it = binding_types_.find(binding);
-        VkDescriptorType descType = (it != binding_types_.end()) 
-            ? it->second 
-            : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        if (it == binding_types_.end()) {
+            return std::unexpected(err_resource(std::format(
+                "Binding {} does not exist in this descriptor set's layout", binding)));
+        }
+        const VkDescriptorType descType = it->second;
+        if (descType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+            return std::unexpected(err_resource(std::format(
+                "Binding {} is a sampler binding; use set_texture() for texture bindings",
+                binding)));
+        }
 
         for (size_t i = 0; i < sets_.size(); i++) {
             VkBuffer vkBuf = buffer->get_for_frame(static_cast<uint32_t>(i));

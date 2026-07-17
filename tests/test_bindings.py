@@ -252,3 +252,29 @@ def test_texture_is_sampled(ctx, fullscreen_vert, tmp_path):
     assert np.allclose(pixels[15, 46, :3], green[:3], atol=2), pixels[15, 46]
     assert np.allclose(pixels[46, 15, :3], blue[:3], atol=2), pixels[46, 15]
     assert np.allclose(pixels[46, 46, :3], white[:3], atol=2), pixels[46, 46]
+
+
+def test_set_texture_on_buffer_binding_points_to_set_buffer(ctx, fullscreen_vert, tmp_path):
+    """Descriptor writes are validated against the layout at the call site,
+    not left for the validation layers at submit time."""
+    png_path = tmp_path / "px.png"
+    write_png(png_path, [[(255, 0, 0, 255)]])
+    tex = ctx.load_texture(str(png_path))
+
+    frag = ctx.compile_shader(str(SHADER_DIR / "ubo.frag"), bz.ShaderStage.FRAGMENT)
+    target = bz.RenderTarget(ctx, 16, 16)
+    pipeline = (ctx.pipeline_builder()
+                .vertex_shader(fullscreen_vert)
+                .fragment_shader(frag)
+                .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
+                .build(target))
+    pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4)
+    dset = pool.allocate_set(pipeline, set=0)
+
+    with pytest.raises(bz.ResourceError) as info:
+        dset.set_texture(0, tex)
+    assert "set_buffer" in str(info.value)
+
+    with pytest.raises(bz.ResourceError) as info:
+        dset.set_texture(7, tex)
+    assert "7" in str(info.value)

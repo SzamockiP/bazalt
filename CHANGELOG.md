@@ -28,6 +28,12 @@ undefined VRAM contents).
 - Swapchain creation failures propagate the real `VkResult` instead of
   collapsing to a bare "Failed to create swapchain"; mid-frame failures
   log the `VkResult` name.
+- `DescriptorSet.set_buffer`/`set_texture` validate the binding against
+  the pipeline layout: a typo'd binding index or a buffer/texture
+  mismatch raises `ResourceError` at the call site instead of being
+  silently written (a nonexistent binding used to be *assumed* to be a
+  uniform buffer) and diagnosed, at best, by the validation layers at
+  submit time.
 
 ### Changed
 - CI now builds `release/**` branches and smoke-tests every built wheel

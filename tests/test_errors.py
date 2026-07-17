@@ -108,6 +108,44 @@ def test_oversized_dynamic_update_is_a_resource_error(ctx):
     assert "64" in str(info.value) and "16" in str(info.value)
 
 
+def test_set_buffer_on_nonexistent_binding_is_a_resource_error(ctx, triangle_shaders):
+    """A typo'd binding index used to be silently *assumed* to be a uniform
+    buffer, producing a descriptor write the layout never declared."""
+    vert, frag = triangle_shaders
+    target = bz.RenderTarget(ctx, 16, 16)
+    pipeline = (ctx.pipeline_builder()
+                .vertex_shader(vert)
+                .fragment_shader(frag)
+                .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+                .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
+                .build(target))
+    pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4)
+    dset = pool.allocate_set(pipeline, set=0)
+    ubuf = ctx.create_buffer([0.0] * 4, bz.BufferType.UNIFORM, bz.MemoryUsage.STATIC)
+
+    with pytest.raises(bz.ResourceError) as info:
+        dset.set_buffer(5, ubuf)
+    assert "5" in str(info.value)
+
+
+def test_set_buffer_on_texture_binding_points_to_set_texture(ctx, triangle_shaders):
+    vert, frag = triangle_shaders
+    target = bz.RenderTarget(ctx, 16, 16)
+    pipeline = (ctx.pipeline_builder()
+                .vertex_shader(vert)
+                .fragment_shader(frag)
+                .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+                .texture(0, bz.ShaderStage.FRAGMENT, set=0)
+                .build(target))
+    pool = ctx.create_descriptor_pool(max_sets=4, samplers=4)
+    dset = pool.allocate_set(pipeline, set=0)
+    ubuf = ctx.create_buffer([0.0] * 4, bz.BufferType.UNIFORM, bz.MemoryUsage.STATIC)
+
+    with pytest.raises(bz.ResourceError) as info:
+        dset.set_buffer(0, ubuf)
+    assert "set_texture" in str(info.value)
+
+
 def test_dynamic_buffer_in_static_set_is_a_resource_error(ctx, triangle_shaders):
     """A DYNAMIC buffer has one backing buffer per frame; a static set can only
     point at one of them. The error must steer towards allocate_frame_set."""
