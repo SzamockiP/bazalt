@@ -130,6 +130,61 @@ void unwrap(std::expected<void, Error>&& result, Logger* logger)
     raise_error(result.error());
 }
 
+// Resolves a list's element type from the explicit argument or the first
+// element. `int_default` is the caller's policy: create_buffer infers UINT32
+// for integers going into an INDEX buffer, update infers INT32 — a deliberate
+// difference, not drift.
+DataType resolve_data_type(const py::list& list, std::optional<DataType> requested,
+                           DataType int_default)
+{
+    if (requested.has_value())
+    {
+        return requested.value();
+    }
+    if (py::isinstance<py::float_>(list[0]))
+    {
+        return DataType::FLOAT;
+    }
+    if (py::isinstance<py::int_>(list[0]))
+    {
+        return int_default;
+    }
+    raise_error(err_resource("Could not infer data type from list elements"));
+}
+
+// Calls fn(data, nbytes) with the list packed as the requested element type.
+// This four-way ladder used to be written out twice (Buffer.update and
+// Context.create_buffer) and had already diverged once: update lacked UINT16.
+template <typename F>
+auto with_list_bytes(const py::list& list, DataType type, F&& fn)
+{
+    const size_t count = list.size();
+    switch (type)
+    {
+    case DataType::FLOAT: {
+        std::vector<float> data(count);
+        for (size_t i = 0; i < count; ++i) data[i] = list[i].cast<float>();
+        return fn(data.data(), count * sizeof(float));
+    }
+    case DataType::UINT32: {
+        std::vector<uint32_t> data(count);
+        for (size_t i = 0; i < count; ++i) data[i] = list[i].cast<uint32_t>();
+        return fn(data.data(), count * sizeof(uint32_t));
+    }
+    case DataType::UINT16: {
+        std::vector<uint16_t> data(count);
+        for (size_t i = 0; i < count; ++i) data[i] = list[i].cast<uint16_t>();
+        return fn(data.data(), count * sizeof(uint16_t));
+    }
+    case DataType::INT32: {
+        std::vector<int32_t> data(count);
+        for (size_t i = 0; i < count; ++i) data[i] = list[i].cast<int32_t>();
+        return fn(data.data(), count * sizeof(int32_t));
+    }
+    }
+    raise_error(err_resource("Unknown data type"));
+}
+
 // True when the buffer's bytes are packed in C order.
 //
 // Dimensions of extent 1 are skipped: their stride is unconstrained and numpy
@@ -201,9 +256,12 @@ std::shared_ptr<Logger> make_default_logger()
     return logger;
 }
 
-}  // namespace
-void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd) {
-    VkCommandBuffer vkCmd = cmd->get(current_frame());
+// Reset, begin, replay and end the per-frame VkCommandBuffer. Shared by the
+// swapchain and headless submit paths, which only differ in what happens to
+// the recorded buffer afterwards.
+VkCommandBuffer record_frame(CommandBuffer& cmd, std::uint32_t frame_index)
+{
+    VkCommandBuffer vkCmd = cmd.get(frame_index);
     vkResetCommandBuffer(vkCmd, 0);
 
     VkCommandBufferBeginInfo beginInfo{
@@ -212,40 +270,27 @@ void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd) {
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         .pInheritanceInfo = nullptr
     };
-    
+
     if (auto e = check(vkBeginCommandBuffer(vkCmd, &beginInfo), "begin recording command buffer")) {
         raise_error(*e);
     }
 
-    cmd->execute(vkCmd, FrameContext{ current_frame() });
+    cmd.execute(vkCmd, FrameContext{ frame_index });
 
     if (auto e = check(vkEndCommandBuffer(vkCmd), "record command buffer")) {
         raise_error(*e);
     }
 
-    end_frame(vkCmd);
+    return vkCmd;
+}
+
+}  // namespace
+void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd) {
+    end_frame(record_frame(*cmd, current_frame()));
 }
 
 void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd) {
-    VkCommandBuffer vkCmd = cmd->get(context.current_frame());
-    vkResetCommandBuffer(vkCmd, 0);
-
-    VkCommandBufferBeginInfo beginInfo{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .pNext = nullptr,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        .pInheritanceInfo = nullptr
-    };
-
-    if (auto e = check(vkBeginCommandBuffer(vkCmd, &beginInfo), "begin recording command buffer")) {
-        raise_error(*e);
-    }
-
-    cmd->execute(vkCmd, FrameContext{ context.current_frame() });
-
-    if (auto e = check(vkEndCommandBuffer(vkCmd), "record command buffer")) {
-        raise_error(*e);
-    }
+    VkCommandBuffer vkCmd = record_frame(*cmd, context.current_frame());
 
     VkSubmitInfo submitInfo{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -266,7 +311,9 @@ void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd) {
 
     // Blocking. There is no swapchain to pace against here, and 0.5's timeline
     // semaphores are what make this asynchronous.
-    vkQueueWaitIdle(context.graphics_queue());
+    if (auto e = check(vkQueueWaitIdle(context.graphics_queue()), "wait for submitted command buffer")) {
+        raise_error(*e);
+    }
 }
 
 
@@ -371,42 +418,12 @@ PYBIND11_MODULE(_core, m) {
             py::buffer_info info = b.request();
             unwrap(buffer.update(info.ptr, contiguous_nbytes(info, "Buffer.update")), nullptr);
         })
-        .def("update", [](Buffer& buffer, py::list list, std::optional<DataType> dataType = std::nullopt) {
+        .def("update", [](Buffer& buffer, py::list list, std::optional<DataType> dataType) {
             if (list.empty()) return;
-            
-            DataType actualType = DataType::FLOAT;
-            if (dataType.has_value()) {
-                actualType = dataType.value();
-            } else {
-                if (py::isinstance<py::float_>(list[0])) {
-                    actualType = DataType::FLOAT;
-                } else if (py::isinstance<py::int_>(list[0])) {
-                    actualType = DataType::INT32;
-                } else {
-                    raise_error(err_resource("Could not infer data type from list elements"));
-                }
-            }
-
-            size_t count = list.size();
-            if (actualType == DataType::FLOAT) {
-                std::vector<float> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<float>();
-                unwrap(buffer.update(data.data(), count * sizeof(float)), nullptr);
-            } else if (actualType == DataType::UINT32) {
-                std::vector<uint32_t> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint32_t>();
-                unwrap(buffer.update(data.data(), count * sizeof(uint32_t)), nullptr);
-            } else if (actualType == DataType::UINT16) {
-                // create_buffer accepted UINT16 while update rejected it, so a
-                // UINT16 buffer could be created and then never written to.
-                std::vector<uint16_t> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint16_t>();
-                unwrap(buffer.update(data.data(), count * sizeof(uint16_t)), nullptr);
-            } else if (actualType == DataType::INT32) {
-                std::vector<int32_t> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<int32_t>();
-                unwrap(buffer.update(data.data(), count * sizeof(int32_t)), nullptr);
-            }
+            DataType actualType = resolve_data_type(list, dataType, DataType::INT32);
+            with_list_bytes(list, actualType, [&](const void* data, size_t nbytes) {
+                unwrap(buffer.update(data, nbytes), nullptr);
+            });
         }, py::arg("list"), py::arg("data_type") = py::none());
     
     py::class_<ShaderModule, std::shared_ptr<ShaderModule>>(m, "ShaderModule");
@@ -559,42 +576,12 @@ PYBIND11_MODULE(_core, m) {
                 raise_error(err_resource("Cannot create buffer from empty list"));
             }
 
-            size_t count = list.size();
-            DataType actualType = DataType::FLOAT;
+            DataType actualType = resolve_data_type(
+                list, dataType, type == BufferType::INDEX ? DataType::UINT32 : DataType::INT32);
 
-            if (dataType.has_value()) {
-                actualType = dataType.value();
-            } else {
-                if (py::isinstance<py::float_>(list[0])) {
-                    actualType = DataType::FLOAT;
-                } else if (py::isinstance<py::int_>(list[0])) {
-                    actualType = (type == BufferType::INDEX) ? DataType::UINT32 : DataType::INT32;
-                } else {
-                    raise_error(err_resource("Could not infer data type from list elements"));
-                }
-            }
-
-            std::expected<std::shared_ptr<Buffer>, Error> res = std::unexpected(err_resource("Unknown data type"));
-
-            if (actualType == DataType::FLOAT) {
-                std::vector<float> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<float>();
-                res = Buffer::create(self, data.data(), count * sizeof(float), type, usage);
-            } else if (actualType == DataType::UINT32) {
-                std::vector<uint32_t> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint32_t>();
-                res = Buffer::create(self, data.data(), count * sizeof(uint32_t), type, usage);
-            } else if (actualType == DataType::UINT16) {
-                std::vector<uint16_t> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<uint16_t>();
-                res = Buffer::create(self, data.data(), count * sizeof(uint16_t), type, usage);
-            } else if (actualType == DataType::INT32) {
-                std::vector<int32_t> data(count);
-                for(size_t i=0; i<count; ++i) data[i] = list[i].cast<int32_t>();
-                res = Buffer::create(self, data.data(), count * sizeof(int32_t), type, usage);
-            }
-
-            auto buffer = unwrap(std::move(res), self.logger().get());
+            auto buffer = with_list_bytes(list, actualType, [&](const void* data, size_t nbytes) {
+                return unwrap(Buffer::create(self, data, nbytes, type, usage), self.logger().get());
+            });
             // Recorded so bindIndexBuffer can pick VK_INDEX_TYPE_UINT16 vs UINT32
             // instead of assuming.
             buffer->set_data_type(actualType);
