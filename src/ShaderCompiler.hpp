@@ -43,9 +43,7 @@ public:
         : context_(context), module_(module), path_(path) {}
 
     ~ShaderModule() {
-        if (module_ != VK_NULL_HANDLE && context_) {
-            vkDestroyShaderModule(context_->device(), module_, nullptr);
-        }
+        destroy();
     }
 
     ShaderModule(const ShaderModule&) = delete;
@@ -58,9 +56,7 @@ public:
 
     ShaderModule& operator=(ShaderModule&& other) noexcept {
         if (this != &other) {
-            if (module_ != VK_NULL_HANDLE && context_) {
-                vkDestroyShaderModule(context_->device(), module_, nullptr);
-            }
+            destroy();
             context_ = std::move(other.context_);
             module_ = other.module_;
             path_ = std::move(other.path_);
@@ -73,6 +69,12 @@ public:
     const std::string& path() const { return path_; }
 
 private:
+    void destroy() {
+        if (module_ != VK_NULL_HANDLE && context_) {
+            vkDestroyShaderModule(context_->device(), module_, nullptr);
+        }
+    }
+
     std::shared_ptr<Context> context_;
     VkShaderModule module_;
     std::string path_;

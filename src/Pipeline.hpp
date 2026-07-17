@@ -58,19 +58,7 @@ public:
     VkShaderStageFlags push_constant_stages() const { return push_constant_stages_; }
 
     ~Pipeline() {
-        if (context_) {
-            if (pipeline_ != VK_NULL_HANDLE) {
-                vkDestroyPipeline(context_->device(), pipeline_, nullptr);
-            }
-            if (layout_ != VK_NULL_HANDLE) {
-                vkDestroyPipelineLayout(context_->device(), layout_, nullptr);
-            }
-            for (auto dl : desc_layouts_) {
-                if (dl != VK_NULL_HANDLE) {
-                    vkDestroyDescriptorSetLayout(context_->device(), dl, nullptr);
-                }
-            }
-        }
+        destroy();
     }
 
     Pipeline(const Pipeline&) = delete;
@@ -88,19 +76,7 @@ public:
 
     Pipeline& operator=(Pipeline&& other) noexcept {
         if (this != &other) {
-            if (context_) {
-                if (pipeline_ != VK_NULL_HANDLE) {
-                    vkDestroyPipeline(context_->device(), pipeline_, nullptr);
-                }
-                if (layout_ != VK_NULL_HANDLE) {
-                    vkDestroyPipelineLayout(context_->device(), layout_, nullptr);
-                }
-                for (auto dl : desc_layouts_) {
-                    if (dl != VK_NULL_HANDLE) {
-                        vkDestroyDescriptorSetLayout(context_->device(), dl, nullptr);
-                    }
-                }
-            }
+            destroy();
             context_ = std::move(other.context_);
             pipeline_ = other.pipeline_;
             layout_ = other.layout_;
@@ -139,6 +115,25 @@ public:
     }
 
 private:
+    // One teardown for the destructor and move-assignment; it used to be written
+    // out twice and the two copies had already started to drift.
+    void destroy() {
+        if (!context_) {
+            return;
+        }
+        if (pipeline_ != VK_NULL_HANDLE) {
+            vkDestroyPipeline(context_->device(), pipeline_, nullptr);
+        }
+        if (layout_ != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(context_->device(), layout_, nullptr);
+        }
+        for (auto dl : desc_layouts_) {
+            if (dl != VK_NULL_HANDLE) {
+                vkDestroyDescriptorSetLayout(context_->device(), dl, nullptr);
+            }
+        }
+    }
+
     std::shared_ptr<Context> context_;
     VkPipeline pipeline_;
     VkPipelineLayout layout_;

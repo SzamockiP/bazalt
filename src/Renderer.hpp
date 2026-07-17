@@ -171,60 +171,10 @@ public:
 		}
 
 		// Depth Image
-		VkFormat depth_format = VK_FORMAT_D32_SFLOAT;
-		renderer->depth_format_ = depth_format;
-
-		VkImageCreateInfo imageInfo{
-			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-			.pNext = nullptr,
-			.flags = 0,
-			.imageType = VK_IMAGE_TYPE_2D,
-			.format = depth_format,
-			.extent = {renderer->swapchain_extent_.width, renderer->swapchain_extent_.height, 1},
-			.mipLevels = 1,
-			.arrayLayers = 1,
-			.samples = VK_SAMPLE_COUNT_1_BIT,
-			.tiling = VK_IMAGE_TILING_OPTIMAL,
-			.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-			.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-			.queueFamilyIndexCount = 0,
-			.pQueueFamilyIndices = nullptr,
-			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
-		};
-
-		VmaAllocationCreateInfo allocImageInfo = {};
-		allocImageInfo.usage = VMA_MEMORY_USAGE_AUTO;
-
-		if (auto e = check(vmaCreateImage(context->allocator(), &imageInfo, &allocImageInfo, &renderer->depth_image_, &renderer->depth_image_allocation_, nullptr),
-		                   "create depth image"))
+		renderer->depth_format_ = VK_FORMAT_D32_SFLOAT;
+		if (auto r = renderer->create_depth_resources(); !r)
 		{
-			return std::unexpected(*e);
-		}
-
-		VkImageViewCreateInfo viewInfo{
-			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-			.pNext = nullptr,
-			.flags = 0,
-			.image = renderer->depth_image_,
-			.viewType = VK_IMAGE_VIEW_TYPE_2D,
-			.format = depth_format,
-			.components = {
-				VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-				VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY
-			},
-			.subresourceRange = {
-				.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-				.baseMipLevel = 0,
-				.levelCount = 1,
-				.baseArrayLayer = 0,
-				.layerCount = 1
-			}
-		};
-
-		if (auto e = check(vkCreateImageView(context->device(), &viewInfo, nullptr, &renderer->depth_image_view_),
-		                   "create depth image view"))
-		{
-			return std::unexpected(*e);
+			return std::unexpected(r.error());
 		}
 
 		context->set_has_swapchain_renderer(true);
@@ -233,10 +183,11 @@ public:
 
 	~SwapchainRenderer()
 	{
-		if (context_)
+		if (!context_)
 		{
-			context_->set_has_swapchain_renderer(false);
+			return;
 		}
+		context_->set_has_swapchain_renderer(false);
 
 		if (context_->device())
 		{
@@ -576,6 +527,20 @@ private:
 		}
 
 		// Recreate depth image
+		if (auto r = create_depth_resources(); !r) {
+			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device,
+				"Failed to recreate depth resources: " + r.error().message);
+			return;
+		}
+
+		if (auto l = context_->logger()) l->log(Severity::Info, Source::Device, "Swapchain recreated (" + std::to_string(swapchain_extent_.width) + "x" + std::to_string(swapchain_extent_.height) + ")");
+	}
+
+	// Depth image + view sized to the current swapchain extent. Shared by first
+	// creation and every recreate — it used to be ~50 lines duplicated verbatim
+	// between the two.
+	std::expected<void, Error> create_depth_resources()
+	{
 		VkImageCreateInfo imageInfo{
 			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
 			.pNext = nullptr,
@@ -597,9 +562,10 @@ private:
 		VmaAllocationCreateInfo allocImageInfo = {};
 		allocImageInfo.usage = VMA_MEMORY_USAGE_AUTO;
 
-		if (vmaCreateImage(context_->allocator(), &imageInfo, &allocImageInfo, &depth_image_, &depth_image_allocation_, nullptr) != VK_SUCCESS) {
-			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to recreate depth image");
-			return;
+		if (auto e = check(vmaCreateImage(context_->allocator(), &imageInfo, &allocImageInfo, &depth_image_, &depth_image_allocation_, nullptr),
+		                   "create depth image"))
+		{
+			return std::unexpected(*e);
 		}
 
 		VkImageViewCreateInfo viewInfo{
@@ -622,11 +588,12 @@ private:
 			}
 		};
 
-		if (vkCreateImageView(context_->device(), &viewInfo, nullptr, &depth_image_view_) != VK_SUCCESS) {
-			if (auto l = context_->logger()) l->log(Severity::Error, Source::Device, "Failed to recreate depth image view");
-			return;
+		if (auto e = check(vkCreateImageView(context_->device(), &viewInfo, nullptr, &depth_image_view_),
+		                   "create depth image view"))
+		{
+			return std::unexpected(*e);
 		}
 
-		if (auto l = context_->logger()) l->log(Severity::Info, Source::Device, "Swapchain recreated (" + std::to_string(swapchain_extent_.width) + "x" + std::to_string(swapchain_extent_.height) + ")");
+		return {};
 	}
 };
