@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [master]
+    branches: [master, "release/**"]
   pull_request:
     branches: [master]
   workflow_dispatch:
@@ -48,6 +48,12 @@ jobs:
           CIBW_ARCHS_WINDOWS: AMD64
           CIBW_ARCHS_LINUX: x86_64
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+
+          # Smoke test on every built wheel: the module imports and the .pyi stub
+          # matches __all__. The GPU test suite can't run here (no Vulkan driver
+          # in the containers) and stays a local concern.
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: python -c "import bazalt" && python -m pytest {project}/tests/test_stubs.py -q
 
           # Linux: install Vulkan SDK tarball + X11/Wayland deps
           # inside the manylinux Docker container (not the host).

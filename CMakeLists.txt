@@ -71,7 +71,26 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb)
 
-add_library(_core MODULE src/main.cpp src/MpscQueue.hpp src/Logger.hpp src/window.hpp src/Context.hpp src/Renderer.hpp src/SurfaceProvider.hpp src/vma_impl.cpp src/stb_impl.cpp)
+add_library(_core MODULE
+    src/main.cpp
+    src/vma_impl.cpp
+    src/stb_impl.cpp
+    src/Buffer.hpp
+    src/CommandBuffer.hpp
+    src/Context.hpp
+    src/DescriptorSet.hpp
+    src/Error.hpp
+    src/Features.hpp
+    src/Logger.hpp
+    src/MpscQueue.hpp
+    src/Pipeline.hpp
+    src/Renderer.hpp
+    src/RenderTarget.hpp
+    src/ShaderCompiler.hpp
+    src/SurfaceProvider.hpp
+    src/Texture.hpp
+    src/window.hpp
+)
 
 target_link_libraries(_core PRIVATE 
     pybind11::module

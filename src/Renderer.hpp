@@ -9,8 +9,6 @@
 #include <string>
 #include <algorithm>
 #include <limits>
-#include <print>
-#include <iostream>
 
 #include "Context.hpp"
 #include "RenderTarget.hpp"
