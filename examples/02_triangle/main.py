@@ -45,5 +45,5 @@ cmd.end_rendering(renderer)
 # Main loop
 while window.is_open():
     window.poll_events()
-    if renderer.begin_frame():
-        renderer.submit(cmd)
+    if frame := renderer.begin_frame():
+        frame.submit(cmd)

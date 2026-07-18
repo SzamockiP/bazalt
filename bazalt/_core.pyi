@@ -290,6 +290,7 @@ class Context:
 
     def __init__(self, logger: Optional[Logger] = None, validation: str = "auto",
                  features: Sequence[Feature] = (), optional: Sequence[Feature] = (),
+                 frames_in_flight: int = 2,
                  raw_extensions: Sequence[str] = ()) -> None:
         """
         Args:
@@ -297,12 +298,17 @@ class Context:
             validation: "auto" (on when the layers are installed), "on", or "off".
             features: required. Gates GPU selection; InitializationError if absent.
             optional: enabled when present; query with `supports()`.
+            frames_in_flight: how many frames may be recorded ahead of the GPU
+                (1-4). 2 is the classic latency/throughput trade-off; 1 is
+                useful for debugging.
             raw_extensions: escape hatch. You shouldn't need this.
         """
         ...
 
     @property
     def logger(self) -> Logger: ...
+    @property
+    def frames_in_flight(self) -> int: ...
     @property
     def device_name(self) -> str: ...
     @property
@@ -348,18 +354,35 @@ class SwapchainRenderer(RenderTargetBase):
         """Attach to an existing native window (Windows only)."""
         ...
 
-    def begin_frame(self) -> bool:
-        """Acquire the next swapchain image. False when the frame should be skipped."""
-        ...
+    def begin_frame(self) -> Optional[Frame]:
+        """Acquire the next swapchain image.
 
-    def submit(self, cmd: CommandBuffer) -> None:
-        """Submit for the current frame and present."""
+        None when the frame should be skipped (minimized, mid-resize):
+
+            frame = renderer.begin_frame()
+            if frame:
+                frame.submit(cmd)
+        """
         ...
 
     @property
     def width(self) -> int: ...
     @property
     def height(self) -> int: ...
+
+class Frame:
+    """One acquired swapchain frame. Submit it and drop it within one tick.
+
+    Submitting twice, or holding a Frame across begin_frame() calls, raises
+    ResourceError.
+    """
+
+    def submit(self, cmd: CommandBuffer) -> None:
+        """Record the command buffer for this frame, submit it and present."""
+        ...
+
+    @property
+    def frame_index(self) -> int: ...
 
 # ── Keyboard Constants ─────────────────────────────────────────────────
 

@@ -139,7 +139,8 @@ if __name__ == "__main__":
     while window.is_open():
         window.poll_events()
         
-        # begin_frame returns True if the swapchain image is ready for rendering
-        if renderer.begin_frame():
-            renderer.submit(cmd)
+        # begin_frame returns a Frame, or None when this frame should be
+        # skipped (window minimized, mid-resize)
+        if frame := renderer.begin_frame():
+            frame.submit(cmd)
 ```

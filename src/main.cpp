@@ -294,8 +294,23 @@ void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd) {
     end_frame(record_frame(*cmd, current_frame()));
 }
 
+std::expected<void, Error> Frame::submit(std::shared_ptr<CommandBuffer> cmd) {
+    if (submitted) {
+        return std::unexpected(err_resource(
+            "This Frame was already submitted. Call begin_frame() again to get the next one."));
+    }
+    if (serial != renderer->current_serial()) {
+        return std::unexpected(err_resource(
+            "This Frame is stale: begin_frame() has run again since it was acquired. "
+            "Acquire, submit and drop a Frame within one tick."));
+    }
+    renderer->submit(std::move(cmd));
+    submitted = true;
+    return {};
+}
+
 void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd) {
-    VkCommandBuffer vkCmd = record_frame(*cmd, context.current_frame());
+    VkCommandBuffer vkCmd = record_frame(*cmd, context.frame_index());
 
     VkSubmitInfo submitInfo{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -320,6 +335,12 @@ void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd) {
     if (auto e = check(vkQueueWaitIdle(context.graphics_queue()), "wait for submitted command buffer")) {
         raise_error(*e);
     }
+
+    // A headless submit is a frame too: advance the ring so DynamicBuffer
+    // slots and frame descriptor sets rotate (this path used to sit on slot 0
+    // forever). After, not before, submitting — an update() made before this
+    // call must land in the slot this submit reads.
+    context.advance_frame();
 }
 
 
@@ -571,11 +592,20 @@ PYBIND11_MODULE(_core, m) {
     py::class_<Context, std::shared_ptr<Context>>(m, "Context")
         .def(py::init([](std::shared_ptr<Logger> logger, const std::string& validation,
                          std::vector<Feature> features, std::vector<Feature> optional,
+                         std::uint32_t frames_in_flight,
                          std::vector<std::string> raw_extensions) {
+            // An argument-validity error, so ValueError — matching what
+            // validation="nonsense" raises, not the BazaltError hierarchy.
+            if (frames_in_flight < 1 || frames_in_flight > 4) {
+                throw py::value_error(std::format(
+                    "frames_in_flight must be between 1 and 4, got {}", frames_in_flight));
+            }
+
             ContextConfig config;
             config.validation = parse_validation(validation);
             config.required = std::move(features);
             config.optional = std::move(optional);
+            config.frames_in_flight = frames_in_flight;
             config.raw_extensions = std::move(raw_extensions);
 
             if (!logger) {
@@ -590,7 +620,9 @@ PYBIND11_MODULE(_core, m) {
         }), py::arg("logger") = py::none(), py::arg("validation") = "auto",
             py::arg("features") = std::vector<Feature>{},
             py::arg("optional") = std::vector<Feature>{},
+            py::arg("frames_in_flight") = 2,
             py::arg("raw_extensions") = std::vector<std::string>{})
+        .def_property_readonly("frames_in_flight", &Context::frames_in_flight)
         .def_property_readonly("logger", &Context::logger)
         .def("supports", &Context::supports, py::arg("feature"))
         .def_property_readonly("device_name", &Context::device_name)
@@ -735,10 +767,28 @@ PYBIND11_MODULE(_core, m) {
             raise_error(err_window("win32_hwnd constructor is only supported on Windows"));
 #endif
         }), py::arg("win32_hwnd"), py::arg("context"))
-        .def("begin_frame", &SwapchainRenderer::begin_frame)
-        .def("submit", &SwapchainRenderer::submit, py::arg("cmd"))
+        // Frame | None instead of bool: "the frame exists" and "here is the
+        // frame" are the same fact, so return it. renderer.submit is gone —
+        // submitting lives on the Frame you were handed.
+        .def("begin_frame", [](std::shared_ptr<SwapchainRenderer> self) -> py::object {
+            if (!self->begin_frame()) {
+                return py::none();
+            }
+            auto frame = std::make_shared<Frame>();
+            frame->renderer = self;
+            frame->serial = self->current_serial();
+            frame->frame_index = self->current_frame();
+            frame->image_index = self->current_image_index();
+            return py::cast(frame);
+        })
         .def_property_readonly("width", [](const SwapchainRenderer& r) { return r.extent().width; })
         .def_property_readonly("height", [](const SwapchainRenderer& r) { return r.extent().height; });
+
+    py::class_<Frame, std::shared_ptr<Frame>>(m, "Frame")
+        .def("submit", [](Frame& self, std::shared_ptr<CommandBuffer> cmd) {
+            unwrap(self.submit(std::move(cmd)), nullptr);
+        }, py::arg("cmd"))
+        .def_property_readonly("frame_index", [](const Frame& f) { return f.frame_index; });
 
     // ── Key Constants ──
     m.attr("KEY_SPACE") = GLFW_KEY_SPACE;

@@ -34,6 +34,10 @@ struct ContextConfig
 	std::vector<Feature> required;
 	std::vector<Feature> optional;
 
+	// How many frames may be recorded ahead of the GPU. 2 is the classic
+	// latency/throughput trade-off; 1 is legal and useful for debugging.
+	std::uint32_t frames_in_flight = 2;
+
 	// Escape hatch, documented as "you shouldn't need this". Present so that the
 	// capability abstraction never becomes a ceiling.
 	std::vector<std::string> raw_extensions;
@@ -42,8 +46,6 @@ struct ContextConfig
 class Context : public std::enable_shared_from_this<Context>
 {
 public:
-	static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
-
 	static std::expected<std::shared_ptr<Context>, Error> create(
 		std::shared_ptr<Logger> logger,
 		const ContextConfig& config = {})
@@ -65,7 +67,14 @@ public:
 				"creating another (creating them one after another is fine)."));
 		}
 
+		if (config.frames_in_flight < 1 || config.frames_in_flight > 4)
+		{
+			return std::unexpected(err_init(std::format(
+				"frames_in_flight must be between 1 and 4, got {}", config.frames_in_flight)));
+		}
+
 		auto context = std::shared_ptr<Context>(new Context(logger));
+		context->frames_in_flight_ = config.frames_in_flight;
 
 		auto target_api = create_instance_(*context, config, logger);
 		if (!target_api)
@@ -176,14 +185,34 @@ public:
 	bool headless() const { return headless_; }
 	bool swapchain_supported() const { return swapchain_supported_; }
 
-	// Frame tracking — updated by the active renderer.
-	// 0.5 moves this onto a FrameRing driven by Context::begin_frame(), which is
-	// what lets headless/compute-only users advance frames and what lifts the
-	// one-renderer-per-Context restriction below.
-	std::uint32_t current_frame() const { return current_frame_; }
-	void set_current_frame(std::uint32_t frame) { current_frame_ = frame; }
+	// ── Frame ring ────────────────────────────────────────────────────────────
+	//
+	// The Context owns and advances the frame counter; renderers and the
+	// headless submit path both call begin_frame_internal() when a new frame
+	// starts. A monotonic serial rather than a wrapping index, because the
+	// deletion queue and upload bookkeeping need "how far has the GPU
+	// progressed", which a modulo index cannot answer.
+	std::uint32_t frames_in_flight() const { return frames_in_flight_; }
+	std::uint64_t frame_serial() const { return frame_serial_; }
+	std::uint32_t frame_index() const
+	{
+		return static_cast<std::uint32_t>(frame_serial_ % frames_in_flight_);
+	}
 
-	// Guards against two SwapchainRenderers fighting over current_frame_.
+	// Not exposed to Python: headless users have exactly one verb (ctx.submit),
+	// and a second frame-advancing verb would be a footgun until multiple
+	// submits per frame exist.
+	//
+	// Call sites pick the boundary that keeps `buffer.update()` and the submit
+	// that consumes it on the SAME ring slot: SwapchainRenderer::begin_frame
+	// advances on entry (updates happen between begin and submit), the headless
+	// ctx.submit advances after submitting (updates happen before the call).
+	std::uint64_t advance_frame()
+	{
+		return ++frame_serial_;
+	}
+
+	// Guards against two SwapchainRenderers fighting over the frame ring.
 	bool has_swapchain_renderer() const { return has_swapchain_renderer_; }
 	void set_has_swapchain_renderer(bool value) { has_swapchain_renderer_ = value; }
 
@@ -612,5 +641,6 @@ private:
 	// Set by configure_features_: 1.3 on the core path, 1.2 on the KHR path.
 	std::uint32_t negotiated_api_version_ = VK_API_VERSION_1_2;
 
-	std::uint32_t current_frame_ = 0;
+	std::uint32_t frames_in_flight_ = 2;
+	std::uint64_t frame_serial_ = 0;
 };

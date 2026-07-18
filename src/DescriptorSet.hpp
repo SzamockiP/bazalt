@@ -12,7 +12,7 @@
 
 class DescriptorSet {
 public:
-    // sets: 1 element (static) or MAX_FRAMES_IN_FLIGHT elements (frame)
+    // sets: 1 element (static) or frames_in_flight elements (frame)
     DescriptorSet(std::shared_ptr<Context> context, std::vector<VkDescriptorSet> sets,
                   Pipeline::BindingTypeMap bindingTypes, bool isFrameSet)
         : context_(context), sets_(std::move(sets)),
@@ -225,7 +225,7 @@ public:
             pipeline->binding_types(setIndex), false);
     }
 
-    // Allocate a frame descriptor set (MAX_FRAMES_IN_FLIGHT VkDescriptorSets)
+    // Allocate a frame descriptor set (frames_in_flight VkDescriptorSets)
     std::expected<std::shared_ptr<DescriptorSet>, Error>
     allocate_frame_descriptor_set(std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) {
         if (!context_) return std::unexpected(err_init("Context destroyed"));
@@ -235,16 +235,17 @@ public:
             return std::unexpected(err_resource("Pipeline has no descriptor set layout at set index " + std::to_string(setIndex)));
         }
 
-        std::vector<VkDescriptorSetLayout> layouts(Context::MAX_FRAMES_IN_FLIGHT, layout);
+        const uint32_t frames = context_->frames_in_flight();
+        std::vector<VkDescriptorSetLayout> layouts(frames, layout);
         VkDescriptorSetAllocateInfo allocInfo{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
             .pNext = nullptr,
             .descriptorPool = pool_,
-            .descriptorSetCount = Context::MAX_FRAMES_IN_FLIGHT,
+            .descriptorSetCount = frames,
             .pSetLayouts = layouts.data()
         };
 
-        std::vector<VkDescriptorSet> sets(Context::MAX_FRAMES_IN_FLIGHT);
+        std::vector<VkDescriptorSet> sets(frames);
         if (auto e = check(vkAllocateDescriptorSets(context_->device(), &allocInfo, sets.data()),
                            "allocate frame descriptor sets from pool (pool may be full)", ErrorCode::Resource)) {
             return std::unexpected(*e);

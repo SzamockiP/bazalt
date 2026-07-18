@@ -143,7 +143,9 @@ public:
 			.flags = VK_FENCE_CREATE_SIGNALED_BIT
 		};
 
-		for (size_t i = 0; i < Context::MAX_FRAMES_IN_FLIGHT; i++)
+		renderer->image_available_semaphores_.resize(context->frames_in_flight(), VK_NULL_HANDLE);
+		renderer->in_flight_fences_.resize(context->frames_in_flight(), VK_NULL_HANDLE);
+		for (size_t i = 0; i < context->frames_in_flight(); i++)
 		{
 			if (auto e = check(vkCreateSemaphore(context->device(), &semaphoreInfo, nullptr, &renderer->image_available_semaphores_[i]),
 			                   "create image available semaphore"))
@@ -192,7 +194,7 @@ public:
 			vkDeviceWaitIdle(context_->device());
 		}
 
-		for (size_t i = 0; i < Context::MAX_FRAMES_IN_FLIGHT; ++i)
+		for (size_t i = 0; i < image_available_semaphores_.size(); ++i)
 		{
 			if (image_available_semaphores_[i]) vkDestroySemaphore(context_->device(), image_available_semaphores_[i], nullptr);
 			if (in_flight_fences_[i]) vkDestroyFence(context_->device(), in_flight_fences_[i], nullptr);
@@ -253,7 +255,8 @@ public:
 	// The one line that used to be hardcoded inside every end_rendering.
 	VkImageLayout final_layout() const override { return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR; }
 
-	std::uint32_t current_frame() const { return context_->current_frame(); }
+	std::uint32_t current_frame() const { return context_->frame_index(); }
+	std::uint64_t current_serial() const { return context_->frame_serial(); }
 	std::uint32_t current_image_index() const { return image_index_; }
 	bool frame_skipped() const { return frame_skipped_; }
 
@@ -264,6 +267,13 @@ public:
 	bool begin_frame()
 	{
 		frame_skipped_ = false;
+
+		// The frame ring advances at the START of a frame, on the Context — not
+		// at the end, on the renderer, as it used to. Everything below indexes
+		// per-frame state through current_frame(), so consistency within one
+		// frame is all that matters. A skipped frame burns a ring slot, which is
+		// harmless: nothing gets submitted under it.
+		context_->advance_frame();
 
 		// Check framebuffer size — return false if minimized (0x0)
 		auto [width, height] = surface_provider_.get_framebuffer_size();
@@ -346,8 +356,6 @@ public:
 		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || surface_provider_.consume_resize_flag()) {
 			recreate_swapchain();
 		}
-
-		context_->set_current_frame((current_frame() + 1) % Context::MAX_FRAMES_IN_FLIGHT);
 	}
 
 private:
@@ -367,9 +375,9 @@ private:
 	std::vector<VkImage> swapchain_images_;
 	std::vector<VkImageView> swapchain_image_views_;
 
-	VkSemaphore image_available_semaphores_[Context::MAX_FRAMES_IN_FLIGHT]{};
+	std::vector<VkSemaphore> image_available_semaphores_;
 	std::vector<VkSemaphore> render_finished_semaphores_;
-	VkFence in_flight_fences_[Context::MAX_FRAMES_IN_FLIGHT]{};
+	std::vector<VkFence> in_flight_fences_;
 
 	std::uint32_t image_index_ = 0;
 
@@ -605,4 +613,22 @@ private:
 
 		return {};
 	}
+};
+// One successfully acquired swapchain frame. begin_frame() hands this out
+// instead of a bool: "a frame exists" and "here is the frame" are the same
+// fact, and putting submit() on the frame makes submitting without having
+// acquired one unrepresentable.
+//
+// The serial is a generation guard: a Frame held across ticks (the obvious
+// PyQt mistake) fails with a readable error instead of a validation storm.
+struct Frame
+{
+	std::shared_ptr<SwapchainRenderer> renderer;
+	std::uint64_t serial = 0;
+	std::uint32_t frame_index = 0;
+	std::uint32_t image_index = 0;
+	bool submitted = false;
+
+	// Records, submits and presents. Defined in main.cpp next to record_frame.
+	std::expected<void, Error> submit(std::shared_ptr<CommandBuffer> cmd);
 };

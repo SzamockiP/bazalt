@@ -142,7 +142,7 @@ fps_timer = 0.0
 while window.is_open():
     window.poll_events()
 
-    if renderer.begin_frame():
+    if frame := renderer.begin_frame():
         current_time = time.time()
         dt = current_time - last_time
         last_time = current_time
@@ -204,4 +204,4 @@ while window.is_open():
         
         ubuf.update(data)
         
-        renderer.submit(cmd)
+        frame.submit(cmd)

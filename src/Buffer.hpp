@@ -8,7 +8,7 @@
 #include <memory>
 #include <expected>
 #include <cstring>
-#include <array>
+#include <vector>
 #include "Context.hpp"
 #include "ImmediateSubmit.hpp"
 
@@ -175,16 +175,19 @@ private:
 
 class DynamicBuffer : public Buffer {
 public:
-    DynamicBuffer(std::shared_ptr<Context> context, 
-                  std::array<VkBuffer, Context::MAX_FRAMES_IN_FLIGHT> buffers, 
-                  std::array<VmaAllocation, Context::MAX_FRAMES_IN_FLIGHT> allocations, 
+    // One buffer per frame in flight; the count is a runtime property of the
+    // Context now, so these are vectors sized at creation.
+    DynamicBuffer(std::shared_ptr<Context> context,
+                  std::vector<VkBuffer> buffers,
+                  std::vector<VmaAllocation> allocations,
                   size_t size,
                   BufferType type)
-        : context_(context), buffers_(buffers), allocations_(allocations), size_(size), type_(type) {}
+        : context_(context), buffers_(std::move(buffers)),
+          allocations_(std::move(allocations)), size_(size), type_(type) {}
 
     ~DynamicBuffer() override {
         if (context_) {
-            for (size_t i = 0; i < Context::MAX_FRAMES_IN_FLIGHT; ++i) {
+            for (size_t i = 0; i < buffers_.size(); ++i) {
                 if (buffers_[i] != VK_NULL_HANDLE) {
                     vmaDestroyBuffer(context_->allocator(), buffers_[i], allocations_[i]);
                 }
@@ -195,8 +198,8 @@ public:
     DynamicBuffer(const DynamicBuffer&) = delete;
     DynamicBuffer& operator=(const DynamicBuffer&) = delete;
 
-    VkBuffer get() const override { 
-        return buffers_[context_->current_frame()]; 
+    VkBuffer get() const override {
+        return buffers_[context_->frame_index()];
     }
     
     size_t size() const override { return size_; }
@@ -210,7 +213,7 @@ public:
                 std::format("Update of {} bytes exceeds the buffer size of {} bytes",
                             data.size(), size_)));
         }
-        uint32_t frame = context_->current_frame();
+        uint32_t frame = context_->frame_index();
         void* mappedData;
         if (auto e = check(vmaMapMemory(context_->allocator(), allocations_[frame], &mappedData),
                            "map dynamic buffer memory for update", ErrorCode::Resource)) {
@@ -241,10 +244,11 @@ public:
             .pQueueFamilyIndices = nullptr
         };
 
-        std::array<VkBuffer, Context::MAX_FRAMES_IN_FLIGHT> buffers{};
-        std::array<VmaAllocation, Context::MAX_FRAMES_IN_FLIGHT> allocations{};
+        const std::uint32_t frames = context.frames_in_flight();
+        std::vector<VkBuffer> buffers(frames, VK_NULL_HANDLE);
+        std::vector<VmaAllocation> allocations(frames, VK_NULL_HANDLE);
 
-        for (size_t i = 0; i < Context::MAX_FRAMES_IN_FLIGHT; ++i) {
+        for (size_t i = 0; i < frames; ++i) {
             if (auto e = check(vmaCreateBuffer(context.allocator(), &bufferInfo, &allocInfo, &buffers[i], &allocations[i], nullptr),
                                std::string("create ") + (type == BufferType::STORAGE ? "storage" : "uniform") + " buffer",
                                ErrorCode::Resource)) {
@@ -261,13 +265,13 @@ public:
                 vmaUnmapMemory(context.allocator(), allocations[i]);
             }
         }
-        return std::make_shared<DynamicBuffer>(context.shared_from_this(), buffers, allocations, data_size, type);
+        return std::make_shared<DynamicBuffer>(context.shared_from_this(), std::move(buffers), std::move(allocations), data_size, type);
     }
 
 private:
     std::shared_ptr<Context> context_;
-    std::array<VkBuffer, Context::MAX_FRAMES_IN_FLIGHT> buffers_ = {VK_NULL_HANDLE};
-    std::array<VmaAllocation, Context::MAX_FRAMES_IN_FLIGHT> allocations_ = {VK_NULL_HANDLE};
+    std::vector<VkBuffer> buffers_;
+    std::vector<VmaAllocation> allocations_;
     size_t size_ = 0;
     BufferType type_ = BufferType::UNIFORM;
 };

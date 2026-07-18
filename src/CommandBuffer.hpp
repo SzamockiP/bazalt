@@ -26,13 +26,14 @@ public:
     static std::expected<std::shared_ptr<CommandBuffer>, Error> create(Context& context) {
         auto ctx = context.shared_from_this();
         auto cmd = std::shared_ptr<CommandBuffer>(new CommandBuffer(ctx));
+        cmd->command_buffers_.resize(ctx->frames_in_flight(), VK_NULL_HANDLE);
 
         VkCommandBufferAllocateInfo allocInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .pNext = nullptr,
             .commandPool = ctx->command_pool(),
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = Context::MAX_FRAMES_IN_FLIGHT
+            .commandBufferCount = ctx->frames_in_flight()
         };
 
         if (auto e = check(vkAllocateCommandBuffers(ctx->device(), &allocInfo, cmd->command_buffers_.data()),
@@ -46,7 +47,8 @@ public:
     ~CommandBuffer() {
         if (context_) {
             vkFreeCommandBuffers(context_->device(), context_->command_pool(),
-                                 Context::MAX_FRAMES_IN_FLIGHT, command_buffers_.data());
+                                 static_cast<uint32_t>(command_buffers_.size()),
+                                 command_buffers_.data());
         }
     }
 
@@ -313,6 +315,6 @@ private:
     CommandBuffer(std::shared_ptr<Context> context) : context_(context) {}
 
     std::shared_ptr<Context> context_;
-    std::array<VkCommandBuffer, Context::MAX_FRAMES_IN_FLIGHT> command_buffers_{};
+    std::vector<VkCommandBuffer> command_buffers_;
     std::vector<std::function<void(VkCommandBuffer, const FrameContext&)>> commands_;
 };

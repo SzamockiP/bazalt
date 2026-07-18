@@ -66,8 +66,8 @@ class VulkanWidget(QWidget):
         
     def tick(self):
         # begin_frame acquires swapchain image and handles automatic resize recreation
-        if self.renderer.begin_frame():
-            self.renderer.submit(self.cmd)
+        if frame := self.renderer.begin_frame():
+            frame.submit(self.cmd)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
