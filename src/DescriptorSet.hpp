@@ -150,6 +150,10 @@ public:
 
     bool is_frame_set() const { return is_frame_set_; }
 
+    // The images this set references — walked at submit time for upload
+    // residency.
+    const std::vector<std::shared_ptr<Image>>& images() const { return images_; }
+
 private:
     std::shared_ptr<Context> context_;
     std::shared_ptr<DescriptorPool> pool_;  // sets must not outlive their pool

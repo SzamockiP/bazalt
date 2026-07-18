@@ -93,6 +93,7 @@ add_library(_core MODULE
     src/ScopeGuard.hpp
     src/ShaderCompiler.hpp
     src/SurfaceProvider.hpp
+    src/UploadManager.hpp
     src/window.hpp
 )
 

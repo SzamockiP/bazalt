@@ -62,19 +62,33 @@ std::expected<void, Error> immediate_submit(Context& context, F&& record)
         return fail(std::move(*e));
     }
 
-    VkSubmitInfo submitInfo{
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .pNext = nullptr,
-        .waitSemaphoreCount = 0,
-        .pWaitSemaphores = nullptr,
-        .pWaitDstStageMask = nullptr,
-        .commandBufferCount = 1,
-        .pCommandBuffers = &cmd,
-        .signalSemaphoreCount = 0,
-        .pSignalSemaphores = nullptr
-    };
+    VkSemaphore timeline = context.submit_timeline();
     {
         std::lock_guard lock(context.queue_mutex());
+
+        // One-shot submits count on the submission timeline too, so the
+        // deletion queue keeps draining even on frame-less workloads.
+        const std::uint64_t serial = context.advance_submit_serial();
+        VkTimelineSemaphoreSubmitInfo timelineInfo{
+            .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+            .pNext = nullptr,
+            .waitSemaphoreValueCount = 0,
+            .pWaitSemaphoreValues = nullptr,
+            .signalSemaphoreValueCount = 1,
+            .pSignalSemaphoreValues = &serial
+        };
+
+        VkSubmitInfo submitInfo{
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .pNext = &timelineInfo,
+            .waitSemaphoreCount = 0,
+            .pWaitSemaphores = nullptr,
+            .pWaitDstStageMask = nullptr,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &cmd,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &timeline
+        };
         if (auto e = check(vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
                            "submit one-shot command buffer", ErrorCode::Resource))
         {
@@ -91,7 +105,6 @@ std::expected<void, Error> immediate_submit(Context& context, F&& record)
 
     // The wait-idle above proves everything submitted so far has completed —
     // a free chance to reclaim deferred handles.
-    context.mark_serial_completed(context.frame_serial());
     context.flush_deletion_queue();
     return {};
 }

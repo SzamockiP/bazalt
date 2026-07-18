@@ -26,6 +26,7 @@
 #include "Format.hpp"
 #include "Image.hpp"
 #include "Sampler.hpp"
+#include "UploadManager.hpp"
 #include "DescriptorSet.hpp"
 
 namespace py = pybind11;
@@ -292,8 +293,28 @@ VkCommandBuffer record_frame(CommandBuffer& cmd, std::uint32_t frame_index)
 }
 
 }  // namespace
-void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd) {
-    end_frame(record_frame(*cmd, current_frame()));
+void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial) {
+    end_frame(record_frame(*cmd, current_frame()), upload_wait_serial);
+}
+
+// Upload residency, per command buffer: every image this recording references
+// must at least be *submitted* (CPU-wait while the worker is still decoding —
+// correctness first), and the frame's GPU work then waits on the submission
+// timeline for the highest upload it depends on (zero CPU stall in the steady
+// state). Images with no pending upload — RTT attachments, synchronous
+// uploads — short-circuit to 0.
+std::uint64_t require_uploads_resident(CommandBuffer& cmd) {
+    std::uint64_t wait_serial = 0;
+    for (const auto& set : cmd.used_sets()) {
+        for (const auto& image : set->images()) {
+            auto serial = image->require_resident();
+            if (!serial) {
+                raise_error(serial.error());
+            }
+            wait_serial = (std::max)(wait_serial, *serial);
+        }
+    }
+    return wait_serial;
 }
 
 std::expected<void, Error> Frame::submit(std::shared_ptr<CommandBuffer> cmd) {
@@ -306,7 +327,8 @@ std::expected<void, Error> Frame::submit(std::shared_ptr<CommandBuffer> cmd) {
             "This Frame is stale: begin_frame() has run again since it was acquired. "
             "Acquire, submit and drop a Frame within one tick."));
     }
-    renderer->submit(std::move(cmd));
+    const std::uint64_t upload_wait_serial = require_uploads_resident(*cmd);
+    renderer->submit(std::move(cmd), upload_wait_serial);
     submitted = true;
     return {};
 }
@@ -344,34 +366,52 @@ py::array image_to_numpy(Image& image) {
 }
 
 void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd) {
+    const std::uint64_t upload_wait_serial = require_uploads_resident(*cmd);
     VkCommandBuffer vkCmd = record_frame(*cmd, context.frame_index());
 
-    VkSubmitInfo submitInfo{
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .pNext = nullptr,
-        .waitSemaphoreCount = 0,
-        .pWaitSemaphores = nullptr,
-        .pWaitDstStageMask = nullptr,
-        .commandBufferCount = 1,
-        .pCommandBuffers = &vkCmd,
-        .signalSemaphoreCount = 0,
-        .pSignalSemaphores = nullptr
-    };
+    VkSemaphore timeline = context.submit_timeline();
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 
-    std::lock_guard lock(context.queue_mutex());
-    if (auto e = check(vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
-                       "submit command buffer")) {
-        raise_error(*e);
+    {
+        std::lock_guard lock(context.queue_mutex());
+        const std::uint64_t serial = context.advance_submit_serial();
+
+        VkTimelineSemaphoreSubmitInfo timelineInfo{
+            .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+            .pNext = nullptr,
+            .waitSemaphoreValueCount = 1,
+            .pWaitSemaphoreValues = &upload_wait_serial,
+            .signalSemaphoreValueCount = 1,
+            .pSignalSemaphoreValues = &serial
+        };
+        VkSubmitInfo submitInfo{
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .pNext = &timelineInfo,
+            // A timeline wait for value 0 is trivially satisfied, so this
+            // needs no branching on whether uploads are pending.
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &timeline,
+            .pWaitDstStageMask = &waitStage,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &vkCmd,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &timeline
+        };
+
+        if (auto e = check(vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
+                           "submit command buffer")) {
+            raise_error(*e);
+        }
+
+        // Blocking. There is no swapchain to pace against here; the timeline
+        // exists for uploads and deferred destruction, not (yet) for making
+        // headless submits asynchronous.
+        if (auto e = check(vkQueueWaitIdle(context.graphics_queue()), "wait for submitted command buffer")) {
+            raise_error(*e);
+        }
     }
 
-    // Blocking. There is no swapchain to pace against here, and 0.5's timeline
-    // semaphores are what make this asynchronous.
-    if (auto e = check(vkQueueWaitIdle(context.graphics_queue()), "wait for submitted command buffer")) {
-        raise_error(*e);
-    }
-
-    // The wait-idle above proves everything through the current frame is done.
-    context.mark_serial_completed(context.frame_serial());
+    // The wait-idle above proves everything through the current serial is done.
     context.flush_deletion_queue();
 
     // A headless submit is a frame too: advance the ring so DynamicBuffer
@@ -526,7 +566,12 @@ PYBIND11_MODULE(_core, m) {
         .def_property_readonly("mip_levels", &Image::mip_levels)
         .def_property_readonly("ready", &Image::ready)
         .def("wait", [](Image& self) {
-            unwrap(self.wait(), nullptr);
+            std::expected<void, Error> r;
+            {
+                py::gil_scoped_release release;
+                r = self.wait();
+            }
+            unwrap(std::move(r), nullptr);
         })
         .def("read", [](Image& self) -> py::array {
             return image_to_numpy(self);
@@ -800,8 +845,33 @@ PYBIND11_MODULE(_core, m) {
         .def("load_image", [](Context& self, const std::string& path) -> py::object {
             // sRGB with a full mip chain: files are pictures. Arrays go through
             // create_image and stay UNORM: arrays are data.
-            return py::cast(unwrap(Image::load_from_file(self, path), self.logger().get()));
+            //
+            // Returns IMMEDIATELY: the header is validated here (missing or
+            // mangled files fail at the call site, and width/height are right
+            // away correct), the decode + copy run on the upload worker. The
+            // image is usable for recording at once; residency is enforced at
+            // submit. img.ready / img.wait() / ctx.wait_for_uploads() are the
+            // explicit-control verbs.
+            if (!self.upload_manager()) {
+                self.set_upload_manager(std::make_unique<UploadManager>(self));
+            }
+            auto* manager = static_cast<UploadManager*>(self.upload_manager());
+            return py::cast(unwrap(manager->load(path), self.logger().get()));
         }, py::arg("path"))
+        .def_property_readonly("uploads_done", [](const Context& self) {
+            return self.upload_manager() ? self.upload_manager()->uploads_done() : true;
+        })
+        .def_property_readonly("upload_progress", [](const Context& self) {
+            // Progress of the current batch of load_image calls, 0.0 .. 1.0
+            // (1.0 when idle) — a loading bar without user-side threads.
+            return self.upload_manager() ? self.upload_manager()->upload_progress() : 1.0;
+        })
+        .def("wait_for_uploads", [](Context& self) {
+            if (self.upload_manager()) {
+                py::gil_scoped_release release;
+                self.upload_manager()->wait_all();
+            }
+        })
         // Registered before the buffer overload so two ints never reach the
         // buffer protocol.
         .def("create_image", [](Context& self, uint32_t width, uint32_t height, Format format) -> py::object {
@@ -868,8 +938,12 @@ PYBIND11_MODULE(_core, m) {
         .def("create_command_buffer", [](Context& self) -> py::object {
             return py::cast(unwrap(CommandBuffer::create(self), self.logger().get()));
         })
-        // The headless counterpart of renderer.submit(): no swapchain, no present.
-        .def("submit", &context_submit, py::arg("cmd"));
+        // The headless counterpart of frame.submit(): no swapchain, no present.
+        .def("submit", [](Context& self, std::shared_ptr<CommandBuffer> cmd) {
+            // Blocking (wait-idle inside) — release the GIL for the duration.
+            py::gil_scoped_release release;
+            context_submit(self, std::move(cmd));
+        }, py::arg("cmd"));
 
     // ── RenderTarget ──
     py::class_<RenderTarget, std::shared_ptr<RenderTarget>>(m, "RenderTargetBase");
@@ -1000,7 +1074,13 @@ PYBIND11_MODULE(_core, m) {
         // frame" are the same fact, so return it. renderer.submit is gone —
         // submitting lives on the Frame you were handed.
         .def("begin_frame", [](std::shared_ptr<SwapchainRenderer> self) -> py::object {
-            if (!self->begin_frame()) {
+            bool acquired;
+            {
+                // Waits on the in-flight fence — release the GIL meanwhile.
+                py::gil_scoped_release release;
+                acquired = self->begin_frame();
+            }
+            if (!acquired) {
                 return py::none();
             }
             auto frame = std::make_shared<Frame>();
@@ -1015,7 +1095,13 @@ PYBIND11_MODULE(_core, m) {
 
     py::class_<Frame, std::shared_ptr<Frame>>(m, "Frame")
         .def("submit", [](Frame& self, std::shared_ptr<CommandBuffer> cmd) {
-            unwrap(self.submit(std::move(cmd)), nullptr);
+            std::expected<void, Error> r;
+            {
+                // May CPU-wait for an upload still decoding — release the GIL.
+                py::gil_scoped_release release;
+                r = self.submit(std::move(cmd));
+            }
+            unwrap(std::move(r), nullptr);
         }, py::arg("cmd"))
         .def_property_readonly("frame_index", [](const Frame& f) { return f.frame_index; });
 

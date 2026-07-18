@@ -205,12 +205,19 @@ class Image:
     def mip_levels(self) -> int: ...
     @property
     def ready(self) -> bool:
-        """Non-blocking: has the upload finished? (Always True while uploads
-        are synchronous.)"""
+        """Non-blocking: is the pixel data on the GPU?
+
+        False while a load_image decode/copy is still in flight. You never
+        have to poll this — a submit that uses the image waits automatically;
+        it exists for loading screens and explicit control.
+        """
         ...
 
     def wait(self) -> None:
-        """Block until this image's upload has finished."""
+        """Block until this image's upload has finished.
+
+        A failed decode (corrupt file) surfaces here as ResourceError.
+        """
         ...
 
     def read(self) -> Any:
@@ -432,7 +439,32 @@ class Context:
     def compile_shader(self, path: str, stage: ShaderStage) -> ShaderModule: ...
 
     def load_image(self, path: str) -> Image:
-        """Decode an image file into an sRGB GPU image with a full mip chain."""
+        """Decode an image file into an sRGB GPU image with a full mip chain.
+
+        Returns IMMEDIATELY: the file header is validated here (a missing or
+        corrupt file raises ResourceError at this call), but the decode and
+        GPU copy run on a background worker. The image is usable for
+        recording right away — a submit that samples it waits for the upload
+        automatically. `img.ready`, `img.wait()` and `ctx.wait_for_uploads()`
+        are the explicit-control verbs.
+        """
+        ...
+
+    @property
+    def uploads_done(self) -> bool:
+        """Non-blocking: have all load_image uploads finished?"""
+        ...
+    @property
+    def upload_progress(self) -> float:
+        """0.0 .. 1.0 for the current batch of load_image calls (1.0 when
+        idle) — a loading bar without user-side threads:
+
+            while not ctx.uploads_done:
+                draw_progress(ctx.upload_progress)
+        """
+        ...
+    def wait_for_uploads(self) -> None:
+        """Block until every pending load_image upload has finished."""
         ...
     def create_image(self, width: int, height: int,
                      format: Format = Format.RGBA8) -> Image: ...

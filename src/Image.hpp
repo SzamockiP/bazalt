@@ -2,11 +2,14 @@
 #include <volk.h>
 #include <vk_mem_alloc.h>
 
+#include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstring>
 #include <expected>
 #include <format>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -91,18 +94,105 @@ public:
 	// "Has the GPU ever been given contents for this image" — uploaded, copied
 	// from an array, or rendered into. Readback and sampling of a virgin image
 	// are refused rather than returning driver-defined garbage (0.4.1 contract).
-	bool has_contents() const { return has_contents_; }
+	bool has_contents() const { return has_contents_.load(); }
 	VkImageLayout current_layout() const { return layout_; }
 	void mark_has_contents(VkImageLayout layout)
 	{
-		has_contents_ = true;
 		layout_ = layout;
+		has_contents_.store(true);
 	}
 
-	// Upload futures. Trivially resolved while uploads are synchronous; the
-	// async UploadManager makes these real without changing a signature.
-	bool ready() const { return has_contents_; }
-	std::expected<void, Error> wait() { return {}; }
+	// ── The image IS the upload future ────────────────────────────────────────
+	//
+	// load_image returns immediately; the decode + copy runs on the upload
+	// worker. The image is usable for *recording* right away — residency is
+	// required only at submit, where the frame's GPU work waits on the
+	// submission timeline (see require_resident). These members are the
+	// explicit-control verbs.
+
+	enum class UploadState { None, Pending, Submitted, Failed };
+
+	// Non-blocking: is the pixel data on the GPU?
+	bool ready() const
+	{
+		switch (upload_state_.load())
+		{
+			case UploadState::None: return has_contents_.load();
+			case UploadState::Pending: return false;
+			case UploadState::Failed: return false;
+			case UploadState::Submitted:
+				return context_->completed_submit_serial() >= upload_serial_.load();
+		}
+		return false;
+	}
+
+	// Block until this one image's upload has finished on the GPU.
+	// A failed decode surfaces here as ResourceError.
+	std::expected<void, Error> wait()
+	{
+		if (auto r = wait_submitted_(); !r)
+		{
+			return std::unexpected(r.error());
+		}
+		if (upload_state_.load() == UploadState::Submitted)
+		{
+			const std::uint64_t serial = upload_serial_.load();
+			VkSemaphore timeline = context_->submit_timeline();
+			VkSemaphoreWaitInfo waitInfo{
+				.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+				.pNext = nullptr,
+				.flags = 0,
+				.semaphoreCount = 1,
+				.pSemaphores = &timeline,
+				.pValues = &serial
+			};
+			if (auto e = check(vkWaitSemaphores(context_->device(), &waitInfo, UINT64_MAX),
+			                   "wait for image upload", ErrorCode::Resource))
+			{
+				return std::unexpected(*e);
+			}
+		}
+		return {};
+	}
+
+	// Called at submit time for every image a command buffer references.
+	// Returns the timeline serial the frame's GPU work must wait for (0 when
+	// nothing is pending — RTT attachments and synchronously uploaded images
+	// short-circuit here). CPU-blocks only while the worker is still decoding.
+	std::expected<std::uint64_t, Error> require_resident()
+	{
+		if (upload_state_.load() == UploadState::None)
+		{
+			return 0;
+		}
+		if (auto r = wait_submitted_(); !r)
+		{
+			return std::unexpected(r.error());
+		}
+		return upload_serial_.load();
+	}
+
+	// Worker-side state transitions.
+	void set_upload_pending() { upload_state_.store(UploadState::Pending); }
+	void set_upload_submitted(std::uint64_t serial)
+	{
+		{
+			std::lock_guard lock(upload_mutex_);
+			upload_serial_.store(serial);
+			mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+			upload_state_.store(UploadState::Submitted);
+		}
+		upload_cv_.notify_all();
+	}
+	void set_upload_failed(std::string message)
+	{
+		{
+			std::lock_guard lock(upload_mutex_);
+			upload_error_ = std::move(message);
+			upload_state_.store(UploadState::Failed);
+		}
+		upload_cv_.notify_all();
+	}
 
 	// ── Creation ──────────────────────────────────────────────────────────────
 
@@ -289,7 +379,12 @@ public:
 	// table; the binding layer shapes the bytes into a numpy array.
 	std::expected<std::vector<std::byte>, Error> read()
 	{
-		if (!has_contents_)
+		// A pending async upload is finished first — read() is blocking anyway.
+		if (auto w = wait(); !w)
+		{
+			return std::unexpected(w.error());
+		}
+		if (!has_contents_.load())
 		{
 			return std::unexpected(err_resource(
 				"read() called on an Image that has no contents yet; upload to it or "
@@ -368,12 +463,44 @@ public:
 		return out;
 	}
 
-private:
-	// Staging upload of mip 0, then either the blit chain filling the rest of
-	// the levels or a single transition to SHADER_READ_ONLY. One synchronous
-	// submit; the async UploadManager replaces the transport, not the recording.
-	std::expected<void, Error> upload_pixels(Context& context, const void* pixels,
-	                                         std::uint32_t mips)
+	// Records the whole upload: transition all mips to TRANSFER_DST, copy the
+	// staging buffer into mip 0, then either blit the chain or transition to
+	// SHADER_READ_ONLY. The sync path replays this through immediate_submit;
+	// the upload worker records it into its own command buffer.
+	void record_upload_commands(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips)
+	{
+		record_image_transition(cmd, image_,
+			VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			0, VK_ACCESS_TRANSFER_WRITE_BIT,
+			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			VK_IMAGE_ASPECT_COLOR_BIT, 0, mips);
+
+		VkBufferImageCopy region{
+			.bufferOffset = 0,
+			.bufferRowLength = 0,
+			.bufferImageHeight = 0,
+			.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+			.imageOffset = { 0, 0, 0 },
+			.imageExtent = { width_, height_, 1 }
+		};
+		vkCmdCopyBufferToImage(cmd, staging, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+		if (mips > 1)
+		{
+			record_mip_generation(cmd, image_, width_, height_, mips);
+		}
+		else
+		{
+			record_image_transition(cmd, image_,
+				VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+		}
+	}
+
+	// Creates and fills a staging buffer for this image's mip 0.
+	std::expected<std::pair<VkBuffer, VmaAllocation>, Error> create_filled_staging(
+		Context& context, const void* pixels)
 	{
 		const FormatInfo info = format_info(format_);
 		const VkDeviceSize size =
@@ -412,37 +539,45 @@ private:
 		std::memcpy(mapped, pixels, static_cast<std::size_t>(size));
 		vmaUnmapMemory(context.allocator(), staging_alloc);
 
+		return std::pair{ staging, staging_alloc };
+	}
+
+private:
+	// CPU-side half of a wait: block while the worker is still decoding, then
+	// surface a failed decode as the error it is.
+	std::expected<void, Error> wait_submitted_()
+	{
+		if (upload_state_.load() == UploadState::Pending ||
+		    upload_state_.load() == UploadState::Failed)
+		{
+			std::unique_lock lock(upload_mutex_);
+			upload_cv_.wait(lock, [&] { return upload_state_.load() != UploadState::Pending; });
+			if (upload_state_.load() == UploadState::Failed)
+			{
+				return std::unexpected(err_resource(upload_error_));
+			}
+		}
+		return {};
+	}
+
+	// Staging upload of mip 0, then either the blit chain filling the rest of
+	// the levels or a single transition to SHADER_READ_ONLY. One synchronous
+	// submit; the async UploadManager replaces the transport, not the recording.
+	std::expected<void, Error> upload_pixels(Context& context, const void* pixels,
+	                                         std::uint32_t mips)
+	{
+		auto staging = create_filled_staging(context, pixels);
+		if (!staging)
+		{
+			return std::unexpected(staging.error());
+		}
+		auto [buffer, allocation] = *staging;
+
 		auto submitted = immediate_submit(context, [&](VkCommandBuffer cmd) {
-			record_image_transition(cmd, image_,
-				VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-				0, VK_ACCESS_TRANSFER_WRITE_BIT,
-				VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-				VK_IMAGE_ASPECT_COLOR_BIT, 0, mips);
-
-			VkBufferImageCopy region{
-				.bufferOffset = 0,
-				.bufferRowLength = 0,
-				.bufferImageHeight = 0,
-				.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-				.imageOffset = { 0, 0, 0 },
-				.imageExtent = { width_, height_, 1 }
-			};
-			vkCmdCopyBufferToImage(cmd, staging, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-			if (mips > 1)
-			{
-				record_mip_generation(cmd, image_, width_, height_, mips);
-			}
-			else
-			{
-				record_image_transition(cmd, image_,
-					VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-					VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-			}
+			record_upload_commands(cmd, buffer, mips);
 		});
 
-		vmaDestroyBuffer(context.allocator(), staging, staging_alloc);
+		vmaDestroyBuffer(context.allocator(), buffer, allocation);
 		if (!submitted)
 		{
 			return std::unexpected(submitted.error());
@@ -510,6 +645,15 @@ private:
 	std::uint32_t width_ = 0;
 	std::uint32_t height_ = 0;
 	std::uint32_t mip_levels_ = 1;
-	bool has_contents_ = false;
+	std::atomic<bool> has_contents_{ false };
 	VkImageLayout layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	// Async upload state, written by the upload worker, read by the main
+	// thread. The cv/mutex pair backs the CPU-side waits; the timeline serial
+	// backs the GPU-side ones.
+	std::atomic<UploadState> upload_state_{ UploadState::None };
+	std::atomic<std::uint64_t> upload_serial_{ 0 };
+	std::mutex upload_mutex_;
+	std::condition_variable upload_cv_;
+	std::string upload_error_;
 };

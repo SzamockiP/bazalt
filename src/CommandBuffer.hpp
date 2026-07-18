@@ -62,6 +62,7 @@ public:
 
     CommandBuffer& begin() {
         commands_.clear();
+        used_sets_.clear();
         return *this;
     }
 
@@ -359,12 +360,21 @@ public:
     CommandBuffer& bind_descriptor_set(std::shared_ptr<DescriptorSet> descSet,
                            std::shared_ptr<Pipeline> pipeline,
                            uint32_t setIndex) {
+        // Remembered so submit paths can walk the images this recording
+        // references and wait for their (async) uploads — residency is a
+        // per-command-buffer question, not a global one, or a loading screen
+        // would serialize behind its own cargo.
+        used_sets_.push_back(descSet);
         commands_.push_back([descSet, pipeline, setIndex](VkCommandBuffer cmd, const FrameContext& frame) {
             VkDescriptorSet set = descSet->get(frame.frame_index);
             vkCmdBindDescriptorSets(cmd, pipeline->bind_point(),
                 pipeline->layout(), setIndex, 1, &set, 0, nullptr);
         });
         return *this;
+    }
+
+    const std::vector<std::shared_ptr<DescriptorSet>>& used_sets() const {
+        return used_sets_;
     }
 
     VkCommandBuffer get(std::uint32_t frame_index) const {
@@ -383,4 +393,5 @@ private:
     std::shared_ptr<Context> context_;
     std::vector<VkCommandBuffer> command_buffers_;
     std::vector<std::function<void(VkCommandBuffer, const FrameContext&)>> commands_;
+    std::vector<std::shared_ptr<DescriptorSet>> used_sets_;
 };

@@ -32,6 +32,19 @@ enum class ValidationMode
 	On,
 };
 
+// The async upload machinery, seen from the Context's side. A tiny virtual
+// interface rather than the real class: UploadManager.hpp needs Context.hpp
+// (queues, timeline, deletion queue), so Context can only know it abstractly.
+// main.cpp creates the concrete UploadManager lazily on the first load_image.
+class UploadManagerBase
+{
+public:
+	virtual ~UploadManagerBase() = default;
+	virtual bool uploads_done() = 0;
+	virtual double upload_progress() = 0;
+	virtual void wait_all() = 0;
+};
+
 // Everything the caller can ask of a Context, in capability terms.
 struct ContextConfig
 {
@@ -131,6 +144,12 @@ public:
 			live_contexts_.fetch_sub(1);
 		}
 
+		// First: stop the upload worker. Its destructor abandons undecoded jobs
+		// (the process is going away; decoding more would only delay exit),
+		// finishes at most one in-flight submit, joins, and destroys its command
+		// pool — all of which needs the device still alive.
+		upload_manager_.reset();
+
 		if (vkb_device_.device)
 		{
 			vkDeviceWaitIdle(vkb_device_.device);
@@ -149,6 +168,11 @@ public:
 			vkDestroySampler(vkb_device_.device, sampler->get(), nullptr);
 		}
 		sampler_cache_.clear();
+
+		if (submit_timeline_)
+		{
+			vkDestroySemaphore(vkb_device_.device, submit_timeline_, nullptr);
+		}
 
 		if (command_pool_)
 		{
@@ -231,41 +255,83 @@ public:
 		return ++frame_serial_;
 	}
 
+	// ── Submission timeline ───────────────────────────────────────────────────
+	//
+	// One timeline semaphore counts EVERY submission on the graphics queue —
+	// frame submits, headless submits, one-shot submits, async uploads. Its
+	// counter answers the only synchronization question the CPU side ever asks:
+	// "has the GPU passed point X?" — uniformly for windowed and headless, and
+	// it is what makes async uploads awaitable.
+	VkSemaphore submit_timeline() const { return submit_timeline_; }
+
+	// Reserve the serial the next submit will signal. Call while holding
+	// queue_mutex(), immediately before the vkQueueSubmit that signals it.
+	std::uint64_t advance_submit_serial() { return ++submit_serial_; }
+	std::uint64_t submit_serial() const { return submit_serial_.load(); }
+
+	std::uint64_t completed_submit_serial() const
+	{
+		std::uint64_t value = 0;
+		vkGetSemaphoreCounterValue(vkb_device_.device, submit_timeline_, &value);
+		return value;
+	}
+
 	// ── Deferred destruction ──────────────────────────────────────────────────
 	//
-	// A handle dropped on the CPU may still be referenced by a frame the GPU is
-	// working through, so resource destructors enqueue their vkDestroy calls
-	// here instead of running them inline. Entries run once the GPU has provably
-	// passed the frame that could last have referenced them.
+	// A handle dropped on the CPU may still be referenced by work the GPU is
+	// chewing through, so resource destructors enqueue their vkDestroy calls
+	// here instead of running them inline. An entry is keyed by the submit
+	// serial at drop time — no later submit can reference the handle (any
+	// recording that did held a shared_ptr, which is gone by the time a
+	// destructor runs) — and runs once the timeline passes that serial.
 	//
 	// The lambdas capture raw handles plus the VkDevice/VmaAllocator values —
 	// never a shared_ptr<Context>, which would keep the Context alive from its
 	// own member and leak everything.
+	//
+	// Thread-safe: the upload worker parks its staging buffers here too.
 	void defer_destroy(std::function<void()> fn)
 	{
-		deletion_queue_.emplace_back(frame_serial_, std::move(fn));
-	}
-
-	// The GPU has provably completed every submission up to and including the
-	// frame with this serial. The graphics queue completes work in submission
-	// order, so one proof point covers everything before it.
-	void mark_serial_completed(std::uint64_t serial)
-	{
-		if (serial > completed_serial_)
-		{
-			completed_serial_ = serial;
-		}
+		std::lock_guard lock(deletion_mutex_);
+		deletion_queue_.emplace_back(submit_serial_.load(), std::move(fn));
 	}
 
 	void flush_deletion_queue()
 	{
-		// Serials are enqueued in non-decreasing order, so the front is always
-		// the oldest entry.
-		while (!deletion_queue_.empty() && deletion_queue_.front().first <= completed_serial_)
+		const std::uint64_t completed = completed_submit_serial();
+
+		// Run the ready entries outside the lock: a destructor lambda must be
+		// free to enqueue (it doesn't today, but that trap is invisible).
+		std::vector<std::function<void()>> ready;
 		{
-			deletion_queue_.front().second();
-			deletion_queue_.pop_front();
+			std::lock_guard lock(deletion_mutex_);
+			// Two producers interleave, so keys are not strictly ordered —
+			// scan rather than pop-from-front. The queue stays tiny.
+			for (auto it = deletion_queue_.begin(); it != deletion_queue_.end();)
+			{
+				if (it->first <= completed)
+				{
+					ready.push_back(std::move(it->second));
+					it = deletion_queue_.erase(it);
+				}
+				else
+				{
+					++it;
+				}
+			}
 		}
+		for (auto& fn : ready)
+		{
+			fn();
+		}
+	}
+
+	// ── Async uploads ─────────────────────────────────────────────────────────
+
+	UploadManagerBase* upload_manager() const { return upload_manager_.get(); }
+	void set_upload_manager(std::unique_ptr<UploadManagerBase> manager)
+	{
+		upload_manager_ = std::move(manager);
 	}
 
 	// ── Sampler cache ─────────────────────────────────────────────────────────
@@ -683,6 +749,26 @@ private:
 			return std::unexpected(*e);
 		}
 
+		// The submission timeline (see submit_timeline() above). Core 1.2; the
+		// feature bit was enabled in create_device_.
+		VkSemaphoreTypeCreateInfo timelineType{
+			.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+			.pNext = nullptr,
+			.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+			.initialValue = 0
+		};
+		VkSemaphoreCreateInfo timelineInfo{
+			.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+			.pNext = &timelineType,
+			.flags = 0
+		};
+		if (auto e = check(vkCreateSemaphore(ctx.vkb_device_.device, &timelineInfo,
+		                                     nullptr, &ctx.submit_timeline_),
+		                   "create submission timeline semaphore"))
+		{
+			return std::unexpected(*e);
+		}
+
 		return {};
 	}
 
@@ -758,7 +844,13 @@ private:
 
 	std::uint32_t frames_in_flight_ = 2;
 	std::uint64_t frame_serial_ = 0;
-	std::uint64_t completed_serial_ = 0;
+
+	VkSemaphore submit_timeline_ = VK_NULL_HANDLE;
+	std::atomic<std::uint64_t> submit_serial_{ 0 };
+
+	std::mutex deletion_mutex_;
 	std::deque<std::pair<std::uint64_t, std::function<void()>>> deletion_queue_;
+
 	std::unordered_map<std::uint32_t, std::shared_ptr<Sampler>> sampler_cache_;
+	std::unique_ptr<UploadManagerBase> upload_manager_;
 };

@@ -260,7 +260,7 @@ public:
 	std::uint32_t current_image_index() const { return image_index_; }
 	bool frame_skipped() const { return frame_skipped_; }
 
-	void submit(std::shared_ptr<CommandBuffer> cmd);
+	void submit(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial = 0);
 
 	// Returns true if a frame was successfully acquired and is ready for rendering.
 	// Returns false if the frame was skipped (minimized, resize, etc.) — caller should skip rendering.
@@ -284,13 +284,8 @@ public:
 
 		vkWaitForFences(context_->device(), 1, &in_flight_fences_[current_frame()], VK_TRUE, UINT64_MAX);
 
-		// The fence just waited was last signalled by the submission that used
-		// this ring slot — frames_in_flight frames ago. That frame is done, so
-		// handles dropped up to then are safe to destroy.
-		if (context_->frame_serial() > context_->frames_in_flight())
-		{
-			context_->mark_serial_completed(context_->frame_serial() - context_->frames_in_flight());
-		}
+		// A frame boundary is the natural point to reclaim deferred handles;
+		// the submission timeline says how far the GPU actually got.
 		context_->flush_deletion_queue();
 
 		VkResult result = vkAcquireNextImageKHR(
@@ -317,24 +312,20 @@ public:
 		return true;
 	}
 
-	void end_frame(VkCommandBuffer cmd)
+	// upload_wait_serial: the highest submission-timeline value this frame's
+	// resources depend on (async uploads). 0 waits for nothing — a timeline
+	// wait for 0 is trivially satisfied, so no branching is needed.
+	void end_frame(VkCommandBuffer cmd, std::uint64_t upload_wait_serial = 0)
 	{
-		VkSemaphore waitSemaphores[] = { image_available_semaphores_[current_frame()] };
-		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-		VkSemaphore signalSemaphores[] = { render_finished_semaphores_[image_index_] };
-		VkSwapchainKHR swapchains[] = { swapchain_ };
+		VkSemaphore waitSemaphores[] = { image_available_semaphores_[current_frame()],
+		                                 context_->submit_timeline() };
+		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		                                      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT };
+		std::uint64_t waitValues[] = { 0, upload_wait_serial };  // binary sem value ignored
 
-		VkSubmitInfo submitInfo{
-			.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-			.pNext = nullptr,
-			.waitSemaphoreCount = 1,
-			.pWaitSemaphores = waitSemaphores,
-			.pWaitDstStageMask = waitStages,
-			.commandBufferCount = 1,
-			.pCommandBuffers = &cmd,
-			.signalSemaphoreCount = 1,
-			.pSignalSemaphores = signalSemaphores
-		};
+		VkSemaphore signalSemaphores[] = { render_finished_semaphores_[image_index_],
+		                                   context_->submit_timeline() };
+		VkSwapchainKHR swapchains[] = { swapchain_ };
 
 		VkPresentInfoKHR presentInfo{
 			.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -352,6 +343,31 @@ public:
 		VkResult result;
 		{
 			std::lock_guard lock(context_->queue_mutex());
+
+			// Every submit signals the timeline; the serial is reserved under
+			// the same lock that orders the submits.
+			std::uint64_t signalValues[] = { 0, context_->advance_submit_serial() };
+
+			VkTimelineSemaphoreSubmitInfo timelineInfo{
+				.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+				.pNext = nullptr,
+				.waitSemaphoreValueCount = 2,
+				.pWaitSemaphoreValues = waitValues,
+				.signalSemaphoreValueCount = 2,
+				.pSignalSemaphoreValues = signalValues
+			};
+
+			VkSubmitInfo submitInfo{
+				.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+				.pNext = &timelineInfo,
+				.waitSemaphoreCount = 2,
+				.pWaitSemaphores = waitSemaphores,
+				.pWaitDstStageMask = waitStages,
+				.commandBufferCount = 1,
+				.pCommandBuffers = &cmd,
+				.signalSemaphoreCount = 2,
+				.pSignalSemaphores = signalSemaphores
+			};
 
 			if (VkResult submit_result = vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
 			    submit_result != VK_SUCCESS) {
