@@ -131,16 +131,32 @@ jobs:
       - name: Install wheel + test deps
         run: pip install wheelhouse/bazalt-*-cp312-*manylinux*.whl pytest numpy
 
-      # TEMPORARY diagnostic: force sync validation via the layer-settings
-      # FILE, bypassing the in-app VkValidationFeaturesEXT/VkLayerSettingEXT
-      # plumbing. Passing here + failing below = the plumbing is at fault;
-      # failing here too = the layer cannot see these hazards on this driver.
-      - name: Sync validation diagnostic (temporary)
+      # TEMPORARY diagnostic: does the debug messenger deliver ANY validation
+      # message on this runner? A deliberate core error (draw with no bound
+      # pipeline) must produce one; TOTAL: 0 means the messenger is dead and
+      # every validation-as-assert in the suite is passing vacuously.
+      - name: Debug messenger diagnostic (temporary)
         continue-on-error: true
         working-directory: ${{ runner.temp }}
         run: |
-          printf 'khronos_validation.validate_sync = true\nkhronos_validation.syncval_shader_accesses_heuristic = true\n' > vk_layer_settings.txt
-          VK_LAYER_SETTINGS_PATH=$PWD/vk_layer_settings.txt python -m pytest "${{ github.workspace }}/tests/test_barriers.py::test_missing_barrier_in_manual_mode_trips_sync_validation" -q
+          python - <<'EOF'
+          import bazalt as bz
+          msgs = []
+          log = bz.Logger(min_severity=bz.Severity.INFO)
+          log.on_message(lambda m: msgs.append((str(m.source), str(m.severity), m.text[:200])))
+          ctx = bz.Context(log, validation="on")
+          target = bz.RenderTarget(ctx, 16, 16)
+          cmd = ctx.create_command_buffer()
+          cmd.begin()
+          cmd.begin_rendering(target)
+          cmd.draw(3)
+          cmd.end_rendering(target)
+          ctx.submit(cmd)
+          log.flush()
+          print("TOTAL:", len(msgs))
+          for s in msgs:
+              print("MSG:", s)
+          EOF
 
       # cwd is OUTSIDE the repo on purpose: the source tree's bazalt/ package
       # has no _core and would shadow the installed wheel on sys.path.
