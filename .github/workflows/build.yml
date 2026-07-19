@@ -131,44 +131,20 @@ jobs:
       - name: Install wheel + test deps
         run: pip install wheelhouse/bazalt-*-cp312-*manylinux*.whl pytest numpy
 
-      # TEMPORARY diagnostic: does the debug messenger deliver ANY validation
-      # message on this runner? The deliberate error is host-side only
-      # (vkUpdateDescriptorSets usage mismatch) — nothing reaches the driver,
-      # so lavapipe cannot segfault on it. TOTAL: 0 means the messenger is
-      # dead and every validation-as-assert in the suite passes vacuously.
-      - name: Debug messenger diagnostic (temporary)
-        continue-on-error: true
-        working-directory: ${{ runner.temp }}
-        run: |
-          python - "${{ github.workspace }}/tests/shaders" <<'EOF'
-          import sys
-          import bazalt as bz
-          shaders = sys.argv[1]
-          msgs = []
-          log = bz.Logger(min_severity=bz.Severity.INFO)
-          log.on_message(lambda m: msgs.append((str(m.source), str(m.severity), m.text[:200])))
-          ctx = bz.Context(log, validation="on")
-          target = bz.RenderTarget(ctx, 16, 16)
-          vert = ctx.compile_shader(f"{shaders}/fullscreen.vert", bz.ShaderStage.VERTEX)
-          frag = ctx.compile_shader(f"{shaders}/ubo.frag", bz.ShaderStage.FRAGMENT)
-          pipe = (ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
-                  .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0).build(target))
-          sbuf = ctx.create_buffer([1.0, 2.0, 3.0, 4.0], bz.BufferType.STORAGE,
-                                   bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
-          pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4)
-          dset = pool.allocate_set(pipe, set=0)
-          dset.set_buffer(0, sbuf)   # STORAGE-usage buffer in a UNIFORM slot
-          log.flush()
-          print("TOTAL:", len(msgs))
-          for s in msgs:
-              print("MSG:", s)
-          EOF
-
       # cwd is OUTSIDE the repo on purpose: the source tree's bazalt/ package
       # has no _core and would shadow the installed wheel on sys.path.
       # VK_ICD_FILENAMES/VK_DRIVER_FILES come from the locate step's GITHUB_ENV.
+      #
+      # BAZALT_SYNCVAL_UNSUPPORTED: this runner's validation layer (1.4.313,
+      # the newest LunarG packages for noble) does not report shader-access
+      # sync hazards even when forced via the layer-settings file, so the one
+      # negative test that needs them skips here. The debug messenger itself
+      # was proven alive (a deliberate host-side error is delivered), so the
+      # suite's validation-as-assert is NOT vacuous.
       - name: Run test suite
         working-directory: ${{ runner.temp }}
+        env:
+          BAZALT_SYNCVAL_UNSUPPORTED: "1"
         run: python -m pytest ${{ github.workspace }}/tests -q
 
   # ── Publish to PyPI on release ────────────────────────────────

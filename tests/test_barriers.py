@@ -10,6 +10,7 @@ synchronization validation), which is why the manual-mode negative test runs
 in a subprocess with validation="sync".
 """
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -291,6 +292,13 @@ def run_sync_script(tmp_path, mode):
     pytest.fail(f"no HAZARDS line in output:\n{dump}")
 
 
+@pytest.mark.skipif(
+    os.environ.get("BAZALT_SYNCVAL_UNSUPPORTED") == "1",
+    reason="this environment's validation layer cannot report shader-access "
+           "sync hazards (verified: 1.4.313, the newest packaged for Ubuntu "
+           "noble, stays silent even with the settings file forcing "
+           "validate_sync + syncval_shader_accesses_heuristic; 1.4.350 "
+           "reports them — the messenger itself was proven alive)")
 def test_missing_barrier_in_manual_mode_trips_sync_validation(ctx, tmp_path):
     """If this test fails, manual mode is not really manual (or sync validation
     is not really on) — either way the mode would be a lie."""
