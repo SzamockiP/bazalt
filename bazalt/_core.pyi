@@ -121,6 +121,7 @@ class DataType(IntEnum):
 class ShaderStage(IntEnum):
     VERTEX = 0
     FRAGMENT = 1
+    COMPUTE = 2
 
 class VertexFormat(IntEnum):
     """Vertex attribute layout. Renamed from `Format`, which is reserved for

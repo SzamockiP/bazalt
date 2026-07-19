@@ -493,6 +493,7 @@ PYBIND11_MODULE(_core, m) {
     py::enum_<ShaderStage>(m, "ShaderStage")
         .value("VERTEX", ShaderStage::VERTEX)
         .value("FRAGMENT", ShaderStage::FRAGMENT)
+        .value("COMPUTE", ShaderStage::COMPUTE)
         .export_values();
 
     py::enum_<VertexFormat>(m, "VertexFormat")

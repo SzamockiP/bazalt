@@ -14,10 +14,11 @@
 
 enum class ShaderStage {
     VERTEX,
-    FRAGMENT
+    FRAGMENT,
+    COMPUTE
 };
 
-// A real switch, deliberately with no default case: adding COMPUTE later makes
+// A real switch, deliberately with no default case: adding a new stage makes
 // every conversion site a compiler error instead of silently aliasing the new
 // stage onto FRAGMENT, which is what the old `stage == VERTEX ? ... : ...`
 // ternaries scattered across Pipeline.hpp and CommandBuffer.hpp would have done.
@@ -25,6 +26,7 @@ inline constexpr VkShaderStageFlagBits to_vk(ShaderStage stage) {
     switch (stage) {
         case ShaderStage::VERTEX:   return VK_SHADER_STAGE_VERTEX_BIT;
         case ShaderStage::FRAGMENT: return VK_SHADER_STAGE_FRAGMENT_BIT;
+        case ShaderStage::COMPUTE:  return VK_SHADER_STAGE_COMPUTE_BIT;
     }
     // Not std::unreachable(): pybind enums accept arbitrary ints, so a forged
     // ShaderStage from Python must degrade gracefully, not invoke UB.
@@ -35,6 +37,7 @@ inline constexpr shaderc_shader_kind to_shaderc_kind(ShaderStage stage) {
     switch (stage) {
         case ShaderStage::VERTEX:   return shaderc_glsl_vertex_shader;
         case ShaderStage::FRAGMENT: return shaderc_glsl_fragment_shader;
+        case ShaderStage::COMPUTE:  return shaderc_glsl_compute_shader;
     }
     return shaderc_glsl_vertex_shader;
 }
