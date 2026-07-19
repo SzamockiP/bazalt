@@ -80,7 +80,7 @@ def test_sampling_without_wait_renders_correctly(ctx, fullscreen_and_textured, t
 
     vert, frag = fullscreen_and_textured
     target = bz.RenderTarget(ctx, 62, 62)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
                 .texture(0, bz.ShaderStage.FRAGMENT, set=0)
@@ -111,7 +111,7 @@ def test_unrelated_submits_do_not_wait_for_uploads(ctx, triangle_shaders, triang
     vert, frag = triangle_shaders
     vbuf, ibuf = triangle_buffers
     target = bz.RenderTarget(ctx, 64, 64)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])

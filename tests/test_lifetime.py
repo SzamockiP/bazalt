@@ -35,7 +35,7 @@ def test_dropping_everything_between_submits_is_safe(ctx, triangle_shaders):
                                  bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
         ibuf = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX,
                                  bz.MemoryUsage.STATIC, bz.DataType.UINT32)
-        pipeline = (ctx.pipeline_builder()
+        pipeline = (ctx.graphics_pipeline()
                     .vertex_shader(vert)
                     .fragment_shader(frag)
                     .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
@@ -67,7 +67,7 @@ def test_rerecording_a_command_buffer_drops_old_resources_safely(ctx, triangle_s
     vert, frag = triangle_shaders
     vbuf, ibuf = triangle_buffers
     target = bz.RenderTarget(ctx, 64, 64)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])

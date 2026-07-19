@@ -38,7 +38,7 @@ import bazalt as bz
 ctx = bz.Context()
 target = bz.RenderTarget(ctx, 800, 600, depth=bz.Format.D32F)
 
-pipeline = (ctx.pipeline_builder()
+pipeline = (ctx.graphics_pipeline()
     .vertex_shader(ctx.compile_shader("triangle.vert", bz.ShaderStage.VERTEX))
     .fragment_shader(ctx.compile_shader("triangle.frag", bz.ShaderStage.FRAGMENT))
     .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
@@ -92,7 +92,7 @@ if __name__ == "__main__":
     # The pipeline is a baked state object that tells the GPU how to interpret our data.
     # It is built against a render target, which supplies the color/depth formats.
     # A SwapchainRenderer is one, so is an offscreen RenderTarget — same call.
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
         .vertex_shader(vert_spv)
         .fragment_shader(frag_spv)
         .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3]) # Position + Color

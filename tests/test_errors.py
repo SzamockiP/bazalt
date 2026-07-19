@@ -87,7 +87,7 @@ def test_descriptor_pool_needs_at_least_one_descriptor(ctx):
 def test_pipeline_without_shaders_is_a_shader_error(ctx):
     target = bz.RenderTarget(ctx, 16, 16)
     with pytest.raises(bz.ShaderError):
-        ctx.pipeline_builder().build(target)
+        ctx.graphics_pipeline().build(target)
 
 
 def test_static_buffer_update_is_a_resource_error(ctx):
@@ -113,7 +113,7 @@ def test_set_buffer_on_nonexistent_binding_is_a_resource_error(ctx, triangle_sha
     buffer, producing a descriptor write the layout never declared."""
     vert, frag = triangle_shaders
     target = bz.RenderTarget(ctx, 16, 16)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
@@ -131,7 +131,7 @@ def test_set_buffer_on_nonexistent_binding_is_a_resource_error(ctx, triangle_sha
 def test_set_buffer_on_image_binding_points_to_set_image(ctx, triangle_shaders):
     vert, frag = triangle_shaders
     target = bz.RenderTarget(ctx, 16, 16)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
@@ -151,7 +151,7 @@ def test_dynamic_buffer_in_static_set_is_a_resource_error(ctx, triangle_shaders)
     point at one of them. The error must steer towards allocate_frame_set."""
     vert, frag = triangle_shaders
     target = bz.RenderTarget(ctx, 16, 16)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])

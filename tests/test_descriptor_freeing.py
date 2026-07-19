@@ -14,7 +14,7 @@ def test_dropped_sets_return_to_the_pool(ctx, triangle_shaders):
     """Allocate-and-drop far more sets than the pool holds at once."""
     vert, frag = triangle_shaders
     target = bz.RenderTarget(ctx, 16, 16)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
@@ -39,7 +39,7 @@ def test_pool_dropped_before_its_sets_is_safe(ctx, triangle_shaders):
     """A set keeps its pool alive; dropping the pool first must not dangle."""
     vert, frag = triangle_shaders
     target = bz.RenderTarget(ctx, 16, 16)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])

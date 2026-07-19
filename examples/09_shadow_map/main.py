@@ -31,14 +31,14 @@ scene_frag = ctx.compile_shader("scene.frag", bz.ShaderStage.FRAGMENT)
 
 # Depth-only pipeline: no fragment shader (legal because the target has no
 # colour attachments).
-shadow_pipe = (ctx.pipeline_builder()
+shadow_pipe = (ctx.graphics_pipeline()
                .vertex_shader(shadow_vert)
                .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                .depth_test(True)
                .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
                .build(shadow))
 
-scene_pipe = (ctx.pipeline_builder()
+scene_pipe = (ctx.graphics_pipeline()
               .vertex_shader(scene_vert)
               .fragment_shader(scene_frag)
               .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])

@@ -15,7 +15,7 @@ vert_spv = ctx.compile_shader("triangle.vert", bz.ShaderStage.VERTEX)
 frag_spv = ctx.compile_shader("triangle.frag", bz.ShaderStage.FRAGMENT)
 
 # Build pipeline: Position (FLOAT3) + Color (FLOAT3)
-pipeline = (ctx.pipeline_builder()
+pipeline = (ctx.graphics_pipeline()
     .vertex_shader(vert_spv)
     .fragment_shader(frag_spv)
     .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])

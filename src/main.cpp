@@ -502,6 +502,12 @@ PYBIND11_MODULE(_core, m) {
         .value("FLOAT4", VertexFormat::FLOAT4)
         .export_values();
 
+    py::enum_<Topology>(m, "Topology")
+        .value("TRIANGLE_LIST", Topology::TRIANGLE_LIST)
+        .value("POINT_LIST", Topology::POINT_LIST)
+        .value("LINE_LIST", Topology::LINE_LIST)
+        .export_values();
+
     // Pixel formats — the name VertexFormat freed in 0.4.
     py::enum_<Format>(m, "Format")
         .value("RGBA8", Format::RGBA8)
@@ -605,45 +611,68 @@ PYBIND11_MODULE(_core, m) {
     py::class_<Pipeline, std::shared_ptr<Pipeline>>(m, "Pipeline");
 
     // Lambdas, not member pointers: the setters take a deducing-this object
-    // parameter, so &PipelineBuilder::vertex_shader would be a plain function
-    // pointer that .def() cannot treat as a method.
-    py::class_<PipelineBuilder, std::shared_ptr<PipelineBuilder>>(m, "PipelineBuilder")
-        .def("vertex_shader", [](PipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> PipelineBuilder& {
+    // parameter, so &GraphicsPipelineBuilder::vertex_shader would be a plain
+    // function pointer that .def() cannot treat as a method.
+    py::class_<GraphicsPipelineBuilder, std::shared_ptr<GraphicsPipelineBuilder>>(m, "GraphicsPipelineBuilder")
+        .def("vertex_shader", [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder& {
             return self.vertex_shader(std::move(shader));
         })
-        .def("fragment_shader", [](PipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> PipelineBuilder& {
+        .def("fragment_shader", [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder& {
             return self.fragment_shader(std::move(shader));
         })
-        .def("vertex_format", [](PipelineBuilder& self, const std::vector<VertexFormat>& formats) -> PipelineBuilder& {
+        .def("vertex_format", [](GraphicsPipelineBuilder& self, const std::vector<VertexFormat>& formats) -> GraphicsPipelineBuilder& {
             return self.vertex_format(formats);
         })
-        .def("depth_test", [](PipelineBuilder& self, bool enable) -> PipelineBuilder& {
+        .def("depth_test", [](GraphicsPipelineBuilder& self, bool enable) -> GraphicsPipelineBuilder& {
             return self.depth_test(enable);
         })
-        .def("cull_mode", [](PipelineBuilder& self, CullMode mode, FrontFace frontFace) -> PipelineBuilder& {
+        .def("cull_mode", [](GraphicsPipelineBuilder& self, CullMode mode, FrontFace frontFace) -> GraphicsPipelineBuilder& {
             return self.cull_mode(mode, frontFace);
         })
-        .def("blend", [](PipelineBuilder& self, bool enable) -> PipelineBuilder& {
+        .def("blend", [](GraphicsPipelineBuilder& self, bool enable) -> GraphicsPipelineBuilder& {
             return self.blend(enable);
         })
-        .def("push_constant", [](PipelineBuilder& self, uint32_t size, ShaderStage stage) -> PipelineBuilder& {
+        .def("topology", [](GraphicsPipelineBuilder& self, Topology topology) -> GraphicsPipelineBuilder& {
+            return self.topology(topology);
+        })
+        .def("push_constant", [](GraphicsPipelineBuilder& self, uint32_t size, ShaderStage stage) -> GraphicsPipelineBuilder& {
             return self.push_constant(size, stage);
         })
-        .def("uniform_buffer", [](PipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set) -> PipelineBuilder& {
+        .def("uniform_buffer", [](GraphicsPipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set) -> GraphicsPipelineBuilder& {
             return self.uniform_buffer(binding, stage, set);
         }, py::arg("binding"), py::arg("stage"), py::arg("set"))
-        .def("storage_buffer", [](PipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set) -> PipelineBuilder& {
+        .def("storage_buffer", [](GraphicsPipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set) -> GraphicsPipelineBuilder& {
             return self.storage_buffer(binding, stage, set);
         }, py::arg("binding"), py::arg("stage"), py::arg("set"))
-        .def("texture", [](PipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set) -> PipelineBuilder& {
+        .def("texture", [](GraphicsPipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set) -> GraphicsPipelineBuilder& {
             return self.texture(binding, stage, set);
         }, py::arg("binding"), py::arg("stage"), py::arg("set"))
         // Takes any RenderTarget. A SwapchainRenderer *is* one, so windowed code
         // reads the same as offscreen code — build(renderer) still works, it just
         // isn't a special case any more.
-        .def("build", [](PipelineBuilder& builder, std::shared_ptr<RenderTarget> target) -> py::object {
+        .def("build", [](GraphicsPipelineBuilder& builder, std::shared_ptr<RenderTarget> target) -> py::object {
             return py::cast(unwrap(builder.build(*target), nullptr));
         }, py::arg("target"));
+
+    // No stage arguments anywhere: compute has exactly one stage, so asking for
+    // it could only ever be redundant or wrong. build() takes no target —
+    // compute has no attachments.
+    py::class_<ComputePipelineBuilder, std::shared_ptr<ComputePipelineBuilder>>(m, "ComputePipelineBuilder")
+        .def("shader", [](ComputePipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> ComputePipelineBuilder& {
+            return self.shader(std::move(shader));
+        })
+        .def("uniform_buffer", [](ComputePipelineBuilder& self, uint32_t binding, uint32_t set) -> ComputePipelineBuilder& {
+            return self.uniform_buffer(binding, set);
+        }, py::arg("binding"), py::arg("set") = 0)
+        .def("storage_buffer", [](ComputePipelineBuilder& self, uint32_t binding, uint32_t set) -> ComputePipelineBuilder& {
+            return self.storage_buffer(binding, set);
+        }, py::arg("binding"), py::arg("set") = 0)
+        .def("push_constant", [](ComputePipelineBuilder& self, uint32_t size) -> ComputePipelineBuilder& {
+            return self.push_constant(size);
+        }, py::arg("size"))
+        .def("build", [](ComputePipelineBuilder& builder) -> py::object {
+            return py::cast(unwrap(builder.build(), nullptr));
+        });
 
     py::class_<DescriptorSet, std::shared_ptr<DescriptorSet>>(m, "DescriptorSet")
         .def("set_image", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Image> image,
@@ -859,8 +888,11 @@ PYBIND11_MODULE(_core, m) {
             auto res = Buffer::create(self, nullptr, size_in_bytes, type, usage);
             return py::cast(unwrap(std::move(res), self.logger().get()));
         }, py::arg("size_in_bytes"), py::arg("type"), py::arg("usage"))
-        .def("pipeline_builder", [](Context& self) -> std::shared_ptr<PipelineBuilder> {
-            return std::make_shared<PipelineBuilder>(self);
+        .def("graphics_pipeline", [](Context& self) -> std::shared_ptr<GraphicsPipelineBuilder> {
+            return std::make_shared<GraphicsPipelineBuilder>(self);
+        })
+        .def("compute_pipeline", [](Context& self) -> std::shared_ptr<ComputePipelineBuilder> {
+            return std::make_shared<ComputePipelineBuilder>(self);
         })
         .def("compile_shader", [](Context& self, const std::string& path, ShaderStage stage) -> py::object {
             return py::cast(unwrap(ShaderCompiler::compile(self, path, stage), self.logger().get()));

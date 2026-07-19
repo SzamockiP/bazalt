@@ -58,7 +58,7 @@ vert_spv = ctx.compile_shader("10cubes.vert", bz.ShaderStage.VERTEX)
 frag_spv = ctx.compile_shader("10cubes.frag", bz.ShaderStage.FRAGMENT)
 
 # Build pipeline
-pipeline = (ctx.pipeline_builder()
+pipeline = (ctx.graphics_pipeline()
     .vertex_shader(vert_spv)
     .fragment_shader(frag_spv)
     .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3]) # pos, normal, color

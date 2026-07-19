@@ -48,7 +48,7 @@ def test_headless_submits_rotate_the_ring(ctx, fullscreen_vert):
     """
     frag = ctx.compile_shader(str(SHADER_DIR / "ubo.frag"), bz.ShaderStage.FRAGMENT)
     target = bz.RenderTarget(ctx, 64, 64)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(fullscreen_vert)
                 .fragment_shader(frag)
                 .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
@@ -86,7 +86,7 @@ def test_update_before_each_submit_always_wins(ctx, fullscreen_vert):
     """
     frag = ctx.compile_shader(str(SHADER_DIR / "ubo.frag"), bz.ShaderStage.FRAGMENT)
     target = bz.RenderTarget(ctx, 64, 64)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(fullscreen_vert)
                 .fragment_shader(frag)
                 .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)

@@ -18,7 +18,7 @@ def test_every_recording_method_returns_the_same_object(ctx, triangle_shaders, t
     vert, frag = triangle_shaders
     vbuf, ibuf = triangle_buffers
     target = bz.RenderTarget(ctx, 16, 16)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
@@ -41,7 +41,7 @@ def test_chained_and_statement_styles_render_identically(ctx, triangle_shaders, 
     vbuf, ibuf = triangle_buffers
 
     def make_pipeline(target):
-        return (ctx.pipeline_builder()
+        return (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
@@ -80,7 +80,7 @@ def test_rendering_scope_records_the_pair(ctx, triangle_shaders, triangle_buffer
     vert, frag = triangle_shaders
     vbuf, ibuf = triangle_buffers
     target = bz.RenderTarget(ctx, 64, 64)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
@@ -103,7 +103,7 @@ def test_rendering_scope_closes_on_exception(ctx, triangle_shaders, triangle_buf
     vert, frag = triangle_shaders
     vbuf, ibuf = triangle_buffers
     target = bz.RenderTarget(ctx, 64, 64)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])

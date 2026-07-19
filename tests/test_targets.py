@@ -65,7 +65,7 @@ def test_depth_only_pass_writes_sampleable_depth(ctx, triangle_shaders, triangle
     shadow = bz.RenderTarget(ctx, 64, 64, color=None, depth=bz.Format.D32F)
 
     # No fragment shader: legal exactly because the target has no colour.
-    depth_pipe = (ctx.pipeline_builder()
+    depth_pipe = (ctx.graphics_pipeline()
                   .vertex_shader(vert)
                   .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                   .depth_test(True)
@@ -92,7 +92,7 @@ def test_depth_only_pass_writes_sampleable_depth(ctx, triangle_shaders, triangle
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     view_frag = ctx.compile_shader(str(SHADER_DIR / "depth_view.frag"), bz.ShaderStage.FRAGMENT)
     screen = bz.RenderTarget(ctx, 64, 64)
-    view_pipe = (ctx.pipeline_builder()
+    view_pipe = (ctx.graphics_pipeline()
                  .vertex_shader(fullscreen)
                  .fragment_shader(view_frag)
                  .texture(0, bz.ShaderStage.FRAGMENT, set=0)
@@ -134,7 +134,7 @@ def test_mrt_renders_into_both_attachments(ctx):
 
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     mrt_frag = ctx.compile_shader(str(SHADER_DIR / "mrt.frag"), bz.ShaderStage.FRAGMENT)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(fullscreen)
                 .fragment_shader(mrt_frag)
                 .build(gbuf))
@@ -162,7 +162,7 @@ def test_missing_fragment_shader_with_color_attachments_is_refused(ctx, triangle
     vert, _ = triangle_shaders
     target = bz.RenderTarget(ctx, 16, 16)
     with pytest.raises(bz.ShaderError):
-        (ctx.pipeline_builder()
+        (ctx.graphics_pipeline()
          .vertex_shader(vert)
          .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
          .build(target))
@@ -178,7 +178,7 @@ def test_color_attachment_samples_as_a_texture(ctx, triangle_shaders, triangle_b
     vbuf, ibuf = triangle_buffers
 
     first = bz.RenderTarget(ctx, 64, 64)
-    pipe1 = (ctx.pipeline_builder()
+    pipe1 = (ctx.graphics_pipeline()
              .vertex_shader(vert)
              .fragment_shader(frag)
              .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
@@ -197,7 +197,7 @@ def test_color_attachment_samples_as_a_texture(ctx, triangle_shaders, triangle_b
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     tex_frag = ctx.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
     second = bz.RenderTarget(ctx, 64, 64)
-    pipe2 = (ctx.pipeline_builder()
+    pipe2 = (ctx.graphics_pipeline()
              .vertex_shader(fullscreen)
              .fragment_shader(tex_frag)
              .texture(0, bz.ShaderStage.FRAGMENT, set=0)

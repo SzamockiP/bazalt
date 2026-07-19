@@ -17,7 +17,7 @@ CLEAR_RGB = np.array([26, 51, 77])
 def draw_triangle(ctx, target, shaders, buffers, clear=CLEAR):
     vert, frag = shaders
     vbuf, ibuf = buffers
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])

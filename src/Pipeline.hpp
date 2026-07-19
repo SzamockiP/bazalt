@@ -35,6 +35,22 @@ enum class FrontFace {
     COUNTER_CLOCKWISE
 };
 
+enum class Topology {
+    TRIANGLE_LIST,
+    POINT_LIST,
+    LINE_LIST
+};
+
+inline constexpr VkPrimitiveTopology to_vk(Topology topology) {
+    switch (topology) {
+        case Topology::TRIANGLE_LIST: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        case Topology::POINT_LIST:    return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+        case Topology::LINE_LIST:     return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    }
+    // Not std::unreachable(): pybind enums accept arbitrary ints.
+    return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+}
+
 class Pipeline {
 public:
     // Maps binding index -> VkDescriptorType so DescriptorSet knows what type to write
@@ -153,14 +169,120 @@ private:
     VkPipelineBindPoint bind_point_ = VK_PIPELINE_BIND_POINT_GRAPHICS;
 };
 
-class PipelineBuilder {
+// The layout plumbing shared by both pipeline builders: descriptor bindings,
+// push-constant ranges, and the Vk objects they become. Internal — Python only
+// ever sees the two builders, each of which owns one of these.
+class PipelineLayoutBuilder {
 public:
-    PipelineBuilder(Context& context) : context_(context) {}
+    void add_binding(uint32_t binding, VkShaderStageFlags stageFlags, VkDescriptorType descriptorType, uint32_t setIndex) {
+        auto& bindings = descriptor_bindings_[setIndex];
+
+        auto it = std::ranges::find(bindings, binding, &VkDescriptorSetLayoutBinding::binding);
+        if (it != bindings.end()) {
+            it->stageFlags |= stageFlags;
+            return;
+        }
+
+        bindings.push_back({
+            .binding = binding,
+            .descriptorType = descriptorType,
+            .descriptorCount = 1,
+            .stageFlags = stageFlags,
+            .pImmutableSamplers = nullptr
+        });
+    }
+
+    void add_push_constant(uint32_t size, VkShaderStageFlags stageFlags) {
+        push_constant_ranges_.push_back({
+            .stageFlags = stageFlags,
+            .offset = 0,
+            .size = size
+        });
+    }
+
+    // One VkDescriptorSetLayout per set index up to the highest one used; gap
+    // set indices get an empty layout so shader set numbers stay meaningful.
+    // Partially created layouts are the caller's guard's problem.
+    std::expected<void, Error> create_set_layouts(
+        Context& context,
+        std::vector<VkDescriptorSetLayout>& layouts,
+        std::map<uint32_t, Pipeline::BindingTypeMap>& bindingTypes) const
+    {
+        if (descriptor_bindings_.empty()) {
+            return {};
+        }
+
+        // Parenthesised to dodge the max() macro from <windows.h>.
+        const uint32_t maxSetIndex = (std::ranges::max)(descriptor_bindings_ | std::views::keys);
+
+        for (uint32_t s = 0; s <= maxSetIndex; s++) {
+            auto it = descriptor_bindings_.find(s);
+            const bool has_bindings = it != descriptor_bindings_.end() && !it->second.empty();
+
+            VkDescriptorSetLayoutCreateInfo layoutInfo{
+                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .bindingCount = has_bindings ? static_cast<uint32_t>(it->second.size()) : 0,
+                .pBindings = has_bindings ? it->second.data() : nullptr
+            };
+
+            VkDescriptorSetLayout layout;
+            if (auto e = check(vkCreateDescriptorSetLayout(context.device(), &layoutInfo, nullptr, &layout),
+                               "create descriptor set layout for set " + std::to_string(s))) {
+                return std::unexpected(*e);
+            }
+            layouts.push_back(layout);
+
+            if (has_bindings) {
+                Pipeline::BindingTypeMap btm;
+                for (const auto& b : it->second) {
+                    btm[b.binding] = b.descriptorType;
+                }
+                bindingTypes[s] = std::move(btm);
+            }
+        }
+        return {};
+    }
+
+    std::expected<VkPipelineLayout, Error> create_layout(Context& context, const std::vector<VkDescriptorSetLayout>& layouts) const {
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .setLayoutCount = static_cast<uint32_t>(layouts.size()),
+            .pSetLayouts = layouts.empty() ? nullptr : layouts.data(),
+            .pushConstantRangeCount = static_cast<uint32_t>(push_constant_ranges_.size()),
+            .pPushConstantRanges = push_constant_ranges_.data()
+        };
+
+        VkPipelineLayout pipelineLayout;
+        if (auto e = check(vkCreatePipelineLayout(context.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout),
+                           "create pipeline layout")) {
+            return std::unexpected(*e);
+        }
+        return pipelineLayout;
+    }
+
+    VkShaderStageFlags push_constant_stages() const {
+        return std::ranges::fold_left(
+            push_constant_ranges_ | std::views::transform(&VkPushConstantRange::stageFlags),
+            VkShaderStageFlags{0}, std::bit_or{});
+    }
+
+private:
+    std::vector<VkPushConstantRange> push_constant_ranges_;
+    std::map<uint32_t, std::vector<VkDescriptorSetLayoutBinding>> descriptor_bindings_;
+};
+
+class GraphicsPipelineBuilder {
+public:
+    GraphicsPipelineBuilder(Context& context) : context_(context) {}
 
     // Chained setters use C++23 deducing this: the object parameter's value
     // category is forwarded, so a chain on a temporary builder moves instead of
     // pinning an lvalue. The pybind layer binds these through lambdas — an
-    // explicit object parameter turns &PipelineBuilder::vertex_shader into a
+    // explicit object parameter turns &GraphicsPipelineBuilder::vertex_shader into a
     // plain function-pointer type that .def() would misread.
 
     template <typename Self>
@@ -201,29 +323,33 @@ public:
     }
 
     template <typename Self>
+    Self&& topology(this Self&& self, Topology topology) {
+        self.topology_ = topology;
+        return std::forward<Self>(self);
+    }
+
+    template <typename Self>
     Self&& push_constant(this Self&& self, uint32_t size, ShaderStage stage) {
-        VkPushConstantRange range{
-            .stageFlags = static_cast<VkShaderStageFlags>(to_vk(stage)),
-            .offset = 0,
-            .size = size
-        };
-        self.push_constant_ranges_.push_back(range);
+        self.layout_.add_push_constant(size, static_cast<VkShaderStageFlags>(to_vk(stage)));
         return std::forward<Self>(self);
     }
 
     template <typename Self>
     Self&& uniform_buffer(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set) {
-        return std::forward<Self>(self).add_descriptor_binding_(binding, stage, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, set);
+        self.layout_.add_binding(binding, static_cast<VkShaderStageFlags>(to_vk(stage)), VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, set);
+        return std::forward<Self>(self);
     }
 
     template <typename Self>
     Self&& storage_buffer(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set) {
-        return std::forward<Self>(self).add_descriptor_binding_(binding, stage, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, set);
+        self.layout_.add_binding(binding, static_cast<VkShaderStageFlags>(to_vk(stage)), VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, set);
+        return std::forward<Self>(self);
     }
 
     template <typename Self>
     Self&& texture(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set) {
-        return std::forward<Self>(self).add_descriptor_binding_(binding, stage, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, set);
+        self.layout_.add_binding(binding, static_cast<VkShaderStageFlags>(to_vk(stage)), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, set);
+        return std::forward<Self>(self);
     }
 
     // Build the pipeline with explicit color/depth formats (decoupled from renderer)
@@ -254,7 +380,7 @@ public:
                 vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
             }
         });
-        if (auto r = create_set_layouts_(descriptorSetLayouts, allBindingTypes); !r) {
+        if (auto r = layout_.create_set_layouts(context_, descriptorSetLayouts, allBindingTypes); !r) {
             return std::unexpected(r.error());
         }
 
@@ -273,7 +399,7 @@ public:
             .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
-            .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            .topology = to_vk(topology_),
             .primitiveRestartEnable = VK_FALSE
         };
 
@@ -332,7 +458,7 @@ public:
 
         const VkPipelineDepthStencilStateCreateInfo depthStencil = depth_stencil_state_();
 
-        auto layout = create_layout_(descriptorSetLayouts);
+        auto layout = layout_.create_layout(context_, descriptorSetLayouts);
         if (!layout) {
             return std::unexpected(layout.error());
         }
@@ -383,17 +509,13 @@ public:
             return std::unexpected(*e);
         }
 
-        const VkShaderStageFlags push_stages = std::ranges::fold_left(
-            push_constant_ranges_ | std::views::transform(&VkPushConstantRange::stageFlags),
-            VkShaderStageFlags{0}, std::bit_or{});
-
         // Everything now belongs to the Pipeline.
         cleanup_layouts.release();
         cleanup_pipeline_layout.release();
 
         return std::make_shared<Pipeline>(context_.shared_from_this(), graphicsPipeline, pipelineLayout,
                                           std::move(descriptorSetLayouts), std::move(allBindingTypes),
-                                          push_stages, VK_PIPELINE_BIND_POINT_GRAPHICS);
+                                          layout_.push_constant_stages(), VK_PIPELINE_BIND_POINT_GRAPHICS);
     }
 
     // Convenience overload: a RenderTarget already knows its own formats, so the
@@ -435,50 +557,6 @@ private:
             });
         }
         return stages;
-    }
-
-    // One VkDescriptorSetLayout per set index up to the highest one used; gap
-    // set indices get an empty layout so shader set numbers stay meaningful.
-    // Partially created layouts are the caller's guard's problem.
-    std::expected<void, Error> create_set_layouts_(
-        std::vector<VkDescriptorSetLayout>& layouts,
-        std::map<uint32_t, Pipeline::BindingTypeMap>& bindingTypes)
-    {
-        if (descriptor_bindings_.empty()) {
-            return {};
-        }
-
-        // Parenthesised to dodge the max() macro from <windows.h>.
-        const uint32_t maxSetIndex = (std::ranges::max)(descriptor_bindings_ | std::views::keys);
-
-        for (uint32_t s = 0; s <= maxSetIndex; s++) {
-            auto it = descriptor_bindings_.find(s);
-            const bool has_bindings = it != descriptor_bindings_.end() && !it->second.empty();
-
-            VkDescriptorSetLayoutCreateInfo layoutInfo{
-                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                .pNext = nullptr,
-                .flags = 0,
-                .bindingCount = has_bindings ? static_cast<uint32_t>(it->second.size()) : 0,
-                .pBindings = has_bindings ? it->second.data() : nullptr
-            };
-
-            VkDescriptorSetLayout layout;
-            if (auto e = check(vkCreateDescriptorSetLayout(context_.device(), &layoutInfo, nullptr, &layout),
-                               "create descriptor set layout for set " + std::to_string(s))) {
-                return std::unexpected(*e);
-            }
-            layouts.push_back(layout);
-
-            if (has_bindings) {
-                Pipeline::BindingTypeMap btm;
-                for (const auto& b : it->second) {
-                    btm[b.binding] = b.descriptorType;
-                }
-                bindingTypes[s] = std::move(btm);
-            }
-        }
-        return {};
     }
 
     struct VertexInput {
@@ -576,48 +654,6 @@ private:
         };
     }
 
-    std::expected<VkPipelineLayout, Error> create_layout_(const std::vector<VkDescriptorSetLayout>& layouts) {
-        VkPipelineLayoutCreateInfo pipelineLayoutInfo{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .setLayoutCount = static_cast<uint32_t>(layouts.size()),
-            .pSetLayouts = layouts.empty() ? nullptr : layouts.data(),
-            .pushConstantRangeCount = static_cast<uint32_t>(push_constant_ranges_.size()),
-            .pPushConstantRanges = push_constant_ranges_.data()
-        };
-
-        VkPipelineLayout pipelineLayout;
-        if (auto e = check(vkCreatePipelineLayout(context_.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout),
-                           "create pipeline layout")) {
-            return std::unexpected(*e);
-        }
-        return pipelineLayout;
-    }
-
-    template <typename Self>
-    Self&& add_descriptor_binding_(this Self&& self, uint32_t binding, ShaderStage stage, VkDescriptorType descriptorType, uint32_t setIndex) {
-        VkShaderStageFlags stageFlag = static_cast<VkShaderStageFlags>(to_vk(stage));
-
-        auto& bindings = self.descriptor_bindings_[setIndex];
-
-        auto it = std::ranges::find(bindings, binding, &VkDescriptorSetLayoutBinding::binding);
-        if (it != bindings.end()) {
-            it->stageFlags |= stageFlag;
-            return std::forward<Self>(self);
-        }
-
-        VkDescriptorSetLayoutBinding layoutBinding{
-            .binding = binding,
-            .descriptorType = descriptorType,
-            .descriptorCount = 1,
-            .stageFlags = stageFlag,
-            .pImmutableSamplers = nullptr
-        };
-        bindings.push_back(layoutBinding);
-        return std::forward<Self>(self);
-    }
-
     Context& context_;
     std::shared_ptr<ShaderModule> vertex_shader_;
     std::shared_ptr<ShaderModule> fragment_shader_;
@@ -626,6 +662,105 @@ private:
     CullMode cull_mode_ = CullMode::BACK;
     FrontFace front_face_ = FrontFace::COUNTER_CLOCKWISE;
     bool blend_enable_ = false;
-    std::vector<VkPushConstantRange> push_constant_ranges_;
-    std::map<uint32_t, std::vector<VkDescriptorSetLayoutBinding>> descriptor_bindings_;
+    Topology topology_ = Topology::TRIANGLE_LIST;
+    PipelineLayoutBuilder layout_;
+};
+
+// Compute pipelines get their own builder instead of extra methods on the
+// graphics one: a single builder where vertex_shader() and a compute shader
+// coexist has illegal states, and the split is what lets storage_buffer()
+// and push_constant() drop the stage argument — compute has exactly one stage.
+class ComputePipelineBuilder {
+public:
+    ComputePipelineBuilder(Context& context) : context_(context) {}
+
+    template <typename Self>
+    Self&& shader(this Self&& self, std::shared_ptr<ShaderModule> shader) {
+        self.shader_ = std::move(shader);
+        return std::forward<Self>(self);
+    }
+
+    template <typename Self>
+    Self&& uniform_buffer(this Self&& self, uint32_t binding, uint32_t set) {
+        self.layout_.add_binding(binding, VK_SHADER_STAGE_COMPUTE_BIT, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, set);
+        return std::forward<Self>(self);
+    }
+
+    template <typename Self>
+    Self&& storage_buffer(this Self&& self, uint32_t binding, uint32_t set) {
+        self.layout_.add_binding(binding, VK_SHADER_STAGE_COMPUTE_BIT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, set);
+        return std::forward<Self>(self);
+    }
+
+    template <typename Self>
+    Self&& push_constant(this Self&& self, uint32_t size) {
+        self.layout_.add_push_constant(size, VK_SHADER_STAGE_COMPUTE_BIT);
+        return std::forward<Self>(self);
+    }
+
+    // No target argument: compute has no attachments.
+    std::expected<std::shared_ptr<Pipeline>, Error> build() {
+        if (!shader_) {
+            return std::unexpected(err_shader("A compute shader must be provided"));
+        }
+
+        std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
+        std::map<uint32_t, Pipeline::BindingTypeMap> allBindingTypes;
+        ScopeGuard cleanup_layouts([&] {
+            for (auto dl : descriptorSetLayouts) {
+                vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
+            }
+        });
+        if (auto r = layout_.create_set_layouts(context_, descriptorSetLayouts, allBindingTypes); !r) {
+            return std::unexpected(r.error());
+        }
+
+        auto layout = layout_.create_layout(context_, descriptorSetLayouts);
+        if (!layout) {
+            return std::unexpected(layout.error());
+        }
+        VkPipelineLayout pipelineLayout = layout.value();
+        ScopeGuard cleanup_pipeline_layout([&] {
+            vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr);
+        });
+
+        VkComputePipelineCreateInfo pipelineInfo{
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .stage = {
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                .module = shader_->get(),
+                .pName = "main",
+                .pSpecializationInfo = nullptr
+            },
+            .layout = pipelineLayout,
+            .basePipelineHandle = VK_NULL_HANDLE,
+            .basePipelineIndex = -1
+        };
+
+        VkPipeline computePipeline;
+        // ErrorCode::Shader for the same reason as graphics: a pipeline that
+        // fails to build is a shader/state mismatch the caller can fix and
+        // retry, and hot reload (0.8) depends on catching exactly that.
+        if (auto e = check(vkCreateComputePipelines(context_.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline),
+                           "create compute pipeline", ErrorCode::Shader)) {
+            return std::unexpected(*e);
+        }
+
+        cleanup_layouts.release();
+        cleanup_pipeline_layout.release();
+
+        return std::make_shared<Pipeline>(context_.shared_from_this(), computePipeline, pipelineLayout,
+                                          std::move(descriptorSetLayouts), std::move(allBindingTypes),
+                                          layout_.push_constant_stages(), VK_PIPELINE_BIND_POINT_COMPUTE);
+    }
+
+private:
+    Context& context_;
+    std::shared_ptr<ShaderModule> shader_;
+    PipelineLayoutBuilder layout_;
 };

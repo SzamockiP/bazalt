@@ -103,7 +103,7 @@ class DemoApp:
         frag_spv = self.ctx.compile_shader(os.path.join(script_dir, "model.frag"), bz.ShaderStage.FRAGMENT)
 
         # Create a graphics pipeline using a builder pattern
-        self.pipeline = (self.ctx.pipeline_builder()
+        self.pipeline = (self.ctx.graphics_pipeline()
             .vertex_shader(vert_spv)
             .fragment_shader(frag_spv)
             .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT2, bz.VertexFormat.FLOAT3])

@@ -18,7 +18,7 @@ frag_spv = ctx.compile_shader("quad_tex.frag", bz.ShaderStage.FRAGMENT)
 texture = ctx.load_image("../assets/wall.png")
 
 # Build pipeline: Position (FLOAT2) + UV (FLOAT2)
-pipeline = (ctx.pipeline_builder()
+pipeline = (ctx.graphics_pipeline()
     .vertex_shader(vert_spv)
     .fragment_shader(frag_spv)
     .vertex_format([bz.VertexFormat.FLOAT2, bz.VertexFormat.FLOAT2])

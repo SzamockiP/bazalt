@@ -38,6 +38,10 @@ def test_removed_names_are_gone_from_the_stub():
     assert "class Texture" not in text, "Texture was split into Image + Sampler"
     assert "load_texture" not in text, "load_texture became load_image"
     assert "set_texture" not in text, "set_texture became set_image"
+    # 0.6: the builder split. Trailing colon/parenthesis on purpose —
+    # "PipelineBuilder" is a substring of "GraphicsPipelineBuilder".
+    assert "class PipelineBuilder:" not in text, "PipelineBuilder became GraphicsPipelineBuilder"
+    assert "def pipeline_builder" not in text, "pipeline_builder became graphics_pipeline"
 
 
 def test_renamed_and_new_api_is_declared():
@@ -49,7 +53,11 @@ def test_renamed_and_new_api_is_declared():
                      # 0.5
                      "class Format(", "class Image", "class Sampler",
                      "class Frame", "def load_image", "def create_image",
-                     "def create_sampler", "def set_image"):
+                     "def create_sampler", "def set_image",
+                     # 0.6
+                     "class GraphicsPipelineBuilder:", "class ComputePipelineBuilder:",
+                     "def graphics_pipeline", "def compute_pipeline",
+                     "class Topology(", "def topology"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 

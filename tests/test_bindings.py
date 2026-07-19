@@ -48,7 +48,7 @@ def test_plain_draw_renders(ctx, triangle_shaders, triangle_buffers):
     vert, frag = triangle_shaders
     vbuf, _ = triangle_buffers
     target = bz.RenderTarget(ctx, 64, 64)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
@@ -70,7 +70,7 @@ def test_plain_draw_renders(ctx, triangle_shaders, triangle_buffers):
 def test_push_constants_reach_the_shader(ctx, fullscreen_vert):
     frag = ctx.compile_shader(str(SHADER_DIR / "push.frag"), bz.ShaderStage.FRAGMENT)
     target = bz.RenderTarget(ctx, 64, 64)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(fullscreen_vert)
                 .fragment_shader(frag)
                 .push_constant(16, bz.ShaderStage.FRAGMENT)
@@ -97,7 +97,7 @@ def test_blend_composites_two_draws(ctx, fullscreen_vert):
     """
     frag = ctx.compile_shader(str(SHADER_DIR / "push.frag"), bz.ShaderStage.FRAGMENT)
     target = bz.RenderTarget(ctx, 64, 64)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(fullscreen_vert)
                 .fragment_shader(frag)
                 .push_constant(16, bz.ShaderStage.FRAGMENT)
@@ -130,7 +130,7 @@ def test_uniform_buffer_via_frame_descriptor_set(ctx, fullscreen_vert):
     """
     frag = ctx.compile_shader(str(SHADER_DIR / "ubo.frag"), bz.ShaderStage.FRAGMENT)
     target = bz.RenderTarget(ctx, 64, 64)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(fullscreen_vert)
                 .fragment_shader(frag)
                 .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
@@ -165,7 +165,7 @@ def test_uniform_buffer_via_frame_descriptor_set(ctx, fullscreen_vert):
 def test_storage_buffer_read_in_fragment_shader(ctx, fullscreen_vert, usage):
     frag = ctx.compile_shader(str(SHADER_DIR / "ssbo.frag"), bz.ShaderStage.FRAGMENT)
     target = bz.RenderTarget(ctx, 64, 64)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(fullscreen_vert)
                 .fragment_shader(frag)
                 .storage_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
@@ -232,7 +232,7 @@ def test_texture_is_sampled(ctx, fullscreen_vert, tmp_path):
     # 62, not 64: pixel centres (15.5/62, 46.5/62) land exactly on uv 0.25/0.75,
     # i.e. on texel centres, where linear filtering contributes nothing.
     target = bz.RenderTarget(ctx, 62, 62)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(fullscreen_vert)
                 .fragment_shader(frag)
                 .texture(0, bz.ShaderStage.FRAGMENT, set=0)
@@ -266,7 +266,7 @@ def test_set_image_on_buffer_binding_points_to_set_buffer(ctx, fullscreen_vert, 
 
     frag = ctx.compile_shader(str(SHADER_DIR / "ubo.frag"), bz.ShaderStage.FRAGMENT)
     target = bz.RenderTarget(ctx, 16, 16)
-    pipeline = (ctx.pipeline_builder()
+    pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(fullscreen_vert)
                 .fragment_shader(frag)
                 .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
