@@ -474,13 +474,21 @@ private:
 				// layer does not track shader descriptor accesses at all, so a
 				// missing barrier between two dispatches goes UNREPORTED — which
 				// would make the whole Sync mode a placebo.
-				static const VkBool32 syncval_shader_accesses = VK_TRUE;
-				inst_builder.add_layer_setting(VkLayerSettingEXT{
-					.pLayerName = "VK_LAYER_KHRONOS_validation",
-					.pSettingName = "syncval_shader_accesses_heuristic",
-					.type = VK_LAYER_SETTING_TYPE_BOOL32_EXT,
-					.valueCount = 1,
-					.pValues = &syncval_shader_accesses });
+				//
+				// Gated on the extension: add_layer_setting() hard-requires
+				// VK_EXT_layer_settings, and older layers (e.g. Ubuntu's apt
+				// package) neither expose it nor need it — there the shader
+				// accesses are tracked by default and the setting doesn't exist.
+				if (system_info->is_extension_available(VK_EXT_LAYER_SETTINGS_EXTENSION_NAME))
+				{
+					static const VkBool32 syncval_shader_accesses = VK_TRUE;
+					inst_builder.add_layer_setting(VkLayerSettingEXT{
+						.pLayerName = "VK_LAYER_KHRONOS_validation",
+						.pSettingName = "syncval_shader_accesses_heuristic",
+						.type = VK_LAYER_SETTING_TYPE_BOOL32_EXT,
+						.valueCount = 1,
+						.pValues = &syncval_shader_accesses });
+				}
 			}
 
 			inst_builder
