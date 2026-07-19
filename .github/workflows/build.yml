@@ -104,10 +104,16 @@ jobs:
 
       # libvulkan1 is the Vulkan LOADER — mesa-vulkan-drivers ships only the
       # ICD, and without the loader every vkCreateInstance fails.
+      # Validation layers come from LunarG's repo, not Ubuntu's: noble's
+      # 1.3.275 layer does not report shader-access sync hazards at all, which
+      # silently guts the manual-barrier negative test.
       - name: Install lavapipe + validation layers
         run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc >/dev/null
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-noble.list https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
           sudo apt-get update
           sudo apt-get install -y libvulkan1 mesa-vulkan-drivers vulkan-validationlayers vulkan-tools
+          dpkg -s vulkan-validationlayers | grep -E "^Version"
 
       # Asked of the package, not hardcoded: the manifest's location has
       # already moved between Ubuntu releases.
