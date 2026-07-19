@@ -237,7 +237,9 @@ SYNC_SCRIPT = textwrap.dedent("""
 
     @log.on_message
     def _(msg):
-        if msg.source == bz.Source.VALIDATION and "hazard detected" in msg.text:
+        # "hazard detected" on recent layers, "Hazard WRITE_AFTER_WRITE" on
+        # older ones (e.g. the apt vulkan-validationlayers in CI).
+        if msg.source == bz.Source.VALIDATION and "hazard" in msg.text.lower():
             hazards.append(msg.text)
 
     ctx = bz.Context(log, validation="sync", auto_barriers=auto)
