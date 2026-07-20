@@ -540,6 +540,16 @@ PYBIND11_MODULE(_core, m) {
         .value("CLAMP", AddressMode::CLAMP)
         .value("MIRROR", AddressMode::MIRROR);
 
+    py::enum_<CompareOp>(m, "CompareOp")
+        .value("NEVER", CompareOp::NEVER)
+        .value("LESS", CompareOp::LESS)
+        .value("EQUAL", CompareOp::EQUAL)
+        .value("LESS_OR_EQUAL", CompareOp::LESS_OR_EQUAL)
+        .value("GREATER", CompareOp::GREATER)
+        .value("NOT_EQUAL", CompareOp::NOT_EQUAL)
+        .value("GREATER_OR_EQUAL", CompareOp::GREATER_OR_EQUAL)
+        .value("ALWAYS", CompareOp::ALWAYS);
+
     py::enum_<CullMode>(m, "CullMode")
         .value("NONE", CullMode::NONE)
         .value("BACK", CullMode::BACK)
@@ -593,7 +603,14 @@ PYBIND11_MODULE(_core, m) {
             return out;
         }, py::arg("dtype"));
     
-    py::class_<ShaderModule, std::shared_ptr<ShaderModule>>(m, "ShaderModule");
+    py::class_<ShaderModule, std::shared_ptr<ShaderModule>>(m, "ShaderModule")
+        .def_property_readonly("path", &ShaderModule::path)
+        .def_property_readonly("includes", &ShaderModule::includes)
+        .def_property_readonly("spirv", [](const ShaderModule& self) {
+            const auto& words = self.spirv();
+            return py::bytes(reinterpret_cast<const char*>(words.data()),
+                             words.size() * sizeof(uint32_t));
+        });
 
     // Image + Sampler replace the old Texture, which fused VkImage, view and a
     // per-texture sampler into one object. Samplers are cached on the Context;
@@ -918,9 +935,11 @@ PYBIND11_MODULE(_core, m) {
         .def("compute_pipeline", [](Context& self) -> std::shared_ptr<ComputePipelineBuilder> {
             return std::make_shared<ComputePipelineBuilder>(self);
         })
-        .def("compile_shader", [](Context& self, const std::string& path, ShaderStage stage) -> py::object {
-            return py::cast(unwrap(ShaderCompiler::compile(self, path, stage), self.logger().get()));
-        }, py::arg("path"), py::arg("stage"))
+        .def("compile_shader", [](Context& self, const std::string& path, ShaderStage stage,
+                                  std::optional<std::string> source) -> py::object {
+            return py::cast(unwrap(ShaderCompiler::compile(self, path, stage, std::move(source)),
+                                   self.logger().get()));
+        }, py::arg("path"), py::arg("stage"), py::kw_only(), py::arg("source") = py::none())
         .def("load_image", [](Context& self, const std::string& path) -> py::object {
             // sRGB with a full mip chain: files are pictures. Arrays go through
             // create_image and stay UNORM: arrays are data.
@@ -1001,12 +1020,13 @@ PYBIND11_MODULE(_core, m) {
                 Image::create_from_pixels(self, info.ptr, width, height, *format),
                 self.logger().get()));
         }, py::arg("array"))
-        .def("create_sampler", [](Context& self, Filter filter, AddressMode address_mode, bool anisotropy) -> py::object {
+        .def("create_sampler", [](Context& self, Filter filter, AddressMode address_mode, bool anisotropy,
+                                  std::optional<CompareOp> compare) -> py::object {
             // Cached: identical descriptions return the identical object.
-            return py::cast(unwrap(self.get_sampler(SamplerDesc{ filter, address_mode, anisotropy }),
+            return py::cast(unwrap(self.get_sampler(SamplerDesc{ filter, address_mode, anisotropy, compare }),
                                    self.logger().get()));
         }, py::arg("filter") = Filter::LINEAR, py::arg("address_mode") = AddressMode::REPEAT,
-           py::arg("anisotropy") = true)
+           py::arg("anisotropy") = true, py::arg("compare") = py::none())
         .def("create_descriptor_pool", [](Context& self, uint32_t maxSets, uint32_t samplers, uint32_t uniformBuffers, uint32_t storageBuffers) -> py::object {
             return py::cast(unwrap(
                 DescriptorPool::create(self, maxSets, samplers, uniformBuffers, storageBuffers),
@@ -1088,13 +1108,18 @@ PYBIND11_MODULE(_core, m) {
     // ── SwapchainRenderer ──
     // Inherits RenderTarget: presenting to a window is one way to consume a
     // rendered image, not the definition of rendering.
+    py::enum_<PresentMode>(m, "PresentMode")
+        .value("FIFO", PresentMode::FIFO)
+        .value("MAILBOX", PresentMode::MAILBOX)
+        .value("IMMEDIATE", PresentMode::IMMEDIATE);
+
     py::class_<SwapchainRenderer, RenderTarget, std::shared_ptr<SwapchainRenderer>>(m, "SwapchainRenderer")
-        .def(py::init([](Window& window, std::shared_ptr<Context> context) {
+        .def(py::init([](Window& window, std::shared_ptr<Context> context, PresentMode present_mode) {
             auto sp = window.get_surface_provider();
             return std::shared_ptr<SwapchainRenderer>(
-                unwrap(SwapchainRenderer::create(context, std::move(sp)), context->logger().get()));
-        }), py::arg("window"), py::arg("context"))
-        .def(py::init([](uint64_t hwnd, std::shared_ptr<Context> context) -> std::shared_ptr<SwapchainRenderer> {
+                unwrap(SwapchainRenderer::create(context, std::move(sp), present_mode), context->logger().get()));
+        }), py::arg("window"), py::arg("context"), py::arg("present_mode") = PresentMode::MAILBOX)
+        .def(py::init([](uint64_t hwnd, std::shared_ptr<Context> context, PresentMode present_mode) -> std::shared_ptr<SwapchainRenderer> {
 #ifdef _WIN32
             SurfaceProvider sp;
             sp.required_instance_extensions = { "VK_KHR_surface", "VK_KHR_win32_surface" };
@@ -1144,11 +1169,12 @@ PYBIND11_MODULE(_core, m) {
             };
             
             return std::shared_ptr<SwapchainRenderer>(
-                unwrap(SwapchainRenderer::create(context, std::move(sp)), context->logger().get()));
+                unwrap(SwapchainRenderer::create(context, std::move(sp), present_mode), context->logger().get()));
 #else
             raise_error(err_window("win32_hwnd constructor is only supported on Windows"));
 #endif
-        }), py::arg("win32_hwnd"), py::arg("context"))
+        }), py::arg("win32_hwnd"), py::arg("context"), py::arg("present_mode") = PresentMode::MAILBOX)
+        .def_property_readonly("present_mode", &SwapchainRenderer::present_mode)
         // Frame | None instead of bool: "the frame exists" and "here is the
         // frame" are the same fact, so return it. renderer.submit is gone —
         // submitting lives on the Frame you were handed.

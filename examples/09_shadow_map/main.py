@@ -97,7 +97,11 @@ shadow_set.set_buffer(0, ubuf)
 scene_set = pool.allocate_frame_set(scene_pipe, set=0)
 scene_set.set_buffer(0, ubuf)
 # NEAREST: linear filtering of depth formats is not universally supported.
-scene_set.set_image(1, shadow.depth, sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
+# LINEAR + compare = hardware PCF: the sampler compares the reference depth
+# against the four nearest texels and filters the RESULTS, softening the edge.
+# (Linear filtering of depth formats is a format feature — fine on desktop GPUs.)
+scene_set.set_image(1, shadow.depth, sampler=ctx.create_sampler(
+    filter=bz.Filter.LINEAR, compare=bz.CompareOp.LESS))
 
 # The light never moves; its matrix is computed once.
 light_proj = glm.orthoRH_ZO(-3.0, 3.0, -3.0, 3.0, 0.1, 10.0)

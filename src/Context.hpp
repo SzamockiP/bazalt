@@ -385,8 +385,8 @@ public:
 			.mipLodBias = 0.0f,
 			.anisotropyEnable = anisotropy ? VK_TRUE : VK_FALSE,
 			.maxAnisotropy = anisotropy ? 16.0f : 1.0f,
-			.compareEnable = VK_FALSE,
-			.compareOp = VK_COMPARE_OP_ALWAYS,
+			.compareEnable = desc.compare ? VK_TRUE : VK_FALSE,
+			.compareOp = desc.compare ? to_vk(*desc.compare) : VK_COMPARE_OP_ALWAYS,
 			.minLod = 0.0f,
 			// The whole mip chain. The old per-texture sampler had maxLod = 0,
 			// which would have clamped every mip away the moment mips existed.
