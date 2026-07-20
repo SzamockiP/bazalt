@@ -31,6 +31,8 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     Format,
     Filter,
     AddressMode,
+    CompareOp,
+    PresentMode,
     CullMode,
     FrontFace,
     MemoryUsage,
@@ -46,7 +48,7 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     ResourceError,
 )
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     # Core
@@ -81,6 +83,8 @@ __all__ = [
     "Format",
     "Filter",
     "AddressMode",
+    "CompareOp",
+    "PresentMode",
     "CullMode",
     "FrontFace",
     "MemoryUsage",

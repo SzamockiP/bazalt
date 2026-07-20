@@ -5,6 +5,59 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.7.0] — 2026-07-20
+
+"Shader Toolbox": every way a shader can arrive is now one function.
+`compile_shader(path, stage, source=...)` — the extension of `path`
+decides the language (`.hlsl`) or format (`.spv`), `source=` compiles
+a string with `path` as a virtual name. GLSL `#include` works and the
+pulled-in files are recorded per module — the contract the 0.8 hot
+reload watcher will consume. Plus two small additions: compare
+samplers (hardware PCF) and a present-mode knob on the swapchain.
+
+### Added
+- **In-memory compilation.** `ctx.compile_shader("name.frag", stage,
+  source=text)` — no file on disk; the virtual name still supplies the
+  language, `ShaderError.path`, and the `#include` base directory.
+- **GLSL `#include`.** Both `"..."` and `<...>` resolve relative to
+  the directory of the *including* file, recursively. The files used
+  are recorded in **`ShaderModule.includes`** (absolute, normalized).
+  A missing include is a `ShaderError` — the compiler discovered it —
+  while a missing top-level file stays a `ResourceError`.
+- **Prebuilt `.spv` loading.** `compile_shader("shader.spv", stage)`
+  loads the binary, checks the SPIR-V magic, and verifies `stage`
+  against the module's `OpEntryPoint`s — binding a fragment binary as
+  VERTEX is one readable error instead of a validation storm.
+- **HLSL.** `.hlsl` extension selects the language; entry point is
+  `main`, one file per stage. Use `[[vk::binding(n, set)]]` on
+  resources — bare `register()` piles into one Vulkan binding space.
+- **`ShaderModule.path` / `.includes` / `.spirv`** — the module knows
+  what it was built from, and `.spirv` round-trips: write it to a file
+  and `compile_shader("*.spv", stage)` loads it back.
+- **Compare samplers.** `ctx.create_sampler(compare=bz.CompareOp.LESS)`
+  → GLSL `sampler2DShadow`; reads return the comparison result and
+  LINEAR filtering averages four results — free hardware PCF. New
+  `bz.CompareOp` enum (full eight VkCompareOp values). Example
+  `09_shadow_map` now uses it.
+- **Present mode.** `bz.SwapchainRenderer(window, ctx,
+  present_mode=bz.PresentMode.FIFO)` — `FIFO` (vsync), `MAILBOX`
+  (default preference, uncapped, no tearing), `IMMEDIATE` (uncapped,
+  for measurements). Unsupported modes fall back to FIFO with an Info
+  log — never an error (FIFO is the only spec-guaranteed mode).
+  `renderer.present_mode` reports the mode actually in use, and the
+  preference is re-negotiated on every swapchain recreation.
+
+### Changed
+- **`ShaderError.path` now names the file the error is actually in** —
+  with includes, that can be the included `.glsl`, not the top-level
+  shader. `.line` is the line within that file. (Previously: always
+  the top-level path.)
+
+### Notes
+- Backlog 0.5 (async headless submit, async `StaticBuffer`,
+  per-attachment clears, `upload_progress` semantics) deferred again
+  in full — nothing in this release needs it; triage returns in 0.8.
+
 ## [0.6.0] — 2026-07-19
 
 "Compute": compute pipelines with automatic barriers. Compute is a

@@ -171,6 +171,31 @@ class AddressMode(IntEnum):
     CLAMP = 1
     MIRROR = 2
 
+class CompareOp(IntEnum):
+    """Comparison for compare samplers (sampler2DShadow), 1:1 with VkCompareOp.
+
+    The sampler returns the comparison RESULT (1.0 = pass): with LESS, 1.0
+    where the reference depth is closer than the stored texel. LINEAR filtering
+    on a compare sampler averages four results — hardware PCF."""
+    NEVER = 0
+    LESS = 1
+    EQUAL = 2
+    LESS_OR_EQUAL = 3
+    GREATER = 4
+    NOT_EQUAL = 5
+    GREATER_OR_EQUAL = 6
+    ALWAYS = 7
+
+class PresentMode(IntEnum):
+    """How presentation paces the frame loop.
+
+    FIFO is vsync and the only mode Vulkan guarantees; MAILBOX (the default
+    preference) and IMMEDIATE fall back to FIFO with an Info log when the
+    surface cannot do them."""
+    FIFO = 0
+    MAILBOX = 1
+    IMMEDIATE = 2
+
 class CullMode(IntEnum):
     NONE = 0
     BACK = 1
@@ -215,7 +240,24 @@ class Buffer:
         """
         ...
 
-class ShaderModule: ...
+class ShaderModule:
+    """A compiled (or loaded) shader. See Context.compile_shader."""
+    @property
+    def path(self) -> str:
+        """The source path — or the virtual name for in-memory sources."""
+        ...
+    @property
+    def includes(self) -> list[str]:
+        """Files pulled in via #include, absolute and normalized.
+
+        Empty for .spv modules and include-free sources. Together with `path`
+        this is the full file set the shader was built from."""
+        ...
+    @property
+    def spirv(self) -> bytes:
+        """The SPIR-V words. `open(p, "wb").write(shader.spirv)` produces a
+        file that compile_shader("*.spv", stage) loads back."""
+        ...
 
 class Image:
     """A GPU image: pixels + format. The sampler it used to be fused with is a
@@ -493,7 +535,30 @@ class Context:
 
     def graphics_pipeline(self) -> GraphicsPipelineBuilder: ...
     def compute_pipeline(self) -> ComputePipelineBuilder: ...
-    def compile_shader(self, path: str, stage: ShaderStage) -> ShaderModule: ...
+    def compile_shader(self, path: str, stage: ShaderStage, *,
+                       source: Optional[str] = None) -> ShaderModule:
+        """Compile or load a shader. One function for every form: the extension
+        of `path` decides how it is handled.
+
+        - `.hlsl` — HLSL (entry point `main`, one file per stage). Use
+          `[[vk::binding(n, set)]]` on resources; bare `register()` piles
+          everything into one Vulkan binding space.
+        - `.spv` — a prebuilt SPIR-V binary: loaded, not compiled. `stage` is
+          verified against the binary's entry points (ShaderError on mismatch).
+        - anything else — GLSL.
+
+        `source=` compiles the given string instead of reading a file; `path`
+        becomes a virtual name that still picks the language, tags diagnostics
+        (ShaderError.path) and anchors relative #include resolution (a name
+        with no directory resolves includes against the working directory).
+
+        GLSL `#include "x"` / `<x>` resolve relative to the directory of the
+        including file, recursively; the files used are recorded in
+        ShaderModule.includes. A missing top-level file is a ResourceError; a
+        missing include is a ShaderError (the compiler discovered it, and the
+        error is recoverable — fix the include and recompile).
+        """
+        ...
 
     def load_image(self, path: str) -> Image:
         """Decode an image file into an sRGB GPU image with a full mip chain.
@@ -533,7 +598,15 @@ class Context:
         ...
     def create_sampler(self, filter: Filter = Filter.LINEAR,
                        address_mode: AddressMode = AddressMode.REPEAT,
-                       anisotropy: bool = True) -> Sampler: ...
+                       anisotropy: bool = True,
+                       compare: Optional[CompareOp] = None) -> Sampler:
+        """Cached: identical descriptions return the identical object.
+
+        `compare=` makes a compare sampler (GLSL `sampler2DShadow`): reads
+        return the comparison result instead of the texel, and LINEAR filtering
+        becomes hardware PCF. (Linear filtering of depth formats is a format
+        feature — universal on desktop GPUs, not spec-guaranteed.)"""
+        ...
     def create_descriptor_pool(self, max_sets: int, samplers: int = 0,
                                uniform_buffers: int = 0,
                                storage_buffers: int = 0) -> DescriptorPool: ...
@@ -556,9 +629,16 @@ class Context:
 class SwapchainRenderer(RenderTargetBase):
     """Presents to a window. One implementation of a render target."""
 
-    def __init__(self, window: Window, context: Context) -> None: ...
-    def __init__(self, win32_hwnd: int, context: Context) -> None:
+    def __init__(self, window: Window, context: Context,
+                 present_mode: PresentMode = PresentMode.MAILBOX) -> None: ...
+    def __init__(self, win32_hwnd: int, context: Context,
+                 present_mode: PresentMode = PresentMode.MAILBOX) -> None:
         """Attach to an existing native window (Windows only)."""
+        ...
+
+    @property
+    def present_mode(self) -> PresentMode:
+        """The mode actually in use (post-fallback), not the requested one."""
         ...
 
     def begin_frame(self) -> Optional[Frame]:
