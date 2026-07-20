@@ -51,9 +51,31 @@ inline VkSurfaceFormatKHR choose_swap_surface_format(const std::vector<VkSurface
 	return it != availableFormats.end() ? *it : availableFormats[0];
 }
 
-inline VkPresentModeKHR choose_swap_present_mode(const std::vector<VkPresentModeKHR>& availablePresentModes) {
-	return std::ranges::contains(availablePresentModes, VK_PRESENT_MODE_MAILBOX_KHR)
-		? VK_PRESENT_MODE_MAILBOX_KHR
+// FIFO is the only mode the spec guarantees; the others are preferences that
+// fall back to FIFO (with an Info log) when the surface can't do them. An enum
+// rather than a vsync bool: a bool cannot spell IMMEDIATE, and a second knob
+// added later would be two ways to say one thing.
+enum class PresentMode {
+	FIFO,       // vsync — capped to refresh rate
+	MAILBOX,    // uncapped, no tearing (the default preference)
+	IMMEDIATE,  // uncapped, tearing possible; for measurements
+};
+
+inline constexpr VkPresentModeKHR to_vk(PresentMode mode) {
+	switch (mode) {
+		case PresentMode::FIFO:      return VK_PRESENT_MODE_FIFO_KHR;
+		case PresentMode::MAILBOX:   return VK_PRESENT_MODE_MAILBOX_KHR;
+		case PresentMode::IMMEDIATE: return VK_PRESENT_MODE_IMMEDIATE_KHR;
+	}
+	// Not std::unreachable(): pybind enums accept arbitrary ints.
+	return VK_PRESENT_MODE_FIFO_KHR;
+}
+
+inline VkPresentModeKHR choose_swap_present_mode(const std::vector<VkPresentModeKHR>& availablePresentModes,
+                                                 PresentMode preferred) {
+	const VkPresentModeKHR wanted = to_vk(preferred);
+	return std::ranges::contains(availablePresentModes, wanted)
+		? wanted
 		: VK_PRESENT_MODE_FIFO_KHR;
 }
 
@@ -74,7 +96,8 @@ inline VkExtent2D choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabilitie
 class SwapchainRenderer : public RenderTarget
 {
 public:
-	static std::expected<std::unique_ptr<SwapchainRenderer>, Error> create(std::shared_ptr<Context> context, SurfaceProvider surface_provider)
+	static std::expected<std::unique_ptr<SwapchainRenderer>, Error> create(std::shared_ptr<Context> context, SurfaceProvider surface_provider,
+	                                                                       PresentMode present_mode = PresentMode::MAILBOX)
 	{
 		if (!context->swapchain_supported())
 		{
@@ -97,6 +120,9 @@ public:
 		}
 
 		auto renderer = std::unique_ptr<SwapchainRenderer>(new SwapchainRenderer(context, std::move(surface_provider)));
+		// The PREFERENCE is stored, not the resolved mode: swapchain recreation
+		// re-negotiates, because availability can change with the surface.
+		renderer->preferred_present_mode_ = present_mode;
 
 		// Surface — created via the SurfaceProvider callback
 		VkSurfaceKHR surface = renderer->surface_provider_.create_surface(context->instance());
@@ -260,6 +286,17 @@ public:
 	std::uint32_t current_image_index() const { return image_index_; }
 	bool frame_skipped() const { return frame_skipped_; }
 
+	// The mode actually in use (post-fallback), not the requested preference.
+	PresentMode present_mode() const
+	{
+		switch (active_present_mode_)
+		{
+			case VK_PRESENT_MODE_MAILBOX_KHR:   return PresentMode::MAILBOX;
+			case VK_PRESENT_MODE_IMMEDIATE_KHR: return PresentMode::IMMEDIATE;
+			default:                            return PresentMode::FIFO;
+		}
+	}
+
 	void submit(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial = 0);
 
 	// Returns true if a frame was successfully acquired and is ready for rendering.
@@ -413,11 +450,19 @@ private:
 
 	bool frame_skipped_ = false;
 
+	PresentMode preferred_present_mode_ = PresentMode::MAILBOX;
+	VkPresentModeKHR active_present_mode_ = VK_PRESENT_MODE_FIFO_KHR;
+
 	std::expected<void, Error> create_swapchain_manually(int width, int height, VkSwapchainKHR old_swapchain = VK_NULL_HANDLE)
 	{
 		auto details = query_swapchain_support(context_->physical_device(), surface_);
 		auto surface_format = choose_swap_surface_format(details.formats);
-		auto present_mode = choose_swap_present_mode(details.present_modes);
+		auto present_mode = choose_swap_present_mode(details.present_modes, preferred_present_mode_);
+		if (present_mode != to_vk(preferred_present_mode_)) {
+			if (auto l = context_->logger()) l->log(Severity::Info, Source::Device,
+				"Requested present mode is not supported by this surface; falling back to FIFO (vsync)");
+		}
+		active_present_mode_ = present_mode;
 		auto extent = choose_swap_extent(details.capabilities, width, height);
 
 		uint32_t image_count = details.capabilities.minImageCount + 1;

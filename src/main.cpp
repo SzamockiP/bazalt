@@ -1108,13 +1108,18 @@ PYBIND11_MODULE(_core, m) {
     // ── SwapchainRenderer ──
     // Inherits RenderTarget: presenting to a window is one way to consume a
     // rendered image, not the definition of rendering.
+    py::enum_<PresentMode>(m, "PresentMode")
+        .value("FIFO", PresentMode::FIFO)
+        .value("MAILBOX", PresentMode::MAILBOX)
+        .value("IMMEDIATE", PresentMode::IMMEDIATE);
+
     py::class_<SwapchainRenderer, RenderTarget, std::shared_ptr<SwapchainRenderer>>(m, "SwapchainRenderer")
-        .def(py::init([](Window& window, std::shared_ptr<Context> context) {
+        .def(py::init([](Window& window, std::shared_ptr<Context> context, PresentMode present_mode) {
             auto sp = window.get_surface_provider();
             return std::shared_ptr<SwapchainRenderer>(
-                unwrap(SwapchainRenderer::create(context, std::move(sp)), context->logger().get()));
-        }), py::arg("window"), py::arg("context"))
-        .def(py::init([](uint64_t hwnd, std::shared_ptr<Context> context) -> std::shared_ptr<SwapchainRenderer> {
+                unwrap(SwapchainRenderer::create(context, std::move(sp), present_mode), context->logger().get()));
+        }), py::arg("window"), py::arg("context"), py::arg("present_mode") = PresentMode::MAILBOX)
+        .def(py::init([](uint64_t hwnd, std::shared_ptr<Context> context, PresentMode present_mode) -> std::shared_ptr<SwapchainRenderer> {
 #ifdef _WIN32
             SurfaceProvider sp;
             sp.required_instance_extensions = { "VK_KHR_surface", "VK_KHR_win32_surface" };
@@ -1164,11 +1169,12 @@ PYBIND11_MODULE(_core, m) {
             };
             
             return std::shared_ptr<SwapchainRenderer>(
-                unwrap(SwapchainRenderer::create(context, std::move(sp)), context->logger().get()));
+                unwrap(SwapchainRenderer::create(context, std::move(sp), present_mode), context->logger().get()));
 #else
             raise_error(err_window("win32_hwnd constructor is only supported on Windows"));
 #endif
-        }), py::arg("win32_hwnd"), py::arg("context"))
+        }), py::arg("win32_hwnd"), py::arg("context"), py::arg("present_mode") = PresentMode::MAILBOX)
+        .def_property_readonly("present_mode", &SwapchainRenderer::present_mode)
         // Frame | None instead of bool: "the frame exists" and "here is the
         // frame" are the same fact, so return it. renderer.submit is gone —
         // submitting lives on the Frame you were handed.
