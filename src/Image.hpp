@@ -463,10 +463,11 @@ public:
 		return out;
 	}
 
-	// Records the whole upload: transition all mips to TRANSFER_DST, copy the
-	// staging buffer into mip 0, then either blit the chain or transition to
-	// SHADER_READ_ONLY. The sync path replays this through immediate_submit;
-	// the upload worker records it into its own command buffer.
+	// Records the whole first upload: transition all mips to TRANSFER_DST from
+	// UNDEFINED (there are no contents to preserve), copy the staging buffer into
+	// mip 0, then either blit the chain or transition to SHADER_READ_ONLY. The
+	// sync path replays this through immediate_submit; the upload worker records
+	// it into its own command buffer.
 	void record_upload_commands(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips)
 	{
 		record_image_transition(cmd, image_,
@@ -475,27 +476,24 @@ public:
 			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 			VK_IMAGE_ASPECT_COLOR_BIT, 0, mips);
 
-		VkBufferImageCopy region{
-			.bufferOffset = 0,
-			.bufferRowLength = 0,
-			.bufferImageHeight = 0,
-			.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-			.imageOffset = { 0, 0, 0 },
-			.imageExtent = { width_, height_, 1 }
-		};
-		vkCmdCopyBufferToImage(cmd, staging, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+		record_copy_and_finalize_(cmd, staging, mips);
+	}
 
-		if (mips > 1)
-		{
-			record_mip_generation(cmd, image_, width_, height_, mips);
-		}
-		else
-		{
-			record_image_transition(cmd, image_,
-				VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-		}
+	// Hot reload: the image already holds contents that in-flight frames may
+	// still be sampling. Transition from SHADER_READ_ONLY with a fragment-shader
+	// source scope, so the copy waits for those reads — a WAR execution
+	// dependency against every frame already submitted on this queue, no CPU
+	// sync needed. UNDEFINED (as in the first upload) would instead let the
+	// driver discard the live contents mid-frame, which sync validation flags.
+	void record_reload_commands(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips)
+	{
+		record_image_transition(cmd, image_,
+			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			VK_IMAGE_ASPECT_COLOR_BIT, 0, mips);
+
+		record_copy_and_finalize_(cmd, staging, mips);
 	}
 
 	// Creates and fills a staging buffer for this image's mip 0.
@@ -585,6 +583,34 @@ private:
 
 		mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 		return {};
+	}
+
+	// Copy staging into mip 0, then either blit the mip chain or transition mip 0
+	// to SHADER_READ_ONLY. Shared by the first upload and hot reload — the image
+	// must already be in TRANSFER_DST across all mips when this runs.
+	void record_copy_and_finalize_(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips)
+	{
+		VkBufferImageCopy region{
+			.bufferOffset = 0,
+			.bufferRowLength = 0,
+			.bufferImageHeight = 0,
+			.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+			.imageOffset = { 0, 0, 0 },
+			.imageExtent = { width_, height_, 1 }
+		};
+		vkCmdCopyBufferToImage(cmd, staging, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+		if (mips > 1)
+		{
+			record_mip_generation(cmd, image_, width_, height_, mips);
+		}
+		else
+		{
+			record_image_transition(cmd, image_,
+				VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+		}
 	}
 
 	// The classic blit cascade: level i-1 (TRANSFER_DST after the copy above)

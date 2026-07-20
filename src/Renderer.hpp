@@ -312,6 +312,14 @@ public:
 		// harmless: nothing gets submitted under it.
 		context_->advance_frame();
 
+		// Apply any pending hot reloads before this frame records: pipeline
+		// rebuilds are handle swaps and old handles retire through the deletion
+		// queue keyed by the current submit serial, so in-flight frames are safe.
+		if (auto* hr = context_->hot_reload())
+		{
+			hr->drain();
+		}
+
 		// Check framebuffer size — return false if minimized (0x0)
 		auto [width, height] = surface_provider_.get_framebuffer_size();
 		if (width == 0 || height == 0) {

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstddef>
 #include <expected>
+#include <filesystem>
 #include <format>
 #include <span>
 #include <chrono>
@@ -27,6 +28,7 @@
 #include "Image.hpp"
 #include "Sampler.hpp"
 #include "UploadManager.hpp"
+#include "HotReload.hpp"
 #include "DescriptorSet.hpp"
 
 namespace py = pybind11;
@@ -367,6 +369,14 @@ py::array image_to_numpy(Image& image) {
 }
 
 void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd) {
+    // Drain hot reloads BEFORE recording, so an edit-then-submit picks up the new
+    // pipeline in THIS submit. The headless path advances the ring only after
+    // submitting, so hooking the drain there (as the windowed path does) would
+    // delay every reload by one submit — and the whole test suite is headless.
+    if (auto* hr = context.hot_reload()) {
+        hr->drain();
+    }
+
     const std::uint64_t upload_wait_serial = require_uploads_resident(*cmd);
     VkCommandBuffer vkCmd = record_frame(*cmd, context.frame_index());
 
@@ -678,7 +688,11 @@ PYBIND11_MODULE(_core, m) {
         // reads the same as offscreen code — build(renderer) still works, it just
         // isn't a special case any more.
         .def("build", [](GraphicsPipelineBuilder& builder, std::shared_ptr<RenderTarget> target) -> py::object {
-            return py::cast(unwrap(builder.build(*target), nullptr));
+            auto pipeline = unwrap(builder.build(*target), nullptr);
+            // Watch unconditionally: a pipeline whose shaders were all unwatched
+            // (source=, .spv from a gone file) simply never fires.
+            if (auto* hr = builder.context().hot_reload()) hr->watch_pipeline(pipeline);
+            return py::cast(pipeline);
         }, py::arg("target"));
 
     // No stage arguments anywhere: compute has exactly one stage, so asking for
@@ -698,7 +712,9 @@ PYBIND11_MODULE(_core, m) {
             return self.push_constant(size);
         }, py::arg("size"))
         .def("build", [](ComputePipelineBuilder& builder) -> py::object {
-            return py::cast(unwrap(builder.build(), nullptr));
+            auto pipeline = unwrap(builder.build(), nullptr);
+            if (auto* hr = builder.context().hot_reload()) hr->watch_pipeline(pipeline);
+            return py::cast(pipeline);
         });
 
     py::class_<DescriptorSet, std::shared_ptr<DescriptorSet>>(m, "DescriptorSet")
@@ -863,7 +879,7 @@ PYBIND11_MODULE(_core, m) {
                          std::vector<Feature> features, std::vector<Feature> optional,
                          std::uint32_t frames_in_flight,
                          std::vector<std::string> raw_extensions,
-                         bool auto_barriers) {
+                         bool auto_barriers, bool hot_reload) {
             // An argument-validity error, so ValueError — matching what
             // validation="nonsense" raises, not the BazaltError hierarchy.
             if (frames_in_flight < 1 || frames_in_flight > 4) {
@@ -887,13 +903,21 @@ PYBIND11_MODULE(_core, m) {
                 logger->log(res.error());
                 raise_error(res.error());
             }
-            return std::move(res.value());
+            auto context = std::move(res.value());
+            // One kwarg covers both shaders and images: it's one feature, "watch
+            // what you loaded". The watcher holds only weak refs, so it never
+            // keeps a resource alive.
+            if (hot_reload) {
+                context->set_hot_reload(std::make_unique<HotReloadWatcher>(*context));
+            }
+            return context;
         }), py::arg("logger") = py::none(), py::arg("validation") = "auto",
             py::arg("features") = std::vector<Feature>{},
             py::arg("optional") = std::vector<Feature>{},
             py::arg("frames_in_flight") = 2,
             py::arg("raw_extensions") = std::vector<std::string>{},
-            py::arg("auto_barriers") = true)
+            py::arg("auto_barriers") = true,
+            py::arg("hot_reload") = false)
         .def_property_readonly("auto_barriers", &Context::auto_barriers)
         .def_property_readonly("frames_in_flight", &Context::frames_in_flight)
         .def_property_readonly("logger", &Context::logger)
@@ -937,8 +961,15 @@ PYBIND11_MODULE(_core, m) {
         })
         .def("compile_shader", [](Context& self, const std::string& path, ShaderStage stage,
                                   std::optional<std::string> source) -> py::object {
-            return py::cast(unwrap(ShaderCompiler::compile(self, path, stage, std::move(source)),
-                                   self.logger().get()));
+            // Only file-backed shaders are watchable: a source= virtual name may
+            // not exist on disk, and .spv is recompiled from its own path too.
+            const bool from_file = !source.has_value();
+            auto module = unwrap(ShaderCompiler::compile(self, path, stage, std::move(source)),
+                                 self.logger().get());
+            if (auto* hr = self.hot_reload(); hr && from_file && std::filesystem::exists(path)) {
+                hr->watch_shader(module);
+            }
+            return py::cast(module);
         }, py::arg("path"), py::arg("stage"), py::kw_only(), py::arg("source") = py::none())
         .def("load_image", [](Context& self, const std::string& path) -> py::object {
             // sRGB with a full mip chain: files are pictures. Arrays go through
@@ -954,7 +985,9 @@ PYBIND11_MODULE(_core, m) {
                 self.set_upload_manager(std::make_unique<UploadManager>(self));
             }
             auto* manager = static_cast<UploadManager*>(self.upload_manager());
-            return py::cast(unwrap(manager->load(path), self.logger().get()));
+            auto image = unwrap(manager->load(path), self.logger().get());
+            if (auto* hr = self.hot_reload()) hr->watch_image(image, path);
+            return py::cast(image);
         }, py::arg("path"))
         .def_property_readonly("uploads_done", [](const Context& self) {
             return self.upload_manager() ? self.upload_manager()->uploads_done() : true;

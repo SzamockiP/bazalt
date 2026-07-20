@@ -50,6 +50,30 @@ public:
 	virtual void wait_all() = 0;
 };
 
+// These live in headers that include Context.hpp, so Context can only name them.
+class ShaderModule;
+class Pipeline;
+class Image;
+
+// The hot-reload file watcher, seen from the Context's side — same abstract
+// interface trick as UploadManagerBase (the concrete HotReloadWatcher lives in
+// HotReload.hpp, which needs the full Pipeline/ShaderModule/Image/UploadManager
+// definitions). Created in the Context binding when hot_reload=True.
+//
+// watch_* register a resource for watching (called from the Python bindings on
+// the main thread). drain() applies whatever changed since the last call and is
+// MAIN THREAD ONLY — it recompiles shaders (the includer is unlocked) and calls
+// vkCreate*. The frame path and the headless submit path both drain it.
+class HotReloadBase
+{
+public:
+	virtual ~HotReloadBase() = default;
+	virtual void watch_shader(std::shared_ptr<ShaderModule> module) = 0;
+	virtual void watch_pipeline(std::shared_ptr<Pipeline> pipeline) = 0;
+	virtual void watch_image(std::shared_ptr<Image> image, std::string path) = 0;
+	virtual void drain() = 0;
+};
+
 // Everything the caller can ask of a Context, in capability terms.
 struct ContextConfig
 {
@@ -156,6 +180,12 @@ public:
 		{
 			live_contexts_.fetch_sub(1);
 		}
+
+		// Before anything it observes goes away: stop the watcher thread. It
+		// touches no Vulkan and no Python (errors go through the Logger's own
+		// queue), so joining it is unconditional and needs no atexit dance — the
+		// jthread destructor requests the stop and joins.
+		hot_reload_.reset();
 
 		// First: stop the upload worker. Its destructor abandons undecoded jobs
 		// (the process is going away; decoding more would only delay exit),
@@ -346,6 +376,17 @@ public:
 	void set_upload_manager(std::unique_ptr<UploadManagerBase> manager)
 	{
 		upload_manager_ = std::move(manager);
+	}
+
+	// ── Hot reload ────────────────────────────────────────────────────────────
+	//
+	// Null unless the Context was created with hot_reload=True. The frame path
+	// (SwapchainRenderer::begin_frame) and the headless submit both drain it on
+	// the main thread.
+	HotReloadBase* hot_reload() const { return hot_reload_.get(); }
+	void set_hot_reload(std::unique_ptr<HotReloadBase> watcher)
+	{
+		hot_reload_ = std::move(watcher);
 	}
 
 	// ── Sampler cache ─────────────────────────────────────────────────────────
@@ -893,4 +934,5 @@ private:
 
 	std::unordered_map<std::uint32_t, std::shared_ptr<Sampler>> sampler_cache_;
 	std::unique_ptr<UploadManagerBase> upload_manager_;
+	std::unique_ptr<HotReloadBase> hot_reload_;
 };

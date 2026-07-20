@@ -334,6 +334,10 @@ class GraphicsPipelineBuilder {
 public:
     GraphicsPipelineBuilder(Context& context) : context_(context) {}
 
+    // So the binding layer can register a freshly built pipeline with the
+    // hot-reload watcher without a second Context handle.
+    Context& context() { return context_; }
+
     // Chained setters use C++23 deducing this: the object parameter's value
     // category is forwarded, so a chain on a temporary builder moves instead of
     // pinning an lvalue. The pybind layer binds these through lambdas — an
@@ -787,6 +791,8 @@ private:
 class ComputePipelineBuilder {
 public:
     ComputePipelineBuilder(Context& context) : context_(context) {}
+
+    Context& context() { return context_; }
 
     template <typename Self>
     Self&& shader(this Self&& self, std::shared_ptr<ShaderModule> shader) {

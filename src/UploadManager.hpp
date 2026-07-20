@@ -118,6 +118,22 @@ public:
 		return image;
 	}
 
+	// Hot reload: re-decode `path` into the EXISTING image. The header is NOT
+	// re-validated here — this is called from the watcher drain, and a bad file
+	// must not throw; the worker decodes, checks the size, and on any problem
+	// logs a WARNING and keeps the old contents. Same size and format only in
+	// v1 (a resize would need a new VkImage and every descriptor set rewritten).
+	// Reuses the image's existing mip count.
+	void reload(std::shared_ptr<Image> image, std::string path)
+	{
+		const std::uint32_t mips = image->mip_levels();
+		{
+			std::lock_guard lock(mutex_);
+			jobs_.push_back({ std::move(image), std::move(path), mips, /*reload=*/true });
+		}
+		cv_.notify_all();
+	}
+
 	// ── UploadManagerBase (the Python-visible aggregate state) ────────────────
 
 	bool uploads_done() override
@@ -181,6 +197,11 @@ private:
 		std::shared_ptr<Image> image;
 		std::string path;
 		std::uint32_t mips = 1;
+		// A hot-reload re-upload into an existing image, not a fresh load. It
+		// discards nothing on failure (the old contents stay), never marks the
+		// image Failed, and stays out of the batch counters — a re-saved texture
+		// must not make a loading bar jump.
+		bool reload = false;
 	};
 
 	// Both counters below describe the current batch. A batch is every upload
@@ -235,16 +256,33 @@ private:
 		stbi_uc* pixels = stbi_load(job.path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
 		if (!pixels)
 		{
-			fail_(job, stbi_failure_reason());
+			// A load failure poisons the image (waiters get the error); a reload
+			// failure just warns and keeps the good contents already on the GPU.
+			if (job.reload) warn_reload_(job, stbi_failure_reason());
+			else            fail_(job, stbi_failure_reason());
 			return;
 		}
 		if (static_cast<std::uint32_t>(width) != job.image->width() ||
 		    static_cast<std::uint32_t>(height) != job.image->height())
 		{
-			// The file changed between stbi_info and the decode. Exotic, but
-			// uploading mismatched bytes would be worse than failing.
 			stbi_image_free(pixels);
-			fail_(job, "file changed on disk while it was being loaded");
+			if (job.reload)
+			{
+				// v1 reloads are same-size only: a new size needs a new VkImage and
+				// every descriptor set holding it rewritten. Keep the old image.
+				if (auto logger = context_.logger())
+					logger->log(Severity::Warning, Source::Upload, std::format(
+						"Hot reload: {} changed size ({}x{} -> {}x{}); keeping the existing "
+						"image (a resize needs a restart)",
+						job.path, job.image->width(), job.image->height(),
+						static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height)));
+			}
+			else
+			{
+				// The file changed between stbi_info and the decode. Exotic, but
+				// uploading mismatched bytes would be worse than failing.
+				fail_(job, "file changed on disk while it was being loaded");
+			}
 			return;
 		}
 
@@ -252,7 +290,8 @@ private:
 		stbi_image_free(pixels);
 		if (!staging)
 		{
-			fail_(job, staging.error().message.c_str());
+			if (job.reload) warn_reload_(job, staging.error().message.c_str());
+			else            fail_(job, staging.error().message.c_str());
 			return;
 		}
 		auto [stagingBuffer, stagingAllocation] = *staging;
@@ -280,7 +319,10 @@ private:
 			.pInheritanceInfo = nullptr
 		};
 		vkBeginCommandBuffer(cmd, &beginInfo);
-		job.image->record_upload_commands(cmd, stagingBuffer, job.mips);
+		// Only the initial layout transition differs: a reload preserves the live
+		// contents against in-flight reads, a first upload discards UNDEFINED.
+		if (job.reload) job.image->record_reload_commands(cmd, stagingBuffer, job.mips);
+		else            job.image->record_upload_commands(cmd, stagingBuffer, job.mips);
 		vkEndCommandBuffer(cmd);
 
 		std::uint64_t serial = 0;
@@ -312,7 +354,8 @@ private:
 			{
 				vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
 				vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
-				fail_(job, "failed to submit the upload command buffer");
+				if (job.reload) warn_reload_(job, "failed to submit the upload command buffer");
+				else            fail_(job, "failed to submit the upload command buffer");
 				return;
 			}
 		}
@@ -329,7 +372,11 @@ private:
 			});
 		retired_.emplace_back(serial, cmd);
 
+		// Both paths point the image at the new serial, so frames wait for the
+		// re-upload and img.ready/.wait() track it. Only a load feeds the batch
+		// accounting; a reload deliberately does not (see Job::reload).
 		job.image->set_upload_submitted(serial);
+		if (!job.reload)
 		{
 			std::lock_guard lock(mutex_);
 			submitted_serials_.push_back(serial);
@@ -368,6 +415,20 @@ private:
 		{
 			std::lock_guard lock(mutex_);
 			++failed_count_;
+		}
+	}
+
+	// A reload that couldn't complete: WARNING, not the Error fail_ raises, and
+	// the image is left exactly as it was — its previous contents keep
+	// rendering. Never touches upload state or the batch counters. Symmetry with
+	// a shader hot reload: a bad edit can't take the application down.
+	void warn_reload_(Job& job, const char* reason)
+	{
+		if (auto logger = context_.logger())
+		{
+			logger->log(Severity::Warning, Source::Upload, reason
+				? std::format("Hot reload: {} ({}); keeping the previous contents", job.path, reason)
+				: std::format("Hot reload: {}; keeping the previous contents", job.path));
 		}
 	}
 
