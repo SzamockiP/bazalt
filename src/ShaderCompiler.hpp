@@ -220,6 +220,12 @@ private:
         options.SetTargetEnvironment(shaderc_target_env_vulkan, env_version);
         options.SetOptimizationLevel(shaderc_optimization_level_performance);
 
+        // Language is an attribute of the file name, not a second API path.
+        // Entry point stays "main" (shaderc's HLSL default) — one file per stage.
+        if (lowercase_extension(path) == ".hlsl") {
+            options.SetSourceLanguage(shaderc_source_language_hlsl);
+        }
+
         // Keep a raw pointer before the unique_ptr moves into options; the
         // recorded includes are read back only while `options` is alive.
         auto includer = std::make_unique<RecordingIncluder>();
