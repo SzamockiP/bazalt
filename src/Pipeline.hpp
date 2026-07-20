@@ -51,6 +51,19 @@ inline constexpr VkPrimitiveTopology to_vk(Topology topology) {
     return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 }
 
+// Everything needed to rebuild a Pipeline's VkPipeline handle in place — the
+// hot-reload mechanism. `shaders` are the modules it was built from (the
+// watcher matches a changed file against these to decide what to rebuild, and
+// holding them keeps a Pipeline's shaders alive for as long as the pipeline).
+// `recreate` re-runs the pipeline creation against a fresh device state: it
+// captured the fixed-function state and the (unchanged) pipeline layout by
+// value and calls shader->get() at call time, so a ShaderModule::replace()d
+// module is picked up automatically. Empty for a default-constructed Pipeline.
+struct PipelineDesc {
+    std::vector<std::shared_ptr<ShaderModule>> shaders;
+    std::function<std::expected<VkPipeline, Error>(Context&)> recreate;
+};
+
 class Pipeline {
 public:
     // Maps binding index -> VkDescriptorType so DescriptorSet knows what type to write
@@ -60,12 +73,14 @@ public:
              std::vector<VkDescriptorSetLayout> descLayouts = {},
              std::map<uint32_t, BindingTypeMap> bindingTypes = {},
              VkShaderStageFlags pushConstantStages = 0,
-             VkPipelineBindPoint bindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS)
+             VkPipelineBindPoint bindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+             PipelineDesc desc = {})
         : context_(context), pipeline_(pipeline), layout_(layout),
           desc_layouts_(std::move(descLayouts)),
           binding_types_(std::move(bindingTypes)),
           push_constant_stages_(pushConstantStages),
-          bind_point_(bindPoint) {}
+          bind_point_(bindPoint),
+          desc_(std::move(desc)) {}
 
     // Carried on the Pipeline so command recording doesn't hardcode
     // VK_PIPELINE_BIND_POINT_GRAPHICS. Compute pipelines (0.6) then need no
@@ -89,7 +104,8 @@ public:
           desc_layouts_(std::move(other.desc_layouts_)),
           binding_types_(std::move(other.binding_types_)),
           push_constant_stages_(other.push_constant_stages_),
-          bind_point_(other.bind_point_) {
+          bind_point_(other.bind_point_),
+          desc_(std::move(other.desc_)) {
         other.pipeline_ = VK_NULL_HANDLE;
         other.layout_ = VK_NULL_HANDLE;
     }
@@ -104,6 +120,7 @@ public:
             binding_types_ = std::move(other.binding_types_);
             push_constant_stages_ = other.push_constant_stages_;
             bind_point_ = other.bind_point_;
+            desc_ = std::move(other.desc_);
 
             other.pipeline_ = VK_NULL_HANDLE;
             other.layout_ = VK_NULL_HANDLE;
@@ -113,6 +130,43 @@ public:
 
     VkPipeline get() const { return pipeline_; }
     VkPipelineLayout layout() const { return layout_; }
+
+    // ── Hot reload ────────────────────────────────────────────────────────────
+
+    // True when this pipeline was built from `module`. The watcher asks this to
+    // decide which pipelines a changed shader file forces to rebuild.
+    bool uses(const ShaderModule* module) const {
+        return std::ranges::any_of(desc_.shaders,
+            [module](const std::shared_ptr<ShaderModule>& s) { return s.get() == module; });
+    }
+
+    // Recreate the VkPipeline from the captured description — the hot-reload
+    // path, main thread only. The modules it names may have been
+    // ShaderModule::replace()d with fresh handles; recreate() reads them via
+    // ->get() now. On success the old VkPipeline retires through the deletion
+    // queue (an in-flight frame may still have it bound) and pipeline_ becomes
+    // the new handle, which deferred bind_pipeline lambdas pick up on their next
+    // replay — no re-recording. On FAILURE pipeline_ is left untouched, so a
+    // shader typo keeps the last good pipeline rendering. layout_/desc_layouts_
+    // are never rebuilt: bindings come from builder calls, not reflection, so
+    // descriptor sets and push-constant ranges stay valid across a reload.
+    std::expected<void, Error> rebuild() {
+        if (!desc_.recreate) {
+            return std::unexpected(err_shader(
+                "This pipeline was not built with a rebuildable description"));
+        }
+        auto fresh = desc_.recreate(*context_);
+        if (!fresh) {
+            return std::unexpected(fresh.error());
+        }
+        if (pipeline_ != VK_NULL_HANDLE) {
+            context_->defer_destroy([device = context_->device(), old = pipeline_] {
+                vkDestroyPipeline(device, old, nullptr);
+            });
+        }
+        pipeline_ = fresh.value();
+        return {};
+    }
 
     VkDescriptorSetLayout descriptor_set_layout(uint32_t setIndex) const {
         if (setIndex < desc_layouts_.size()) {
@@ -167,6 +221,7 @@ private:
     std::map<uint32_t, BindingTypeMap> binding_types_;
     VkShaderStageFlags push_constant_stages_ = 0;
     VkPipelineBindPoint bind_point_ = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    PipelineDesc desc_;
 };
 
 // The layout plumbing shared by both pipeline builders: descriptor bindings,
@@ -370,9 +425,10 @@ public:
                 "attachments (only depth-only targets can omit it)"));
         }
 
-        const std::vector<VkPipelineShaderStageCreateInfo> shaderStages = shader_stages_();
-
-        // Descriptor set layouts — owned by the guard until the Pipeline exists.
+        // Descriptor set layouts and the pipeline layout are created ONCE and
+        // reused across every hot-reload rebuild: they come from the builder's
+        // binding/push-constant calls, not the shader source. Owned by guards
+        // until the Pipeline exists.
         std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
         std::map<uint32_t, Pipeline::BindingTypeMap> allBindingTypes;
         ScopeGuard cleanup_layouts([&] {
@@ -384,8 +440,101 @@ public:
             return std::unexpected(r.error());
         }
 
+        auto layout = layout_.create_layout(context_, descriptorSetLayouts);
+        if (!layout) {
+            return std::unexpected(layout.error());
+        }
+        VkPipelineLayout pipelineLayout = layout.value();
+        ScopeGuard cleanup_pipeline_layout([&] {
+            vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr);
+        });
+
+        // The rebuildable slice of state: everything vkCreateGraphicsPipelines
+        // needs except the layout. Copied into the recreate closure below so a
+        // hot reload re-runs create_pipeline_ against fresh shader handles.
+        GraphicsState state{
+            .vertex = vertex_shader_,
+            .fragment = fragment_shader_,
+            .formats = formats_,
+            .depth_test = depth_test_,
+            .cull_mode = cull_mode_,
+            .front_face = front_face_,
+            .blend_enable = blend_enable_,
+            .topology = topology_,
+            .color_formats = std::move(colorFormats),
+            .depth_format = depthFormat
+        };
+
+        auto pipeline = create_pipeline_(context_, state, pipelineLayout);
+        if (!pipeline) {
+            return std::unexpected(pipeline.error());
+        }
+
+        // Everything now belongs to the Pipeline.
+        cleanup_layouts.release();
+        cleanup_pipeline_layout.release();
+
+        PipelineDesc desc;
+        desc.shaders.push_back(vertex_shader_);
+        if (fragment_shader_) {
+            desc.shaders.push_back(fragment_shader_);
+        }
+        desc.recreate = [state = std::move(state), pipelineLayout](Context& c) {
+            return create_pipeline_(c, state, pipelineLayout);
+        };
+
+        return std::make_shared<Pipeline>(context_.shared_from_this(), pipeline.value(), pipelineLayout,
+                                          std::move(descriptorSetLayouts), std::move(allBindingTypes),
+                                          layout_.push_constant_stages(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                          std::move(desc));
+    }
+
+    // Convenience overload: a RenderTarget already knows its own formats, so the
+    // caller shouldn't have to dig them out. This is what replaces build(renderer).
+    std::expected<std::shared_ptr<Pipeline>, Error> build(const RenderTarget& target) {
+        std::vector<VkFormat> colorFormats;
+        colorFormats.reserve(target.color_count());
+        for (std::uint32_t i = 0; i < target.color_count(); ++i) {
+            colorFormats.push_back(target.color_format(i));
+        }
+        return build(std::move(colorFormats), target.depth_format());
+    }
+
+private:
+    // ── build() steps ─────────────────────────────────────────────────────────
+
+    // The rebuildable fixed-function + shader state, minus the pipeline layout
+    // (created once in build() and reused). Copied by value into the Pipeline's
+    // recreate closure; the shader shared_ptrs are read via ->get() inside
+    // create_pipeline_, which is exactly the hot-reload swap point.
+    struct GraphicsState {
+        std::shared_ptr<ShaderModule> vertex;
+        std::shared_ptr<ShaderModule> fragment;
+        std::vector<VertexFormat> formats;
+        bool depth_test = false;
+        CullMode cull_mode = CullMode::BACK;
+        FrontFace front_face = FrontFace::COUNTER_CLOCKWISE;
+        bool blend_enable = false;
+        Topology topology = Topology::TRIANGLE_LIST;
+        std::vector<VkFormat> color_formats;
+        VkFormat depth_format = VK_FORMAT_UNDEFINED;
+    };
+
+    struct VertexInput {
+        VkVertexInputBindingDescription binding{};
+        std::vector<VkVertexInputAttributeDescription> attributes;
+    };
+
+    // Assemble the VkPipeline from the rebuildable state plus a ready pipeline
+    // layout. Static and reading only its arguments, so build() and rebuild()
+    // share one code path. shader_stages_ reads s.vertex/s.fragment->get() here
+    // — after a ShaderModule::replace() that returns the new handle.
+    static std::expected<VkPipeline, Error> create_pipeline_(
+            Context& context, const GraphicsState& s, VkPipelineLayout pipelineLayout) {
+        const std::vector<VkPipelineShaderStageCreateInfo> shaderStages = shader_stages_(s);
+
         // Vertex input — the CreateInfo points into vertexInput, so it lives here.
-        const VertexInput vertexInput = vertex_input_();
+        const VertexInput vertexInput = vertex_input_(s);
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
         if (!vertexInput.attributes.empty()) {
@@ -399,7 +548,7 @@ public:
             .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
-            .topology = to_vk(topology_),
+            .topology = to_vk(s.topology),
             .primitiveRestartEnable = VK_FALSE
         };
 
@@ -426,7 +575,7 @@ public:
             .pScissors = nullptr
         };
 
-        const VkPipelineRasterizationStateCreateInfo rasterizer = rasterization_state_();
+        const VkPipelineRasterizationStateCreateInfo rasterizer = rasterization_state_(s);
 
         VkPipelineMultisampleStateCreateInfo multisampling{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
@@ -443,7 +592,7 @@ public:
         // One blend state per colour attachment (identical for now; per-target
         // blend control can arrive additively).
         const std::vector<VkPipelineColorBlendAttachmentState> blendAttachments(
-            colorFormats.size(), color_blend_attachment_());
+            s.color_formats.size(), color_blend_attachment_(s));
 
         VkPipelineColorBlendStateCreateInfo colorBlending{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -456,25 +605,16 @@ public:
             .blendConstants = {0.0f, 0.0f, 0.0f, 0.0f}
         };
 
-        const VkPipelineDepthStencilStateCreateInfo depthStencil = depth_stencil_state_();
-
-        auto layout = layout_.create_layout(context_, descriptorSetLayouts);
-        if (!layout) {
-            return std::unexpected(layout.error());
-        }
-        VkPipelineLayout pipelineLayout = layout.value();
-        ScopeGuard cleanup_pipeline_layout([&] {
-            vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr);
-        });
+        const VkPipelineDepthStencilStateCreateInfo depthStencil = depth_stencil_state_(s);
 
         // Dynamic Rendering Info
         VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
             .pNext = nullptr,
             .viewMask = 0,
-            .colorAttachmentCount = static_cast<uint32_t>(colorFormats.size()),
-            .pColorAttachmentFormats = colorFormats.empty() ? nullptr : colorFormats.data(),
-            .depthAttachmentFormat = depthFormat != VK_FORMAT_UNDEFINED ? depthFormat : VK_FORMAT_UNDEFINED,
+            .colorAttachmentCount = static_cast<uint32_t>(s.color_formats.size()),
+            .pColorAttachmentFormats = s.color_formats.empty() ? nullptr : s.color_formats.data(),
+            .depthAttachmentFormat = s.depth_format != VK_FORMAT_UNDEFINED ? s.depth_format : VK_FORMAT_UNDEFINED,
             .stencilAttachmentFormat = VK_FORMAT_UNDEFINED
         };
 
@@ -503,55 +643,34 @@ public:
         VkPipeline graphicsPipeline;
         // ErrorCode::Shader, not Initialization: a pipeline that fails to build is
         // almost always a shader/state mismatch the caller can fix and retry, and
-        // hot reload (0.6) depends on catching exactly this as recoverable.
-        if (auto e = check(vkCreateGraphicsPipelines(context_.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline),
+        // hot reload (0.8) depends on catching exactly this as recoverable.
+        if (auto e = check(vkCreateGraphicsPipelines(context.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline),
                            "create graphics pipeline", ErrorCode::Shader)) {
             return std::unexpected(*e);
         }
-
-        // Everything now belongs to the Pipeline.
-        cleanup_layouts.release();
-        cleanup_pipeline_layout.release();
-
-        return std::make_shared<Pipeline>(context_.shared_from_this(), graphicsPipeline, pipelineLayout,
-                                          std::move(descriptorSetLayouts), std::move(allBindingTypes),
-                                          layout_.push_constant_stages(), VK_PIPELINE_BIND_POINT_GRAPHICS);
+        return graphicsPipeline;
     }
-
-    // Convenience overload: a RenderTarget already knows its own formats, so the
-    // caller shouldn't have to dig them out. This is what replaces build(renderer).
-    std::expected<std::shared_ptr<Pipeline>, Error> build(const RenderTarget& target) {
-        std::vector<VkFormat> colorFormats;
-        colorFormats.reserve(target.color_count());
-        for (std::uint32_t i = 0; i < target.color_count(); ++i) {
-            colorFormats.push_back(target.color_format(i));
-        }
-        return build(std::move(colorFormats), target.depth_format());
-    }
-
-private:
-    // ── build() steps ─────────────────────────────────────────────────────────
 
     // 1 stage (depth-only) or 2. The fragment stage is optional exactly when
     // the target has no colour attachments — build() enforces that pairing.
-    std::vector<VkPipelineShaderStageCreateInfo> shader_stages_() const {
+    static std::vector<VkPipelineShaderStageCreateInfo> shader_stages_(const GraphicsState& s) {
         std::vector<VkPipelineShaderStageCreateInfo> stages;
         stages.push_back({
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
             .stage = VK_SHADER_STAGE_VERTEX_BIT,
-            .module = vertex_shader_->get(),
+            .module = s.vertex->get(),
             .pName = "main",
             .pSpecializationInfo = nullptr
         });
-        if (fragment_shader_) {
+        if (s.fragment) {
             stages.push_back({
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 .pNext = nullptr,
                 .flags = 0,
                 .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-                .module = fragment_shader_->get(),
+                .module = s.fragment->get(),
                 .pName = "main",
                 .pSpecializationInfo = nullptr
             });
@@ -559,14 +678,9 @@ private:
         return stages;
     }
 
-    struct VertexInput {
-        VkVertexInputBindingDescription binding{};
-        std::vector<VkVertexInputAttributeDescription> attributes;
-    };
-
     // Translates the VertexFormat list into a binding + attribute descriptions
     // with packed offsets.
-    VertexInput vertex_input_() const {
+    static VertexInput vertex_input_(const GraphicsState& s) {
         VertexInput result;
         result.binding = {
             .binding = 0,
@@ -574,14 +688,14 @@ private:
             .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
         };
 
-        result.attributes.resize(formats_.size());
+        result.attributes.resize(s.formats.size());
         uint32_t offset = 0;
-        for (size_t i = 0; i < formats_.size(); i++) {
+        for (size_t i = 0; i < s.formats.size(); i++) {
             result.attributes[i].binding = 0;
             result.attributes[i].location = static_cast<uint32_t>(i);
             result.attributes[i].offset = offset;
 
-            switch (formats_[i]) {
+            switch (s.formats[i]) {
                 case VertexFormat::FLOAT2:
                     result.attributes[i].format = VK_FORMAT_R32G32_SFLOAT;
                     offset += 8;
@@ -600,11 +714,11 @@ private:
         return result;
     }
 
-    VkPipelineRasterizationStateCreateInfo rasterization_state_() const {
+    static VkPipelineRasterizationStateCreateInfo rasterization_state_(const GraphicsState& s) {
         VkCullModeFlags vkCullMode = VK_CULL_MODE_NONE;
-        if (cull_mode_ == CullMode::BACK) vkCullMode = VK_CULL_MODE_BACK_BIT;
-        else if (cull_mode_ == CullMode::FRONT) vkCullMode = VK_CULL_MODE_FRONT_BIT;
-        else if (cull_mode_ == CullMode::FRONT_AND_BACK) vkCullMode = VK_CULL_MODE_FRONT_AND_BACK;
+        if (s.cull_mode == CullMode::BACK) vkCullMode = VK_CULL_MODE_BACK_BIT;
+        else if (s.cull_mode == CullMode::FRONT) vkCullMode = VK_CULL_MODE_FRONT_BIT;
+        else if (s.cull_mode == CullMode::FRONT_AND_BACK) vkCullMode = VK_CULL_MODE_FRONT_AND_BACK;
 
         return {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
@@ -614,7 +728,7 @@ private:
             .rasterizerDiscardEnable = VK_FALSE,
             .polygonMode = VK_POLYGON_MODE_FILL,
             .cullMode = vkCullMode,
-            .frontFace = front_face_ == FrontFace::CLOCKWISE
+            .frontFace = s.front_face == FrontFace::CLOCKWISE
                 ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE,
             .depthBiasEnable = VK_FALSE,
             .depthBiasConstantFactor = 0.0f,
@@ -624,26 +738,26 @@ private:
         };
     }
 
-    VkPipelineColorBlendAttachmentState color_blend_attachment_() const {
+    static VkPipelineColorBlendAttachmentState color_blend_attachment_(const GraphicsState& s) {
         return {
-            .blendEnable = blend_enable_ ? VK_TRUE : VK_FALSE,
-            .srcColorBlendFactor = blend_enable_ ? VK_BLEND_FACTOR_SRC_ALPHA : VK_BLEND_FACTOR_ONE,
-            .dstColorBlendFactor = blend_enable_ ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
+            .blendEnable = s.blend_enable ? VK_TRUE : VK_FALSE,
+            .srcColorBlendFactor = s.blend_enable ? VK_BLEND_FACTOR_SRC_ALPHA : VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = s.blend_enable ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
             .colorBlendOp = VK_BLEND_OP_ADD,
             .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-            .dstAlphaBlendFactor = blend_enable_ ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
+            .dstAlphaBlendFactor = s.blend_enable ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
             .alphaBlendOp = VK_BLEND_OP_ADD,
             .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
         };
     }
 
-    VkPipelineDepthStencilStateCreateInfo depth_stencil_state_() const {
+    static VkPipelineDepthStencilStateCreateInfo depth_stencil_state_(const GraphicsState& s) {
         return {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
-            .depthTestEnable = depth_test_ ? VK_TRUE : VK_FALSE,
-            .depthWriteEnable = depth_test_ ? VK_TRUE : VK_FALSE,
+            .depthTestEnable = s.depth_test ? VK_TRUE : VK_FALSE,
+            .depthWriteEnable = s.depth_test ? VK_TRUE : VK_FALSE,
             .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
             .depthBoundsTestEnable = VK_FALSE,
             .stencilTestEnable = VK_FALSE,
@@ -704,6 +818,7 @@ public:
             return std::unexpected(err_shader("A compute shader must be provided"));
         }
 
+        // Layouts once, reused across hot-reload rebuilds (see graphics build()).
         std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
         std::map<uint32_t, Pipeline::BindingTypeMap> allBindingTypes;
         ScopeGuard cleanup_layouts([&] {
@@ -724,6 +839,31 @@ public:
             vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr);
         });
 
+        auto pipeline = create_pipeline_(context_, shader_, pipelineLayout);
+        if (!pipeline) {
+            return std::unexpected(pipeline.error());
+        }
+
+        cleanup_layouts.release();
+        cleanup_pipeline_layout.release();
+
+        PipelineDesc desc;
+        desc.shaders.push_back(shader_);
+        desc.recreate = [shader = shader_, pipelineLayout](Context& c) {
+            return create_pipeline_(c, shader, pipelineLayout);
+        };
+
+        return std::make_shared<Pipeline>(context_.shared_from_this(), pipeline.value(), pipelineLayout,
+                                          std::move(descriptorSetLayouts), std::move(allBindingTypes),
+                                          layout_.push_constant_stages(), VK_PIPELINE_BIND_POINT_COMPUTE,
+                                          std::move(desc));
+    }
+
+private:
+    // Static so build() and rebuild() share it; reads shader->get() at call
+    // time, the hot-reload swap point.
+    static std::expected<VkPipeline, Error> create_pipeline_(
+            Context& context, const std::shared_ptr<ShaderModule>& shader, VkPipelineLayout pipelineLayout) {
         VkComputePipelineCreateInfo pipelineInfo{
             .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
             .pNext = nullptr,
@@ -733,7 +873,7 @@ public:
                 .pNext = nullptr,
                 .flags = 0,
                 .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-                .module = shader_->get(),
+                .module = shader->get(),
                 .pName = "main",
                 .pSpecializationInfo = nullptr
             },
@@ -746,20 +886,13 @@ public:
         // ErrorCode::Shader for the same reason as graphics: a pipeline that
         // fails to build is a shader/state mismatch the caller can fix and
         // retry, and hot reload (0.8) depends on catching exactly that.
-        if (auto e = check(vkCreateComputePipelines(context_.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline),
+        if (auto e = check(vkCreateComputePipelines(context.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline),
                            "create compute pipeline", ErrorCode::Shader)) {
             return std::unexpected(*e);
         }
-
-        cleanup_layouts.release();
-        cleanup_pipeline_layout.release();
-
-        return std::make_shared<Pipeline>(context_.shared_from_this(), computePipeline, pipelineLayout,
-                                          std::move(descriptorSetLayouts), std::move(allBindingTypes),
-                                          layout_.push_constant_stages(), VK_PIPELINE_BIND_POINT_COMPUTE);
+        return computePipeline;
     }
 
-private:
     Context& context_;
     std::shared_ptr<ShaderModule> shader_;
     PipelineLayoutBuilder layout_;

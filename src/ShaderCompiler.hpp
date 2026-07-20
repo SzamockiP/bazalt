@@ -48,8 +48,8 @@ inline constexpr shaderc_shader_kind to_shaderc_kind(ShaderStage stage) {
 class ShaderModule {
 public:
     ShaderModule(std::shared_ptr<Context> context, VkShaderModule module, const std::string& path,
-                 std::vector<std::string> includes, std::vector<uint32_t> spirv)
-        : context_(context), module_(module), path_(path),
+                 ShaderStage stage, std::vector<std::string> includes, std::vector<uint32_t> spirv)
+        : context_(context), module_(module), path_(path), stage_(stage),
           includes_(std::move(includes)), spirv_(std::move(spirv)) {}
 
     ~ShaderModule() {
@@ -61,6 +61,7 @@ public:
 
     ShaderModule(ShaderModule&& other) noexcept
         : context_(std::move(other.context_)), module_(other.module_), path_(std::move(other.path_)),
+          stage_(other.stage_),
           includes_(std::move(other.includes_)), spirv_(std::move(other.spirv_)) {
         other.module_ = VK_NULL_HANDLE;
     }
@@ -71,6 +72,7 @@ public:
             context_ = std::move(other.context_);
             module_ = other.module_;
             path_ = std::move(other.path_);
+            stage_ = other.stage_;
             includes_ = std::move(other.includes_);
             spirv_ = std::move(other.spirv_);
             other.module_ = VK_NULL_HANDLE;
@@ -80,10 +82,33 @@ public:
 
     VkShaderModule get() const { return module_; }
     const std::string& path() const { return path_; }
+    // The stage the module was compiled for — not derivable from the file
+    // extension, so it must be remembered for the hot-reload recompile.
+    ShaderStage stage() const { return stage_; }
     // Files pulled in via #include, absolute and normalized. The 0.8 hot-reload
     // watcher watches path() plus these; empty for .spv and include-free sources.
     const std::vector<std::string>& includes() const { return includes_; }
     const std::vector<uint32_t>& spirv() const { return spirv_; }
+
+    // Swap in a freshly compiled body (hot reload). MAIN THREAD ONLY: the
+    // compile that produced these parts ran an unlocked RecordingIncluder. The
+    // old handle retires through the deletion queue rather than being destroyed
+    // inline — a pipeline the watcher is about to rebuild() still names it until
+    // that rebuild picks up the new handle, and an in-flight frame may still
+    // hold the old VkPipeline built from it. Pipelines pick the new module up on
+    // their next rebuild(); the ShaderModule object identity never changes, so
+    // the watcher's weak_ptr and every builder's shared_ptr stay valid.
+    void replace(VkShaderModule module, std::vector<std::string> includes,
+                 std::vector<uint32_t> spirv) {
+        if (module_ != VK_NULL_HANDLE && context_) {
+            context_->defer_destroy([device = context_->device(), old = module_] {
+                vkDestroyShaderModule(device, old, nullptr);
+            });
+        }
+        module_ = module;
+        includes_ = std::move(includes);
+        spirv_ = std::move(spirv);
+    }
 
 private:
     void destroy() {
@@ -95,6 +120,7 @@ private:
     std::shared_ptr<Context> context_;
     VkShaderModule module_;
     std::string path_;
+    ShaderStage stage_;
     std::vector<std::string> includes_;
     std::vector<uint32_t> spirv_;
 };
@@ -164,11 +190,37 @@ private:
 
 class ShaderCompiler {
 public:
+    // The compiled body of a shader without the ShaderModule wrapper: a fresh
+    // VkShaderModule plus the include list and SPIR-V that go with it. compile()
+    // wraps these into a new ShaderModule; the hot-reload watcher feeds them to
+    // ShaderModule::replace() so the module object identity survives a reload.
+    struct CompiledParts {
+        VkShaderModule module;
+        std::vector<std::string> includes;
+        std::vector<uint32_t> spirv;
+    };
+
     // One entry point for every shader form. The extension of `path` decides how
     // it is handled (GLSL by default); when `source` is given the file is never
     // opened and `path` is a virtual name — it still supplies the language, the
     // diagnostic tag, ShaderError.path, and the base directory for #include.
     static std::expected<std::shared_ptr<ShaderModule>, Error> compile(
+            Context& context, const std::string& path, ShaderStage stage,
+            std::optional<std::string> source = std::nullopt) {
+        auto parts = compile_parts(context, path, stage, std::move(source));
+        if (!parts) {
+            return std::unexpected(parts.error());
+        }
+        return std::make_shared<ShaderModule>(context.shared_from_this(), parts->module, path,
+                                              stage, std::move(parts->includes), std::move(parts->spirv));
+    }
+
+    // The compile without the wrapper. Reads the file fresh from `path` (unless
+    // `source` overrides it), so a watcher recompiles simply by calling this
+    // again with the module's stored path and stage. MAIN THREAD ONLY when it
+    // compiles text (RecordingIncluder is unlocked); .spv loading is thread-safe
+    // but shares the entry point for one obvious way.
+    static std::expected<CompiledParts, Error> compile_parts(
             Context& context, const std::string& path, ShaderStage stage,
             std::optional<std::string> source = std::nullopt) {
         if (lowercase_extension(path) == ".spv") {
@@ -191,7 +243,7 @@ private:
         return ext;
     }
 
-    static std::expected<std::shared_ptr<ShaderModule>, Error> compile_text(
+    static std::expected<CompiledParts, Error> compile_text(
             Context& context, const std::string& path, ShaderStage stage,
             std::optional<std::string> source) {
         std::string text;
@@ -244,10 +296,14 @@ private:
         }
 
         std::vector<uint32_t> spirv(module.cbegin(), module.cend());
-        return make_module(context, std::move(spirv), path, recorder->included());
+        auto vk_module = make_vk_module(context, spirv);
+        if (!vk_module) {
+            return std::unexpected(vk_module.error());
+        }
+        return CompiledParts{*vk_module, recorder->included(), std::move(spirv)};
     }
 
-    static std::expected<std::shared_ptr<ShaderModule>, Error> load_spv(
+    static std::expected<CompiledParts, Error> load_spv(
             Context& context, const std::string& path, ShaderStage stage) {
         std::ifstream file(path, std::ios::ate | std::ios::binary);
         if (!file.is_open()) {
@@ -275,7 +331,11 @@ private:
                 path));
         }
 
-        return make_module(context, std::move(spirv), path, {});
+        auto vk_module = make_vk_module(context, spirv);
+        if (!vk_module) {
+            return std::unexpected(vk_module.error());
+        }
+        return CompiledParts{*vk_module, {}, std::move(spirv)};
     }
 
     static constexpr const char* stage_name(ShaderStage stage) {
@@ -318,9 +378,8 @@ private:
         return false;
     }
 
-    static std::expected<std::shared_ptr<ShaderModule>, Error> make_module(
-            Context& context, std::vector<uint32_t> spirv, const std::string& path,
-            std::vector<std::string> includes) {
+    static std::expected<VkShaderModule, Error> make_vk_module(
+            Context& context, const std::vector<uint32_t>& spirv) {
         VkShaderModuleCreateInfo createInfo{
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
             .pNext = nullptr,
@@ -335,8 +394,7 @@ private:
             return std::unexpected(*e);
         }
 
-        return std::make_shared<ShaderModule>(context.shared_from_this(), vk_module, path,
-                                              std::move(includes), std::move(spirv));
+        return vk_module;
     }
 
     struct ErrorLocation {
