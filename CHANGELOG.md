@@ -33,9 +33,13 @@ application down. Plus two diagnostics: per-frame GPU timing and debug names.
     knob; the API stays one kwarg.
 - **`frame.gpu_time_ms`.** The GPU duration in milliseconds of the frame
   submitted `frames_in_flight` ago (a timestamp pair around each submit).
-  `None` until the ring has cycled once, and on devices without timestamp
-  support. Windowed only — a headless submit is a blocking wait-idle, where
-  wall-clock time already is the GPU time.
+  Opt-in with `Context(gpu_timing=True)` — the timestamp pool reset and two
+  writes ride in every frame's command buffer, and per-frame queries are not
+  guaranteed free on every GPU, so a profiling diagnostic stays off by default:
+  no query pool, no per-frame cost, `gpu_time_ms` is `None`. When on: `None`
+  until the ring has cycled once, and on devices without timestamp support.
+  Windowed only — a headless submit is a blocking wait-idle, where wall-clock
+  time already is the GPU time.
 - **Debug object names.** `name=` on `create_buffer` / `create_image` /
   `load_image`, and `.name()` on both pipeline builders, attach a
   `VK_EXT_debug_utils` object name so validation messages name the culprit. A

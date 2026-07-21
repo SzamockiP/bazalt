@@ -933,7 +933,7 @@ PYBIND11_MODULE(_core, m) {
                          std::vector<Feature> features, std::vector<Feature> optional,
                          std::uint32_t frames_in_flight,
                          std::vector<std::string> raw_extensions,
-                         bool auto_barriers, bool hot_reload) {
+                         bool auto_barriers, bool hot_reload, bool gpu_timing) {
             // An argument-validity error, so ValueError — matching what
             // validation="nonsense" raises, not the BazaltError hierarchy.
             if (frames_in_flight < 1 || frames_in_flight > 4) {
@@ -948,6 +948,7 @@ PYBIND11_MODULE(_core, m) {
             config.frames_in_flight = frames_in_flight;
             config.raw_extensions = std::move(raw_extensions);
             config.auto_barriers = auto_barriers;
+            config.gpu_timing = gpu_timing;
 
             if (!logger) {
                 logger = make_default_logger();
@@ -971,7 +972,8 @@ PYBIND11_MODULE(_core, m) {
             py::arg("frames_in_flight") = 2,
             py::arg("raw_extensions") = std::vector<std::string>{},
             py::arg("auto_barriers") = true,
-            py::arg("hot_reload") = false)
+            py::arg("hot_reload") = false,
+            py::arg("gpu_timing") = false)
         .def_property_readonly("auto_barriers", &Context::auto_barriers)
         .def_property_readonly("frames_in_flight", &Context::frames_in_flight)
         .def_property_readonly("logger", &Context::logger)

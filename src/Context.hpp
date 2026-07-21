@@ -92,6 +92,10 @@ struct ContextConfig
 	// RenderTarget contract and stay automatic always.
 	bool auto_barriers = true;
 
+	// frame.gpu_time_ms: a timestamp pair recorded around every windowed submit.
+	// Off by default because it is a profiling diagnostic
+	bool gpu_timing = false;
+
 	// Escape hatch, documented as "you shouldn't need this". Present so that the
 	// capability abstraction never becomes a ceiling.
 	std::vector<std::string> raw_extensions;
@@ -130,6 +134,7 @@ public:
 		auto context = std::shared_ptr<Context>(new Context(logger));
 		context->frames_in_flight_ = config.frames_in_flight;
 		context->auto_barriers_ = config.auto_barriers;
+		context->gpu_timing_ = config.gpu_timing;
 
 		auto target_api = create_instance_(*context, config, logger);
 		if (!target_api)
@@ -280,6 +285,8 @@ public:
 	// progressed", which a modulo index cannot answer.
 	std::uint32_t frames_in_flight() const { return frames_in_flight_; }
 	bool auto_barriers() const { return auto_barriers_; }
+	// Whether the swapchain renderer records frame.gpu_time_ms timestamps.
+	bool gpu_timing() const { return gpu_timing_; }
 	std::uint64_t frame_serial() const { return frame_serial_; }
 	std::uint32_t frame_index() const
 	{
@@ -948,6 +955,7 @@ private:
 
 	std::uint32_t frames_in_flight_ = 2;
 	bool auto_barriers_ = true;
+	bool gpu_timing_ = false;
 	std::uint64_t frame_serial_ = 0;
 
 	VkSemaphore submit_timeline_ = VK_NULL_HANDLE;

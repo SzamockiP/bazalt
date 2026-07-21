@@ -25,7 +25,7 @@ and the Vulkan SDK.
 - **Command Buffers:** Explicit, yet simple command recording — calls chain (`cmd.bind_pipeline(p).draw(3)`), and `with cmd.rendering(target):` closes the pass for you.
 - **Asynchronous Texture Streaming:** `ctx.load_image()` returns immediately while the decode and GPU copy run in the background; anything that samples the image waits for it automatically. `ctx.upload_progress` gives you a loading bar for free.
 - **Hot Reload:** `Context(hot_reload=True)` watches the shaders (and their `#include`s) and images you loaded and applies edits live — shaders recompile and rebuild their pipelines in place, images re-upload into the same handle. A typo or a bad file is logged and the last good version keeps rendering, so a mistake never takes the app down. See `examples/12_hot_reload`.
-- **Frame Timing & Debug Names:** `frame.gpu_time_ms` reports the GPU time of a recent frame; `name=` / `.name()` label buffers, images and pipelines so validation messages name the culprit.
+- **Frame Timing & Debug Names:** `Context(gpu_timing=True)` makes `frame.gpu_time_ms` report the GPU time of a recent frame (opt-in — off by default it costs nothing); `name=` / `.name()` label buffers, images and pipelines so validation messages name the culprit.
 - **Headless Rendering:** Draw into an offscreen `RenderTarget` and read the pixels back as a NumPy array — no window, no display required.
 - **Render-to-Texture, MRT & Shadow Maps:** Target attachments are ordinary `Image` objects in any supported `Format` — sample `target.color[0]` or a depth-only target's `target.depth` like any texture.
 - **Runs Widely:** Vulkan 1.2 baseline with 1.3 used where available, so bazalt runs on older integrated GPUs too. Capabilities are requested by name, never by version or extension.
@@ -117,7 +117,7 @@ pipeline = ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)...b
 while window.is_open():
     window.poll_events()
     if frame := renderer.begin_frame():   # edits are applied here (and at ctx.submit)
-        frame.submit(cmd)                 # ...frame.gpu_time_ms gives GPU frame timing
+        frame.submit(cmd)                 # ...frame.gpu_time_ms (with gpu_timing=True) gives GPU frame timing
 ```
 
 Editing `shader.frag` rebuilds the pipeline in place; re-saving `wall.png` (same

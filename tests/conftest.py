@@ -35,10 +35,12 @@ def _session_context():
     messages = []
     logger = bz.Logger(min_severity=bz.Severity.INFO)
     logger.on_message(messages.append)
-    # hot_reload=True for the whole suite: the watcher runs under every test, so
-    # validation-as-assert audits it continuously, and it's the only way to test
-    # hot reload given one Context per process. Files that never change never fire.
-    context = bz.Context(logger, validation="auto", hot_reload=True)
+    # hot_reload=True and gpu_timing=True for the whole suite: both run under
+    # every test, so validation-as-assert audits them continuously, and it's the
+    # only way to exercise them given one Context per process. Hot reload for
+    # files that never change never fires; the timestamp path is opt-in so the
+    # gpu_time_ms test needs it on here (default apps pay nothing).
+    context = bz.Context(logger, validation="auto", hot_reload=True, gpu_timing=True)
     yield context, logger, messages
 
 

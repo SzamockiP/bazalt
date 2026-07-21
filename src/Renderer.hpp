@@ -501,6 +501,14 @@ private:
 	// Best-effort: any missing capability leaves timestamp_pool_ null.
 	void create_timestamp_pool_()
 	{
+		// Opt-in only. Off (the default), no pool exists, so submit records no
+		// timestamps, begin_frame reads none, and gpu_time_ms stays None — no
+		// per-frame timestamp work at all, which is the point of the default.
+		if (!context_->gpu_timing())
+		{
+			return;
+		}
+
 		VkPhysicalDeviceProperties props{};
 		vkGetPhysicalDeviceProperties(context_->physical_device(), &props);
 		if (props.limits.timestampPeriod <= 0.0f)

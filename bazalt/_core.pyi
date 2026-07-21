@@ -500,7 +500,8 @@ class Context:
                  frames_in_flight: int = 2,
                  raw_extensions: Sequence[str] = (),
                  auto_barriers: bool = True,
-                 hot_reload: bool = False) -> None:
+                 hot_reload: bool = False,
+                 gpu_timing: bool = False) -> None:
         """
         Args:
             logger: defaults to one printing warnings to stderr.
@@ -524,6 +525,11 @@ class Context:
                 bad edit (typo, wrong size, corrupt file) is logged and the last
                 good version keeps rendering — a mistake never kills the app.
                 Changes apply at begin_frame() and at ctx.submit().
+            gpu_timing: record frame.gpu_time_ms (a timestamp pair around each
+                windowed submit). Off by default because it is a profiling
+                diagnostic — the pool reset and two writes ride in every frame's
+                command buffer, and per-frame queries are not guaranteed free on
+                every GPU. Left off, frame.gpu_time_ms is always None, no cost.
         """
         ...
 
@@ -699,7 +705,8 @@ class Frame:
     def gpu_time_ms(self) -> Optional[float]:
         """GPU time in milliseconds of the frame submitted frames_in_flight ago
         (a timestamp pair around each submit, read back once its fence signals).
-        None until the ring has cycled once, and on devices without timestamp
+        None unless the Context was created with gpu_timing=True; also None
+        until the ring has cycled once, and on devices without timestamp
         support."""
         ...
 
