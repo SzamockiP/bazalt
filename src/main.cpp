@@ -335,8 +335,8 @@ void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd, std::uint64_t
 std::uint64_t require_uploads_resident(CommandBuffer& cmd) {
     std::uint64_t wait_serial = 0;
     for (const auto& set : cmd.used_sets()) {
-        for (const auto& image : set->images()) {
-            auto serial = image->require_resident();
+        for (const auto& bi : set->images()) {
+            auto serial = bi.image->require_resident();
             if (!serial) {
                 raise_error(serial.error());
             }
@@ -370,6 +370,24 @@ struct RenderingScope {
     std::shared_ptr<CommandBuffer> cmd;
     std::shared_ptr<RenderTarget> target;
     std::vector<float> clear_color;
+};
+
+// A GPU timer handle. cmd.timer() records the opening timestamp and returns
+// one of these; it is stopped explicitly (stop) or by a `with` (__exit__), and
+// read back off itself (ms). The handle IS the identity — no name, no key.
+// Holds the command buffer alive so the query pool outlives the handle.
+struct Timer {
+    std::shared_ptr<CommandBuffer> cmd;
+    std::size_t index = 0;
+    std::uint64_t generation = 0;
+    bool stopped = false;
+
+    void stop() {
+        if (!stopped) {
+            cmd->stop_timer(index);  // idempotent: a query written twice would be UB
+            stopped = true;
+        }
+    }
 };
 
 // Readback shaped for numpy: (h, w, channels) — or (h, w) for single-channel
@@ -759,6 +777,9 @@ PYBIND11_MODULE(_core, m) {
         .def("storage_buffer", [](ComputePipelineBuilder& self, uint32_t binding, uint32_t set) -> ComputePipelineBuilder& {
             return self.storage_buffer(binding, set);
         }, py::arg("binding"), py::arg("set") = 0)
+        .def("storage_image", [](ComputePipelineBuilder& self, uint32_t binding, uint32_t set) -> ComputePipelineBuilder& {
+            return self.storage_image(binding, set);
+        }, py::arg("binding"), py::arg("set") = 0)
         .def("push_constant", [](ComputePipelineBuilder& self, uint32_t size) -> ComputePipelineBuilder& {
             return self.push_constant(size);
         }, py::arg("size"))
@@ -776,6 +797,9 @@ PYBIND11_MODULE(_core, m) {
                              std::shared_ptr<Sampler> sampler) {
             unwrap(self.set_image(binding, std::move(image), std::move(sampler)), nullptr);
         }, py::arg("binding"), py::arg("image"), py::arg("sampler") = py::none())
+        .def("set_storage_image", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Image> image) {
+            unwrap(self.set_storage_image(binding, std::move(image)), nullptr);
+        }, py::arg("binding"), py::arg("image"))
         .def("set_buffer", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Buffer> buffer) {
             unwrap(self.set_buffer(binding, std::move(buffer)), nullptr);
         }, py::arg("binding"), py::arg("buffer"));
@@ -817,6 +841,13 @@ PYBIND11_MODULE(_core, m) {
                              const std::vector<float>& clear_color) {
             return RenderingScope{ std::move(self), std::move(target), clear_color };
         }, py::arg("target"), py::arg("clear_color") = std::vector<float>{0.0f, 0.0f, 0.0f, 1.0f})
+        // GPU timer: records the opening timestamp and returns a Timer handle.
+        // Stop it with t.stop() or a `with` block; read it back with t.ms.
+        .def("timer", [](std::shared_ptr<CommandBuffer> self) {
+            const std::size_t index = self->start_timer();
+            const std::uint64_t generation = self->recording_generation();
+            return std::make_shared<Timer>(Timer{ std::move(self), index, generation, false });
+        })
         // The no-argument versions are gone: begin_rendering emits a full-target
         // viewport and scissor itself. These remain for split-screen and similar.
         .def("set_viewport", [](std::shared_ptr<CommandBuffer> self, float x, float y, float width, float height) {
@@ -886,6 +917,17 @@ PYBIND11_MODULE(_core, m) {
         .def("__exit__", [](RenderingScope& self, py::object, py::object, py::object) {
             self.cmd->end_rendering(self.target);
             return false;  // never swallow exceptions
+        });
+
+    py::class_<Timer, std::shared_ptr<Timer>>(m, "Timer")
+        .def("stop", [](Timer& self) { self.stop(); })
+        .def("__enter__", [](std::shared_ptr<Timer> self) { return self; })
+        .def("__exit__", [](Timer& self, py::object, py::object, py::object) {
+            self.stop();
+            return false;  // never swallow exceptions
+        })
+        .def_property_readonly("ms", [](const Timer& self) {
+            return self.cmd->read_timer(self.index, self.generation);
         });
 
     // ── Window (GLFW) ──
@@ -1126,11 +1168,11 @@ PYBIND11_MODULE(_core, m) {
                                    self.logger().get()));
         }, py::arg("filter") = Filter::LINEAR, py::arg("address_mode") = AddressMode::REPEAT,
            py::arg("anisotropy") = true, py::arg("compare") = py::none())
-        .def("create_descriptor_pool", [](Context& self, uint32_t maxSets, uint32_t samplers, uint32_t uniformBuffers, uint32_t storageBuffers) -> py::object {
+        .def("create_descriptor_pool", [](Context& self, uint32_t maxSets, uint32_t samplers, uint32_t uniformBuffers, uint32_t storageBuffers, uint32_t storageImages) -> py::object {
             return py::cast(unwrap(
-                DescriptorPool::create(self, maxSets, samplers, uniformBuffers, storageBuffers),
+                DescriptorPool::create(self, maxSets, samplers, uniformBuffers, storageBuffers, storageImages),
                 self.logger().get()));
-        }, py::arg("max_sets"), py::arg("samplers") = 0, py::arg("uniform_buffers") = 0, py::arg("storage_buffers") = 0)
+        }, py::arg("max_sets"), py::arg("samplers") = 0, py::arg("uniform_buffers") = 0, py::arg("storage_buffers") = 0, py::arg("storage_images") = 0)
         // Command buffers come from the Context, not a renderer: they are a device
         // resource, and a headless Context has no renderer to ask.
         .def("create_command_buffer", [](Context& self, std::optional<bool> auto_barriers) -> py::object {

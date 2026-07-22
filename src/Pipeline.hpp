@@ -825,6 +825,16 @@ public:
         return std::forward<Self>(self);
     }
 
+    // A read/write image the shader accesses by coordinate (imageLoad/imageStore).
+    // Compute-only for now: fragment-shader storage images would need the tracker
+    // to see writes it can't (no reflection), so they wait for a manual image
+    // barrier — see the ResourceTracker ceiling note.
+    template <typename Self>
+    Self&& storage_image(this Self&& self, uint32_t binding, uint32_t set) {
+        self.layout_.add_binding(binding, VK_SHADER_STAGE_COMPUTE_BIT, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, set);
+        return std::forward<Self>(self);
+    }
+
     template <typename Self>
     Self&& push_constant(this Self&& self, uint32_t size) {
         self.layout_.add_push_constant(size, VK_SHADER_STAGE_COMPUTE_BIT);

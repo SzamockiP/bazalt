@@ -5,6 +5,61 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.9.0] — 2026-07-22
+
+"Storage Images": compute shaders can now write images, not just buffers.
+`imageStore`/`imageLoad` to a storage image opens post-processing and procedural
+image generation in compute, and the `ResourceTracker` — buffer-only since 0.6 —
+learns image barriers, so the layout transitions those paths need are recorded
+for you. Plus per-scope GPU timers that read back headless.
+
+### Added
+- **Storage images in compute.** `ComputePipelineBuilder.storage_image(binding)`
+  declares a read/write image binding; `DescriptorSet.set_storage_image(binding,
+  image)` binds one (no sampler — accessed by coordinate, in `GENERAL` layout).
+  `create_descriptor_pool` grows a `storage_images=` count. `create_image` already
+  gives every format its legal usages, so a storage image needs no special
+  creation — `ctx.create_image(w, h, fmt)` is enough where the format supports it.
+- **The tracker learns image barriers** (pays down the "storage images
+  untracked" debt). Per-image state now carries a layout on top of the buffer
+  hazard logic, so a use emits an image-memory barrier with the right transition:
+  `UNDEFINED → GENERAL` before the first write, `GENERAL → GENERAL` (a
+  read-after-write / write-after-write memory barrier) between dispatches, and
+  `GENERAL → SHADER_READ_ONLY` before a graphics pipeline samples a
+  compute-written image — hoisted before `begin_rendering`, since a pipeline
+  barrier is illegal inside dynamic rendering. Uploaded textures the tracker
+  never saw are left untouched, so ordinary texturing costs nothing. Every
+  auto-barrier path is checked by sync-validation-as-assert in the test suite.
+- **GPU timers.** `cmd.timer()` records a timestamp and returns a `Timer`
+  handle; stop it with a `with` block or `t.stop()` and read the GPU wall-clock
+  in milliseconds off `t.ms`. The handle is the identity — no names, no keys —
+  so several, nested and overlapping timers all work, and there is no forced
+  `with`. Unlike `frame.gpu_time_ms` this needs no window and no `begin_frame`:
+  a blocking headless submit means `t.ms` is ready as soon as `ctx.submit()`
+  returns (profiling a dispatch is the use case). A handle read after the
+  command buffer was re-recorded reports `None` (its slots now belong to a
+  different timer). Self-gating: the query pool exists only once a timer is used,
+  so apps that don't time pay nothing, no Context flag. Best-effort: a device
+  without timestamp support reports `None`.
+- New example `13_compute_postprocess`: a compute shader generates an animated
+  image into a storage image and a fullscreen pass samples it, timing the
+  dispatch.
+
+### Notes
+- **`upload_progress` semantics are now final** (settled here after being
+  deferred since 0.5). "Batch" means everything queued since uploads last fully
+  drained: when all in-flight uploads finish, progress resets to `1.0` and the
+  next `load_image` starts a fresh batch from `0`, so a second loading screen
+  counts only its own images.
+- **Ceilings (documented, not regressions):** storage-image contents are not
+  carried between submits by the tracker — each replay re-establishes the image
+  from `UNDEFINED` (a discard, legal from any layout), which is exactly right for
+  a compute post-process that overwrites its output every frame. Storage images
+  are compute-only for now; a fragment-shader `imageStore` would need reflection
+  the tracker doesn't have, so it waits for a manual image barrier. Remaining 0.5
+  backlog (async headless submit, async `StaticBuffer`, per-attachment clears)
+  rides with the release that needs it.
+
 ## [0.8.0] — 2026-07-20
 
 "Hot Reload": `bz.Context(logger, hot_reload=True)` watches the files bazalt

@@ -311,6 +311,11 @@ class DescriptorSet:
                   sampler: Optional[Sampler] = None) -> None:
         """Bind an image (+ sampler; None means linear/repeat/anisotropic)."""
         ...
+    def set_storage_image(self, binding: int, image: Image) -> None:
+        """Bind a storage image (no sampler) to a binding declared with
+        .storage_image(). The image is accessed in GENERAL layout; the tracker
+        adds the transition and any barrier around the dispatch automatically."""
+        ...
     def set_buffer(self, binding: int, buffer: Buffer) -> None: ...
 
 class DescriptorPool:
@@ -391,6 +396,12 @@ class ComputePipelineBuilder:
     def shader(self, shader: ShaderModule) -> ComputePipelineBuilder: ...
     def uniform_buffer(self, binding: int, set: int = 0) -> ComputePipelineBuilder: ...
     def storage_buffer(self, binding: int, set: int = 0) -> ComputePipelineBuilder: ...
+    def storage_image(self, binding: int, set: int = 0) -> ComputePipelineBuilder:
+        """A read/write image the compute shader accesses by coordinate
+        (imageLoad/imageStore). Bind one with DescriptorSet.set_storage_image;
+        the auto-barrier tracker transitions it to GENERAL before the dispatch
+        and to SHADER_READ_ONLY before a later graphics sample."""
+        ...
     def push_constant(self, size: int) -> ComputePipelineBuilder: ...
     def name(self, name: str) -> ComputePipelineBuilder:
         """Debug name for the VkPipeline; no-op without VK_EXT_debug_utils."""
@@ -465,10 +476,47 @@ class CommandBuffer:
     def bind_descriptor_set(self, descriptor_set: DescriptorSet, pipeline: Pipeline,
                             set: int) -> CommandBuffer: ...
 
+    def timer(self) -> Timer:
+        """Start a GPU timer and return its handle. Records a timestamp here;
+        stop it with a `with` block or Timer.stop(), read it back with Timer.ms:
+
+            with cmd.timer() as t:
+                cmd.bind_pipeline(blur).dispatch(gx, gy)
+            ...                     # or, without `with`:
+            t = cmd.timer()         #   t = cmd.timer()
+            ...                     #   cmd.dispatch(...)
+            ctx.submit(cmd)         #   t.stop()
+            print(t.ms)
+
+        The handle is the identity — no names, no keys — so several, nested and
+        overlapping timers all work. Unlike frame.gpu_time_ms this needs no
+        window: the blocking headless submit means t.ms is ready as soon as
+        submit() returns. Self-gating: the query pool exists only once a timer is
+        used, so apps that don't time pay nothing."""
+        ...
+
 class RenderingScope:
     """Returned by CommandBuffer.rendering(); use it in a `with` statement."""
 
     def __enter__(self) -> CommandBuffer: ...
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
+
+class Timer:
+    """A GPU timer handle from CommandBuffer.timer(). Usable as a context
+    manager (`with cmd.timer() as t:`) or stopped by hand (t.stop())."""
+
+    def stop(self) -> None:
+        """Record the closing timestamp. Idempotent; called for you on `with`
+        exit."""
+        ...
+    @property
+    def ms(self) -> Optional[float]:
+        """Measured GPU time in milliseconds, or None if timestamps are
+        unsupported, the command buffer was re-recorded since (the handle is
+        stale), or the submit has not completed (a blocking headless submit
+        always has)."""
+        ...
+    def __enter__(self) -> Timer: ...
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
 
 class Window:
@@ -614,7 +662,12 @@ class Context:
 
             while not ctx.uploads_done:
                 draw_progress(ctx.upload_progress)
-        """
+
+        "Batch" means everything queued since the last time uploads fully
+        drained: once all in-flight uploads finish, progress resets to 1.0 and
+        the next load_image starts a fresh batch from 0. This is the final
+        semantics (settled in 0.9) — a second loading screen counts only its own
+        images, not the ones a previous screen already finished."""
         ...
     def wait_for_uploads(self) -> None:
         """Block until every pending load_image upload has finished."""
@@ -640,7 +693,8 @@ class Context:
         ...
     def create_descriptor_pool(self, max_sets: int, samplers: int = 0,
                                uniform_buffers: int = 0,
-                               storage_buffers: int = 0) -> DescriptorPool: ...
+                               storage_buffers: int = 0,
+                               storage_images: int = 0) -> DescriptorPool: ...
 
     def create_command_buffer(self, auto_barriers: Optional[bool] = None) -> CommandBuffer:
         """Command buffers are a device resource, so they come from the Context —

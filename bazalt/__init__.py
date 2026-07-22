@@ -21,6 +21,7 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     DescriptorSet,
     CommandBuffer,
     RenderingScope,
+    Timer,
     MouseState,
     BufferType,
     DataType,
@@ -48,7 +49,7 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     ResourceError,
 )
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 __all__ = [
     # Core
@@ -72,6 +73,7 @@ __all__ = [
     "DescriptorSet",
     "CommandBuffer",
     "RenderingScope",
+    "Timer",
     # Data types
     "MouseState",
     "BufferType",

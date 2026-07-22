@@ -1,0 +1,14 @@
+#version 450
+// Fills every texel of a storage image with a constant colour. The most basic
+// compute-writes-an-image test: dispatch -> imageStore -> readback -> assert.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(img);
+    if (p.x < sz.x && p.y < sz.y) {
+        imageStore(img, p, vec4(0.25, 0.5, 0.75, 1.0));
+    }
+}

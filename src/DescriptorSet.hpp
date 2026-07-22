@@ -23,6 +23,14 @@ public:
         VkDescriptorType type;
     };
 
+    // Same idea for images: STORAGE_IMAGE (compute read-write, GENERAL layout)
+    // vs COMBINED_IMAGE_SAMPLER (sampled, SHADER_READ_ONLY). The type lets the
+    // tracker transition a compute-written image before a later sample.
+    struct BoundImage {
+        std::shared_ptr<Image> image;
+        VkDescriptorType type;
+    };
+
     // sets: 1 element (static) or frames_in_flight elements (frame)
     DescriptorSet(std::shared_ptr<Context> context, std::shared_ptr<DescriptorPool> pool,
                   std::vector<VkDescriptorSet> sets,
@@ -89,8 +97,60 @@ public:
             };
             vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
-        images_.push_back(std::move(image));
+        bound_images_.push_back({ std::move(image), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER });
         samplers_.push_back(std::move(sampler));
+        return {};
+    }
+
+    // Write a storage image to this descriptor set (all copies). No sampler:
+    // a storage image is read/written by coordinate (imageLoad/imageStore), and
+    // its descriptor layout is GENERAL — the only layout a storage image may be
+    // accessed in. The auto-barrier tracker transitions the image to GENERAL
+    // before the dispatch, so the recorded layout here is always what the GPU
+    // finds at execute time.
+    std::expected<void, Error> set_storage_image(uint32_t binding, std::shared_ptr<Image> image) {
+        if (!context_) return std::unexpected(err_init("Context destroyed"));
+        if (!image) return std::unexpected(err_resource("set_storage_image: image is null"));
+
+        auto it = binding_types_.find(binding);
+        if (it == binding_types_.end()) {
+            return std::unexpected(err_resource(std::format(
+                "Binding {} does not exist in this descriptor set's layout", binding)));
+        }
+        if (it->second != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+            return std::unexpected(err_resource(std::format(
+                "Binding {} is not a storage-image binding; declare it with "
+                ".storage_image({}) on the pipeline builder", binding, binding)));
+        }
+
+        VkDescriptorImageInfo imageInfo{
+            .sampler = VK_NULL_HANDLE,
+            .imageView = image->view(),
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL
+        };
+
+        for (auto& set : sets_) {
+            VkWriteDescriptorSet write{
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = nullptr,
+                .dstSet = set,
+                .dstBinding = binding,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                .pImageInfo = &imageInfo,
+                .pBufferInfo = nullptr,
+                .pTexelBufferView = nullptr
+            };
+            vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
+        }
+        // A storage image is a compute output: after the dispatch it holds
+        // contents, in GENERAL. Marking it here (record time) is the same
+        // optimism as a storage buffer being readable — the headless submit
+        // blocks before read(), so contents exist by then, and read()'s
+        // transition needs the resting layout to be GENERAL, not UNDEFINED.
+        image->mark_has_contents(VK_IMAGE_LAYOUT_GENERAL);
+        bound_images_.push_back({ std::move(image), VK_DESCRIPTOR_TYPE_STORAGE_IMAGE });
         return {};
     }
 
@@ -159,8 +219,9 @@ public:
     bool is_frame_set() const { return is_frame_set_; }
 
     // The images this set references — walked at submit time for upload
-    // residency.
-    const std::vector<std::shared_ptr<Image>>& images() const { return images_; }
+    // residency and at record time by the ResourceTracker (the type tells a
+    // storage image from a sampled one).
+    const std::vector<BoundImage>& images() const { return bound_images_; }
 
     // The buffers this set references — walked at record time by the
     // ResourceTracker to compute automatic barriers.
@@ -173,7 +234,7 @@ private:
     Pipeline::BindingTypeMap binding_types_;
     bool is_frame_set_;
     // Hold shared_ptrs to prevent resources from being freed
-    std::vector<std::shared_ptr<Image>> images_;
+    std::vector<BoundImage> bound_images_;
     std::vector<std::shared_ptr<Sampler>> samplers_;
     std::vector<BoundBuffer> buffers_;
 };
@@ -185,10 +246,11 @@ public:
         uint32_t maxSets,
         uint32_t samplerCount,
         uint32_t uniformBufferCount,
-        uint32_t storageBufferCount)
+        uint32_t storageBufferCount,
+        uint32_t storageImageCount)
     {
         std::vector<VkDescriptorPoolSize> poolSizes;
-        
+
         if (samplerCount > 0) {
             poolSizes.push_back({
                 .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -205,6 +267,12 @@ public:
             poolSizes.push_back({
                 .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 .descriptorCount = storageBufferCount
+            });
+        }
+        if (storageImageCount > 0) {
+            poolSizes.push_back({
+                .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                .descriptorCount = storageImageCount
             });
         }
 
