@@ -67,11 +67,10 @@ present_set.set_image(0, image)
 
 def record(cmd, t):
     cmd.begin()
-    with cmd.timer():
-        (cmd.bind_pipeline(generate)
-            .bind_descriptor_set(gen_set, generate, set=0)
-            .push_constants(generate, 0, struct.pack("<f", t))
-            .dispatch((W + 7) // 8, (H + 7) // 8))
+    (cmd.bind_pipeline(generate)
+        .bind_descriptor_set(gen_set, generate, set=0)
+        .push_constants(generate, 0, struct.pack("<f", t))
+        .dispatch((W + 7) // 8, (H + 7) // 8))
     with cmd.rendering(renderer):
         cmd.bind_pipeline(present).bind_descriptor_set(present_set, present, set=0).draw(3)
 
