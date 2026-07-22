@@ -335,8 +335,8 @@ void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd, std::uint64_t
 std::uint64_t require_uploads_resident(CommandBuffer& cmd) {
     std::uint64_t wait_serial = 0;
     for (const auto& set : cmd.used_sets()) {
-        for (const auto& image : set->images()) {
-            auto serial = image->require_resident();
+        for (const auto& bi : set->images()) {
+            auto serial = bi.image->require_resident();
             if (!serial) {
                 raise_error(serial.error());
             }
@@ -759,6 +759,9 @@ PYBIND11_MODULE(_core, m) {
         .def("storage_buffer", [](ComputePipelineBuilder& self, uint32_t binding, uint32_t set) -> ComputePipelineBuilder& {
             return self.storage_buffer(binding, set);
         }, py::arg("binding"), py::arg("set") = 0)
+        .def("storage_image", [](ComputePipelineBuilder& self, uint32_t binding, uint32_t set) -> ComputePipelineBuilder& {
+            return self.storage_image(binding, set);
+        }, py::arg("binding"), py::arg("set") = 0)
         .def("push_constant", [](ComputePipelineBuilder& self, uint32_t size) -> ComputePipelineBuilder& {
             return self.push_constant(size);
         }, py::arg("size"))
@@ -776,6 +779,9 @@ PYBIND11_MODULE(_core, m) {
                              std::shared_ptr<Sampler> sampler) {
             unwrap(self.set_image(binding, std::move(image), std::move(sampler)), nullptr);
         }, py::arg("binding"), py::arg("image"), py::arg("sampler") = py::none())
+        .def("set_storage_image", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Image> image) {
+            unwrap(self.set_storage_image(binding, std::move(image)), nullptr);
+        }, py::arg("binding"), py::arg("image"))
         .def("set_buffer", [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Buffer> buffer) {
             unwrap(self.set_buffer(binding, std::move(buffer)), nullptr);
         }, py::arg("binding"), py::arg("buffer"));
@@ -1126,11 +1132,11 @@ PYBIND11_MODULE(_core, m) {
                                    self.logger().get()));
         }, py::arg("filter") = Filter::LINEAR, py::arg("address_mode") = AddressMode::REPEAT,
            py::arg("anisotropy") = true, py::arg("compare") = py::none())
-        .def("create_descriptor_pool", [](Context& self, uint32_t maxSets, uint32_t samplers, uint32_t uniformBuffers, uint32_t storageBuffers) -> py::object {
+        .def("create_descriptor_pool", [](Context& self, uint32_t maxSets, uint32_t samplers, uint32_t uniformBuffers, uint32_t storageBuffers, uint32_t storageImages) -> py::object {
             return py::cast(unwrap(
-                DescriptorPool::create(self, maxSets, samplers, uniformBuffers, storageBuffers),
+                DescriptorPool::create(self, maxSets, samplers, uniformBuffers, storageBuffers, storageImages),
                 self.logger().get()));
-        }, py::arg("max_sets"), py::arg("samplers") = 0, py::arg("uniform_buffers") = 0, py::arg("storage_buffers") = 0)
+        }, py::arg("max_sets"), py::arg("samplers") = 0, py::arg("uniform_buffers") = 0, py::arg("storage_buffers") = 0, py::arg("storage_images") = 0)
         // Command buffers come from the Context, not a renderer: they are a device
         // resource, and a headless Context has no renderer to ask.
         .def("create_command_buffer", [](Context& self, std::optional<bool> auto_barriers) -> py::object {

@@ -1,0 +1,16 @@
+#version 450
+// Read-modify-write on a storage image: halves the RGB of every texel in place.
+// Dispatched after store_const to exercise a compute->compute image barrier
+// (the write in this dispatch must wait for the previous dispatch's write).
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba8) uniform image2D img;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(img);
+    if (p.x < sz.x && p.y < sz.y) {
+        vec4 v = imageLoad(img, p);
+        imageStore(img, p, vec4(v.rgb * 0.5, v.a));
+    }
+}

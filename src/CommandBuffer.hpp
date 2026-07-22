@@ -475,7 +475,7 @@ private:
     // illegal inside dynamic rendering); deferred recording makes the insert
     // a cheap vector operation on data that only exists at record time.
     void record_barrier_(std::shared_ptr<Buffer> buffer, ResourceTracker::Barrier b) {
-        auto lambda = [buffer = std::move(buffer), b](VkCommandBuffer cmd, const FrameContext&) {
+        hoist_or_push_([buffer = std::move(buffer), b](VkCommandBuffer cmd, const FrameContext&) {
             VkBufferMemoryBarrier barrier{
                 .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
                 .pNext = nullptr,
@@ -490,7 +490,41 @@ private:
                 .size = VK_WHOLE_SIZE
             };
             vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 1, &barrier, 0, nullptr);
-        };
+        });
+    }
+
+    // The image counterpart: an image-memory barrier that also carries the
+    // layout transition the tracker computed. Same hoisting as buffers — a
+    // vkCmdPipelineBarrier is illegal inside dynamic rendering, so a transition
+    // discovered mid-pass (a compute-written image about to be sampled) lands
+    // just before begin_rendering.
+    void record_image_barrier_(std::shared_ptr<Image> image, ResourceTracker::ImageBarrier b) {
+        hoist_or_push_([image = std::move(image), b](VkCommandBuffer cmd, const FrameContext&) {
+            VkImageMemoryBarrier barrier{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = b.src_access,
+                .dstAccessMask = b.dst_access,
+                .oldLayout = b.old_layout,
+                .newLayout = b.new_layout,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = image->vk_image(),
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = image->mip_levels(),
+                    .baseArrayLayer = 0,
+                    .layerCount = 1
+                }
+            };
+            vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        });
+    }
+
+    // Push a recorded barrier, or hoist it before begin_rendering when inside a
+    // rendering scope. Shared by the buffer and image paths.
+    void hoist_or_push_(std::function<void(VkCommandBuffer, const FrameContext&)> lambda) {
         if (in_rendering_) {
             commands_.insert(commands_.begin() + rendering_insert_pos_, std::move(lambda));
             ++rendering_insert_pos_;
@@ -509,6 +543,19 @@ private:
         }
         if (auto b = tracker_.use(buffer.get(), stages, access, writes)) {
             record_barrier_(buffer, *b);
+        }
+    }
+
+    void track_image_use_(const std::shared_ptr<Image>& image, VkImageLayout layout,
+                          VkPipelineStageFlags stages, VkAccessFlags access, bool writes) {
+        if (!auto_barriers_) {
+            return;
+        }
+        if (writes) {
+            tracked_writes_ = true;
+        }
+        if (auto b = tracker_.use_image(image.get(), layout, stages, access, writes)) {
+            record_image_barrier_(image, *b);
         }
     }
 
@@ -531,6 +578,19 @@ private:
                                VK_ACCESS_UNIFORM_READ_BIT, false);
                 }
             }
+            // A sampled image only needs a barrier if the tracker has already
+            // seen it — i.e. compute wrote it earlier in this recording and it
+            // is still in GENERAL. An uploaded texture the tracker never saw
+            // rests in SHADER_READ_ONLY and is left untouched (the pre-0.9
+            // behaviour), so ordinary texturing pays nothing.
+            for (const auto& bi : set->images()) {
+                if (bi.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
+                    tracker_.tracks(bi.image.get())) {
+                    track_image_use_(bi.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                     VK_ACCESS_SHADER_READ_BIT, false);
+                }
+            }
         }
     }
 
@@ -549,6 +609,18 @@ private:
                 } else if (bb.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
                     track_use_(bb.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                VK_ACCESS_UNIFORM_READ_BIT, false);
+                }
+            }
+            // Storage images are conservatively READ+WRITE, like storage
+            // buffers: without reflection a `readonly` image is indistinguishable
+            // from a written one, and GENERAL is the only layout either is
+            // accessed in. The transition to GENERAL (from UNDEFINED on first
+            // use, or from a prior use's layout) rides on this barrier.
+            for (const auto& bi : set->images()) {
+                if (bi.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+                    track_image_use_(bi.image, VK_IMAGE_LAYOUT_GENERAL,
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                     VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, true);
                 }
             }
         }
