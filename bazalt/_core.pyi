@@ -652,7 +652,12 @@ class Context:
 
             while not ctx.uploads_done:
                 draw_progress(ctx.upload_progress)
-        """
+
+        "Batch" means everything queued since the last time uploads fully
+        drained: once all in-flight uploads finish, progress resets to 1.0 and
+        the next load_image starts a fresh batch from 0. This is the final
+        semantics (settled in 0.9) — a second loading screen counts only its own
+        images, not the ones a previous screen already finished."""
         ...
     def wait_for_uploads(self) -> None:
         """Block until every pending load_image upload has finished."""
