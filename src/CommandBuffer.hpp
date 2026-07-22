@@ -7,6 +7,7 @@
 #include <array>
 #include <expected>
 #include <functional>
+#include <string>
 #include "Context.hpp"
 #include "RenderTarget.hpp"
 #include "Pipeline.hpp"
@@ -54,6 +55,11 @@ public:
     // Python object is dropped.
     ~CommandBuffer() {
         if (context_) {
+            if (timer_pool_ != VK_NULL_HANDLE) {
+                context_->defer_destroy([device = context_->device(), pool = timer_pool_] {
+                    vkDestroyQueryPool(device, pool, nullptr);
+                });
+            }
             context_->defer_destroy(
                 [device = context_->device(), pool = context_->command_pool(),
                  buffers = std::move(command_buffers_)] {
@@ -78,6 +84,9 @@ public:
         tracked_writes_ = false;
         in_rendering_ = false;
         rendering_insert_pos_ = 0;
+        // Timer scopes are re-declared each recording; the query pool itself is
+        // kept and reset (vkCmdResetQueryPool) at the top of every replay.
+        timer_names_.clear();
         return *this;
     }
 
@@ -401,6 +410,59 @@ public:
         return {};
     }
 
+    // ── GPU timers ──────────────────────────────────────────────────────────
+    //
+    // `with cmd.timer("blur"):` brackets a slice of the recording with a pair of
+    // vkCmdWriteTimestamp calls; after a completed submit, cmd.timer_ms("blur")
+    // returns the GPU wall-clock of that slice in milliseconds. Unlike 0.8's
+    // frame.gpu_time_ms this needs no window and no begin_frame — the headless
+    // submit blocks, so the readback is ready as soon as ctx.submit() returns,
+    // which is the point (profiling a dispatch is the main use case).
+    //
+    // Self-gating: the query pool is created only when a timer is actually used,
+    // so an app that never calls timer() pays nothing, no Context flag required.
+    // Best-effort: a device without timestamp support reports None, never errors.
+
+    // Records the opening timestamp and returns the scope's index (its two query
+    // slots are 2*index / 2*index+1). Paired with end_timer by the with-scope.
+    std::size_t begin_timer(std::string name) {
+        const std::size_t index = timer_names_.size();
+        timer_names_.push_back(std::move(name));
+        record_timer_write_(static_cast<std::uint32_t>(2 * index), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+        return index;
+    }
+
+    void end_timer(std::size_t index) {
+        record_timer_write_(static_cast<std::uint32_t>(2 * index + 1), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    }
+
+    // The measured time of a scope, or nullopt if timestamps are unsupported,
+    // the name was never recorded, or the results are not ready yet (a submit
+    // still in flight — for a blocking headless submit they always are).
+    std::optional<double> timer_ms(const std::string& name) const {
+        if (timer_pool_ == VK_NULL_HANDLE) {
+            return std::nullopt;
+        }
+        std::size_t index = timer_names_.size();
+        for (std::size_t i = 0; i < timer_names_.size(); ++i) {
+            if (timer_names_[i] == name) { index = i; break; }
+        }
+        if (index == timer_names_.size()) {
+            return std::nullopt;
+        }
+        std::uint64_t ts[2] = { 0, 0 };
+        if (vkGetQueryPoolResults(context_->device(), timer_pool_,
+                                  static_cast<std::uint32_t>(2 * index), 2,
+                                  sizeof(ts), ts, sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
+            return std::nullopt;  // VK_NOT_READY: submit not finished
+        }
+        const std::uint64_t mask = timer_valid_bits_ >= 64
+            ? ~std::uint64_t{ 0 }
+            : ((std::uint64_t{ 1 } << timer_valid_bits_) - 1);
+        const std::uint64_t delta = (ts[1] - ts[0]) & mask;
+        return static_cast<double>(delta) * static_cast<double>(timer_period_) / 1.0e6;
+    }
+
     // No stage argument: the Pipeline already knows which stages its push constant
     // range covers, so passing a mismatched one was a validation error for no gain.
     CommandBuffer& push_constants(std::shared_ptr<Pipeline> pipeline, uint32_t offset, uint32_t size, const void* data) {
@@ -444,6 +506,19 @@ public:
     }
 
     void execute(VkCommandBuffer vkCmd, const FrameContext& frame) {
+        // Timer query pool: created/grown here (the scope count is known once
+        // recording is done) and reset before any command runs — timestamps
+        // must be reset before they are written, and vkCmdResetQueryPool is
+        // illegal inside a render pass, so the top of execute is the one safe
+        // spot. The timestamp-write lambdas read timer_pool_ at execute, so a
+        // grow that recreates the pool is picked up without re-recording.
+        if (!timer_names_.empty()) {
+            ensure_timer_pool_(2 * timer_names_.size());
+            if (timer_pool_ != VK_NULL_HANDLE) {
+                vkCmdResetQueryPool(vkCmd, timer_pool_, 0, timer_capacity_);
+            }
+        }
+
         // Replay wrap-around. In-recording barriers order uses within one
         // replay, but the same recording ran last frame and may still be in
         // flight — its trailing reads/writes race with this replay's first
@@ -531,6 +606,67 @@ private:
         } else {
             commands_.push_back(std::move(lambda));
         }
+    }
+
+    // A recorded timestamp write. Captures `this` (safe: the lambda only runs
+    // inside this->execute) and reads timer_pool_ at execute, so it no-ops when
+    // timestamps are unsupported and follows the pool across a grow.
+    void record_timer_write_(std::uint32_t slot, VkPipelineStageFlagBits stage) {
+        commands_.push_back([this, slot, stage](VkCommandBuffer cmd, const FrameContext&) {
+            if (timer_pool_ != VK_NULL_HANDLE) {
+                vkCmdWriteTimestamp(cmd, stage, timer_pool_, slot);
+            }
+        });
+    }
+
+    // Best-effort query pool sized for `needed` slots. Queries timestamp
+    // support once; on an unsupported device timer_pool_ stays null and every
+    // timer becomes a silent no-op (timer_ms returns None). Grows by recreating
+    // (deferred destroy of the old pool) — rare, only when a later recording
+    // declares more scopes than any before it.
+    void ensure_timer_pool_(std::size_t needed) {
+        if (timer_pool_ != VK_NULL_HANDLE && timer_capacity_ >= needed) {
+            return;
+        }
+        if (!timer_supported_.has_value()) {
+            VkPhysicalDeviceProperties props{};
+            vkGetPhysicalDeviceProperties(context_->physical_device(), &props);
+            std::uint32_t family_count = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(context_->physical_device(), &family_count, nullptr);
+            std::vector<VkQueueFamilyProperties> families(family_count);
+            vkGetPhysicalDeviceQueueFamilyProperties(context_->physical_device(), &family_count, families.data());
+            const std::uint32_t gf = context_->graphics_queue_family();
+            const bool ok = props.limits.timestampPeriod > 0.0f &&
+                            gf < family_count && families[gf].timestampValidBits != 0;
+            timer_supported_ = ok;
+            if (ok) {
+                timer_period_ = props.limits.timestampPeriod;
+                timer_valid_bits_ = families[gf].timestampValidBits;
+            }
+        }
+        if (!*timer_supported_) {
+            return;
+        }
+
+        if (timer_pool_ != VK_NULL_HANDLE) {
+            context_->defer_destroy([device = context_->device(), pool = timer_pool_] {
+                vkDestroyQueryPool(device, pool, nullptr);
+            });
+            timer_pool_ = VK_NULL_HANDLE;
+        }
+        VkQueryPoolCreateInfo poolInfo{
+            .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .queryType = VK_QUERY_TYPE_TIMESTAMP,
+            .queryCount = static_cast<std::uint32_t>(needed),
+            .pipelineStatistics = 0
+        };
+        if (vkCreateQueryPool(context_->device(), &poolInfo, nullptr, &timer_pool_) != VK_SUCCESS) {
+            timer_pool_ = VK_NULL_HANDLE;
+            return;
+        }
+        timer_capacity_ = static_cast<std::uint32_t>(needed);
     }
 
     void track_use_(const std::shared_ptr<Buffer>& buffer, VkPipelineStageFlags stages,
@@ -639,4 +775,12 @@ private:
     std::size_t rendering_insert_pos_ = 0;
     std::unordered_map<uint32_t, std::shared_ptr<DescriptorSet>> bound_graphics_sets_;
     std::unordered_map<uint32_t, std::shared_ptr<DescriptorSet>> bound_compute_sets_;
+
+    // ── GPU timers (query pool survives begin(); results read after submit) ──
+    VkQueryPool timer_pool_ = VK_NULL_HANDLE;
+    std::uint32_t timer_capacity_ = 0;
+    float timer_period_ = 0.0f;
+    std::uint32_t timer_valid_bits_ = 0;
+    std::optional<bool> timer_supported_;  // queried once, lazily
+    std::vector<std::string> timer_names_;  // scope index -> name (reset by begin)
 };

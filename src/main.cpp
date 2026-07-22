@@ -372,6 +372,14 @@ struct RenderingScope {
     std::vector<float> clear_color;
 };
 
+// The state behind `with cmd.timer("name"):`. __enter__ records the opening
+// timestamp and remembers the scope index; __exit__ records the closing one.
+struct TimerScope {
+    std::shared_ptr<CommandBuffer> cmd;
+    std::string name;
+    std::size_t index = 0;
+};
+
 // Readback shaped for numpy: (h, w, channels) — or (h, w) for single-channel
 // formats — with the dtype the format table dictates. Shared by Image.read and
 // RenderTarget.read_pixels.
@@ -823,6 +831,14 @@ PYBIND11_MODULE(_core, m) {
                              const std::vector<float>& clear_color) {
             return RenderingScope{ std::move(self), std::move(target), clear_color };
         }, py::arg("target"), py::arg("clear_color") = std::vector<float>{0.0f, 0.0f, 0.0f, 1.0f})
+        // GPU timer scope: `with cmd.timer("blur"):` brackets the enclosed
+        // commands; cmd.timer_ms("blur") reads the result after a submit.
+        .def("timer", [](std::shared_ptr<CommandBuffer> self, std::string name) {
+            return TimerScope{ std::move(self), std::move(name) };
+        }, py::arg("name"))
+        .def("timer_ms", [](CommandBuffer& self, const std::string& name) {
+            return self.timer_ms(name);
+        }, py::arg("name"))
         // The no-argument versions are gone: begin_rendering emits a full-target
         // viewport and scissor itself. These remain for split-screen and similar.
         .def("set_viewport", [](std::shared_ptr<CommandBuffer> self, float x, float y, float width, float height) {
@@ -891,6 +907,16 @@ PYBIND11_MODULE(_core, m) {
         })
         .def("__exit__", [](RenderingScope& self, py::object, py::object, py::object) {
             self.cmd->end_rendering(self.target);
+            return false;  // never swallow exceptions
+        });
+
+    py::class_<TimerScope>(m, "TimerScope")
+        .def("__enter__", [](TimerScope& self) {
+            self.index = self.cmd->begin_timer(self.name);
+            return self.cmd;
+        })
+        .def("__exit__", [](TimerScope& self, py::object, py::object, py::object) {
+            self.cmd->end_timer(self.index);
             return false;  // never swallow exceptions
         });
 

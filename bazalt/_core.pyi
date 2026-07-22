@@ -476,8 +476,35 @@ class CommandBuffer:
     def bind_descriptor_set(self, descriptor_set: DescriptorSet, pipeline: Pipeline,
                             set: int) -> CommandBuffer: ...
 
+    def timer(self, name: str) -> TimerScope:
+        """A GPU timer scope:
+
+            with cmd.timer("blur"):
+                cmd.bind_pipeline(blur).dispatch(gx, gy)
+            ...
+            ctx.submit(cmd)
+            print(cmd.timer_ms("blur"))
+
+        Brackets the enclosed commands with a timestamp pair. Unlike
+        frame.gpu_time_ms this works headless — the blocking submit means the
+        result is ready as soon as submit() returns. Self-gating: the query pool
+        exists only once a timer is used, so apps that don't time pay nothing."""
+        ...
+
+    def timer_ms(self, name: str) -> Optional[float]:
+        """The measured GPU time of a timer scope in milliseconds, or None if
+        timestamps are unsupported, the name was never recorded, or the submit
+        has not completed (a blocking headless submit always has)."""
+        ...
+
 class RenderingScope:
     """Returned by CommandBuffer.rendering(); use it in a `with` statement."""
+
+    def __enter__(self) -> CommandBuffer: ...
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
+
+class TimerScope:
+    """Returned by CommandBuffer.timer(); use it in a `with` statement."""
 
     def __enter__(self) -> CommandBuffer: ...
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
