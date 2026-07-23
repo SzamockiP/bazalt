@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "bazalt"
-version = "0.9.0"
+version = "0.10.0"
 description = "Python library for rapid GPU shader prototyping using Vulkan"
 requires-python = ">=3.10"
 license = {text = "MIT"}

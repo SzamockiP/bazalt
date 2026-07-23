@@ -5,6 +5,57 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.10.0] — 2026-07-23
+
+"Cubemaps and texture arrays": images can now have more than one layer. The
+existing `ctx.create_image` and `ctx.load_image` grow a `cube=` flag and accept
+a **list** of layers (numpy arrays or file paths) — a cubemap is six faces, a
+texture array is N, one mechanism (`arrayLayers > 1`) with two views: `CUBE` for
+sampling (`samplerCube`), `2D_ARRAY` for compute storage writes. Skyboxes,
+environment maps and procedural cubemaps without leaving the
+`create_image`/`load_image` surface, and no new function or type.
+
+### Added
+- **Layered images through the existing calls — no new names, no new types.**
+  - `ctx.create_image(images, *, cube=False)` accepts a **list** of numpy arrays
+    → a texture array (view `2D_ARRAY`); `cube=True` (exactly 6 square faces,
+    order +X,-X,+Y,-Y,+Z,-Z) → a cubemap (view `CUBE`). A single array is still a
+    2D image, unchanged.
+  - `ctx.create_image(w, h, fmt, *, layers=N)` / `cube=True` makes an **empty**
+    texture array / cubemap, to be filled by a compute storage image (a
+    procedural skybox writes all six faces with `imageStore` to an
+    `image2DArray`).
+  - `ctx.load_image(paths, *, cube=False)` accepts a **list** of file paths → a
+    layered image loaded from disk (async, sRGB + mips), array or cubemap.
+- **`Image.array_layers` and `Image.is_cube`** report the layer count and whether
+  an image is a cubemap (alongside `width`/`height`/`mip_levels`).
+- New example `14_skybox`: an empty cubemap is filled face-by-face by a compute
+  shader and sampled as a `samplerCube` skybox with a per-pixel world-space ray.
+
+### Changed
+- Image upload, mip generation and the automatic layout barriers now cover every
+  layer: one layered buffer→image copy, one blit per mip across all faces, and
+  `layerCount = array_layers` in the tracker's image-memory barriers. A cubemap
+  transitions `GENERAL → SHADER_READ_ONLY` across all six faces in a single
+  barrier before it is sampled — checked by sync-validation-as-assert.
+
+### Notes
+- A cubemap carries two views over one `VkImage`: a `CUBE` view for sampling and
+  a parallel `2D_ARRAY` view for storage writes (a `CUBE` view is illegal as a
+  storage image). `set_image` binds the former, `set_storage_image` the latter;
+  the caller never sees the distinction. `array_layers()` reads the same, and the
+  automatic barriers cover all layers.
+- `cube=` is the one disambiguator a layered image needs: six layers alone could
+  be a cubemap or a six-slice array, and only the caller knows which. It sets the
+  image's creation flag and view type — it is not a sampler setting (the sampler
+  is identical for 2D, arrays and cubemaps).
+- **Out of scope for now (documented, not a regression):** rendering *into*
+  cubemap/array layers (dynamic environment capture, cascade shadow maps) needs
+  per-layer render-target views — a later release. In 0.10 an empty layered image
+  is filled by uploading pixels or by a compute storage image. The remaining 0.5
+  backlog (async headless submit, async `StaticBuffer`, Sampler debug names)
+  stays deferred.
+
 ## [0.9.0] — 2026-07-22
 
 "Storage Images": compute shaders can now write images, not just buffers.
