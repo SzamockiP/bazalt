@@ -5,6 +5,58 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.11.0] — 2026-07-23
+
+"Mipmaps": the mip chain is no longer hardcoded away for everything except
+`load_image`. Numpy textures can opt into a full chain, file loads can opt out,
+empty images can allocate levels, and `cmd.generate_mipmaps` fills a chain from
+mip 0 for images written by compute or a render pass — the machinery that only
+the file loader used since 0.5 is now the whole surface. Plus a fix to the
+manual image barrier so it composes with the automatic tracker.
+
+### Added
+- **`mipmaps=` on the pixel/file image calls.** `ctx.create_image(array, *,
+  mipmaps=True)` and `ctx.create_image([...], *, mipmaps=True)` generate the full
+  mip chain for a numpy texture (default `False` — arrays are data and get no
+  surprise filtering). `ctx.load_image(path, *, mipmaps=False)` / `load_image([...],
+  *, mipmaps=False)` turn the chain off for files (default `True` — pictures are
+  mipped, e.g. a UI sprite sampled 1:1 opts out).
+- **`mip_levels=` on empty images.** `ctx.create_image(w, h, fmt, *, mip_levels=N)`
+  allocates a mip chain (1..full chain for the size); the extra levels start empty,
+  to be filled by writing mip 0 (compute / a render pass) and then
+  `cmd.generate_mipmaps`.
+- **`cmd.generate_mipmaps(image, *, src=Access.SHADER_READ)`.** Fills mip levels
+  1..N by blitting mip 0 down the chain (every array layer / cube face at once),
+  leaving each level sampleable in `SHADER_READ_ONLY`. `src` names mip 0's current
+  layout in `cmd.barrier`'s vocabulary — `SHADER_READ` (an uploaded / already-baked
+  image, the default) or `SHADER_WRITE` (mip 0 fresh from a compute `imageStore`);
+  its scope doubles as the barrier waiting on that producer. Refused on a
+  single-level image, a non-blittable format, or inside a rendering scope.
+
+### Fixed
+- **Manual `cmd.barrier(image, …)` now updates the automatic tracker.** Mixing it
+  with automatic uses of the same image in one recording (a manual transition
+  followed by an auto sample) is now safe: the tracker learns the post-barrier
+  layout instead of re-transitioning from a stale one, which had produced a
+  mismatched-`oldLayout` validation error and a redundant barrier. `generate_mipmaps`
+  seeds the tracker the same way.
+
+### Changed
+- The C++ source is now formatted by a project `.clang-format` (Allman braces,
+  120-column) — a one-time sweep, no behaviour change.
+
+### Notes
+- Arrays default to a single level and files default to a full chain — the "arrays
+  are data, files are pictures" split from 0.5, now with an explicit override on
+  both sides. Mip generation reuses the existing blit cascade (falling back to a
+  single level when the format can't be blitted/linearly filtered), so a cubemap
+  or texture array mips across all layers in one pass.
+- **Out of scope (unchanged from 0.10):** rendering *into* a specific mip level
+  or cubemap/array layer with the graphics pipeline (dynamic environment capture,
+  render-to-mip) still needs per-subresource render-target views — it rides with
+  MSAA / render-to-layer in a later release. In 0.11 an empty mipped image is
+  filled by writing mip 0 (upload or compute) then `generate_mipmaps`.
+
 ## [0.10.0] — 2026-07-23
 
 "Cubemaps and texture arrays": images can now have more than one layer. The

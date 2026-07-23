@@ -64,6 +64,32 @@ def test_unsupported_dtype_is_refused(ctx):
         ctx.create_image(np.zeros((4, 4, 4), dtype=np.int32))
 
 
+# ── mipmaps: opt-in for arrays, opt-out for files ─────────────────────────
+
+
+def test_array_mipmaps_opt_in(ctx):
+    """create_image(array, mipmaps=True) builds the full chain; the default
+    stays single-level (data images get no surprise mips) and mip 0 round-trips
+    either way."""
+    arr = np.full((16, 16, 4), (200, 100, 50, 255), np.uint8)
+
+    assert ctx.create_image(arr).mip_levels == 1
+    mipped = ctx.create_image(arr, mipmaps=True)
+    assert mipped.mip_levels == 5  # full chain for 16x16: 16,8,4,2,1
+    np.testing.assert_array_equal(mipped.read(), arr)  # mip 0 unchanged
+
+
+def test_load_image_mipmaps_can_be_turned_off(ctx, tmp_path):
+    """Files are mipped by default (pictures); mipmaps=False keeps one level."""
+    from test_bindings import write_png
+
+    png = tmp_path / "img.png"
+    write_png(png, [[(255, 0, 0, 255)] * 16] * 16)
+
+    assert ctx.load_image(str(png)).mip_levels == 5
+    assert ctx.load_image(str(png), mipmaps=False).mip_levels == 1
+
+
 # ── empty images ──────────────────────────────────────────────────────────
 
 

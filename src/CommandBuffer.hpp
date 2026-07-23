@@ -469,7 +469,9 @@ public:
     // `cmd.barrier(image, Access.SHADER_WRITE, Access.SHADER_READ)` once, after
     // the dispatch, so the asset is generated once instead of every frame. The
     // layout is inferred from the access (WRITE->GENERAL, READ->SHADER_READ_ONLY);
-    // only those two shader accesses name an image layout.
+    // only those two shader accesses name an image layout. In auto mode this also
+    // updates the tracker, so mixing it with automatic uses of the same image in
+    // one recording is safe — no stale-oldLayout double transition.
     std::expected<void, Error> barrier(std::shared_ptr<Image> image, Access src, Access dst)
     {
         if (!image)
@@ -492,7 +494,71 @@ public:
         }
         const StageAccess s = to_vk(src);
         const StageAccess d = to_vk(dst);
+        Image* img = image.get();
         record_image_barrier_(std::move(image), {*old_layout, *new_layout, s.stages, d.stages, s.access, d.access});
+        // Keep the auto-tracker in sync: a later automatic use of this image in
+        // the same recording must see the post-barrier layout, not re-transition
+        // from a stale one. No-op in manual mode (the tracker is never consulted).
+        if (auto_barriers_)
+        {
+            tracker_.note_image_layout(img, *new_layout, d.stages, d.access);
+        }
+        return {};
+    }
+
+    // Fills mip levels 1..N-1 of a mipped image by blitting mip 0 down the chain
+    // (every array layer / cube face at once), leaving every level sampleable in
+    // SHADER_READ_ONLY. The pair to create_image(..., mip_levels=N): write mip 0
+    // (upload, compute, or a render pass), then generate the rest here.
+    //
+    // `src` names mip 0's CURRENT layout via the same access vocabulary as
+    // cmd.barrier: SHADER_READ (SHADER_READ_ONLY — an uploaded or already-baked
+    // image, the default) or SHADER_WRITE (GENERAL — mip 0 fresh from a compute
+    // imageStore). Its scope doubles as the barrier waiting on that producer.
+    // Refused inside a rendering scope (blits and barriers are illegal there).
+    std::expected<void, Error> generate_mipmaps(std::shared_ptr<Image> image, Access src = Access::SHADER_READ)
+    {
+        if (!image)
+        {
+            return std::unexpected(err_resource("generate_mipmaps: image is null"));
+        }
+        if (in_rendering_)
+        {
+            return std::unexpected(err_resource(
+                "cmd.generate_mipmaps() is not allowed inside a rendering scope; "
+                "record it before begin_rendering"));
+        }
+        if (image->mip_levels() <= 1)
+        {
+            return std::unexpected(err_resource(
+                "generate_mipmaps: image has a single mip level; create it with "
+                "mip_levels>1 (empty) or mipmaps=True (from pixels/files)"));
+        }
+        if (!Image::can_generate_mips(*context_, image->format()))
+        {
+            return std::unexpected(err_resource(
+                "generate_mipmaps: this format cannot be blitted and linearly "
+                "filtered on this device, so a mip chain can't be generated"));
+        }
+        const auto src_layout = image_layout_for(src);
+        if (!src_layout)
+        {
+            return std::unexpected(err_resource(
+                "generate_mipmaps: src must be Access.SHADER_READ (mip 0 in "
+                "SHADER_READ_ONLY) or Access.SHADER_WRITE (mip 0 in GENERAL)"));
+        }
+        const StageAccess s = to_vk(src);
+        Image* img = image.get();
+        commands_.push_back(
+            [image = std::move(image), layout = *src_layout, s](VkCommandBuffer cmd, const FrameContext&)
+            { image->record_generate_mipmaps(cmd, layout, s.stages, s.access); });
+        // The image now rests in SHADER_READ_ONLY across every level; keep the
+        // tracker in sync so a later automatic sample emits no extra transition.
+        if (auto_barriers_)
+        {
+            tracker_.note_image_layout(
+                img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+        }
         return {};
     }
 

@@ -213,6 +213,29 @@ public:
         return image_states_.contains(image);
     }
 
+    // A manual cmd.barrier(image) / generate_mipmaps already recorded a real
+    // transition to `layout`, making prior work available to (dst_stages,
+    // dst_access). Seed the tracker so a following automatic use of the same
+    // image in this recording sees the real layout and does NOT re-transition
+    // with a stale oldLayout (a validation error) — and WAR/WAW-orders correctly
+    // against these consumers. Modelling dst as a completed read is right for
+    // both the READ case (a later sample needs no barrier) and the WRITE case (a
+    // later write waits on dst before overwriting).
+    void note_image_layout(
+        Image* image,
+        VkImageLayout layout,
+        VkPipelineStageFlags dst_stages,
+        VkAccessFlags dst_access)
+    {
+        ImageState& st = image_states_[image];
+        st = {};
+        st.layout = layout;
+        st.read_stages = dst_stages;
+        st.read_access = dst_access;
+        st.visible_stages = dst_stages;
+        st.visible_access = dst_access;
+    }
+
     void reset()
     {
         states_.clear();

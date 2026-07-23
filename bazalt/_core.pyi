@@ -489,8 +489,25 @@ class CommandBuffer:
         shader bakes an image in one submit (GENERAL) and later frames sample it
         (SHADER_READ_ONLY). Generate it once, then
         `cmd.barrier(image, Access.SHADER_WRITE, Access.SHADER_READ)` after the
-        dispatch, and sample it every frame without regenerating. Refused inside
-        a rendering scope."""
+        dispatch, and sample it every frame without regenerating. In auto mode
+        this also updates the tracker, so mixing it with automatic uses of the
+        same image in one recording is safe. Refused inside a rendering scope."""
+        ...
+
+    def generate_mipmaps(self, image: Image, *,
+                         src: Access = Access.SHADER_READ) -> CommandBuffer:
+        """Fill mip levels 1..N of a mipped image by blitting mip 0 down the chain
+        (every array layer / cube face at once), leaving every level sampleable.
+
+        The pair to create_image(..., mip_levels=N): write mip 0 (upload, a
+        compute imageStore, or a render pass), then generate the rest here. `src`
+        names mip 0's current layout in cmd.barrier's vocabulary — SHADER_READ
+        (SHADER_READ_ONLY, an uploaded or already-baked image; the default) or
+        SHADER_WRITE (GENERAL, mip 0 fresh from compute).
+
+        Raises ResourceError if the image has a single level (create it with
+        mip_levels>1 or mipmaps=True), if the format can't be blitted/linearly
+        filtered, or if called inside a rendering scope."""
         ...
 
     def push_constants(self, pipeline: Pipeline, offset: int, data: bytes) -> CommandBuffer:
@@ -657,8 +674,10 @@ class Context:
         """
         ...
 
-    def load_image(self, path: str, *, name: str = "") -> Image:
-        """Decode an image file into an sRGB GPU image with a full mip chain.
+    def load_image(self, path: str, *, mipmaps: bool = True, name: str = "") -> Image:
+        """Decode an image file into an sRGB GPU image, with a full mip chain by
+        default (`mipmaps=False` for a single level — e.g. a UI sprite sampled
+        1:1).
 
         Returns IMMEDIATELY: the file header is validated here (a missing or
         corrupt file raises ResourceError at this call), but the decode and
@@ -676,12 +695,13 @@ class Context:
         ...
 
     def load_image(self, paths: Sequence[str], *, cube: bool = False,
-                   name: str = "") -> Image:
-        """From a list of image files → a layered image (async, sRGB + mips): a
-        texture array, or a cubemap when `cube=True` (6 square faces, order
-        +X,-X,+Y,-Y,+Z,-Z). Every face must share a size. Returns immediately
-        like the single-file load; hot reload is not wired for layered images
-        in v1 (a re-saved face keeps the loaded contents)."""
+                   mipmaps: bool = True, name: str = "") -> Image:
+        """From a list of image files → a layered image (async, sRGB, mipped by
+        default): a texture array, or a cubemap when `cube=True` (6 square faces,
+        order +X,-X,+Y,-Y,+Z,-Z). Every face must share a size. `mipmaps=False`
+        keeps a single level. Returns immediately like the single-file load; hot
+        reload is not wired for layered images in v1 (a re-saved face keeps the
+        loaded contents)."""
         ...
 
     @property
@@ -707,24 +727,32 @@ class Context:
         ...
     def create_image(self, width: int, height: int,
                      format: Format = Format.RGBA8, *, layers: int = 1,
-                     cube: bool = False, name: str = "") -> Image:
+                     cube: bool = False, mip_levels: int = 1, name: str = "") -> Image:
         """Empty image on the GPU. `layers > 1` makes a texture array (view
         2D_ARRAY); `cube=True` makes a cubemap (6 square faces, view CUBE). An
         empty layered image is filled by rendering into it or by a compute
         storage image (procedural skyboxes/arrays); the data forms below upload
-        pixels instead."""
+        pixels instead.
+
+        `mip_levels > 1` allocates a mip chain (1..full chain for the size); the
+        extra levels start empty — write mip 0 (compute / a render pass) then
+        `cmd.generate_mipmaps(img)` to fill the rest."""
         ...
-    def create_image(self, array: Any, *, cube: bool = False, name: str = "") -> Image:
+    def create_image(self, array: Any, *, mipmaps: bool = False,
+                     cube: bool = False, name: str = "") -> Image:
         """From one numpy array → a 2D image; shape + dtype pick the format
-        (UNORM — arrays are data, files are pictures). (h, w, 3) has no portable
-        GPU format and raises ResourceError with a padding hint. `cube=True`
-        here is a mistake — a cubemap needs 6 faces, so pass a list (below)."""
+        (UNORM — arrays are data, files are pictures). One level by default;
+        `mipmaps=True` generates the full chain (arrays stay 1-level unless asked,
+        so a data texture gets no surprise filtering). (h, w, 3) has no portable
+        GPU format and raises ResourceError with a padding hint. `cube=True` here
+        is a mistake — a cubemap needs 6 faces, so pass a list (below)."""
         ...
-    def create_image(self, images: Sequence[Any], *, cube: bool = False,
-                     name: str = "") -> Image:
+    def create_image(self, images: Sequence[Any], *, mipmaps: bool = False,
+                     cube: bool = False, name: str = "") -> Image:
         """From a list of numpy arrays → a layered image: a texture array, or a
         cubemap when `cube=True` (exactly 6 square faces, order
-        +X,-X,+Y,-Y,+Z,-Z). Every layer must share shape and dtype."""
+        +X,-X,+Y,-Y,+Z,-Z). Every layer must share shape and dtype. `mipmaps=True`
+        generates the full chain across every layer."""
         ...
     def create_sampler(self, filter: Filter = Filter.LINEAR,
                        address_mode: AddressMode = AddressMode.REPEAT,

@@ -1185,6 +1185,19 @@ PYBIND11_MODULE(_core, m)
             py::arg("image"),
             py::arg("src"),
             py::arg("dst"))
+        // Fill mip levels 1..N of a mipped image from mip 0 (all layers). `src`
+        // names mip 0's current layout: SHADER_READ (default, an uploaded/baked
+        // image) or SHADER_WRITE (mip 0 fresh from compute imageStore).
+        .def(
+            "generate_mipmaps",
+            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Image> image, Access src)
+            {
+                unwrap(self->generate_mipmaps(std::move(image), src), nullptr);
+                return self;
+            },
+            py::arg("image"),
+            py::kw_only(),
+            py::arg("src") = Access::SHADER_READ)
         // No stage argument: the Pipeline already records which stages its push
         // constant range covers, so repeating it could only ever be wrong.
         .def(
@@ -1456,10 +1469,12 @@ PYBIND11_MODULE(_core, m)
             py::arg("source") = py::none())
         .def(
             "load_image",
-            [](Context& self, const std::string& path, const std::string& name) -> py::object
+            [](Context& self, const std::string& path, bool mipmaps, const std::string& name) -> py::object
             {
-                // sRGB with a full mip chain: files are pictures. Arrays go through
-                // create_image and stay UNORM: arrays are data.
+                // sRGB with a full mip chain by default: files are pictures. Arrays go
+                // through create_image and stay UNORM (arrays are data). `mipmaps` can
+                // turn the chain off (e.g. a UI sprite sampled 1:1 wants no minified
+                // levels).
                 //
                 // Returns IMMEDIATELY: the header is validated here (missing or
                 // mangled files fail at the call site, and width/height are right
@@ -1472,7 +1487,7 @@ PYBIND11_MODULE(_core, m)
                     self.set_upload_manager(std::make_unique<UploadManager>(self));
                 }
                 auto* manager = static_cast<UploadManager*>(self.upload_manager());
-                auto image = unwrap(manager->load(path), self.logger().get());
+                auto image = unwrap(manager->load(path, mipmaps), self.logger().get());
                 name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
                 if (auto* hr = self.hot_reload())
                     hr->watch_image(image, path);
@@ -1480,6 +1495,7 @@ PYBIND11_MODULE(_core, m)
             },
             py::arg("path"),
             py::kw_only(),
+            py::arg("mipmaps") = true,
             py::arg("name") = "")
         // A list of paths → a layered image loaded from files: texture array
         // (cube=False) or cubemap (cube=True, 6 square faces, order
@@ -1488,20 +1504,22 @@ PYBIND11_MODULE(_core, m)
         // the loaded contents.
         .def(
             "load_image",
-            [](Context& self, const std::vector<std::string>& paths, bool cube, const std::string& name) -> py::object
+            [](Context& self, const std::vector<std::string>& paths, bool cube, bool mipmaps, const std::string& name)
+                -> py::object
             {
                 if (!self.upload_manager())
                 {
                     self.set_upload_manager(std::make_unique<UploadManager>(self));
                 }
                 auto* manager = static_cast<UploadManager*>(self.upload_manager());
-                auto image = unwrap(manager->load_layered(paths, cube), self.logger().get());
+                auto image = unwrap(manager->load_layered(paths, cube, mipmaps), self.logger().get());
                 name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
                 return py::cast(image);
             },
             py::arg("paths"),
             py::kw_only(),
             py::arg("cube") = false,
+            py::arg("mipmaps") = true,
             py::arg("name") = "")
         .def_property_readonly(
             "uploads_done",
@@ -1537,6 +1555,7 @@ PYBIND11_MODULE(_core, m)
                Format format,
                uint32_t layers,
                bool cube,
+               uint32_t mip_levels,
                const std::string& name) -> py::object
             {
                 if (cube)
@@ -1556,8 +1575,25 @@ PYBIND11_MODULE(_core, m)
                     }
                     layers = 6;
                 }
-                auto image =
-                    unwrap(Image::create_empty(self, width, height, format, 1, layers, cube), self.logger().get());
+                // An empty mipped image allocates the chain; the levels start empty,
+                // to be filled by rendering / compute into mip 0 then
+                // cmd.generate_mipmaps(). Cap at the dimensions' full chain.
+                if (width > 0 && height > 0)
+                {
+                    const uint32_t max_mips = Image::full_mip_count(width, height);
+                    if (mip_levels < 1 || mip_levels > max_mips)
+                    {
+                        raise_error(err_resource(
+                            std::format(
+                                "create_image: mip_levels must be 1..{} for a {}x{} image, got {}",
+                                max_mips,
+                                width,
+                                height,
+                                mip_levels)));
+                    }
+                }
+                auto image = unwrap(
+                    Image::create_empty(self, width, height, format, mip_levels, layers, cube), self.logger().get());
                 name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
                 return py::cast(image);
             },
@@ -1567,12 +1603,13 @@ PYBIND11_MODULE(_core, m)
             py::kw_only(),
             py::arg("layers") = 1,
             py::arg("cube") = false,
+            py::arg("mip_levels") = 1,
             py::arg("name") = "")
         // A single (h,w[,c]) array → a 2D image. cube=True here is a mistake: a
         // cubemap needs six faces, so point the caller at the list form.
         .def(
             "create_image",
-            [](Context& self, py::buffer b, bool cube, const std::string& name) -> py::object
+            [](Context& self, py::buffer b, bool mipmaps, bool cube, const std::string& name) -> py::object
             {
                 if (cube)
                 {
@@ -1584,13 +1621,14 @@ PYBIND11_MODULE(_core, m)
                 contiguous_nbytes(info, "create_image");
                 const ArrayImageSpec spec = array_image_spec(info);
                 auto image = unwrap(
-                    Image::create_from_pixels(self, info.ptr, spec.width, spec.height, spec.format),
+                    Image::create_from_pixels(self, info.ptr, spec.width, spec.height, spec.format, mipmaps),
                     self.logger().get());
                 name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
                 return py::cast(image);
             },
             py::arg("array"),
             py::kw_only(),
+            py::arg("mipmaps") = false,
             py::arg("cube") = false,
             py::arg("name") = "")
         // A list of arrays → a layered image: texture array (cube=False) or
@@ -1598,7 +1636,7 @@ PYBIND11_MODULE(_core, m)
         // Every layer must share shape and dtype.
         .def(
             "create_image",
-            [](Context& self, py::list images, bool cube, const std::string& name) -> py::object
+            [](Context& self, py::list images, bool mipmaps, bool cube, const std::string& name) -> py::object
             {
                 const size_t layers = images.size();
                 if (layers == 0)
@@ -1657,13 +1695,15 @@ PYBIND11_MODULE(_core, m)
                         spec->height,
                         static_cast<uint32_t>(layers),
                         cube,
-                        spec->format),
+                        spec->format,
+                        mipmaps),
                     self.logger().get());
                 name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
                 return py::cast(image);
             },
             py::arg("images"),
             py::kw_only(),
+            py::arg("mipmaps") = false,
             py::arg("cube") = false,
             py::arg("name") = "")
         .def(

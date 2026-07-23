@@ -84,7 +84,7 @@ public:
     // Main thread: validate the file header synchronously (a missing or
     // mangled file fails HERE, at the call site, and width/height are correct
     // immediately), create the empty image, and hand the decode to the worker.
-    std::expected<std::shared_ptr<Image>, Error> load(const std::string& path)
+    std::expected<std::shared_ptr<Image>, Error> load(const std::string& path, bool mipmaps = true)
     {
         int width = 0, height = 0, comp = 0;
         if (!stbi_info(path.c_str(), &width, &height, &comp))
@@ -97,7 +97,7 @@ public:
 
         const Format format = Format::RGBA8_SRGB;
         const std::uint32_t mips =
-            Image::can_generate_mips(context_, format)
+            mipmaps && Image::can_generate_mips(context_, format)
                 ? Image::full_mip_count(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height))
                 : 1;
 
@@ -122,7 +122,10 @@ public:
     // Validates every header synchronously (all faces must share a size), builds
     // the empty layered image, and hands the decode + concatenate + single upload
     // to the worker. One batch unit, exactly like a single load.
-    std::expected<std::shared_ptr<Image>, Error> load_layered(const std::vector<std::string>& paths, bool cube)
+    std::expected<std::shared_ptr<Image>, Error> load_layered(
+        const std::vector<std::string>& paths,
+        bool cube,
+        bool mipmaps = true)
     {
         if (paths.empty())
         {
@@ -170,7 +173,7 @@ public:
 
         const Format format = Format::RGBA8_SRGB;
         const std::uint32_t mips =
-            Image::can_generate_mips(context_, format)
+            mipmaps && Image::can_generate_mips(context_, format)
                 ? Image::full_mip_count(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height))
                 : 1;
 

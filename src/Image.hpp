@@ -440,21 +440,25 @@ public:
     }
 
     // From caller-provided pixels (numpy arrays land here). UNORM by default at
-    // the binding layer: arrays are data, files are pictures. One mip — data
-    // images don't want surprise filtering.
+    // the binding layer: arrays are data, files are pictures. One mip by default
+    // — data images don't want surprise filtering — but `mipmaps` opts a numpy
+    // texture into the full chain (falling back to one level when the format
+    // can't be blitted, exactly like load_from_file).
     static std::expected<std::shared_ptr<Image>, Error> create_from_pixels(
         Context& context,
         const void* pixels,
         std::uint32_t width,
         std::uint32_t height,
-        Format format)
+        Format format,
+        bool mipmaps = false)
     {
-        auto image = create_empty(context, width, height, format, 1);
+        const std::uint32_t mips = mipmaps && can_generate_mips(context, format) ? full_mip_count(width, height) : 1;
+        auto image = create_empty(context, width, height, format, mips);
         if (!image)
         {
             return image;
         }
-        if (auto r = (*image)->upload_pixels(context, pixels, 1); !r)
+        if (auto r = (*image)->upload_pixels(context, pixels, mips); !r)
         {
             return std::unexpected(r.error());
         }
@@ -463,8 +467,9 @@ public:
 
     // A texture array or cubemap from caller-provided pixels: `layers` images of
     // width×height laid out back to back (layer 0, layer 1, …). UNORM data, one
-    // mip — same policy as create_from_pixels. `cube` picks the CUBE view;
-    // callers (the binding layer) enforce layers==6 and square faces first.
+    // mip by default — same policy as create_from_pixels; `mipmaps` opts into the
+    // full chain (one blit per level across every layer). `cube` picks the CUBE
+    // view; callers (the binding layer) enforce layers==6 and square faces first.
     static std::expected<std::shared_ptr<Image>, Error> create_layered_from_pixels(
         Context& context,
         const void* pixels,
@@ -472,56 +477,18 @@ public:
         std::uint32_t height,
         std::uint32_t layers,
         bool cube,
-        Format format)
+        Format format,
+        bool mipmaps = false)
     {
-        auto image = create_empty(context, width, height, format, 1, layers, cube);
+        const std::uint32_t mips = mipmaps && can_generate_mips(context, format) ? full_mip_count(width, height) : 1;
+        auto image = create_empty(context, width, height, format, mips, layers, cube);
         if (!image)
         {
             return image;
         }
-        if (auto r = (*image)->upload_pixels(context, pixels, 1); !r)
+        if (auto r = (*image)->upload_pixels(context, pixels, mips); !r)
         {
             return std::unexpected(r.error());
-        }
-        return image;
-    }
-
-    // From a file on disk: sRGB, full mip chain (when the format supports the
-    // blits — otherwise silently one level, matching the anisotropy precedent:
-    // a correct image that minifies slightly softer, not a failure).
-    static std::expected<std::shared_ptr<Image>, Error> load_from_file(Context& context, const std::string& path)
-    {
-        int width = 0, height = 0, channels = 0;
-        stbi_uc* pixels = stbi_load(path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
-        if (!pixels)
-        {
-            // stb knows whether this was a missing file or a corrupt one; saying
-            // only "Failed to load" throws that away.
-            const char* reason = stbi_failure_reason();
-            return std::unexpected(err_resource(
-                reason ? std::format("Failed to load image: {} ({})", path, reason)
-                       : std::format("Failed to load image: {}", path)));
-        }
-
-        const Format format = Format::RGBA8_SRGB;
-        const std::uint32_t mips =
-            can_generate_mips(context, format)
-                ? full_mip_count(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height))
-                : 1;
-
-        auto image =
-            create_empty(context, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), format, mips);
-        if (!image)
-        {
-            stbi_image_free(pixels);
-            return image;
-        }
-
-        auto uploaded = (*image)->upload_pixels(context, pixels, mips);
-        stbi_image_free(pixels);
-        if (!uploaded)
-        {
-            return std::unexpected(uploaded.error());
         }
         return image;
     }
@@ -682,6 +649,131 @@ public:
             array_layers_);
 
         record_copy_and_finalize_(cmd, staging, mips);
+    }
+
+    // Standalone mip generation for cmd.generate_mipmaps(): mip 0 already holds
+    // its final contents (in `src_layout` — GENERAL from a compute write, or
+    // SHADER_READ_ONLY from an upload / prior bake), and the rest of the chain is
+    // (re)generated by blitting down. Every level, every layer ends in
+    // SHADER_READ_ONLY. The caller (CommandBuffer) has already checked
+    // mip_levels_ > 1 and that the format can be blitted. The mip-0 transition's
+    // src scope (stage + access) doubles as the RAW/WAR barrier against whatever
+    // produced mip 0.
+    void record_generate_mipmaps(
+        VkCommandBuffer cmd,
+        VkImageLayout src_layout,
+        VkPipelineStageFlags src_stage,
+        VkAccessFlags src_access)
+    {
+        // mip 0 -> TRANSFER_SRC (this transition is also the barrier waiting on
+        // the producer of mip 0).
+        record_image_transition(
+            cmd,
+            image_,
+            src_layout,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            src_access,
+            VK_ACCESS_TRANSFER_READ_BIT,
+            src_stage,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            0,
+            1,
+            array_layers_);
+
+        // The other levels hold nothing worth keeping -> discard into TRANSFER_DST.
+        record_image_transition(
+            cmd,
+            image_,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            0,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            1,
+            mip_levels_ - 1,
+            array_layers_);
+
+        std::int32_t mip_width = static_cast<std::int32_t>(width_);
+        std::int32_t mip_height = static_cast<std::int32_t>(height_);
+
+        for (std::uint32_t i = 1; i < mip_levels_; ++i)
+        {
+            const std::int32_t next_width = mip_width > 1 ? mip_width / 2 : 1;
+            const std::int32_t next_height = mip_height > 1 ? mip_height / 2 : 1;
+
+            // One blit with layerCount = array_layers_ fills level i for every
+            // face/layer at once (they share mip dimensions).
+            VkImageBlit blit{
+                .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 0, array_layers_},
+                .srcOffsets = {{0, 0, 0}, {mip_width, mip_height, 1}},
+                .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, array_layers_},
+                .dstOffsets = {{0, 0, 0}, {next_width, next_height, 1}}};
+            vkCmdBlitImage(
+                cmd,
+                image_,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                image_,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1,
+                &blit,
+                VK_FILTER_LINEAR);
+
+            // Level i-1 is done being read from -> retire to SHADER_READ_ONLY.
+            record_image_transition(
+                cmd,
+                image_,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_TRANSFER_READ_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                i - 1,
+                1,
+                array_layers_);
+
+            if (i + 1 < mip_levels_)
+            {
+                // Level i becomes the source for the next blit.
+                record_image_transition(
+                    cmd,
+                    image_,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_IMAGE_ASPECT_COLOR_BIT,
+                    i,
+                    1,
+                    array_layers_);
+            }
+            else
+            {
+                // The last level retires straight to SHADER_READ_ONLY.
+                record_image_transition(
+                    cmd,
+                    image_,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    VK_IMAGE_ASPECT_COLOR_BIT,
+                    i,
+                    1,
+                    array_layers_);
+            }
+
+            mip_width = next_width;
+            mip_height = next_height;
+        }
     }
 
     // Creates and fills a staging buffer for this image's mip 0, all layers

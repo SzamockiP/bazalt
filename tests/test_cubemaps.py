@@ -198,6 +198,42 @@ def test_image_barrier_rejects_non_shader_access(ctx):
         cmd.barrier(cube, bz.Access.VERTEX_READ, bz.Access.SHADER_READ)
 
 
+def test_manual_barrier_then_auto_sample_in_one_recording(ctx, fullscreen_vert):
+    """A manual cmd.barrier(image) must compose with an AUTOMATIC sample of the
+    same image in ONE recording. The barrier seeds the tracker, so the auto path
+    sees the post-barrier layout and emits no second transition; without that
+    seeding it would re-transition from a stale GENERAL and the validation-as-
+    assert ctx fixture would catch the layout mismatch."""
+    comp = ctx.compile_shader(str(SHADER_DIR / "store_array.comp"), bz.ShaderStage.COMPUTE)
+    fill = ctx.compute_pipeline().shader(comp).storage_image(0).build()
+    cube = ctx.create_image(16, 16, bz.Format.RGBA8, cube=True)
+
+    target = bz.RenderTarget(ctx, 8, 8)
+    sampler_pipe = _cube_sampler(ctx, fullscreen_vert, target)
+    pool = ctx.create_descriptor_pool(max_sets=2, storage_images=1, samplers=1)
+    fill_set = pool.allocate_set(fill, set=0)
+    fill_set.set_storage_image(0, cube)
+    sample_set = pool.allocate_set(sampler_pipe, set=0)
+    sample_set.set_image(0, cube)
+
+    for i, direction in enumerate(FACE_DIRS):
+        cmd = ctx.create_command_buffer()
+        cmd.begin()
+        cmd.bind_pipeline(fill).bind_descriptor_set(fill_set, fill, set=0).dispatch(2, 2, 6)
+        # Manual barrier mid-recording, then an automatic sample of the same image.
+        cmd.barrier(cube, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
+        cmd.begin_rendering(target)
+        cmd.bind_pipeline(sampler_pipe).bind_descriptor_set(sample_set, sampler_pipe, set=0)
+        cmd.push_constants(sampler_pipe, 0, struct.pack("4f", *direction, 0.0))
+        cmd.draw(3)
+        cmd.end_rendering(target)
+        ctx.submit(cmd)
+
+        expected = [round(i / 5 * 255), 64, 128]
+        assert np.allclose(target.read_pixels()[4, 4, :3], expected, atol=2), \
+            f"face {i}: {target.read_pixels()[4, 4, :3]}"
+
+
 # ── validation: the cube flag and layer consistency are enforced ───────────
 
 
