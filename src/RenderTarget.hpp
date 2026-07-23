@@ -27,45 +27,47 @@
 class RenderTarget
 {
 public:
-	virtual ~RenderTarget() = default;
+    virtual ~RenderTarget() = default;
 
-	virtual std::uint32_t color_count() const = 0;
+    virtual std::uint32_t color_count() const = 0;
 
-	// Queried at replay time, not record time: a swapchain hands out a different
-	// image every frame.
-	virtual VkImage color_image(std::uint32_t index) const = 0;
-	virtual VkImageView color_view(std::uint32_t index) const = 0;
-	virtual VkFormat color_format(std::uint32_t index) const = 0;
+    // Queried at replay time, not record time: a swapchain hands out a different
+    // image every frame.
+    virtual VkImage color_image(std::uint32_t index) const = 0;
+    virtual VkImageView color_view(std::uint32_t index) const = 0;
+    virtual VkFormat color_format(std::uint32_t index) const = 0;
 
-	// VK_NULL_HANDLE when the target has no depth attachment.
-	virtual VkImage depth_image() const = 0;
-	virtual VkImageView depth_view() const = 0;
-	virtual VkFormat depth_format() const = 0;
+    // VK_NULL_HANDLE when the target has no depth attachment.
+    virtual VkImage depth_image() const = 0;
+    virtual VkImageView depth_view() const = 0;
+    virtual VkFormat depth_format() const = 0;
 
-	virtual VkExtent2D extent() const = 0;
+    virtual VkExtent2D extent() const = 0;
 
-	// The layout the colour attachments must be left in when rendering ends.
-	// A swapchain needs PRESENT_SRC_KHR; an offscreen target that will be sampled
-	// needs SHADER_READ_ONLY_OPTIMAL. This being a virtual is what removes the
-	// hardcoded present transition from CommandBuffer.
-	virtual VkImageLayout final_layout() const = 0;
+    // The layout the colour attachments must be left in when rendering ends.
+    // A swapchain needs PRESENT_SRC_KHR; an offscreen target that will be sampled
+    // needs SHADER_READ_ONLY_OPTIMAL. This being a virtual is what removes the
+    // hardcoded present transition from CommandBuffer.
+    virtual VkImageLayout final_layout() const = 0;
 
-	// Same question for the depth attachment. The swapchain's depth buffer is
-	// scratch (stays DEPTH_ATTACHMENT_OPTIMAL, store DONT_CARE); an offscreen
-	// depth ends sampleable, which is the whole of what makes `shadow.depth` a
-	// texture with zero extra API. end_rendering also derives its store-op from
-	// this: a depth that will be consumed must be stored.
-	virtual VkImageLayout depth_final_layout() const
-	{
-		return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-	}
+    // Same question for the depth attachment. The swapchain's depth buffer is
+    // scratch (stays DEPTH_ATTACHMENT_OPTIMAL, store DONT_CARE); an offscreen
+    // depth ends sampleable, which is the whole of what makes `shadow.depth` a
+    // texture with zero extra API. end_rendering also derives its store-op from
+    // this: a depth that will be consumed must be stored.
+    virtual VkImageLayout depth_final_layout() const
+    {
+        return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    }
 
-	// Called by CommandBuffer when the end-of-rendering barrier is recorded into
-	// a real submit. An OffscreenTarget uses this to learn that its image has
-	// left UNDEFINED — the submit paths never see the target (it lives inside the
-	// recorded lambdas), so the notification has to come from the recording
-	// itself. No-op for targets that don't care.
-	virtual void on_rendering_recorded() {}
+    // Called by CommandBuffer when the end-of-rendering barrier is recorded into
+    // a real submit. An OffscreenTarget uses this to learn that its image has
+    // left UNDEFINED — the submit paths never see the target (it lives inside the
+    // recorded lambdas), so the notification has to come from the recording
+    // itself. No-op for targets that don't care.
+    virtual void on_rendering_recorded()
+    {
+    }
 };
 
 // Everything a recorded command needs that isn't known until replay.
@@ -75,7 +77,7 @@ public:
 // here would be both dead weight and a limit.
 struct FrameContext
 {
-	std::uint32_t frame_index = 0;
+    std::uint32_t frame_index = 0;
 };
 
 // A render target backed by Images this object owns, with no swapchain and no
@@ -86,111 +88,155 @@ struct FrameContext
 class OffscreenTarget : public RenderTarget, public std::enable_shared_from_this<OffscreenTarget>
 {
 public:
-	static std::expected<std::shared_ptr<OffscreenTarget>, Error> create(
-		Context& context, std::uint32_t width, std::uint32_t height,
-		std::vector<Format> colors, std::optional<Format> depth)
-	{
-		if (colors.empty() && !depth)
-		{
-			return std::unexpected(err_resource(
-				"A RenderTarget needs at least one attachment: pass color=..., "
-				"depth=..., or both"));
-		}
-		for (Format f : colors)
-		{
-			if (format_info(f).depth)
-			{
-				return std::unexpected(err_resource(std::format(
-					"{} is a depth format and cannot be a colour attachment; "
-					"pass it as depth= instead", format_name(f))));
-			}
-		}
-		if (depth && !format_info(*depth).depth)
-		{
-			return std::unexpected(err_resource(std::format(
-				"{} is not a depth format; use bz.Format.D32F", format_name(*depth))));
-		}
+    static std::expected<std::shared_ptr<OffscreenTarget>, Error> create(
+        Context& context,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::vector<Format> colors,
+        std::optional<Format> depth)
+    {
+        if (colors.empty() && !depth)
+        {
+            return std::unexpected(err_resource(
+                "A RenderTarget needs at least one attachment: pass color=..., "
+                "depth=..., or both"));
+        }
+        for (Format f : colors)
+        {
+            if (format_info(f).depth)
+            {
+                return std::unexpected(err_resource(
+                    std::format(
+                        "{} is a depth format and cannot be a colour attachment; "
+                        "pass it as depth= instead",
+                        format_name(f))));
+            }
+        }
+        if (depth && !format_info(*depth).depth)
+        {
+            return std::unexpected(
+                err_resource(std::format("{} is not a depth format; use bz.Format.D32F", format_name(*depth))));
+        }
 
-		auto target = std::shared_ptr<OffscreenTarget>(new OffscreenTarget(context.shared_from_this()));
-		target->extent_ = { width, height };
+        auto target = std::shared_ptr<OffscreenTarget>(new OffscreenTarget(context.shared_from_this()));
+        target->extent_ = {width, height};
 
-		for (Format f : colors)
-		{
-			auto image = Image::create_empty(context, width, height, f);
-			if (!image)
-			{
-				return std::unexpected(image.error());
-			}
-			target->colors_.push_back(std::move(*image));
-		}
-		if (depth)
-		{
-			auto image = Image::create_empty(context, width, height, *depth);
-			if (!image)
-			{
-				return std::unexpected(image.error());
-			}
-			target->depth_ = std::move(*image);
-		}
+        for (Format f : colors)
+        {
+            auto image = Image::create_empty(context, width, height, f);
+            if (!image)
+            {
+                return std::unexpected(image.error());
+            }
+            target->colors_.push_back(std::move(*image));
+        }
+        if (depth)
+        {
+            auto image = Image::create_empty(context, width, height, *depth);
+            if (!image)
+            {
+                return std::unexpected(image.error());
+            }
+            target->depth_ = std::move(*image);
+        }
 
-		return target;
-	}
+        return target;
+    }
 
-	OffscreenTarget(const OffscreenTarget&) = delete;
-	OffscreenTarget& operator=(const OffscreenTarget&) = delete;
+    OffscreenTarget(const OffscreenTarget&) = delete;
+    OffscreenTarget& operator=(const OffscreenTarget&) = delete;
 
-	std::uint32_t color_count() const override { return static_cast<std::uint32_t>(colors_.size()); }
-	VkImage color_image(std::uint32_t i) const override { return colors_[i]->vk_image(); }
-	VkImageView color_view(std::uint32_t i) const override { return colors_[i]->view(); }
-	VkFormat color_format(std::uint32_t i) const override { return format_info(colors_[i]->format()).vk; }
-	VkImage depth_image() const override { return depth_ ? depth_->vk_image() : VK_NULL_HANDLE; }
-	VkImageView depth_view() const override { return depth_ ? depth_->view() : VK_NULL_HANDLE; }
-	VkFormat depth_format() const override { return depth_ ? format_info(depth_->format()).vk : VK_FORMAT_UNDEFINED; }
-	VkExtent2D extent() const override { return extent_; }
+    std::uint32_t color_count() const override
+    {
+        return static_cast<std::uint32_t>(colors_.size());
+    }
+    VkImage color_image(std::uint32_t i) const override
+    {
+        return colors_[i]->vk_image();
+    }
+    VkImageView color_view(std::uint32_t i) const override
+    {
+        return colors_[i]->view();
+    }
+    VkFormat color_format(std::uint32_t i) const override
+    {
+        return format_info(colors_[i]->format()).vk;
+    }
+    VkImage depth_image() const override
+    {
+        return depth_ ? depth_->vk_image() : VK_NULL_HANDLE;
+    }
+    VkImageView depth_view() const override
+    {
+        return depth_ ? depth_->view() : VK_NULL_HANDLE;
+    }
+    VkFormat depth_format() const override
+    {
+        return depth_ ? format_info(depth_->format()).vk : VK_FORMAT_UNDEFINED;
+    }
+    VkExtent2D extent() const override
+    {
+        return extent_;
+    }
 
-	// Left ready to be sampled, so using the result as a texture needs no extra
-	// step — colour and depth both.
-	VkImageLayout final_layout() const override { return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; }
-	VkImageLayout depth_final_layout() const override { return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; }
+    // Left ready to be sampled, so using the result as a texture needs no extra
+    // step — colour and depth both.
+    VkImageLayout final_layout() const override
+    {
+        return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+    VkImageLayout depth_final_layout() const override
+    {
+        return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
 
-	// The attachments as Images, for Python and for readback.
-	const std::vector<std::shared_ptr<Image>>& colors() const { return colors_; }
-	const std::shared_ptr<Image>& depth() const { return depth_; }
+    // The attachments as Images, for Python and for readback.
+    const std::vector<std::shared_ptr<Image>>& colors() const
+    {
+        return colors_;
+    }
+    const std::shared_ptr<Image>& depth() const
+    {
+        return depth_;
+    }
 
-	// Copies colour attachment 0 back to host memory; kept as the ergonomic
-	// spelling for tests (target.color[0].read() is the general form).
-	std::expected<std::vector<std::byte>, Error> read_pixels()
-	{
-		if (colors_.empty())
-		{
-			return std::unexpected(err_resource(
-				"read_pixels() on a depth-only RenderTarget; read target.depth instead"));
-		}
-		return colors_[0]->read();
-	}
+    // Copies colour attachment 0 back to host memory; kept as the ergonomic
+    // spelling for tests (target.color[0].read() is the general form).
+    std::expected<std::vector<std::byte>, Error> read_pixels()
+    {
+        if (colors_.empty())
+        {
+            return std::unexpected(
+                err_resource("read_pixels() on a depth-only RenderTarget; read target.depth instead"));
+        }
+        return colors_[0]->read();
+    }
 
-	// Runs at execute() time, inside a real submit — the attachments learn they
-	// have contents exactly when that becomes true (the 0.4.1 read_pixels fix,
-	// now spelled per-Image). Depth included: that is what makes shadow maps
-	// readable and sampleable.
-	void on_rendering_recorded() override
-	{
-		for (auto& image : colors_)
-		{
-			image->mark_has_contents(final_layout());
-		}
-		if (depth_)
-		{
-			depth_->mark_has_contents(depth_final_layout());
-		}
-	}
+    // Runs at execute() time, inside a real submit — the attachments learn they
+    // have contents exactly when that becomes true (the 0.4.1 read_pixels fix,
+    // now spelled per-Image). Depth included: that is what makes shadow maps
+    // readable and sampleable.
+    void on_rendering_recorded() override
+    {
+        for (auto& image : colors_)
+        {
+            image->mark_has_contents(final_layout());
+        }
+        if (depth_)
+        {
+            depth_->mark_has_contents(depth_final_layout());
+        }
+    }
 
 private:
-	explicit OffscreenTarget(std::shared_ptr<Context> context) : context_(std::move(context)) {}
+    explicit OffscreenTarget(std::shared_ptr<Context> context)
+        : context_(std::move(context))
+    {
+    }
 
-	std::shared_ptr<Context> context_;
-	VkExtent2D extent_{};
+    std::shared_ptr<Context> context_;
+    VkExtent2D extent_{};
 
-	std::vector<std::shared_ptr<Image>> colors_;
-	std::shared_ptr<Image> depth_;
+    std::vector<std::shared_ptr<Image>> colors_;
+    std::shared_ptr<Image> depth_;
 };

@@ -21,13 +21,16 @@
 // That single change is what lets the same command buffer be replayed against a
 // window, an offscreen image, or (later) a compute-only submit: this file no
 // longer knows that swapchains exist.
-class CommandBuffer {
+class CommandBuffer
+{
 public:
     // Takes a Context, not a renderer: command buffers are a device resource and
     // have nothing to do with presentation. This is what lets a headless Context
     // with no renderer at all record commands.
     static std::expected<std::shared_ptr<CommandBuffer>, Error> create(
-        Context& context, std::optional<bool> auto_barriers = std::nullopt) {
+        Context& context,
+        std::optional<bool> auto_barriers = std::nullopt)
+    {
         auto ctx = context.shared_from_this();
         auto cmd = std::shared_ptr<CommandBuffer>(new CommandBuffer(ctx));
         // Per-command-buffer override of the Context-wide mode, so one hot
@@ -40,11 +43,13 @@ public:
             .pNext = nullptr,
             .commandPool = ctx->command_pool(),
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = ctx->frames_in_flight()
-        };
+            .commandBufferCount = ctx->frames_in_flight()};
 
-        if (auto e = check(vkAllocateCommandBuffers(ctx->device(), &allocInfo, cmd->command_buffers_.data()),
-                           "allocate command buffers", ErrorCode::Resource)) {
+        if (auto e = check(
+                vkAllocateCommandBuffers(ctx->device(), &allocInfo, cmd->command_buffers_.data()),
+                "allocate command buffers",
+                ErrorCode::Resource))
+        {
             return std::unexpected(*e);
         }
 
@@ -53,27 +58,26 @@ public:
 
     // Deferred: a per-frame VkCommandBuffer may still be executing when the
     // Python object is dropped.
-    ~CommandBuffer() {
-        if (context_) {
-            if (timer_pool_ != VK_NULL_HANDLE) {
-                context_->defer_destroy([device = context_->device(), pool = timer_pool_] {
-                    vkDestroyQueryPool(device, pool, nullptr);
-                });
+    ~CommandBuffer()
+    {
+        if (context_)
+        {
+            if (timer_pool_ != VK_NULL_HANDLE)
+            {
+                context_->defer_destroy([device = context_->device(), pool = timer_pool_]
+                                        { vkDestroyQueryPool(device, pool, nullptr); });
             }
             context_->defer_destroy(
-                [device = context_->device(), pool = context_->command_pool(),
-                 buffers = std::move(command_buffers_)] {
-                    vkFreeCommandBuffers(device, pool,
-                                         static_cast<uint32_t>(buffers.size()),
-                                         buffers.data());
-                });
+                [device = context_->device(), pool = context_->command_pool(), buffers = std::move(command_buffers_)]
+                { vkFreeCommandBuffers(device, pool, static_cast<uint32_t>(buffers.size()), buffers.data()); });
         }
     }
 
     CommandBuffer(const CommandBuffer&) = delete;
     CommandBuffer& operator=(const CommandBuffer&) = delete;
 
-    CommandBuffer& begin() {
+    CommandBuffer& begin()
+    {
         commands_.clear();
         used_sets_.clear();
         // A reused command buffer must forget its previous recording entirely,
@@ -96,138 +100,153 @@ public:
     // which made presentation a special case dressed up as the default and left
     // no way to name anything else. Naming what you draw into costs one token
     // and buys one rule that holds everywhere.
-    CommandBuffer& begin_rendering(std::shared_ptr<RenderTarget> target, const std::vector<float>& clear_color) {
+    CommandBuffer& begin_rendering(std::shared_ptr<RenderTarget> target, const std::vector<float>& clear_color)
+    {
         std::array<float, 4> cc = {0.0f, 0.0f, 0.0f, 1.0f};
-        if (clear_color.size() >= 4) {
-            cc[0] = clear_color[0]; cc[1] = clear_color[1]; cc[2] = clear_color[2]; cc[3] = clear_color[3];
+        if (clear_color.size() >= 4)
+        {
+            cc[0] = clear_color[0];
+            cc[1] = clear_color[1];
+            cc[2] = clear_color[2];
+            cc[3] = clear_color[3];
         }
 
-        commands_.push_back([cc, target](VkCommandBuffer cmd, const FrameContext& frame) {
-            RenderTarget* rt = target.get();
+        commands_.push_back(
+            [cc, target](VkCommandBuffer cmd, const FrameContext& frame)
+            {
+                RenderTarget* rt = target.get();
 
-            // Every colour attachment enters COLOR_ATTACHMENT_OPTIMAL. UNDEFINED
-            // as the source: contents are cleared each pass anyway.
-            for (uint32_t i = 0; i < rt->color_count(); ++i) {
-                VkImageMemoryBarrier barrier{
-                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                    .pNext = nullptr,
-                    .srcAccessMask = 0,
-                    .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-                    .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .image = rt->color_image(i),
-                    .subresourceRange = {
-                        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                        .baseMipLevel = 0,
-                        .levelCount = 1,
-                        .baseArrayLayer = 0,
-                        .layerCount = 1
-                    }
-                };
+                // Every colour attachment enters COLOR_ATTACHMENT_OPTIMAL. UNDEFINED
+                // as the source: contents are cleared each pass anyway.
+                for (uint32_t i = 0; i < rt->color_count(); ++i)
+                {
+                    VkImageMemoryBarrier barrier{
+                        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                        .pNext = nullptr,
+                        .srcAccessMask = 0,
+                        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                        .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .image = rt->color_image(i),
+                        .subresourceRange = {
+                            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                            .baseMipLevel = 0,
+                            .levelCount = 1,
+                            .baseArrayLayer = 0,
+                            .layerCount = 1}};
 
-                vkCmdPipelineBarrier(
-                    cmd,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    0, 0, nullptr, 0, nullptr, 1, &barrier
-                );
-            }
+                    vkCmdPipelineBarrier(
+                        cmd,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        0,
+                        0,
+                        nullptr,
+                        0,
+                        nullptr,
+                        1,
+                        &barrier);
+                }
 
-            if (rt->depth_image() != VK_NULL_HANDLE) {
-                VkImageMemoryBarrier depthBarrier{
-                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                    .pNext = nullptr,
-                    .srcAccessMask = 0,
-                    .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-                    .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .image = rt->depth_image(),
-                    .subresourceRange = {
-                        .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-                        .baseMipLevel = 0,
-                        .levelCount = 1,
-                        .baseArrayLayer = 0,
-                        .layerCount = 1
-                    }
-                };
+                if (rt->depth_image() != VK_NULL_HANDLE)
+                {
+                    VkImageMemoryBarrier depthBarrier{
+                        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                        .pNext = nullptr,
+                        .srcAccessMask = 0,
+                        .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                        .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .image = rt->depth_image(),
+                        .subresourceRange = {
+                            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                            .baseMipLevel = 0,
+                            .levelCount = 1,
+                            .baseArrayLayer = 0,
+                            .layerCount = 1}};
 
-                vkCmdPipelineBarrier(
-                    cmd,
-                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                    0, 0, nullptr, 0, nullptr, 1, &depthBarrier
-                );
-            }
+                    vkCmdPipelineBarrier(
+                        cmd,
+                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                        0,
+                        0,
+                        nullptr,
+                        0,
+                        nullptr,
+                        1,
+                        &depthBarrier);
+                }
 
-            std::vector<VkRenderingAttachmentInfo> colorAttachments;
-            colorAttachments.reserve(rt->color_count());
-            for (uint32_t i = 0; i < rt->color_count(); ++i) {
-                colorAttachments.push_back({
+                std::vector<VkRenderingAttachmentInfo> colorAttachments;
+                colorAttachments.reserve(rt->color_count());
+                for (uint32_t i = 0; i < rt->color_count(); ++i)
+                {
+                    colorAttachments.push_back(
+                        {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                         .pNext = nullptr,
+                         .imageView = rt->color_view(i),
+                         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                         .resolveMode = VK_RESOLVE_MODE_NONE,
+                         .resolveImageView = VK_NULL_HANDLE,
+                         .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                         // One clear colour for every attachment; per-attachment
+                         // clears can arrive additively if something needs them.
+                         .clearValue = {.color = {{cc[0], cc[1], cc[2], cc[3]}}}});
+                }
+
+                VkRenderingAttachmentInfo depthAttachment{
                     .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
                     .pNext = nullptr,
-                    .imageView = rt->color_view(i),
-                    .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    .imageView = rt->depth_view(),
+                    .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                     .resolveMode = VK_RESOLVE_MODE_NONE,
                     .resolveImageView = VK_NULL_HANDLE,
                     .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
                     .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                    // One clear colour for every attachment; per-attachment
-                    // clears can arrive additively if something needs them.
-                    .clearValue = { .color = { { cc[0], cc[1], cc[2], cc[3] } } }
-                });
-            }
+                    // A depth that will be consumed (shadow maps) must be stored;
+                    // the swapchain's scratch depth keeps DONT_CARE.
+                    .storeOp = rt->depth_final_layout() == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL
+                                   ? VK_ATTACHMENT_STORE_OP_DONT_CARE
+                                   : VK_ATTACHMENT_STORE_OP_STORE,
+                    .clearValue = {.depthStencil = {1.0f, 0}}};
 
-            VkRenderingAttachmentInfo depthAttachment{
-                .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-                .pNext = nullptr,
-                .imageView = rt->depth_view(),
-                .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                .resolveMode = VK_RESOLVE_MODE_NONE,
-                .resolveImageView = VK_NULL_HANDLE,
-                .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-                .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-                // A depth that will be consumed (shadow maps) must be stored;
-                // the swapchain's scratch depth keeps DONT_CARE.
-                .storeOp = rt->depth_final_layout() == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL
-                    ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE,
-                .clearValue = { .depthStencil = { 1.0f, 0 } }
-            };
+                VkRenderingInfo renderingInfo{
+                    .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                    .pNext = nullptr,
+                    .flags = 0,
+                    .renderArea = {{0, 0}, rt->extent()},
+                    .layerCount = 1,
+                    .viewMask = 0,
+                    .colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size()),
+                    .pColorAttachments = colorAttachments.empty() ? nullptr : colorAttachments.data(),
+                    .pDepthAttachment = rt->depth_view() != VK_NULL_HANDLE ? &depthAttachment : nullptr,
+                    .pStencilAttachment = nullptr};
 
-            VkRenderingInfo renderingInfo{
-                .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-                .pNext = nullptr,
-                .flags = 0,
-                .renderArea = { {0, 0}, rt->extent() },
-                .layerCount = 1,
-                .viewMask = 0,
-                .colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size()),
-                .pColorAttachments = colorAttachments.empty() ? nullptr : colorAttachments.data(),
-                .pDepthAttachment = rt->depth_view() != VK_NULL_HANDLE ? &depthAttachment : nullptr,
-                .pStencilAttachment = nullptr
-            };
+                vkCmdBeginRendering(cmd, &renderingInfo);
 
-            vkCmdBeginRendering(cmd, &renderingInfo);
+                // Emitted automatically: set_viewport()/set_scissor() took no arguments
+                // and silently read the swapchain, which is magic â€” just less legible
+                // than doing it here. set_viewport(x, y, w, h) remains for the cases
+                // that genuinely want something other than the whole target.
+                VkViewport viewport{
+                    .x = 0.0f,
+                    .y = 0.0f,
+                    .width = static_cast<float>(rt->extent().width),
+                    .height = static_cast<float>(rt->extent().height),
+                    .minDepth = 0.0f,
+                    .maxDepth = 1.0f};
+                vkCmdSetViewport(cmd, 0, 1, &viewport);
 
-            // Emitted automatically: set_viewport()/set_scissor() took no arguments
-            // and silently read the swapchain, which is magic â€” just less legible
-            // than doing it here. set_viewport(x, y, w, h) remains for the cases
-            // that genuinely want something other than the whole target.
-            VkViewport viewport{
-                .x = 0.0f,
-                .y = 0.0f,
-                .width = static_cast<float>(rt->extent().width),
-                .height = static_cast<float>(rt->extent().height),
-                .minDepth = 0.0f,
-                .maxDepth = 1.0f
-            };
-            vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-            VkRect2D scissor{ .offset = {0, 0}, .extent = rt->extent() };
-            vkCmdSetScissor(cmd, 0, 1, &scissor);
-        });
+                VkRect2D scissor{.offset = {0, 0}, .extent = rt->extent()};
+                vkCmdSetScissor(cmd, 0, 1, &scissor);
+            });
         // vkCmdPipelineBarrier is illegal inside a dynamic rendering scope, so
         // auto barriers discovered between begin and end are hoisted to just
         // before this lambda (record_barrier_ reads these two fields).
@@ -236,160 +255,188 @@ public:
         return *this;
     }
 
-    CommandBuffer& end_rendering(std::shared_ptr<RenderTarget> target) {
-        commands_.push_back([target](VkCommandBuffer cmd, const FrameContext& frame) {
-            vkCmdEndRendering(cmd);
+    CommandBuffer& end_rendering(std::shared_ptr<RenderTarget> target)
+    {
+        commands_.push_back(
+            [target](VkCommandBuffer cmd, const FrameContext& frame)
+            {
+                vkCmdEndRendering(cmd);
 
-            // Every colour attachment retires to the target's final layout.
-            // (Was VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, unconditionally, on colour 0
-            // only â€” that one constant is why nothing but a swapchain could ever
-            // be drawn into.)
-            for (uint32_t i = 0; i < target->color_count(); ++i) {
-                VkImageMemoryBarrier barrier{
-                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                    .pNext = nullptr,
-                    .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                    .dstAccessMask = 0,
-                    .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    .newLayout = target->final_layout(),
-                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .image = target->color_image(i),
-                    .subresourceRange = {
-                        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                        .baseMipLevel = 0,
-                        .levelCount = 1,
-                        .baseArrayLayer = 0,
-                        .layerCount = 1
-                    }
-                };
+                // Every colour attachment retires to the target's final layout.
+                // (Was VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, unconditionally, on colour 0
+                // only â€” that one constant is why nothing but a swapchain could ever
+                // be drawn into.)
+                for (uint32_t i = 0; i < target->color_count(); ++i)
+                {
+                    VkImageMemoryBarrier barrier{
+                        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                        .pNext = nullptr,
+                        .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                        .dstAccessMask = 0,
+                        .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        .newLayout = target->final_layout(),
+                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .image = target->color_image(i),
+                        .subresourceRange = {
+                            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                            .baseMipLevel = 0,
+                            .levelCount = 1,
+                            .baseArrayLayer = 0,
+                            .layerCount = 1}};
 
-                vkCmdPipelineBarrier(
-                    cmd,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                    0, 0, nullptr, 0, nullptr, 1, &barrier
-                );
-            }
+                    vkCmdPipelineBarrier(
+                        cmd,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        0,
+                        0,
+                        nullptr,
+                        0,
+                        nullptr,
+                        1,
+                        &barrier);
+                }
 
-            // Depth retires to its own final layout when it will be consumed
-            // (offscreen: SHADER_READ_ONLY, which is what makes `target.depth`
-            // sampleable). The swapchain's depth stays put â€” no barrier.
-            if (target->depth_image() != VK_NULL_HANDLE &&
-                target->depth_final_layout() != VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL) {
-                VkImageMemoryBarrier depthBarrier{
-                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                    .pNext = nullptr,
-                    .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                    .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
-                    .oldLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                    .newLayout = target->depth_final_layout(),
-                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .image = target->depth_image(),
-                    .subresourceRange = {
-                        .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-                        .baseMipLevel = 0,
-                        .levelCount = 1,
-                        .baseArrayLayer = 0,
-                        .layerCount = 1
-                    }
-                };
+                // Depth retires to its own final layout when it will be consumed
+                // (offscreen: SHADER_READ_ONLY, which is what makes `target.depth`
+                // sampleable). The swapchain's depth stays put â€” no barrier.
+                if (target->depth_image() != VK_NULL_HANDLE &&
+                    target->depth_final_layout() != VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL)
+                {
+                    VkImageMemoryBarrier depthBarrier{
+                        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                        .pNext = nullptr,
+                        .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                        .oldLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                        .newLayout = target->depth_final_layout(),
+                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .image = target->depth_image(),
+                        .subresourceRange = {
+                            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                            .baseMipLevel = 0,
+                            .levelCount = 1,
+                            .baseArrayLayer = 0,
+                            .layerCount = 1}};
 
-                vkCmdPipelineBarrier(
-                    cmd,
-                    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                    0, 0, nullptr, 0, nullptr, 1, &depthBarrier
-                );
-            }
+                    vkCmdPipelineBarrier(
+                        cmd,
+                        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                        0,
+                        0,
+                        nullptr,
+                        0,
+                        nullptr,
+                        1,
+                        &depthBarrier);
+                }
 
-            // Runs at execute() time, inside a real submit â€” so the target learns
-            // its images have left UNDEFINED exactly when that becomes true, and a
-            // recorded-but-never-submitted command buffer marks nothing.
-            target->on_rendering_recorded();
-        });
+                // Runs at execute() time, inside a real submit â€” so the target learns
+                // its images have left UNDEFINED exactly when that becomes true, and a
+                // recorded-but-never-submitted command buffer marks nothing.
+                target->on_rendering_recorded();
+            });
         in_rendering_ = false;
         return *this;
     }
 
     // Explicit override for split-screen and similar. The no-argument version is
     // gone: begin_rendering already covers the whole-target case.
-    CommandBuffer& set_viewport(float x, float y, float width, float height) {
-        commands_.push_back([x, y, width, height](VkCommandBuffer cmd, const FrameContext&) {
-            VkViewport viewport{
-                .x = x, .y = y, .width = width, .height = height,
-                .minDepth = 0.0f, .maxDepth = 1.0f
-            };
-            vkCmdSetViewport(cmd, 0, 1, &viewport);
-        });
+    CommandBuffer& set_viewport(float x, float y, float width, float height)
+    {
+        commands_.push_back(
+            [x, y, width, height](VkCommandBuffer cmd, const FrameContext&)
+            {
+                VkViewport viewport{
+                    .x = x, .y = y, .width = width, .height = height, .minDepth = 0.0f, .maxDepth = 1.0f};
+                vkCmdSetViewport(cmd, 0, 1, &viewport);
+            });
         return *this;
     }
 
-    CommandBuffer& set_scissor(std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
-        commands_.push_back([x, y, width, height](VkCommandBuffer cmd, const FrameContext&) {
-            VkRect2D scissor{ .offset = {x, y}, .extent = {width, height} };
-            vkCmdSetScissor(cmd, 0, 1, &scissor);
-        });
+    CommandBuffer& set_scissor(std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height)
+    {
+        commands_.push_back(
+            [x, y, width, height](VkCommandBuffer cmd, const FrameContext&)
+            {
+                VkRect2D scissor{.offset = {x, y}, .extent = {width, height}};
+                vkCmdSetScissor(cmd, 0, 1, &scissor);
+            });
         return *this;
     }
 
-    CommandBuffer& bind_pipeline(std::shared_ptr<Pipeline> pipeline) {
-        commands_.push_back([pipeline](VkCommandBuffer cmd, const FrameContext&) {
-            vkCmdBindPipeline(cmd, pipeline->bind_point(), pipeline->get());
-        });
+    CommandBuffer& bind_pipeline(std::shared_ptr<Pipeline> pipeline)
+    {
+        commands_.push_back([pipeline](VkCommandBuffer cmd, const FrameContext&)
+                            { vkCmdBindPipeline(cmd, pipeline->bind_point(), pipeline->get()); });
         return *this;
     }
 
-    CommandBuffer& bind_vertex_buffer(std::shared_ptr<Buffer> buffer) {
+    CommandBuffer& bind_vertex_buffer(std::shared_ptr<Buffer> buffer)
+    {
         // The read truly happens at draw, but a barrier placed before the bind
         // is still before the draw — sound, and simpler than deferring it.
         track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT, false);
-        commands_.push_back([buffer](VkCommandBuffer cmd, const FrameContext&) {
-            VkBuffer vertexBuffers[] = {buffer->get()};
-            VkDeviceSize offsets[] = {0};
-            vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
-        });
+        commands_.push_back(
+            [buffer](VkCommandBuffer cmd, const FrameContext&)
+            {
+                VkBuffer vertexBuffers[] = {buffer->get()};
+                VkDeviceSize offsets[] = {0};
+                vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+            });
         return *this;
     }
 
-    CommandBuffer& bind_index_buffer(std::shared_ptr<Buffer> buffer) {
+    CommandBuffer& bind_index_buffer(std::shared_ptr<Buffer> buffer)
+    {
         track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_INDEX_READ_BIT, false);
-        commands_.push_back([buffer](VkCommandBuffer cmd, const FrameContext&) {
-            // Derived from the buffer rather than hardcoded to UINT32: create_buffer
-            // accepts UINT16 indices, which used to be read back at half count.
-            vkCmdBindIndexBuffer(cmd, buffer->get(), 0, buffer->index_type());
-        });
+        commands_.push_back(
+            [buffer](VkCommandBuffer cmd, const FrameContext&)
+            {
+                // Derived from the buffer rather than hardcoded to UINT32: create_buffer
+                // accepts UINT16 indices, which used to be read back at half count.
+                vkCmdBindIndexBuffer(cmd, buffer->get(), 0, buffer->index_type());
+            });
         return *this;
     }
 
-    CommandBuffer& draw(uint32_t vertexCount) {
+    CommandBuffer& draw(uint32_t vertexCount)
+    {
         track_draw_();
-        commands_.push_back([vertexCount](VkCommandBuffer cmd, const FrameContext&) {
-            vkCmdDraw(cmd, vertexCount, 1, 0, 0);
-        });
+        commands_.push_back([vertexCount](VkCommandBuffer cmd, const FrameContext&)
+                            { vkCmdDraw(cmd, vertexCount, 1, 0, 0); });
         return *this;
     }
 
-    CommandBuffer& draw_indexed(uint32_t indexCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
+    CommandBuffer& draw_indexed(uint32_t indexCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0)
+    {
         track_draw_();
-        commands_.push_back([indexCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext&) {
-            vkCmdDrawIndexed(cmd, indexCount, 1, firstIndex, vertexOffset, 0);
-        });
+        commands_.push_back([indexCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext&)
+                            { vkCmdDrawIndexed(cmd, indexCount, 1, firstIndex, vertexOffset, 0); });
         return *this;
     }
 
-    CommandBuffer& draw_indexed_instanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0) {
+    CommandBuffer& draw_indexed_instanced(
+        uint32_t indexCount,
+        uint32_t instanceCount,
+        uint32_t firstIndex = 0,
+        int32_t vertexOffset = 0)
+    {
         track_draw_();
-        commands_.push_back([indexCount, instanceCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext&) {
-            vkCmdDrawIndexed(cmd, indexCount, instanceCount, firstIndex, vertexOffset, 0);
-        });
+        commands_.push_back(
+            [indexCount, instanceCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext&)
+            { vkCmdDrawIndexed(cmd, indexCount, instanceCount, firstIndex, vertexOffset, 0); });
         return *this;
     }
 
-    CommandBuffer& dispatch(uint32_t groupCountX, uint32_t groupCountY = 1, uint32_t groupCountZ = 1) {
+    CommandBuffer& dispatch(uint32_t groupCountX, uint32_t groupCountY = 1, uint32_t groupCountZ = 1)
+    {
         track_dispatch_();
-        commands_.push_back([groupCountX, groupCountY, groupCountZ](VkCommandBuffer cmd, const FrameContext&) {
-            vkCmdDispatch(cmd, groupCountX, groupCountY, groupCountZ);
-        });
+        commands_.push_back([groupCountX, groupCountY, groupCountZ](VkCommandBuffer cmd, const FrameContext&)
+                            { vkCmdDispatch(cmd, groupCountX, groupCountY, groupCountZ); });
         return *this;
     }
 
@@ -397,18 +444,21 @@ public:
     // inside a rendering scope: vkCmdPipelineBarrier is invalid there, and in
     // manual mode nothing is hoisted by magic — that would be a second,
     // implicit way of doing the explicit thing.
-    std::expected<void, Error> barrier(std::shared_ptr<Buffer> buffer, Access src, Access dst) {
-        if (!buffer) {
+    std::expected<void, Error> barrier(std::shared_ptr<Buffer> buffer, Access src, Access dst)
+    {
+        if (!buffer)
+        {
             return std::unexpected(err_resource("barrier: buffer is null"));
         }
-        if (in_rendering_) {
+        if (in_rendering_)
+        {
             return std::unexpected(err_resource(
                 "cmd.barrier() is not allowed inside a rendering scope; "
                 "record it before begin_rendering"));
         }
         const StageAccess s = to_vk(src);
         const StageAccess d = to_vk(dst);
-        record_barrier_(std::move(buffer), { s.stages, d.stages, s.access, d.access });
+        record_barrier_(std::move(buffer), {s.stages, d.stages, s.access, d.access});
         return {};
     }
 
@@ -420,26 +470,29 @@ public:
     // the dispatch, so the asset is generated once instead of every frame. The
     // layout is inferred from the access (WRITE->GENERAL, READ->SHADER_READ_ONLY);
     // only those two shader accesses name an image layout.
-    std::expected<void, Error> barrier(std::shared_ptr<Image> image, Access src, Access dst) {
-        if (!image) {
+    std::expected<void, Error> barrier(std::shared_ptr<Image> image, Access src, Access dst)
+    {
+        if (!image)
+        {
             return std::unexpected(err_resource("barrier: image is null"));
         }
-        if (in_rendering_) {
+        if (in_rendering_)
+        {
             return std::unexpected(err_resource(
                 "cmd.barrier() is not allowed inside a rendering scope; "
                 "record it before begin_rendering"));
         }
         const auto old_layout = image_layout_for(src);
         const auto new_layout = image_layout_for(dst);
-        if (!old_layout || !new_layout) {
+        if (!old_layout || !new_layout)
+        {
             return std::unexpected(err_resource(
                 "cmd.barrier(image, ...) takes Access.SHADER_WRITE (GENERAL) or "
                 "Access.SHADER_READ (SHADER_READ_ONLY); other accesses are buffer-only"));
         }
         const StageAccess s = to_vk(src);
         const StageAccess d = to_vk(dst);
-        record_image_barrier_(std::move(image),
-            { *old_layout, *new_layout, s.stages, d.stages, s.access, d.access });
+        record_image_barrier_(std::move(image), {*old_layout, *new_layout, s.stages, d.stages, s.access, d.access});
         return {};
     }
 
@@ -462,57 +515,74 @@ public:
 
     // Records the opening timestamp and returns the timer's index (its two query
     // slots are 2*index / 2*index+1). Paired with stop_timer.
-    std::size_t start_timer() {
+    std::size_t start_timer()
+    {
         const std::size_t index = timer_count_++;
         record_timer_write_(static_cast<std::uint32_t>(2 * index), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
         return index;
     }
 
-    void stop_timer(std::size_t index) {
+    void stop_timer(std::size_t index)
+    {
         record_timer_write_(static_cast<std::uint32_t>(2 * index + 1), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
     }
 
     // Which recording a timer belongs to. begin() bumps this, so a handle read
     // after the command buffer was re-recorded reports None (its slots now hold
     // a different timer's data) instead of a misleading number.
-    std::uint64_t recording_generation() const { return recording_generation_; }
+    std::uint64_t recording_generation() const
+    {
+        return recording_generation_;
+    }
 
     // The measured time of one timer in milliseconds, or nullopt when:
     // timestamps are unsupported, the handle is from a superseded recording, or
     // the results are not ready (a submit still in flight — a blocking headless
     // submit always is).
-    std::optional<double> read_timer(std::size_t index, std::uint64_t generation) const {
-        if (timer_pool_ == VK_NULL_HANDLE || generation != recording_generation_ ||
-            index >= timer_count_) {
+    std::optional<double> read_timer(std::size_t index, std::uint64_t generation) const
+    {
+        if (timer_pool_ == VK_NULL_HANDLE || generation != recording_generation_ || index >= timer_count_)
+        {
             return std::nullopt;
         }
-        std::uint64_t ts[2] = { 0, 0 };
-        if (vkGetQueryPoolResults(context_->device(), timer_pool_,
-                                  static_cast<std::uint32_t>(2 * index), 2,
-                                  sizeof(ts), ts, sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
-            return std::nullopt;  // VK_NOT_READY: submit not finished
+        std::uint64_t ts[2] = {0, 0};
+        if (vkGetQueryPoolResults(
+                context_->device(),
+                timer_pool_,
+                static_cast<std::uint32_t>(2 * index),
+                2,
+                sizeof(ts),
+                ts,
+                sizeof(std::uint64_t),
+                VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
+        {
+            return std::nullopt; // VK_NOT_READY: submit not finished
         }
-        const std::uint64_t mask = timer_valid_bits_ >= 64
-            ? ~std::uint64_t{ 0 }
-            : ((std::uint64_t{ 1 } << timer_valid_bits_) - 1);
+        const std::uint64_t mask = timer_valid_bits_ >= 64 ? ~std::uint64_t{0}
+                                                           : ((std::uint64_t{1} << timer_valid_bits_) - 1);
         const std::uint64_t delta = (ts[1] - ts[0]) & mask;
         return static_cast<double>(delta) * static_cast<double>(timer_period_) / 1.0e6;
     }
 
     // No stage argument: the Pipeline already knows which stages its push constant
     // range covers, so passing a mismatched one was a validation error for no gain.
-    CommandBuffer& push_constants(std::shared_ptr<Pipeline> pipeline, uint32_t offset, uint32_t size, const void* data) {
+    CommandBuffer& push_constants(std::shared_ptr<Pipeline> pipeline, uint32_t offset, uint32_t size, const void* data)
+    {
         std::vector<uint8_t> buffer(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
-        commands_.push_back([pipeline, offset, size, buffer](VkCommandBuffer cmd, const FrameContext&) {
-            vkCmdPushConstants(cmd, pipeline->layout(), pipeline->push_constant_stages(),
-                               offset, size, buffer.data());
-        });
+        commands_.push_back(
+            [pipeline, offset, size, buffer](VkCommandBuffer cmd, const FrameContext&)
+            {
+                vkCmdPushConstants(
+                    cmd, pipeline->layout(), pipeline->push_constant_stages(), offset, size, buffer.data());
+            });
         return *this;
     }
 
-    CommandBuffer& bind_descriptor_set(std::shared_ptr<DescriptorSet> descSet,
-                           std::shared_ptr<Pipeline> pipeline,
-                           uint32_t setIndex) {
+    CommandBuffer& bind_descriptor_set(
+        std::shared_ptr<DescriptorSet> descSet,
+        std::shared_ptr<Pipeline> pipeline,
+        uint32_t setIndex)
+    {
         // Remembered so submit paths can walk the images this recording
         // references and wait for their (async) uploads — residency is a
         // per-command-buffer question, not a global one, or a loading screen
@@ -520,37 +590,46 @@ public:
         used_sets_.push_back(descSet);
         // Record-time bookkeeping for the tracker: the next dispatch/draw walks
         // the sets bound at its bind point. Rebinding an index replaces it.
-        if (pipeline->bind_point() == VK_PIPELINE_BIND_POINT_COMPUTE) {
+        if (pipeline->bind_point() == VK_PIPELINE_BIND_POINT_COMPUTE)
+        {
             bound_compute_sets_[setIndex] = descSet;
-        } else {
+        }
+        else
+        {
             bound_graphics_sets_[setIndex] = descSet;
         }
-        commands_.push_back([descSet, pipeline, setIndex](VkCommandBuffer cmd, const FrameContext& frame) {
-            VkDescriptorSet set = descSet->get(frame.frame_index);
-            vkCmdBindDescriptorSets(cmd, pipeline->bind_point(),
-                pipeline->layout(), setIndex, 1, &set, 0, nullptr);
-        });
+        commands_.push_back(
+            [descSet, pipeline, setIndex](VkCommandBuffer cmd, const FrameContext& frame)
+            {
+                VkDescriptorSet set = descSet->get(frame.frame_index);
+                vkCmdBindDescriptorSets(cmd, pipeline->bind_point(), pipeline->layout(), setIndex, 1, &set, 0, nullptr);
+            });
         return *this;
     }
 
-    const std::vector<std::shared_ptr<DescriptorSet>>& used_sets() const {
+    const std::vector<std::shared_ptr<DescriptorSet>>& used_sets() const
+    {
         return used_sets_;
     }
 
-    VkCommandBuffer get(std::uint32_t frame_index) const {
+    VkCommandBuffer get(std::uint32_t frame_index) const
+    {
         return command_buffers_[frame_index];
     }
 
-    void execute(VkCommandBuffer vkCmd, const FrameContext& frame) {
+    void execute(VkCommandBuffer vkCmd, const FrameContext& frame)
+    {
         // Timer query pool: created/grown here (the scope count is known once
         // recording is done) and reset before any command runs — timestamps
         // must be reset before they are written, and vkCmdResetQueryPool is
         // illegal inside a render pass, so the top of execute is the one safe
         // spot. The timestamp-write lambdas read timer_pool_ at execute, so a
         // grow that recreates the pool is picked up without re-recording.
-        if (timer_count_ > 0) {
+        if (timer_count_ > 0)
+        {
             ensure_timer_pool_(2 * timer_count_);
-            if (timer_pool_ != VK_NULL_HANDLE) {
+            if (timer_pool_ != VK_NULL_HANDLE)
+            {
                 vkCmdResetQueryPool(vkCmd, timer_pool_, 0, timer_capacity_);
             }
         }
@@ -561,47 +640,52 @@ public:
         // write. One conservative memory barrier at the top covers that.
         // Emitted only when the recording writes a tracked buffer at all:
         // read-only recordings race with nothing.
-        if (auto_barriers_ && tracked_writes_) {
+        if (auto_barriers_ && tracked_writes_)
+        {
             VkMemoryBarrier barrier{
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                 .pNext = nullptr,
                 .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-                .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                                 VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
-                                 VK_ACCESS_INDEX_READ_BIT
-            };
+                .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
+                                 VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT};
             constexpr VkPipelineStageFlags stages = kAllShaderStages | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
             vkCmdPipelineBarrier(vkCmd, stages, stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
         }
-        for (auto& cmd_func : commands_) {
+        for (auto& cmd_func : commands_)
+        {
             cmd_func(vkCmd, frame);
         }
     }
 
 private:
-    CommandBuffer(std::shared_ptr<Context> context) : context_(context) {}
+    CommandBuffer(std::shared_ptr<Context> context)
+        : context_(context)
+    {
+    }
 
     // Records a buffer-barrier lambda. Inside a rendering scope it is hoisted
     // to just before the begin_rendering lambda (vkCmdPipelineBarrier is
     // illegal inside dynamic rendering); deferred recording makes the insert
     // a cheap vector operation on data that only exists at record time.
-    void record_barrier_(std::shared_ptr<Buffer> buffer, ResourceTracker::Barrier b) {
-        hoist_or_push_([buffer = std::move(buffer), b](VkCommandBuffer cmd, const FrameContext&) {
-            VkBufferMemoryBarrier barrier{
-                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-                .pNext = nullptr,
-                .srcAccessMask = b.src_access,
-                .dstAccessMask = b.dst_access,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                // Resolved at execute time, never captured: a DynamicBuffer
-                // has one handle per frame in flight.
-                .buffer = buffer->get(),
-                .offset = 0,
-                .size = VK_WHOLE_SIZE
-            };
-            vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 1, &barrier, 0, nullptr);
-        });
+    void record_barrier_(std::shared_ptr<Buffer> buffer, ResourceTracker::Barrier b)
+    {
+        hoist_or_push_(
+            [buffer = std::move(buffer), b](VkCommandBuffer cmd, const FrameContext&)
+            {
+                VkBufferMemoryBarrier barrier{
+                    .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                    .pNext = nullptr,
+                    .srcAccessMask = b.src_access,
+                    .dstAccessMask = b.dst_access,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    // Resolved at execute time, never captured: a DynamicBuffer
+                    // has one handle per frame in flight.
+                    .buffer = buffer->get(),
+                    .offset = 0,
+                    .size = VK_WHOLE_SIZE};
+                vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+            });
     }
 
     // The image counterpart: an image-memory barrier that also carries the
@@ -609,39 +693,44 @@ private:
     // vkCmdPipelineBarrier is illegal inside dynamic rendering, so a transition
     // discovered mid-pass (a compute-written image about to be sampled) lands
     // just before begin_rendering.
-    void record_image_barrier_(std::shared_ptr<Image> image, ResourceTracker::ImageBarrier b) {
-        hoist_or_push_([image = std::move(image), b](VkCommandBuffer cmd, const FrameContext&) {
-            VkImageMemoryBarrier barrier{
-                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                .pNext = nullptr,
-                .srcAccessMask = b.src_access,
-                .dstAccessMask = b.dst_access,
-                .oldLayout = b.old_layout,
-                .newLayout = b.new_layout,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = image->vk_image(),
-                .subresourceRange = {
-                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                    .baseMipLevel = 0,
-                    .levelCount = image->mip_levels(),
-                    .baseArrayLayer = 0,
-                    // All layers transition together: the tracker holds one
-                    // layout per image, and a cube/array is used as a whole.
-                    .layerCount = image->array_layers()
-                }
-            };
-            vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-        });
+    void record_image_barrier_(std::shared_ptr<Image> image, ResourceTracker::ImageBarrier b)
+    {
+        hoist_or_push_(
+            [image = std::move(image), b](VkCommandBuffer cmd, const FrameContext&)
+            {
+                VkImageMemoryBarrier barrier{
+                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    .pNext = nullptr,
+                    .srcAccessMask = b.src_access,
+                    .dstAccessMask = b.dst_access,
+                    .oldLayout = b.old_layout,
+                    .newLayout = b.new_layout,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = image->vk_image(),
+                    .subresourceRange = {
+                        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                        .baseMipLevel = 0,
+                        .levelCount = image->mip_levels(),
+                        .baseArrayLayer = 0,
+                        // All layers transition together: the tracker holds one
+                        // layout per image, and a cube/array is used as a whole.
+                        .layerCount = image->array_layers()}};
+                vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+            });
     }
 
     // Push a recorded barrier, or hoist it before begin_rendering when inside a
     // rendering scope. Shared by the buffer and image paths.
-    void hoist_or_push_(std::function<void(VkCommandBuffer, const FrameContext&)> lambda) {
-        if (in_rendering_) {
+    void hoist_or_push_(std::function<void(VkCommandBuffer, const FrameContext&)> lambda)
+    {
+        if (in_rendering_)
+        {
             commands_.insert(commands_.begin() + rendering_insert_pos_, std::move(lambda));
             ++rendering_insert_pos_;
-        } else {
+        }
+        else
+        {
             commands_.push_back(std::move(lambda));
         }
     }
@@ -649,12 +738,16 @@ private:
     // A recorded timestamp write. Captures `this` (safe: the lambda only runs
     // inside this->execute) and reads timer_pool_ at execute, so it no-ops when
     // timestamps are unsupported and follows the pool across a grow.
-    void record_timer_write_(std::uint32_t slot, VkPipelineStageFlagBits stage) {
-        commands_.push_back([this, slot, stage](VkCommandBuffer cmd, const FrameContext&) {
-            if (timer_pool_ != VK_NULL_HANDLE) {
-                vkCmdWriteTimestamp(cmd, stage, timer_pool_, slot);
-            }
-        });
+    void record_timer_write_(std::uint32_t slot, VkPipelineStageFlagBits stage)
+    {
+        commands_.push_back(
+            [this, slot, stage](VkCommandBuffer cmd, const FrameContext&)
+            {
+                if (timer_pool_ != VK_NULL_HANDLE)
+                {
+                    vkCmdWriteTimestamp(cmd, stage, timer_pool_, slot);
+                }
+            });
     }
 
     // Best-effort query pool sized for `needed` slots. Queries timestamp
@@ -662,11 +755,14 @@ private:
     // timer becomes a silent no-op (timer_ms returns None). Grows by recreating
     // (deferred destroy of the old pool) — rare, only when a later recording
     // declares more scopes than any before it.
-    void ensure_timer_pool_(std::size_t needed) {
-        if (timer_pool_ != VK_NULL_HANDLE && timer_capacity_ >= needed) {
+    void ensure_timer_pool_(std::size_t needed)
+    {
+        if (timer_pool_ != VK_NULL_HANDLE && timer_capacity_ >= needed)
+        {
             return;
         }
-        if (!timer_supported_.has_value()) {
+        if (!timer_supported_.has_value())
+        {
             VkPhysicalDeviceProperties props{};
             vkGetPhysicalDeviceProperties(context_->physical_device(), &props);
             std::uint32_t family_count = 0;
@@ -674,22 +770,24 @@ private:
             std::vector<VkQueueFamilyProperties> families(family_count);
             vkGetPhysicalDeviceQueueFamilyProperties(context_->physical_device(), &family_count, families.data());
             const std::uint32_t gf = context_->graphics_queue_family();
-            const bool ok = props.limits.timestampPeriod > 0.0f &&
-                            gf < family_count && families[gf].timestampValidBits != 0;
+            const bool ok = props.limits.timestampPeriod > 0.0f && gf < family_count &&
+                            families[gf].timestampValidBits != 0;
             timer_supported_ = ok;
-            if (ok) {
+            if (ok)
+            {
                 timer_period_ = props.limits.timestampPeriod;
                 timer_valid_bits_ = families[gf].timestampValidBits;
             }
         }
-        if (!*timer_supported_) {
+        if (!*timer_supported_)
+        {
             return;
         }
 
-        if (timer_pool_ != VK_NULL_HANDLE) {
-            context_->defer_destroy([device = context_->device(), pool = timer_pool_] {
-                vkDestroyQueryPool(device, pool, nullptr);
-            });
+        if (timer_pool_ != VK_NULL_HANDLE)
+        {
+            context_->defer_destroy([device = context_->device(), pool = timer_pool_]
+                                    { vkDestroyQueryPool(device, pool, nullptr); });
             timer_pool_ = VK_NULL_HANDLE;
         }
         VkQueryPoolCreateInfo poolInfo{
@@ -698,37 +796,52 @@ private:
             .flags = 0,
             .queryType = VK_QUERY_TYPE_TIMESTAMP,
             .queryCount = static_cast<std::uint32_t>(needed),
-            .pipelineStatistics = 0
-        };
-        if (vkCreateQueryPool(context_->device(), &poolInfo, nullptr, &timer_pool_) != VK_SUCCESS) {
+            .pipelineStatistics = 0};
+        if (vkCreateQueryPool(context_->device(), &poolInfo, nullptr, &timer_pool_) != VK_SUCCESS)
+        {
             timer_pool_ = VK_NULL_HANDLE;
             return;
         }
         timer_capacity_ = static_cast<std::uint32_t>(needed);
     }
 
-    void track_use_(const std::shared_ptr<Buffer>& buffer, VkPipelineStageFlags stages,
-                    VkAccessFlags access, bool writes) {
-        if (!auto_barriers_) {
+    void track_use_(
+        const std::shared_ptr<Buffer>& buffer,
+        VkPipelineStageFlags stages,
+        VkAccessFlags access,
+        bool writes)
+    {
+        if (!auto_barriers_)
+        {
             return;
         }
-        if (writes) {
+        if (writes)
+        {
             tracked_writes_ = true;
         }
-        if (auto b = tracker_.use(buffer.get(), stages, access, writes)) {
+        if (auto b = tracker_.use(buffer.get(), stages, access, writes))
+        {
             record_barrier_(buffer, *b);
         }
     }
 
-    void track_image_use_(const std::shared_ptr<Image>& image, VkImageLayout layout,
-                          VkPipelineStageFlags stages, VkAccessFlags access, bool writes) {
-        if (!auto_barriers_) {
+    void track_image_use_(
+        const std::shared_ptr<Image>& image,
+        VkImageLayout layout,
+        VkPipelineStageFlags stages,
+        VkAccessFlags access,
+        bool writes)
+    {
+        if (!auto_barriers_)
+        {
             return;
         }
-        if (writes) {
+        if (writes)
+        {
             tracked_writes_ = true;
         }
-        if (auto b = tracker_.use_image(image.get(), layout, stages, access, writes)) {
+        if (auto b = tracker_.use_image(image.get(), layout, stages, access, writes))
+        {
             record_image_barrier_(image, *b);
         }
     }
@@ -736,20 +849,31 @@ private:
     // Storage buffers in graphics shaders are conservatively READS. Writes are
     // invisible without shader reflection — the documented limit of auto mode;
     // cmd.barrier() covers that case by hand.
-    void track_draw_() {
-        if (!auto_barriers_) {
+    void track_draw_()
+    {
+        if (!auto_barriers_)
+        {
             return;
         }
-        for (auto& [idx, set] : bound_graphics_sets_) {
-            for (const auto& bb : set->buffers()) {
-                if (bb.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
-                    track_use_(bb.buffer,
-                               VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                               VK_ACCESS_SHADER_READ_BIT, false);
-                } else if (bb.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
-                    track_use_(bb.buffer,
-                               VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                               VK_ACCESS_UNIFORM_READ_BIT, false);
+        for (auto& [idx, set] : bound_graphics_sets_)
+        {
+            for (const auto& bb : set->buffers())
+            {
+                if (bb.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+                {
+                    track_use_(
+                        bb.buffer,
+                        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        false);
+                }
+                else if (bb.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+                {
+                    track_use_(
+                        bb.buffer,
+                        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                        VK_ACCESS_UNIFORM_READ_BIT,
+                        false);
                 }
             }
             // A sampled image only needs a barrier if the tracker has already
@@ -757,12 +881,16 @@ private:
             // is still in GENERAL. An uploaded texture the tracker never saw
             // rests in SHADER_READ_ONLY and is left untouched (the pre-0.9
             // behaviour), so ordinary texturing pays nothing.
-            for (const auto& bi : set->images()) {
-                if (bi.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
-                    tracker_.tracks(bi.image.get())) {
-                    track_image_use_(bi.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                     VK_ACCESS_SHADER_READ_BIT, false);
+            for (const auto& bi : set->images())
+            {
+                if (bi.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && tracker_.tracks(bi.image.get()))
+                {
+                    track_image_use_(
+                        bi.image,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        false);
                 }
             }
         }
@@ -771,18 +899,27 @@ private:
     // Compute SSBOs are conservatively READ+WRITE: without reflection there is
     // no telling a `readonly buffer` from a mutated one, and the pessimism
     // costs one barrier, not correctness.
-    void track_dispatch_() {
-        if (!auto_barriers_) {
+    void track_dispatch_()
+    {
+        if (!auto_barriers_)
+        {
             return;
         }
-        for (auto& [idx, set] : bound_compute_sets_) {
-            for (const auto& bb : set->buffers()) {
-                if (bb.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
-                    track_use_(bb.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                               VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, true);
-                } else if (bb.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
-                    track_use_(bb.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                               VK_ACCESS_UNIFORM_READ_BIT, false);
+        for (auto& [idx, set] : bound_compute_sets_)
+        {
+            for (const auto& bb : set->buffers())
+            {
+                if (bb.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+                {
+                    track_use_(
+                        bb.buffer,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                        true);
+                }
+                else if (bb.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+                {
+                    track_use_(bb.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_UNIFORM_READ_BIT, false);
                 }
             }
             // Storage images are conservatively READ+WRITE, like storage
@@ -790,11 +927,16 @@ private:
             // from a written one, and GENERAL is the only layout either is
             // accessed in. The transition to GENERAL (from UNDEFINED on first
             // use, or from a prior use's layout) rides on this barrier.
-            for (const auto& bi : set->images()) {
-                if (bi.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
-                    track_image_use_(bi.image, VK_IMAGE_LAYOUT_GENERAL,
-                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                     VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, true);
+            for (const auto& bi : set->images())
+            {
+                if (bi.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+                {
+                    track_image_use_(
+                        bi.image,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                        true);
                 }
             }
         }
@@ -819,7 +961,7 @@ private:
     std::uint32_t timer_capacity_ = 0;
     float timer_period_ = 0.0f;
     std::uint32_t timer_valid_bits_ = 0;
-    std::optional<bool> timer_supported_;  // queried once, lazily
-    std::size_t timer_count_ = 0;           // timers declared this recording
-    std::uint64_t recording_generation_ = 0;  // bumped by begin(); stale-handle guard
+    std::optional<bool> timer_supported_;    // queried once, lazily
+    std::size_t timer_count_ = 0;            // timers declared this recording
+    std::uint64_t recording_generation_ = 0; // bumped by begin(); stale-handle guard
 };

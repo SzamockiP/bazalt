@@ -13,12 +13,14 @@
 
 class DescriptorPool;
 
-class DescriptorSet {
+class DescriptorSet
+{
 public:
     // The descriptor type rides along so the ResourceTracker can tell a
     // storage buffer (read-write in compute) from a uniform one at dispatch
     // and draw time.
-    struct BoundBuffer {
+    struct BoundBuffer
+    {
         std::shared_ptr<Buffer> buffer;
         VkDescriptorType type;
     };
@@ -26,17 +28,26 @@ public:
     // Same idea for images: STORAGE_IMAGE (compute read-write, GENERAL layout)
     // vs COMBINED_IMAGE_SAMPLER (sampled, SHADER_READ_ONLY). The type lets the
     // tracker transition a compute-written image before a later sample.
-    struct BoundImage {
+    struct BoundImage
+    {
         std::shared_ptr<Image> image;
         VkDescriptorType type;
     };
 
     // sets: 1 element (static) or frames_in_flight elements (frame)
-    DescriptorSet(std::shared_ptr<Context> context, std::shared_ptr<DescriptorPool> pool,
-                  std::vector<VkDescriptorSet> sets,
-                  Pipeline::BindingTypeMap bindingTypes, bool isFrameSet)
-        : context_(context), pool_(std::move(pool)), sets_(std::move(sets)),
-          binding_types_(std::move(bindingTypes)), is_frame_set_(isFrameSet) {}
+    DescriptorSet(
+        std::shared_ptr<Context> context,
+        std::shared_ptr<DescriptorPool> pool,
+        std::vector<VkDescriptorSet> sets,
+        Pipeline::BindingTypeMap bindingTypes,
+        bool isFrameSet)
+        : context_(context),
+          pool_(std::move(pool)),
+          sets_(std::move(sets)),
+          binding_types_(std::move(bindingTypes)),
+          is_frame_set_(isFrameSet)
+    {
+    }
 
     // Frees the sets back to the pool, deferred (an in-flight frame may still
     // have them bound). The lambda captures the RAW pool handle, never the
@@ -50,27 +61,35 @@ public:
     // Write an image + sampler to this descriptor set (all copies).
     // sampler == nullptr means "the default": linear, repeat, anisotropic —
     // resolved through the Context's cache, so it costs nothing.
-    std::expected<void, Error> set_image(uint32_t binding, std::shared_ptr<Image> image,
-                                         std::shared_ptr<Sampler> sampler = nullptr) {
-        if (!context_) return std::unexpected(err_init("Context destroyed"));
-        if (!image) return std::unexpected(err_resource("set_image: image is null"));
+    std::expected<void, Error> set_image(
+        uint32_t binding,
+        std::shared_ptr<Image> image,
+        std::shared_ptr<Sampler> sampler = nullptr)
+    {
+        if (!context_)
+            return std::unexpected(err_init("Context destroyed"));
+        if (!image)
+            return std::unexpected(err_resource("set_image: image is null"));
 
         // A typo in the binding index used to surface only as a validation error
         // at submit time (or not at all with the layers off). Diagnose it here.
         auto it = binding_types_.find(binding);
-        if (it == binding_types_.end()) {
-            return std::unexpected(err_resource(std::format(
-                "Binding {} does not exist in this descriptor set's layout", binding)));
+        if (it == binding_types_.end())
+        {
+            return std::unexpected(
+                err_resource(std::format("Binding {} does not exist in this descriptor set's layout", binding)));
         }
-        if (it->second != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-            return std::unexpected(err_resource(std::format(
-                "Binding {} is not a sampler binding; use set_buffer() for buffer bindings",
-                binding)));
+        if (it->second != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+        {
+            return std::unexpected(err_resource(
+                std::format("Binding {} is not a sampler binding; use set_buffer() for buffer bindings", binding)));
         }
 
-        if (!sampler) {
+        if (!sampler)
+        {
             auto def = context_->get_sampler({});
-            if (!def) {
+            if (!def)
+            {
                 return std::unexpected(def.error());
             }
             sampler = std::move(*def);
@@ -79,10 +98,10 @@ public:
         VkDescriptorImageInfo imageInfo{
             .sampler = sampler->get(),
             .imageView = image->view(),
-            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-        };
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 
-        for (auto& set : sets_) {
+        for (auto& set : sets_)
+        {
             VkWriteDescriptorSet write{
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .pNext = nullptr,
@@ -93,11 +112,10 @@ public:
                 .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                 .pImageInfo = &imageInfo,
                 .pBufferInfo = nullptr,
-                .pTexelBufferView = nullptr
-            };
+                .pTexelBufferView = nullptr};
             vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
-        bound_images_.push_back({ std::move(image), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER });
+        bound_images_.push_back({std::move(image), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER});
         samplers_.push_back(std::move(sampler));
         return {};
     }
@@ -108,19 +126,27 @@ public:
     // accessed in. The auto-barrier tracker transitions the image to GENERAL
     // before the dispatch, so the recorded layout here is always what the GPU
     // finds at execute time.
-    std::expected<void, Error> set_storage_image(uint32_t binding, std::shared_ptr<Image> image) {
-        if (!context_) return std::unexpected(err_init("Context destroyed"));
-        if (!image) return std::unexpected(err_resource("set_storage_image: image is null"));
+    std::expected<void, Error> set_storage_image(uint32_t binding, std::shared_ptr<Image> image)
+    {
+        if (!context_)
+            return std::unexpected(err_init("Context destroyed"));
+        if (!image)
+            return std::unexpected(err_resource("set_storage_image: image is null"));
 
         auto it = binding_types_.find(binding);
-        if (it == binding_types_.end()) {
-            return std::unexpected(err_resource(std::format(
-                "Binding {} does not exist in this descriptor set's layout", binding)));
+        if (it == binding_types_.end())
+        {
+            return std::unexpected(
+                err_resource(std::format("Binding {} does not exist in this descriptor set's layout", binding)));
         }
-        if (it->second != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
-            return std::unexpected(err_resource(std::format(
-                "Binding {} is not a storage-image binding; declare it with "
-                ".storage_image({}) on the pipeline builder", binding, binding)));
+        if (it->second != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "Binding {} is not a storage-image binding; declare it with "
+                    ".storage_image({}) on the pipeline builder",
+                    binding,
+                    binding)));
         }
 
         VkDescriptorImageInfo imageInfo{
@@ -128,10 +154,10 @@ public:
             // storage_view() is the 2D_ARRAY view for a cubemap (a CUBE view is
             // illegal as storage) and the plain view for everything else.
             .imageView = image->storage_view(),
-            .imageLayout = VK_IMAGE_LAYOUT_GENERAL
-        };
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
 
-        for (auto& set : sets_) {
+        for (auto& set : sets_)
+        {
             VkWriteDescriptorSet write{
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .pNext = nullptr,
@@ -142,8 +168,7 @@ public:
                 .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                 .pImageInfo = &imageInfo,
                 .pBufferInfo = nullptr,
-                .pTexelBufferView = nullptr
-            };
+                .pTexelBufferView = nullptr};
             vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
         // A storage image is a compute output: after the dispatch it holds
@@ -152,18 +177,22 @@ public:
         // blocks before read(), so contents exist by then, and read()'s
         // transition needs the resting layout to be GENERAL, not UNDEFINED.
         image->mark_has_contents(VK_IMAGE_LAYOUT_GENERAL);
-        bound_images_.push_back({ std::move(image), VK_DESCRIPTOR_TYPE_STORAGE_IMAGE });
+        bound_images_.push_back({std::move(image), VK_DESCRIPTOR_TYPE_STORAGE_IMAGE});
         return {};
     }
 
     // Write a buffer to this descriptor set
     // For frame descriptor sets + DynamicBuffer: writes per-frame buffer to each copy
     // For static descriptor sets + DynamicBuffer: bz.ResourceError
-    std::expected<void, Error> set_buffer(uint32_t binding, std::shared_ptr<Buffer> buffer) {
-        if (!context_) return std::unexpected(err_init("Context destroyed"));
-        if (!buffer) return std::unexpected(err_resource("set_buffer: buffer is null"));
+    std::expected<void, Error> set_buffer(uint32_t binding, std::shared_ptr<Buffer> buffer)
+    {
+        if (!context_)
+            return std::unexpected(err_init("Context destroyed"));
+        if (!buffer)
+            return std::unexpected(err_resource("set_buffer: buffer is null"));
 
-        if (!is_frame_set_ && buffer->is_dynamic()) {
+        if (!is_frame_set_ && buffer->is_dynamic())
+        {
             return std::unexpected(err_resource(
                 "Cannot bind a DYNAMIC buffer to a static DescriptorSet. "
                 "Use allocate_frame_set() instead."));
@@ -173,24 +202,22 @@ public:
         // UNIFORM_BUFFER, so a typo'd index produced a descriptor write the
         // layout never declared — garbage diagnosed (at best) at submit time.
         auto it = binding_types_.find(binding);
-        if (it == binding_types_.end()) {
-            return std::unexpected(err_resource(std::format(
-                "Binding {} does not exist in this descriptor set's layout", binding)));
+        if (it == binding_types_.end())
+        {
+            return std::unexpected(
+                err_resource(std::format("Binding {} does not exist in this descriptor set's layout", binding)));
         }
         const VkDescriptorType descType = it->second;
-        if (descType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-            return std::unexpected(err_resource(std::format(
-                "Binding {} is a sampler binding; use set_image() for image bindings",
-                binding)));
+        if (descType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+        {
+            return std::unexpected(err_resource(
+                std::format("Binding {} is a sampler binding; use set_image() for image bindings", binding)));
         }
 
-        for (size_t i = 0; i < sets_.size(); i++) {
+        for (size_t i = 0; i < sets_.size(); i++)
+        {
             VkBuffer vkBuf = buffer->get_for_frame(static_cast<uint32_t>(i));
-            VkDescriptorBufferInfo bufferInfo{
-                .buffer = vkBuf,
-                .offset = 0,
-                .range = buffer->size()
-            };
+            VkDescriptorBufferInfo bufferInfo{.buffer = vkBuf, .offset = 0, .range = buffer->size()};
 
             VkWriteDescriptorSet write{
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -202,36 +229,46 @@ public:
                 .descriptorType = descType,
                 .pImageInfo = nullptr,
                 .pBufferInfo = &bufferInfo,
-                .pTexelBufferView = nullptr
-            };
+                .pTexelBufferView = nullptr};
             vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
-        buffers_.push_back({ std::move(buffer), descType });
+        buffers_.push_back({std::move(buffer), descType});
         return {};
     }
 
     // Get the VkDescriptorSet for the given frame
-    VkDescriptorSet get(uint32_t currentFrame) const {
-        if (is_frame_set_) {
+    VkDescriptorSet get(uint32_t currentFrame) const
+    {
+        if (is_frame_set_)
+        {
             return sets_[currentFrame % sets_.size()];
         }
         return sets_[0];
     }
 
-    bool is_frame_set() const { return is_frame_set_; }
+    bool is_frame_set() const
+    {
+        return is_frame_set_;
+    }
 
     // The images this set references — walked at submit time for upload
     // residency and at record time by the ResourceTracker (the type tells a
     // storage image from a sampled one).
-    const std::vector<BoundImage>& images() const { return bound_images_; }
+    const std::vector<BoundImage>& images() const
+    {
+        return bound_images_;
+    }
 
     // The buffers this set references — walked at record time by the
     // ResourceTracker to compute automatic barriers.
-    const std::vector<BoundBuffer>& buffers() const { return buffers_; }
+    const std::vector<BoundBuffer>& buffers() const
+    {
+        return buffers_;
+    }
 
 private:
     std::shared_ptr<Context> context_;
-    std::shared_ptr<DescriptorPool> pool_;  // sets must not outlive their pool
+    std::shared_ptr<DescriptorPool> pool_; // sets must not outlive their pool
     std::vector<VkDescriptorSet> sets_;
     Pipeline::BindingTypeMap binding_types_;
     bool is_frame_set_;
@@ -241,7 +278,8 @@ private:
     std::vector<BoundBuffer> buffers_;
 };
 
-class DescriptorPool : public std::enable_shared_from_this<DescriptorPool> {
+class DescriptorPool : public std::enable_shared_from_this<DescriptorPool>
+{
 public:
     static std::expected<std::shared_ptr<DescriptorPool>, Error> create(
         Context& context,
@@ -253,32 +291,25 @@ public:
     {
         std::vector<VkDescriptorPoolSize> poolSizes;
 
-        if (samplerCount > 0) {
-            poolSizes.push_back({
-                .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                .descriptorCount = samplerCount
-            });
+        if (samplerCount > 0)
+        {
+            poolSizes.push_back({.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = samplerCount});
         }
-        if (uniformBufferCount > 0) {
-            poolSizes.push_back({
-                .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                .descriptorCount = uniformBufferCount
-            });
+        if (uniformBufferCount > 0)
+        {
+            poolSizes.push_back({.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = uniformBufferCount});
         }
-        if (storageBufferCount > 0) {
-            poolSizes.push_back({
-                .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                .descriptorCount = storageBufferCount
-            });
+        if (storageBufferCount > 0)
+        {
+            poolSizes.push_back({.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = storageBufferCount});
         }
-        if (storageImageCount > 0) {
-            poolSizes.push_back({
-                .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                .descriptorCount = storageImageCount
-            });
+        if (storageImageCount > 0)
+        {
+            poolSizes.push_back({.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = storageImageCount});
         }
 
-        if (poolSizes.empty()) {
+        if (poolSizes.empty())
+        {
             return std::unexpected(err_resource("DescriptorPool must have at least one non-zero descriptor count"));
         }
 
@@ -291,12 +322,14 @@ public:
             .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
             .maxSets = maxSets,
             .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
-            .pPoolSizes = poolSizes.data()
-        };
+            .pPoolSizes = poolSizes.data()};
 
         VkDescriptorPool pool;
-        if (auto e = check(vkCreateDescriptorPool(context.device(), &poolInfo, nullptr, &pool),
-                           "create descriptor pool", ErrorCode::Resource)) {
+        if (auto e = check(
+                vkCreateDescriptorPool(context.device(), &poolInfo, nullptr, &pool),
+                "create descriptor pool",
+                ErrorCode::Resource))
+        {
             return std::unexpected(*e);
         }
 
@@ -305,27 +338,36 @@ public:
 
     // Deferred, so it lands in the queue after every set's free (sets hold the
     // pool, so their destructors necessarily run first).
-    ~DescriptorPool() {
-        if (pool_ != VK_NULL_HANDLE && context_) {
-            context_->defer_destroy([device = context_->device(), pool = pool_] {
-                vkDestroyDescriptorPool(device, pool, nullptr);
-            });
+    ~DescriptorPool()
+    {
+        if (pool_ != VK_NULL_HANDLE && context_)
+        {
+            context_->defer_destroy([device = context_->device(), pool = pool_]
+                                    { vkDestroyDescriptorPool(device, pool, nullptr); });
         }
     }
 
-    VkDescriptorPool get() const { return pool_; }
+    VkDescriptorPool get() const
+    {
+        return pool_;
+    }
 
     DescriptorPool(const DescriptorPool&) = delete;
     DescriptorPool& operator=(const DescriptorPool&) = delete;
 
     // Allocate a static descriptor set (1 VkDescriptorSet)
-    std::expected<std::shared_ptr<DescriptorSet>, Error>
-    allocate_descriptor_set(std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) {
-        if (!context_) return std::unexpected(err_init("Context destroyed"));
+    std::expected<std::shared_ptr<DescriptorSet>, Error> allocate_descriptor_set(
+        std::shared_ptr<Pipeline> pipeline,
+        uint32_t setIndex)
+    {
+        if (!context_)
+            return std::unexpected(err_init("Context destroyed"));
 
         VkDescriptorSetLayout layout = pipeline->descriptor_set_layout(setIndex);
-        if (layout == VK_NULL_HANDLE) {
-            return std::unexpected(err_resource("Pipeline has no descriptor set layout at set index " + std::to_string(setIndex)));
+        if (layout == VK_NULL_HANDLE)
+        {
+            return std::unexpected(
+                err_resource("Pipeline has no descriptor set layout at set index " + std::to_string(setIndex)));
         }
 
         VkDescriptorSetAllocateInfo allocInfo{
@@ -333,28 +375,34 @@ public:
             .pNext = nullptr,
             .descriptorPool = pool_,
             .descriptorSetCount = 1,
-            .pSetLayouts = &layout
-        };
+            .pSetLayouts = &layout};
 
         VkDescriptorSet set;
-        if (auto e = check(vkAllocateDescriptorSets(context_->device(), &allocInfo, &set),
-                           "allocate descriptor set from pool (pool may be full)", ErrorCode::Resource)) {
+        if (auto e = check(
+                vkAllocateDescriptorSets(context_->device(), &allocInfo, &set),
+                "allocate descriptor set from pool (pool may be full)",
+                ErrorCode::Resource))
+        {
             return std::unexpected(*e);
         }
 
         return std::make_shared<DescriptorSet>(
-            context_, shared_from_this(), std::vector<VkDescriptorSet>{set},
-            pipeline->binding_types(setIndex), false);
+            context_, shared_from_this(), std::vector<VkDescriptorSet>{set}, pipeline->binding_types(setIndex), false);
     }
 
     // Allocate a frame descriptor set (frames_in_flight VkDescriptorSets)
-    std::expected<std::shared_ptr<DescriptorSet>, Error>
-    allocate_frame_descriptor_set(std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) {
-        if (!context_) return std::unexpected(err_init("Context destroyed"));
+    std::expected<std::shared_ptr<DescriptorSet>, Error> allocate_frame_descriptor_set(
+        std::shared_ptr<Pipeline> pipeline,
+        uint32_t setIndex)
+    {
+        if (!context_)
+            return std::unexpected(err_init("Context destroyed"));
 
         VkDescriptorSetLayout layout = pipeline->descriptor_set_layout(setIndex);
-        if (layout == VK_NULL_HANDLE) {
-            return std::unexpected(err_resource("Pipeline has no descriptor set layout at set index " + std::to_string(setIndex)));
+        if (layout == VK_NULL_HANDLE)
+        {
+            return std::unexpected(
+                err_resource("Pipeline has no descriptor set layout at set index " + std::to_string(setIndex)));
         }
 
         const uint32_t frames = context_->frames_in_flight();
@@ -364,38 +412,44 @@ public:
             .pNext = nullptr,
             .descriptorPool = pool_,
             .descriptorSetCount = frames,
-            .pSetLayouts = layouts.data()
-        };
+            .pSetLayouts = layouts.data()};
 
         std::vector<VkDescriptorSet> sets(frames);
-        if (auto e = check(vkAllocateDescriptorSets(context_->device(), &allocInfo, sets.data()),
-                           "allocate frame descriptor sets from pool (pool may be full)", ErrorCode::Resource)) {
+        if (auto e = check(
+                vkAllocateDescriptorSets(context_->device(), &allocInfo, sets.data()),
+                "allocate frame descriptor sets from pool (pool may be full)",
+                ErrorCode::Resource))
+        {
             return std::unexpected(*e);
         }
 
         return std::make_shared<DescriptorSet>(
-            context_, shared_from_this(), std::move(sets),
-            pipeline->binding_types(setIndex), true);
+            context_, shared_from_this(), std::move(sets), pipeline->binding_types(setIndex), true);
     }
 
-    std::shared_ptr<Logger> logger() const {
+    std::shared_ptr<Logger> logger() const
+    {
         return context_ ? context_->logger() : nullptr;
     }
 
 private:
     DescriptorPool(std::shared_ptr<Context> context, VkDescriptorPool pool)
-        : context_(context), pool_(pool) {}
+        : context_(context),
+          pool_(pool)
+    {
+    }
 
     std::shared_ptr<Context> context_;
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
 };
 
 // Out of line: needs DescriptorPool to be complete for pool_->get().
-inline DescriptorSet::~DescriptorSet() {
-    if (context_ && pool_ && !sets_.empty()) {
+inline DescriptorSet::~DescriptorSet()
+{
+    if (context_ && pool_ && !sets_.empty())
+    {
         context_->defer_destroy(
-            [device = context_->device(), pool = pool_->get(), sets = std::move(sets_)] {
-                vkFreeDescriptorSets(device, pool, static_cast<uint32_t>(sets.size()), sets.data());
-            });
+            [device = context_->device(), pool = pool_->get(), sets = std::move(sets_)]
+            { vkFreeDescriptorSets(device, pool, static_cast<uint32_t>(sets.size()), sets.data()); });
     }
 }

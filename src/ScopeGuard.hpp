@@ -10,7 +10,10 @@ template <typename F>
 class ScopeGuard
 {
 public:
-    explicit ScopeGuard(F fn) : fn_(std::move(fn)) {}
+    explicit ScopeGuard(F fn)
+        : fn_(std::move(fn))
+    {
+    }
 
     ~ScopeGuard()
     {
@@ -24,7 +27,10 @@ public:
     ScopeGuard& operator=(const ScopeGuard&) = delete;
 
     // Call once the guarded objects have found an owner.
-    void release() { armed_ = false; }
+    void release()
+    {
+        armed_ = false;
+    }
 
 private:
     F fn_;

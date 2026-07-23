@@ -27,17 +27,19 @@ std::expected<void, Error> immediate_submit(Context& context, F&& record)
         .pNext = nullptr,
         .commandPool = context.command_pool(),
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1
-    };
+        .commandBufferCount = 1};
 
     VkCommandBuffer cmd = VK_NULL_HANDLE;
-    if (auto e = check(vkAllocateCommandBuffers(context.device(), &allocInfo, &cmd),
-                       "allocate one-shot command buffer", ErrorCode::Resource))
+    if (auto e = check(
+            vkAllocateCommandBuffers(context.device(), &allocInfo, &cmd),
+            "allocate one-shot command buffer",
+            ErrorCode::Resource))
     {
         return std::unexpected(*e);
     }
 
-    const auto fail = [&](Error error) -> std::expected<void, Error> {
+    const auto fail = [&](Error error) -> std::expected<void, Error>
+    {
         vkFreeCommandBuffers(context.device(), context.command_pool(), 1, &cmd);
         return std::unexpected(std::move(error));
     };
@@ -46,18 +48,15 @@ std::expected<void, Error> immediate_submit(Context& context, F&& record)
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .pNext = nullptr,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        .pInheritanceInfo = nullptr
-    };
-    if (auto e = check(vkBeginCommandBuffer(cmd, &beginInfo),
-                       "begin one-shot command buffer", ErrorCode::Resource))
+        .pInheritanceInfo = nullptr};
+    if (auto e = check(vkBeginCommandBuffer(cmd, &beginInfo), "begin one-shot command buffer", ErrorCode::Resource))
     {
         return fail(std::move(*e));
     }
 
     std::forward<F>(record)(cmd);
 
-    if (auto e = check(vkEndCommandBuffer(cmd),
-                       "record one-shot command buffer", ErrorCode::Resource))
+    if (auto e = check(vkEndCommandBuffer(cmd), "record one-shot command buffer", ErrorCode::Resource))
     {
         return fail(std::move(*e));
     }
@@ -75,8 +74,7 @@ std::expected<void, Error> immediate_submit(Context& context, F&& record)
             .waitSemaphoreValueCount = 0,
             .pWaitSemaphoreValues = nullptr,
             .signalSemaphoreValueCount = 1,
-            .pSignalSemaphoreValues = &serial
-        };
+            .pSignalSemaphoreValues = &serial};
 
         VkSubmitInfo submitInfo{
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -87,15 +85,15 @@ std::expected<void, Error> immediate_submit(Context& context, F&& record)
             .commandBufferCount = 1,
             .pCommandBuffers = &cmd,
             .signalSemaphoreCount = 1,
-            .pSignalSemaphores = &timeline
-        };
-        if (auto e = check(vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
-                           "submit one-shot command buffer", ErrorCode::Resource))
+            .pSignalSemaphores = &timeline};
+        if (auto e = check(
+                vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
+                "submit one-shot command buffer",
+                ErrorCode::Resource))
         {
             return fail(std::move(*e));
         }
-        if (auto e = check(vkQueueWaitIdle(context.graphics_queue()),
-                           "wait for one-shot submit", ErrorCode::Resource))
+        if (auto e = check(vkQueueWaitIdle(context.graphics_queue()), "wait for one-shot submit", ErrorCode::Resource))
         {
             return fail(std::move(*e));
         }

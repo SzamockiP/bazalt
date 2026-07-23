@@ -21,13 +21,13 @@
 // which is why there is no need to save new features for a 2.0.
 enum class Feature
 {
-	ANISOTROPIC_FILTERING,  // samplerAnisotropy — Texture uses this
-	WIREFRAME,              // fillModeNonSolid
-	WIDE_LINES,             // wideLines
-	DEPTH_CLAMP,            // depthClamp
-	SAMPLE_RATE_SHADING,    // sampleRateShading
-	MULTI_DRAW_INDIRECT,    // multiDrawIndirect
-	SHADER_FLOAT64,         // shaderFloat64
+    ANISOTROPIC_FILTERING, // samplerAnisotropy — Texture uses this
+    WIREFRAME,             // fillModeNonSolid
+    WIDE_LINES,            // wideLines
+    DEPTH_CLAMP,           // depthClamp
+    SAMPLE_RATE_SHADING,   // sampleRateShading
+    MULTI_DRAW_INDIRECT,   // multiDrawIndirect
+    SHADER_FLOAT64,        // shaderFloat64
 };
 
 // Every Feature above maps to a plain VkPhysicalDeviceFeatures boolean, so the
@@ -37,49 +37,47 @@ enum class Feature
 // before that would be a hollow promise.
 struct FeatureInfo
 {
-	Feature feature;
-	const char* name;
-	VkBool32 VkPhysicalDeviceFeatures::* bit;
+    Feature feature;
+    const char* name;
+    VkBool32 VkPhysicalDeviceFeatures::* bit;
 };
 
-inline constexpr std::array<FeatureInfo, 7> kFeatureTable{ {
-	{ Feature::ANISOTROPIC_FILTERING, "ANISOTROPIC_FILTERING", &VkPhysicalDeviceFeatures::samplerAnisotropy },
-	{ Feature::WIREFRAME,             "WIREFRAME",             &VkPhysicalDeviceFeatures::fillModeNonSolid },
-	{ Feature::WIDE_LINES,            "WIDE_LINES",            &VkPhysicalDeviceFeatures::wideLines },
-	{ Feature::DEPTH_CLAMP,           "DEPTH_CLAMP",           &VkPhysicalDeviceFeatures::depthClamp },
-	{ Feature::SAMPLE_RATE_SHADING,   "SAMPLE_RATE_SHADING",   &VkPhysicalDeviceFeatures::sampleRateShading },
-	{ Feature::MULTI_DRAW_INDIRECT,   "MULTI_DRAW_INDIRECT",   &VkPhysicalDeviceFeatures::multiDrawIndirect },
-	{ Feature::SHADER_FLOAT64,        "SHADER_FLOAT64",        &VkPhysicalDeviceFeatures::shaderFloat64 },
-} };
+inline constexpr std::array<FeatureInfo, 7> kFeatureTable{{
+    {Feature::ANISOTROPIC_FILTERING, "ANISOTROPIC_FILTERING", &VkPhysicalDeviceFeatures::samplerAnisotropy},
+    {Feature::WIREFRAME, "WIREFRAME", &VkPhysicalDeviceFeatures::fillModeNonSolid},
+    {Feature::WIDE_LINES, "WIDE_LINES", &VkPhysicalDeviceFeatures::wideLines},
+    {Feature::DEPTH_CLAMP, "DEPTH_CLAMP", &VkPhysicalDeviceFeatures::depthClamp},
+    {Feature::SAMPLE_RATE_SHADING, "SAMPLE_RATE_SHADING", &VkPhysicalDeviceFeatures::sampleRateShading},
+    {Feature::MULTI_DRAW_INDIRECT, "MULTI_DRAW_INDIRECT", &VkPhysicalDeviceFeatures::multiDrawIndirect},
+    {Feature::SHADER_FLOAT64, "SHADER_FLOAT64", &VkPhysicalDeviceFeatures::shaderFloat64},
+}};
 
 inline constexpr const FeatureInfo& feature_info(Feature feature)
 {
-	auto it = std::ranges::find(kFeatureTable, feature, &FeatureInfo::feature);
-	// The table covers the enum, but the input can be forged from Python
-	// (pybind enums accept arbitrary ints), so a safe fallback beats
-	// std::unreachable here.
-	return it != kFeatureTable.end() ? *it : kFeatureTable[0];
+    auto it = std::ranges::find(kFeatureTable, feature, &FeatureInfo::feature);
+    // The table covers the enum, but the input can be forged from Python
+    // (pybind enums accept arbitrary ints), so a safe fallback beats
+    // std::unreachable here.
+    return it != kFeatureTable.end() ? *it : kFeatureTable[0];
 }
 
 inline constexpr std::string_view feature_name(Feature feature)
 {
-	return feature_info(feature).name;
+    return feature_info(feature).name;
 }
 
 inline constexpr bool feature_available(const VkPhysicalDeviceFeatures& available, Feature feature)
 {
-	return available.*(feature_info(feature).bit) == VK_TRUE;
+    return available.*(feature_info(feature).bit) == VK_TRUE;
 }
 
 inline constexpr void enable_feature(VkPhysicalDeviceFeatures& features, Feature feature)
 {
-	features.*(feature_info(feature).bit) = VK_TRUE;
+    features.*(feature_info(feature).bit) = VK_TRUE;
 }
 
 inline std::string api_version_string(std::uint32_t version)
 {
-	return std::format("{}.{}.{}",
-	                   VK_API_VERSION_MAJOR(version),
-	                   VK_API_VERSION_MINOR(version),
-	                   VK_API_VERSION_PATCH(version));
+    return std::format(
+        "{}.{}.{}", VK_API_VERSION_MAJOR(version), VK_API_VERSION_MINOR(version), VK_API_VERSION_PATCH(version));
 }

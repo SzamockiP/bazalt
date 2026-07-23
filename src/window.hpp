@@ -23,7 +23,7 @@ struct WindowDeleter
             glfwDestroyWindow(ptr);
         }
     };
-} ;
+};
 
 struct MouseState
 {
@@ -39,9 +39,11 @@ class Window
 public:
     static inline std::atomic<int> window_count_{0};
 
-    static std::expected<std::unique_ptr<Window>, Error> create(int width, int height,
-                                                                const std::string& title,
-                                                                std::shared_ptr<Logger> logger = nullptr)
+    static std::expected<std::unique_ptr<Window>, Error> create(
+        int width,
+        int height,
+        const std::string& title,
+        std::shared_ptr<Logger> logger = nullptr)
     {
         // Must be installed before glfwInit — otherwise the most common failure a
         // new user hits (no display, no drivers) reports "Failed to create window"
@@ -130,27 +132,39 @@ public:
         return mouse_;
     }
 
-    GLFWwindow* get_native_handle() const { return window_.get(); }
+    GLFWwindow* get_native_handle() const
+    {
+        return window_.get();
+    }
 
     void set_title(const std::string& title)
     {
         title_ = title;
         glfwSetWindowTitle(window_.get(), title_.c_str());
     }
-    bool was_framebuffer_resized() const { return framebuffer_resized_; }
-    void reset_framebuffer_resized() { framebuffer_resized_ = false; }
+    bool was_framebuffer_resized() const
+    {
+        return framebuffer_resized_;
+    }
+    void reset_framebuffer_resized()
+    {
+        framebuffer_resized_ = false;
+    }
 
-    void get_framebuffer_size(int& width, int& height) const {
+    void get_framebuffer_size(int& width, int& height) const
+    {
         glfwGetFramebufferSize(window_.get(), &width, &height);
     }
 
-    int get_width() const {
+    int get_width() const
+    {
         int w, h;
         glfwGetWindowSize(window_.get(), &w, &h);
         return w;
     }
 
-    int get_height() const {
+    int get_height() const
+    {
         int w, h;
         glfwGetWindowSize(window_.get(), &w, &h);
         return h;
@@ -164,21 +178,25 @@ public:
         // GLFW knows which Vulkan instance extensions are required for the platform
         uint32_t count = 0;
         const char** exts = glfwGetRequiredInstanceExtensions(&count);
-        if (exts) {
+        if (exts)
+        {
             sp.required_instance_extensions.assign(exts, exts + count);
         }
 
         GLFWwindow* raw = window_.get();
 
-        sp.create_surface = [raw](VkInstance instance) -> VkSurfaceKHR {
+        sp.create_surface = [raw](VkInstance instance) -> VkSurfaceKHR
+        {
             VkSurfaceKHR surface = VK_NULL_HANDLE;
-            if (glfwCreateWindowSurface(instance, raw, nullptr, &surface) != VK_SUCCESS) {
+            if (glfwCreateWindowSurface(instance, raw, nullptr, &surface) != VK_SUCCESS)
+            {
                 return VK_NULL_HANDLE;
             }
             return surface;
         };
 
-        sp.get_framebuffer_size = [raw]() -> std::pair<int, int> {
+        sp.get_framebuffer_size = [raw]() -> std::pair<int, int>
+        {
             int w, h;
             glfwGetFramebufferSize(raw, &w, &h);
             return {w, h};
@@ -186,7 +204,8 @@ public:
 
         // Pointer to this Window's resize flag — consumed (read + reset) each check
         bool* resized_flag = &framebuffer_resized_;
-        sp.consume_resize_flag = [resized_flag]() -> bool {
+        sp.consume_resize_flag = [resized_flag]() -> bool
+        {
             bool was = *resized_flag;
             *resized_flag = false;
             return was;
@@ -196,8 +215,12 @@ public:
     }
 
 private:
-    Window(int width, int height, const std::string& title) :
-        width_(width), height_(height), title_(title) {}
+    Window(int width, int height, const std::string& title)
+        : width_(width),
+          height_(height),
+          title_(title)
+    {
+    }
 
     // GLFW's error callback is global rather than per-window, so the routing has
     // to be global too. weak_ptr so this never keeps a Logger alive.
@@ -206,9 +229,7 @@ private:
 
     static void glfw_error_callback(int error_code, const char* description)
     {
-        last_glfw_error_ = description
-            ? std::string(description)
-            : ("GLFW error " + std::to_string(error_code));
+        last_glfw_error_ = description ? std::string(description) : ("GLFW error " + std::to_string(error_code));
 
         if (auto logger = glfw_logger_.lock())
         {

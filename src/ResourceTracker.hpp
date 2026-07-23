@@ -9,7 +9,8 @@ class Image;
 // What a recorded command does to a buffer, named from the caller's point of
 // view. This is the vocabulary of cmd.barrier() in manual mode; the automatic
 // tracker speaks raw (stage, access) pairs directly for better precision.
-enum class Access {
+enum class Access
+{
     SHADER_READ,
     SHADER_WRITE,
     VERTEX_READ,
@@ -17,7 +18,8 @@ enum class Access {
     UNIFORM_READ
 };
 
-struct StageAccess {
+struct StageAccess
+{
     VkPipelineStageFlags stages;
     VkAccessFlags access;
 };
@@ -26,31 +28,41 @@ struct StageAccess {
 // not synchronization2, and mixing models would be a second way to say the
 // same thing.
 inline constexpr VkPipelineStageFlags kAllShaderStages =
-    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
-    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
-inline constexpr StageAccess to_vk(Access access) {
-    switch (access) {
-        case Access::SHADER_READ:  return { kAllShaderStages, VK_ACCESS_SHADER_READ_BIT };
-        case Access::SHADER_WRITE: return { kAllShaderStages, VK_ACCESS_SHADER_WRITE_BIT };
-        case Access::VERTEX_READ:  return { VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT };
-        case Access::INDEX_READ:   return { VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_INDEX_READ_BIT };
-        case Access::UNIFORM_READ: return { kAllShaderStages, VK_ACCESS_UNIFORM_READ_BIT };
+inline constexpr StageAccess to_vk(Access access)
+{
+    switch (access)
+    {
+        case Access::SHADER_READ:
+            return {kAllShaderStages, VK_ACCESS_SHADER_READ_BIT};
+        case Access::SHADER_WRITE:
+            return {kAllShaderStages, VK_ACCESS_SHADER_WRITE_BIT};
+        case Access::VERTEX_READ:
+            return {VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT};
+        case Access::INDEX_READ:
+            return {VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_INDEX_READ_BIT};
+        case Access::UNIFORM_READ:
+            return {kAllShaderStages, VK_ACCESS_UNIFORM_READ_BIT};
     }
     // Not std::unreachable(): pybind enums accept arbitrary ints.
-    return { kAllShaderStages, VK_ACCESS_SHADER_READ_BIT };
+    return {kAllShaderStages, VK_ACCESS_SHADER_READ_BIT};
 }
 
 // The image layout each shader access implies: a storage image written by a
 // shader lives in GENERAL, a sampled image in SHADER_READ_ONLY. Only these two
 // shader accesses name an image layout; the rest are buffer-only. Backs the
 // manual cmd.barrier(image, ...) — the caller names accesses, not raw layouts.
-inline std::optional<VkImageLayout> image_layout_for(Access access) {
-    switch (access) {
-        case Access::SHADER_WRITE: return VK_IMAGE_LAYOUT_GENERAL;
-        case Access::SHADER_READ:  return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        default:                   return std::nullopt;
+inline std::optional<VkImageLayout> image_layout_for(Access access)
+{
+    switch (access)
+    {
+        case Access::SHADER_WRITE:
+            return VK_IMAGE_LAYOUT_GENERAL;
+        case Access::SHADER_READ:
+            return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        default:
+            return std::nullopt;
     }
 }
 
@@ -66,9 +78,11 @@ inline std::optional<VkImageLayout> image_layout_for(Access access) {
 // buffer tracker covers everything the Python API can express. Known limit:
 // SSBO *writes* from graphics shaders are invisible here (no reflection) —
 // cmd.barrier() in manual mode is the ceiling for that.
-class ResourceTracker {
+class ResourceTracker
+{
 public:
-    struct Barrier {
+    struct Barrier
+    {
         VkPipelineStageFlags src_stages;
         VkPipelineStageFlags dst_stages;
         VkAccessFlags src_access;
@@ -76,31 +90,30 @@ public:
     };
 
     // Registers a use and returns the barrier that must precede it, if any.
-    std::optional<Barrier> use(Buffer* buffer, VkPipelineStageFlags stages,
-                               VkAccessFlags access, bool writes) {
+    std::optional<Barrier> use(Buffer* buffer, VkPipelineStageFlags stages, VkAccessFlags access, bool writes)
+    {
         BufferState& st = states_[buffer];
         std::optional<Barrier> result;
 
-        if (writes) {
+        if (writes)
+        {
             // WAW / WAR: everything that touched the buffer must drain first.
-            if (st.written || st.read_stages != 0) {
-                result = Barrier{
-                    st.write_stages | st.read_stages,
-                    stages,
-                    st.write_access | st.read_access,
-                    access
-                };
+            if (st.written || st.read_stages != 0)
+            {
+                result = Barrier{st.write_stages | st.read_stages, stages, st.write_access | st.read_access, access};
             }
             st = {};
             st.written = true;
             st.write_stages = stages;
             st.write_access = access;
-        } else {
+        }
+        else
+        {
             // RAW — only if the write isn't already visible to these stages.
             // (Two draws reading the same SSBO emit one barrier, not two.)
-            if (st.written &&
-                ((stages & ~st.visible_stages) != 0 || (access & ~st.visible_access) != 0)) {
-                result = Barrier{ st.write_stages, stages, st.write_access, access };
+            if (st.written && ((stages & ~st.visible_stages) != 0 || (access & ~st.visible_access) != 0))
+            {
+                result = Barrier{st.write_stages, stages, st.write_access, access};
                 st.visible_stages |= stages;
                 st.visible_access |= access;
             }
@@ -113,7 +126,8 @@ public:
     // Same hazard logic as a buffer, plus a layout: a storage image must be in
     // GENERAL to be read/written in a shader, SHADER_READ_ONLY to be sampled, so
     // every use may need a layout transition on top of the memory barrier.
-    struct ImageBarrier {
+    struct ImageBarrier
+    {
         VkImageLayout old_layout;
         VkImageLayout new_layout;
         VkPipelineStageFlags src_stages;
@@ -131,9 +145,13 @@ public:
     // frame. Consequence — the documented ceiling — is that contents are NOT
     // carried between submits through the tracker; a dispatch that wants last
     // frame's image must overwrite it (post-processing does) or use cmd.barrier.
-    std::optional<ImageBarrier> use_image(Image* image, VkImageLayout layout,
-                                          VkPipelineStageFlags stages,
-                                          VkAccessFlags access, bool writes) {
+    std::optional<ImageBarrier> use_image(
+        Image* image,
+        VkImageLayout layout,
+        VkPipelineStageFlags stages,
+        VkAccessFlags access,
+        bool writes)
+    {
         auto [it, inserted] = image_states_.try_emplace(image);
         ImageState& st = it->second;
         const VkImageLayout old = st.layout;
@@ -144,34 +162,39 @@ public:
         // every shader stage: a previous frame's replay may still be sampling
         // this image (WAR), and there is no earlier use in THIS recording to
         // name as the source. Later uses name their real predecessor.
-        auto with_first_use_floor = [&](VkPipelineStageFlags s, VkAccessFlags a)
-            -> std::pair<VkPipelineStageFlags, VkAccessFlags> {
-            if (s == 0) {
-                return { kAllShaderStages,
-                         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
+        auto with_first_use_floor = [&](VkPipelineStageFlags s,
+                                        VkAccessFlags a) -> std::pair<VkPipelineStageFlags, VkAccessFlags>
+        {
+            if (s == 0)
+            {
+                return {kAllShaderStages, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT};
             }
-            return { s, a };
+            return {s, a};
         };
 
-        if (writes) {
-            if (st.written || st.read_stages != 0 || layout_change) {
-                auto [ss, sa] = with_first_use_floor(st.write_stages | st.read_stages,
-                                                     st.write_access | st.read_access);
-                result = ImageBarrier{ old, layout, ss, stages, sa, access };
+        if (writes)
+        {
+            if (st.written || st.read_stages != 0 || layout_change)
+            {
+                auto [ss, sa] =
+                    with_first_use_floor(st.write_stages | st.read_stages, st.write_access | st.read_access);
+                result = ImageBarrier{old, layout, ss, stages, sa, access};
             }
             st = {};
             st.layout = layout;
             st.written = true;
             st.write_stages = stages;
             st.write_access = access;
-        } else {
-            const bool needs = layout_change ||
-                (st.written && ((stages & ~st.visible_stages) != 0 ||
-                                (access & ~st.visible_access) != 0));
-            if (needs) {
-                auto [ss, sa] = with_first_use_floor(st.written ? st.write_stages : st.read_stages,
-                                                     st.written ? st.write_access : st.read_access);
-                result = ImageBarrier{ old, layout, ss, stages, sa, access };
+        }
+        else
+        {
+            const bool needs = layout_change || (st.written && ((stages & ~st.visible_stages) != 0 ||
+                                                                (access & ~st.visible_access) != 0));
+            if (needs)
+            {
+                auto [ss, sa] = with_first_use_floor(
+                    st.written ? st.write_stages : st.read_stages, st.written ? st.write_access : st.read_access);
+                result = ImageBarrier{old, layout, ss, stages, sa, access};
                 st.visible_stages |= stages;
                 st.visible_access |= access;
             }
@@ -185,12 +208,20 @@ public:
     // Has this image been touched in the current recording? track_draw_ uses
     // this to leave uploaded textures (never seen by the tracker) alone while
     // still transitioning a compute-written image before it is sampled.
-    bool tracks(Image* image) const { return image_states_.contains(image); }
+    bool tracks(Image* image) const
+    {
+        return image_states_.contains(image);
+    }
 
-    void reset() { states_.clear(); image_states_.clear(); }
+    void reset()
+    {
+        states_.clear();
+        image_states_.clear();
+    }
 
 private:
-    struct BufferState {
+    struct BufferState
+    {
         bool written = false;
         VkPipelineStageFlags write_stages = 0;
         VkAccessFlags write_access = 0;
@@ -203,7 +234,8 @@ private:
     };
 
     // BufferState plus the layout the recording has left the image in so far.
-    struct ImageState {
+    struct ImageState
+    {
         VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
         bool written = false;
         VkPipelineStageFlags write_stages = 0;
