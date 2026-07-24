@@ -4,8 +4,10 @@
 
 #include <cstdint>
 #include <expected>
+#include <map>
 #include <memory>
 #include <optional>
+#include <tuple>
 #include <vector>
 
 #include "Context.hpp"
@@ -100,6 +102,39 @@ public:
         return VK_NULL_HANDLE;
     }
 
+    // ── Subresource selection (render-to-layer / render-to-mip) ────────────────
+    // Which array layer(s) and mip of each attachment a pass actually writes.
+    // The default is the whole-image, base-subresource case every target used
+    // before 0.13: layer 0, mip 0, one of each. A SubresourceTarget overrides
+    // these so CommandBuffer's attachment barriers hit exactly the layer/mip the
+    // view renders into — the view and the barrier both read from here, so they
+    // cannot drift. extent() (mip-scaled) covers renderArea/viewport/scissor.
+    struct Subresource
+    {
+        std::uint32_t base_layer = 0;
+        std::uint32_t layer_count = 1;
+        std::uint32_t base_mip = 0;
+        std::uint32_t mip_count = 1;
+    };
+    virtual Subresource color_subresource() const
+    {
+        return {};
+    }
+    virtual Subresource depth_subresource() const
+    {
+        return {};
+    }
+
+    // Multiview: a non-zero mask renders every set bit's layer in ONE pass, the
+    // shader keying per-view work off gl_ViewIndex. 0 (the default) is the ordinary
+    // single-layer path. A MultiviewTarget (RenderTarget.all_layers()) returns
+    // (1<<N)-1; its color/depth views span all N layers and its subresource covers
+    // them, so the attachment barriers transition the whole array.
+    virtual std::uint32_t view_mask() const
+    {
+        return 0;
+    }
+
     // The layout the colour attachments must be left in when rendering ends.
     // A swapchain needs PRESENT_SRC_KHR; an offscreen target that will be sampled
     // needs SHADER_READ_ONLY_OPTIMAL. This being a virtual is what removes the
@@ -151,6 +186,9 @@ public:
         std::vector<Format> colors,
         std::optional<Format> depth,
         std::uint32_t samples = 1,
+        std::uint32_t layers = 1,
+        bool cube = false,
+        std::uint32_t mip_levels = 1,
         const std::string& name = "")
     {
         if (colors.empty() && !depth)
@@ -158,6 +196,51 @@ public:
             return std::unexpected(err_resource(
                 "A RenderTarget needs at least one attachment: pass color=..., "
                 "depth=..., or both"));
+        }
+        // Render-to-layer / render-to-mip: the attachments become layered / cube /
+        // mipped images and target.layer(i)/.mip(m) slice one subresource to render
+        // into. cube fixes 6 square layers (Vulkan face order +X,-X,+Y,-Y,+Z,-Z);
+        // the colour attachment gets a CUBE view so target.color[0] samples as a
+        // cubemap, the depth attachment stays a plain 2D array (never a cube).
+        if (cube)
+        {
+            if (layers != 1 && layers != 6)
+            {
+                return std::unexpected(err_resource(std::format(
+                    "a cube RenderTarget implies 6 layers; drop layers= or pass layers=6, got {}", layers)));
+            }
+            if (width != height)
+            {
+                return std::unexpected(err_resource(std::format(
+                    "a cube RenderTarget needs square faces, got {}x{}", width, height)));
+            }
+            layers = 6;
+        }
+        if (layers == 0 || mip_levels == 0)
+        {
+            return std::unexpected(err_resource("layers and mip_levels must be >= 1"));
+        }
+        // Cap the mip chain to the dimensions, like create_image: a level count past
+        // the full chain fails at vkCreateImage (and trips the validation layer), so
+        // reject it here with a message that says the ceiling.
+        if (width > 0 && height > 0)
+        {
+            const std::uint32_t max_mips = Image::full_mip_count(width, height);
+            if (mip_levels > max_mips)
+            {
+                return std::unexpected(err_resource(std::format(
+                    "mip_levels must be 1..{} for a {}x{} target, got {}", max_mips, width, height, mip_levels)));
+            }
+        }
+        // MSAA composes with layers/cube (the multisampled attachment is layered and
+        // resolves per layer), but not with mips: a multisampled image has no mip
+        // chain. Reject that combination here with a clear message instead of at
+        // vkCreateImage.
+        if (samples > 1 && mip_levels > 1)
+        {
+            return std::unexpected(err_resource(
+                "samples>1 cannot combine with mip_levels: a multisampled image has no "
+                "mip chain (MSAA + layers/cube is fine)"));
         }
         for (Format f : colors)
         {
@@ -185,6 +268,8 @@ public:
         auto target = std::shared_ptr<OffscreenTarget>(new OffscreenTarget(context.shared_from_this()));
         target->extent_ = {width, height};
         target->samples_ = *vk_samples;
+        target->layers_ = layers;
+        target->mip_levels_ = mip_levels;
 
         // colors_/depth_ are always the single-sample, sampleable attachments —
         // what target.color/target.depth expose and what final_layout() applies to.
@@ -192,7 +277,7 @@ public:
         // image (msaa_colors_/msaa_depth_) is what actually gets rendered into.
         for (std::size_t i = 0; i < colors.size(); ++i)
         {
-            auto resolve = Image::create_empty(context, width, height, colors[i]);
+            auto resolve = Image::create_empty(context, width, height, colors[i], mip_levels, layers, cube);
             if (!resolve)
             {
                 return std::unexpected(resolve.error());
@@ -204,7 +289,9 @@ public:
             target->colors_.push_back(std::move(*resolve));
             if (msaa)
             {
-                auto ms = Image::create_empty(context, width, height, colors[i], 1, 1, false, *vk_samples);
+                // The multisampled image matches the resolve target's layer count
+                // (never cube: it's a plain layered attachment, resolved per layer).
+                auto ms = Image::create_empty(context, width, height, colors[i], 1, layers, false, *vk_samples);
                 if (!ms)
                 {
                     return std::unexpected(ms.error());
@@ -218,7 +305,9 @@ public:
         }
         if (depth)
         {
-            auto resolve = Image::create_empty(context, width, height, *depth);
+            // Depth is a plain 2D array even for a cube target: it is scratch, never
+            // sampled as a cubemap, so it needs no CUBE view (cube=false).
+            auto resolve = Image::create_empty(context, width, height, *depth, mip_levels, layers, false);
             if (!resolve)
             {
                 return std::unexpected(resolve.error());
@@ -230,7 +319,7 @@ public:
             target->depth_ = std::move(*resolve);
             if (msaa)
             {
-                auto ms = Image::create_empty(context, width, height, *depth, 1, 1, false, *vk_samples);
+                auto ms = Image::create_empty(context, width, height, *depth, 1, layers, false, *vk_samples);
                 if (!ms)
                 {
                     return std::unexpected(ms.error());
@@ -362,10 +451,162 @@ public:
         }
     }
 
+    ~OffscreenTarget()
+    {
+        // The per-subresource views are the only Vulkan objects OffscreenTarget owns
+        // beyond its Images (which self-destruct, deferred). A SubresourceTarget
+        // borrows these — they live exactly as long as the parent, so it never owns
+        // Vulkan objects itself and can be created/discarded freely.
+        if (!subresource_views_.empty() && context_)
+        {
+            std::vector<VkImageView> views;
+            views.reserve(subresource_views_.size());
+            for (auto& [key, view] : subresource_views_)
+            {
+                views.push_back(view);
+            }
+            context_->defer_destroy(
+                [device = context_->device(), views = std::move(views)]
+                {
+                    for (VkImageView v : views)
+                    {
+                        vkDestroyImageView(device, v, nullptr);
+                    }
+                });
+        }
+    }
+
+    // ── render-to-layer / render-to-mip ────────────────────────────────────────
+    // A single (layer, mip) subresource of an attachment, as a plain 2D view —
+    // what a SubresourceTarget renders into. Cached and owned here; slicing the
+    // same subresource twice returns the same view. The *_view accessors return
+    // the image actually rendered into (the multisampled one under MSAA); the
+    // *_resolve_view accessors return the single-sample resolve subresource (null
+    // without MSAA), so a layered MSAA target resolves each layer on its own.
+    VkImageView color_subresource_view(std::uint32_t attachment, std::uint32_t layer, std::uint32_t mip)
+    {
+        const auto& image = msaa_colors_.empty() ? colors_[attachment] : msaa_colors_[attachment];
+        return view_(image, VK_IMAGE_ASPECT_COLOR_BIT, layer, 1, mip);
+    }
+    VkImageView color_resolve_subresource_view(std::uint32_t attachment, std::uint32_t layer, std::uint32_t mip)
+    {
+        if (msaa_colors_.empty())
+        {
+            return VK_NULL_HANDLE;
+        }
+        return view_(colors_[attachment], VK_IMAGE_ASPECT_COLOR_BIT, layer, 1, mip);
+    }
+    VkImageView depth_subresource_view(std::uint32_t layer, std::uint32_t mip)
+    {
+        const auto& image = msaa_depth_ ? msaa_depth_ : depth_;
+        if (!image)
+        {
+            return VK_NULL_HANDLE;
+        }
+        return view_(image, VK_IMAGE_ASPECT_DEPTH_BIT, layer, 1, mip);
+    }
+    VkImageView depth_resolve_subresource_view(std::uint32_t layer, std::uint32_t mip)
+    {
+        if (!msaa_depth_)
+        {
+            return VK_NULL_HANDLE;
+        }
+        return view_(depth_, VK_IMAGE_ASPECT_DEPTH_BIT, layer, 1, mip);
+    }
+
+    // Multiview attachment views: a 2D_ARRAY view over ALL layers at mip 0, what a
+    // MultiviewTarget renders every layer through in one pass. The *_resolve_ ones
+    // are the single-sample resolve targets (null without MSAA) — a multiview MSAA
+    // pass resolves every view into the matching resolve layer.
+    VkImageView color_array_view(std::uint32_t attachment)
+    {
+        const auto& image = msaa_colors_.empty() ? colors_[attachment] : msaa_colors_[attachment];
+        return view_(image, VK_IMAGE_ASPECT_COLOR_BIT, 0, layers_, 0);
+    }
+    VkImageView color_resolve_array_view(std::uint32_t attachment)
+    {
+        if (msaa_colors_.empty())
+        {
+            return VK_NULL_HANDLE;
+        }
+        return view_(colors_[attachment], VK_IMAGE_ASPECT_COLOR_BIT, 0, layers_, 0);
+    }
+    VkImageView depth_array_view()
+    {
+        const auto& image = msaa_depth_ ? msaa_depth_ : depth_;
+        if (!image)
+        {
+            return VK_NULL_HANDLE;
+        }
+        return view_(image, VK_IMAGE_ASPECT_DEPTH_BIT, 0, layers_, 0);
+    }
+    VkImageView depth_resolve_array_view()
+    {
+        if (!msaa_depth_)
+        {
+            return VK_NULL_HANDLE;
+        }
+        return view_(depth_, VK_IMAGE_ASPECT_DEPTH_BIT, 0, layers_, 0);
+    }
+    std::uint32_t array_layers() const
+    {
+        return layers_;
+    }
+
+    // Bounds-checked slices. Returned as a RenderTargetBase (the view is a
+    // RenderTarget), so it passes straight into cmd.rendering(...). `layer(i, mip)`
+    // is the general form (both axes); `mip(m)` is sugar for layer 0. A layered
+    // AND mipped target (e.g. a mipped cube for prefiltered reflections) needs the
+    // combined form.
+    std::expected<std::shared_ptr<RenderTarget>, Error> layer(std::uint32_t i, std::uint32_t mip = 0);
+    std::expected<std::shared_ptr<RenderTarget>, Error> mip(std::uint32_t m);
+
+    // Multiview: render into EVERY layer in one pass (the shader keys per-view work
+    // off gl_ViewIndex) instead of a pass per layer. Needs a layered target and the
+    // multiview GPU feature; composes with MSAA (resolves each view per layer).
+    std::expected<std::shared_ptr<RenderTarget>, Error> all_layers();
+
 private:
     explicit OffscreenTarget(std::shared_ptr<Context> context)
         : context_(std::move(context))
     {
+    }
+
+    // Shared body of the view accessors: cache lookup keyed by (VkImage, baseLayer,
+    // layerCount, mip) — the image handle disambiguates render vs resolve vs depth —
+    // on miss create a single-mip view (2D for one layer, 2D_ARRAY for a multiview
+    // span) and store it.
+    VkImageView view_(
+        const std::shared_ptr<Image>& image,
+        VkImageAspectFlags aspect,
+        std::uint32_t base_layer,
+        std::uint32_t layer_count,
+        std::uint32_t mip)
+    {
+        auto key = std::tuple{reinterpret_cast<std::uint64_t>(image->vk_image()), base_layer, layer_count, mip};
+        if (auto it = subresource_views_.find(key); it != subresource_views_.end())
+        {
+            return it->second;
+        }
+        VkImageViewCreateInfo info{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .image = image->vk_image(),
+            .viewType = layer_count > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
+            .format = format_info(image->format()).vk,
+            .components = {},
+            .subresourceRange = {aspect, mip, 1, base_layer, layer_count}};
+        VkImageView view = VK_NULL_HANDLE;
+        // Bounds are checked in layer()/mip() before we get here; a create failure
+        // is a genuine driver error, so surface a null and let the caller's
+        // validation-as-assert catch the bad attachment rather than crashing.
+        if (vkCreateImageView(context_->device(), &info, nullptr, &view) != VK_SUCCESS)
+        {
+            return VK_NULL_HANDLE;
+        }
+        subresource_views_.emplace(key, view);
+        return view;
     }
 
     std::shared_ptr<Context> context_;
@@ -382,4 +623,268 @@ private:
     std::vector<std::shared_ptr<Image>> msaa_colors_;
     std::shared_ptr<Image> msaa_depth_;
     VkSampleCountFlagBits samples_ = VK_SAMPLE_COUNT_1_BIT;
+
+    // Layer / mip counts every attachment shares. layers_ == 6 for a cube.
+    std::uint32_t layers_ = 1;
+    std::uint32_t mip_levels_ = 1;
+
+    // Lazily created views, keyed (VkImage handle, base layer, layer count, mip).
+    // Owned here, destroyed (deferred) in the destructor.
+    std::map<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t>, VkImageView> subresource_views_;
 };
+
+// A render target that is one (layer, mip) subresource of an OffscreenTarget —
+// what target.layer(i) / target.mip(m) hand back. It owns no Vulkan objects: the
+// per-subresource views live in the parent's cache, the attachment Images are the
+// parent's. begin_rendering needs no change to render into it — the attachment
+// views come back single-subresource (color_view/depth_view), the barriers read
+// the {layer,1,mip,1} range (color_subresource/depth_subresource), and extent()
+// is mip-scaled so renderArea/viewport/scissor shrink to the mip automatically.
+class SubresourceTarget : public RenderTarget
+{
+public:
+    SubresourceTarget(std::shared_ptr<OffscreenTarget> parent, std::uint32_t layer, std::uint32_t mip)
+        : parent_(std::move(parent)), layer_(layer), mip_(mip)
+    {
+    }
+
+    std::uint32_t color_count() const override
+    {
+        return parent_->color_count();
+    }
+    VkImage color_image(std::uint32_t i) const override
+    {
+        return parent_->color_image(i);
+    }
+    VkImageView color_view(std::uint32_t i) const override
+    {
+        return parent_->color_subresource_view(i, layer_, mip_);
+    }
+    VkFormat color_format(std::uint32_t i) const override
+    {
+        return parent_->color_format(i);
+    }
+    VkImage depth_image() const override
+    {
+        return parent_->depth_image();
+    }
+    VkImageView depth_view() const override
+    {
+        return parent_->depth_subresource_view(layer_, mip_);
+    }
+    VkFormat depth_format() const override
+    {
+        return parent_->depth_format();
+    }
+
+    // The whole point of "no CommandBuffer edits for renderArea": a .mip(m) target
+    // reports the mip's dimensions, so the pass covers exactly that mip.
+    VkExtent2D extent() const override
+    {
+        VkExtent2D e = parent_->extent();
+        std::uint32_t w = e.width >> mip_;
+        std::uint32_t h = e.height >> mip_;
+        return {w ? w : 1u, h ? h : 1u};
+    }
+
+    // MSAA composes with layers: the multisampled attachment and its single-sample
+    // resolve target are both sliced to this subresource, so CommandBuffer resolves
+    // exactly this layer. Without MSAA these return 1 / VK_NULL_HANDLE (from the
+    // parent) and the resolve wiring stays off.
+    VkSampleCountFlagBits samples() const override
+    {
+        return parent_->samples();
+    }
+    VkImage color_resolve_image(std::uint32_t i) const override
+    {
+        return parent_->color_resolve_image(i);
+    }
+    VkImageView color_resolve_view(std::uint32_t i) const override
+    {
+        return parent_->color_resolve_subresource_view(i, layer_, mip_);
+    }
+    VkImage depth_resolve_image() const override
+    {
+        return parent_->depth_resolve_image();
+    }
+    VkImageView depth_resolve_view() const override
+    {
+        return parent_->depth_resolve_subresource_view(layer_, mip_);
+    }
+
+    VkImageLayout final_layout() const override
+    {
+        return parent_->final_layout();
+    }
+    VkImageLayout depth_final_layout() const override
+    {
+        return parent_->depth_final_layout();
+    }
+
+    Subresource color_subresource() const override
+    {
+        return {layer_, 1, mip_, 1};
+    }
+    Subresource depth_subresource() const override
+    {
+        return {layer_, 1, mip_, 1};
+    }
+
+    // Forwards to the parent, which marks the whole attachment Image sampleable.
+    // Correct once every layer/mip a caller intends to sample has been rendered
+    // (Image holds one layout for the whole image — sampling a partially rendered
+    // layered target is undefined and validation will flag it).
+    void on_rendering_recorded() override
+    {
+        parent_->on_rendering_recorded();
+    }
+
+private:
+    std::shared_ptr<OffscreenTarget> parent_;
+    std::uint32_t layer_;
+    std::uint32_t mip_;
+};
+
+// Renders into EVERY layer of an OffscreenTarget in one pass via multiview — what
+// target.all_layers() hands back. The attachment views span all layers (2D_ARRAY),
+// view_mask() lights one bit per layer, and the barriers cover the whole array; the
+// shader selects per-layer work with gl_ViewIndex. Composes with MSAA (each view
+// resolves into its own layer), and because it renders every layer, the whole-image
+// sampleable mark is exactly correct — no partial-render caveat.
+class MultiviewTarget : public RenderTarget
+{
+public:
+    explicit MultiviewTarget(std::shared_ptr<OffscreenTarget> parent) : parent_(std::move(parent))
+    {
+    }
+
+    std::uint32_t color_count() const override
+    {
+        return parent_->color_count();
+    }
+    VkImage color_image(std::uint32_t i) const override
+    {
+        return parent_->color_image(i);
+    }
+    VkImageView color_view(std::uint32_t i) const override
+    {
+        return parent_->color_array_view(i);
+    }
+    VkFormat color_format(std::uint32_t i) const override
+    {
+        return parent_->color_format(i);
+    }
+    VkImage depth_image() const override
+    {
+        return parent_->depth_image();
+    }
+    VkImageView depth_view() const override
+    {
+        return parent_->depth_array_view();
+    }
+    VkFormat depth_format() const override
+    {
+        return parent_->depth_format();
+    }
+    VkExtent2D extent() const override
+    {
+        return parent_->extent();
+    }
+
+    std::uint32_t view_mask() const override
+    {
+        const std::uint32_t n = parent_->array_layers();
+        return n >= 32 ? 0xFFFFFFFFu : ((1u << n) - 1u);
+    }
+
+    // MSAA composes with multiview: one pass renders every layer of the
+    // multisampled attachment and resolves each view into the matching resolve
+    // layer. The array views span all layers, so the resolve is per-view. Without
+    // MSAA these come back 1 / VK_NULL_HANDLE from the parent (resolve wiring off).
+    VkSampleCountFlagBits samples() const override
+    {
+        return parent_->samples();
+    }
+    VkImage color_resolve_image(std::uint32_t i) const override
+    {
+        return parent_->color_resolve_image(i);
+    }
+    VkImageView color_resolve_view(std::uint32_t i) const override
+    {
+        return parent_->color_resolve_array_view(i);
+    }
+    VkImage depth_resolve_image() const override
+    {
+        return parent_->depth_resolve_image();
+    }
+    VkImageView depth_resolve_view() const override
+    {
+        return parent_->depth_resolve_array_view();
+    }
+
+    Subresource color_subresource() const override
+    {
+        return {0, parent_->array_layers(), 0, 1};
+    }
+    Subresource depth_subresource() const override
+    {
+        return {0, parent_->array_layers(), 0, 1};
+    }
+
+    VkImageLayout final_layout() const override
+    {
+        return parent_->final_layout();
+    }
+    VkImageLayout depth_final_layout() const override
+    {
+        return parent_->depth_final_layout();
+    }
+
+    void on_rendering_recorded() override
+    {
+        parent_->on_rendering_recorded();
+    }
+
+private:
+    std::shared_ptr<OffscreenTarget> parent_;
+};
+
+inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::layer(std::uint32_t i, std::uint32_t mip)
+{
+    if (i >= layers_)
+    {
+        return std::unexpected(err_resource(
+            std::format("layer {} is out of range; this target has {} layer(s)", i, layers_)));
+    }
+    if (mip >= mip_levels_)
+    {
+        return std::unexpected(err_resource(
+            std::format("mip {} is out of range; this target has {} mip level(s)", mip, mip_levels_)));
+    }
+    return std::make_shared<SubresourceTarget>(shared_from_this(), i, mip);
+}
+
+inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::mip(std::uint32_t m)
+{
+    if (m >= mip_levels_)
+    {
+        return std::unexpected(err_resource(
+            std::format("mip {} is out of range; this target has {} mip level(s)", m, mip_levels_)));
+    }
+    return std::make_shared<SubresourceTarget>(shared_from_this(), 0, m);
+}
+
+inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::all_layers()
+{
+    if (!context_->supports_multiview())
+    {
+        return std::unexpected(err_resource(
+            "all_layers() needs the multiview GPU feature, which this device does not support"));
+    }
+    if (layers_ <= 1)
+    {
+        return std::unexpected(err_resource(
+            "all_layers() needs a layered target (layers>1 or cube); this target has 1 layer"));
+    }
+    return std::make_shared<MultiviewTarget>(shared_from_this());
+}

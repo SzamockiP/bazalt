@@ -362,14 +362,16 @@ public:
             return std::unexpected(
                 err_resource(std::format("Image dimensions must be non-zero, got {}x{}", width, height)));
         }
-        // A multisampled image is an MSAA attachment and nothing else: it can't
-        // carry mips (no blitting between sample counts), can't be a layered
-        // texture, and can't be a cubemap. Fail here rather than at vkCreateImage.
-        if (samples != VK_SAMPLE_COUNT_1_BIT && (mip_levels != 1 || array_layers != 1 || cube))
+        // A multisampled image is an MSAA attachment and nothing else. It can be a
+        // layered attachment (MSAA render-to-layer resolves per layer), but it can't
+        // carry mips (no blitting between sample counts) or be a cubemap (you sample
+        // the single-sample resolve, never a multisampled cube view). Fail here
+        // rather than at vkCreateImage.
+        if (samples != VK_SAMPLE_COUNT_1_BIT && (mip_levels != 1 || cube))
         {
             return std::unexpected(err_resource(
                 "A multisampled image (samples>1) is a render-target attachment only: "
-                "it cannot have mipmaps, array layers, or be a cubemap"));
+                "it cannot have mipmaps or be a cubemap"));
         }
         const FormatInfo info = format_info(format);
         const VkImageAspectFlags aspect = info.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;

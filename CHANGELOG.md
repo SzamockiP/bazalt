@@ -5,6 +5,68 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.13.0] — 2026-07-24
+
+"Render-to-layer & Multiview": a graphics pass can now rasterize a scene into one
+subresource — an array layer, a cubemap face, or a mip level — of a render
+target, one at a time or (via multiview) into every layer in a single pass.
+Compute could write layers/faces/mips since 0.10; this closes the gap for the
+raster pipeline, which is what dynamic environment capture (real-time
+reflections), cascade shadow maps, and render-to-mip are built on. A
+`RenderTarget` grows layered/cube/mipped attachments (the same `layers=` /
+`cube=` / `mip_levels=` kwargs `create_image` already had), and `target.layer(i)`
+/ `target.mip(m)` hand back a lightweight view you render into with the existing
+`cmd.rendering(...)`; `target.all_layers()` renders them all at once with the
+shader keying off `gl_ViewIndex`. The whole thing infers from the target: the
+attachment barriers narrow to the layer/mip the view covers, `renderArea`/viewport
+follow the mip's size, and the multiview mask flows from the target into both the
+pass and the pipeline — no new knob on the rendering verb.
+
+### Added
+- **`layers=` / `cube=` / `mip_levels=` on `RenderTarget`.** `bz.RenderTarget(ctx,
+  w, h, color=..., depth=..., cube=True)` makes the colour attachment a cubemap
+  (so `target.color[0]` samples as a `samplerCube`) with a matching 6-layer depth
+  buffer; `layers=N` makes every attachment an N-layer array; `mip_levels=M`
+  allocates the mip chain. Mirrors `create_image` exactly.
+- **`target.layer(i, mip=0)` / `target.mip(m)`.** A lightweight `RenderTarget` view
+  of one array layer / cube face and optionally one mip, passed straight to
+  `cmd.rendering(...)`. `layer(i, mip=m)` selects both axes (e.g. a mipped cube for
+  prefiltered/roughness-based reflections). Cube face `i` is layer `i`, Vulkan order
+  `+X, -X, +Y, -Y, +Z, -Z`. The pass transitions and covers exactly that
+  subresource — a `.mip(m)` pass renders at the mip's own size.
+- **MSAA + layers.** `samples>1` now composes with `layers=` / `cube=` (only
+  `mip_levels>1` is rejected — a multisampled image has no mip chain). The
+  multisampled attachment is layered and resolves per layer, so
+  `cmd.rendering(msaa_target.layer(i))` antialiases each layer — MSAA environment
+  capture and antialiased cascade shadows.
+- **`target.all_layers()` (multiview).** Renders into EVERY layer / cube face in ONE
+  pass instead of a pass per layer; the shader selects per-layer work with
+  `gl_ViewIndex` (e.g. a per-face matrix for cube capture). Needs a layered target
+  and `ctx.supports_multiview()`; composes with MSAA (each view resolves into its
+  own layer). Enabled when the GPU advertises the multiview feature.
+- **`ctx.supports_multiview()`.** Whether one-pass `all_layers()` is available.
+- **Examples `16_env_capture`, `17_cascade_shadows`, `18_multiview`.** Real-time
+  cubemap reflection (six-pass and one-pass multiview variants) and a 3-cascade
+  shadow array, driven by `target.layer(i)` / `target.all_layers()`.
+
+### Fixed
+- **STATIC uniform buffers.** `create_buffer(data, UNIFORM, STATIC)` was created
+  without `VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT` (the STATIC path had no `UNIFORM`
+  case), so it failed at bind time with a cryptic validation error. Constant data
+  in a STATIC uniform buffer now works.
+
+### Notes
+- **No breaking changes** — additive. `layers`/`cube`/`mip_levels` default to the
+  scalar case, and a target with none of them is byte-for-byte the previous
+  behaviour (the new subresource defaults, `view_mask()==0`, and `viewMask==0` on
+  the pipeline all reproduce what the code hardcoded before).
+- **Deliberate ceilings.** MSAA does not compose with `mip_levels>1` (a multisampled
+  image has no mip chain). The attachment `Image` holds one layout for the whole
+  image, so with per-layer passes render every layer/mip you intend to sample before
+  sampling a layered target (`all_layers()` renders them all at once, so it has no
+  such caveat); sampling a partially rendered target is undefined and validation
+  flags it.
+
 ## [0.12.0] — 2026-07-24
 
 "MSAA": hardware multisampling, the last effect of the resource/renderer phase.
