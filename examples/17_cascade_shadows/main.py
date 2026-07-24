@@ -26,6 +26,48 @@ import bazalt as bz
 import glm
 import numpy as np
 
+
+class Camera:
+    """Free-look camera, same scheme as example 07: mouse looks, WASD moves,
+    Space / Left-Shift go up / down."""
+    def __init__(self, pos, yaw, pitch, speed=6.0):
+        self.pos = glm.vec3(*pos)
+        self.yaw = yaw
+        self.pitch = pitch
+        self.speed = speed
+        self.sensitivity = 0.002
+        self._update()
+
+    def _update(self):
+        self.front = glm.normalize(glm.vec3(
+            math.cos(self.yaw) * math.cos(self.pitch),
+            math.sin(self.pitch),
+            math.sin(self.yaw) * math.cos(self.pitch)))
+        self.right = glm.normalize(glm.cross(self.front, glm.vec3(0.0, 1.0, 0.0)))
+        self.up = glm.normalize(glm.cross(self.right, self.front))
+
+    def update_mouse(self, dx, dy):
+        self.yaw += dx * self.sensitivity
+        limit = math.pi / 2 - 0.01
+        self.pitch = max(-limit, min(limit, self.pitch + dy * self.sensitivity))
+        self._update()
+
+    def process_keyboard(self, window, dt):
+        v = self.speed * dt
+        if window.is_key_pressed(bz.KEY_W): self.pos += v * self.front
+        if window.is_key_pressed(bz.KEY_S): self.pos -= v * self.front
+        if window.is_key_pressed(bz.KEY_A): self.pos -= v * self.right
+        if window.is_key_pressed(bz.KEY_D): self.pos += v * self.right
+        if window.is_key_pressed(bz.KEY_SPACE): self.pos += v * glm.vec3(0.0, 1.0, 0.0)
+        if window.is_key_pressed(bz.KEY_LEFT_SHIFT): self.pos -= v * glm.vec3(0.0, 1.0, 0.0)
+
+    def view_proj(self, aspect):
+        view = glm.lookAt(self.pos, self.pos + self.front, self.up)
+        proj = glm.perspectiveRH_ZO(glm.radians(55.0), aspect, 0.1, 200.0)
+        proj[1][1] *= -1
+        return proj * view
+
+
 W, H = 1024, 720
 SHADOW = 1024
 CASCADE_EXTENT = [4.0, 9.0, 18.0]  # half-size of each concentric cascade box
@@ -37,6 +79,7 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 window = bz.Window(W, H, "Bazalt Demo - Cascade Shadow Maps (render-to-layer)", logger=logger)
 ctx = bz.Context(logger)
 renderer = bz.SwapchainRenderer(window, ctx)
+window.set_cursor_mode(bz.CURSOR_DISABLED)  # mouse-look
 
 # The shadow array: depth-only, one layer per cascade.
 shadow = bz.RenderTarget(ctx, SHADOW, SHADOW, color=None, depth=bz.Format.D32F, layers=3)
@@ -152,12 +195,12 @@ def record(cmd, camera_vp):
 
 
 cmd = ctx.create_command_buffer()
-proj = glm.perspectiveRH_ZO(glm.radians(50.0), W / H, 0.1, 100.0)
-proj[1][1] *= -1
+camera = Camera(pos=(0.0, 9.0, 16.0), yaw=-math.pi / 2, pitch=-0.45, speed=10.0)
 
 TITLE = "Bazalt Demo - Cascade Shadow Maps (render-to-layer)"
-start = time.time()
-last_time = start
+last_time = time.time()
+last_mouse_dx = 0.0
+last_mouse_dy = 0.0
 frame_count = 0
 fps_timer = 0.0
 while window.is_open():
@@ -167,17 +210,20 @@ while window.is_open():
         continue
 
     now = time.time()
-    frame_count += 1
-    fps_timer += now - last_time
+    dt = now - last_time
     last_time = now
+    frame_count += 1
+    fps_timer += dt
     if fps_timer >= 1.0:
         fps = frame_count / fps_timer
         window.set_title(f"{TITLE} | {1000.0 / fps:.2f} ms/frame | {fps:.1f} FPS")
         frame_count = 0
         fps_timer = 0.0
 
-    t = (now - start) * 0.25
-    eye = glm.vec3(16.0 * math.cos(t), 9.0, 16.0 * math.sin(t))
-    view = glm.lookAt(eye, glm.vec3(0.0, 1.0, 0.0), glm.vec3(0.0, 1.0, 0.0))
-    record(cmd, proj * view)
+    mouse = window.get_mouse_state()
+    camera.update_mouse(mouse.dx - last_mouse_dx, mouse.dy - last_mouse_dy)
+    last_mouse_dx, last_mouse_dy = mouse.dx, mouse.dy
+    camera.process_keyboard(window, dt)
+
+    record(cmd, camera.view_proj(W / H))
     frame.submit(cmd)
