@@ -64,11 +64,31 @@ scene_pipe = (ctx.graphics_pipeline()
               .texture(1, bz.ShaderStage.FRAGMENT, set=0)
               .build(renderer))
 
-# The cascade UBO: 3 light matrices + extents + light dir. Updated once (static
-# light). LINEAR + compare = hardware PCF, exactly as in the shadow-map example.
-cascade_ubo = ctx.create_buffer(np.zeros(56, np.float32), bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+# Concentric ortho cascades around the origin: each is a light-space box of
+# increasing size, the same light view backed off along its direction.
+def cascade_vp(half):
+    eye = glm.vec3(0.0) - LIGHT_DIR * 25.0  # back the light off along its direction
+    view = glm.lookAt(eye, glm.vec3(0.0), glm.vec3(0.0, 1.0, 0.0))
+    proj = glm.orthoRH_ZO(-half, half, -half, half, 0.1, 60.0)
+    proj[1][1] *= -1  # Vulkan Y-flip
+    return proj * view
+
+
+LIGHT_VP = [cascade_vp(e) for e in CASCADE_EXTENT]
+
+# The cascade UBO: 3 light matrices + extents + light dir. The light is static, so
+# this is a STATIC uniform buffer + a static descriptor set — no per-frame ring to
+# keep fed. (A DYNAMIC buffer written once would leave the OTHER frame-in-flight's
+# slot stale and the image would flicker every other frame.) LINEAR + compare =
+# hardware PCF, as in the shadow-map example.
+cascade_blob = (b"".join(bytes(glm.transpose(vp)) for vp in LIGHT_VP)
+                + struct.pack("4f", *CASCADE_EXTENT, 0.0)
+                + struct.pack("4f", LIGHT_DIR.x, LIGHT_DIR.y, LIGHT_DIR.z, 0.0))
+cascade_ubo = ctx.create_buffer(np.frombuffer(cascade_blob, np.float32).copy(),
+                                bz.BufferType.UNIFORM, bz.MemoryUsage.STATIC)
+
 pool = ctx.create_descriptor_pool(max_sets=2, uniform_buffers=2, samplers=2)
-scene_set = pool.allocate_frame_set(scene_pipe, set=0)
+scene_set = pool.allocate_set(scene_pipe, set=0)
 scene_set.set_buffer(0, cascade_ubo)
 scene_set.set_image(1, shadow.depth, sampler=ctx.create_sampler(
     filter=bz.Filter.LINEAR, compare=bz.CompareOp.LESS))
@@ -111,24 +131,6 @@ ibuf = ctx.create_buffer(np.array(idx, np.uint32), bz.BufferType.INDEX, bz.Memor
 index_count = len(idx)
 
 
-# ── cascade light matrices (concentric ortho boxes around the origin) ────────
-
-def cascade_vp(half):
-    eye = glm.vec3(0.0) - LIGHT_DIR * 25.0  # back the light off along its direction
-    view = glm.lookAt(eye, glm.vec3(0.0), glm.vec3(0.0, 1.0, 0.0))
-    proj = glm.orthoRH_ZO(-half, half, -half, half, 0.1, 60.0)
-    proj[1][1] *= -1  # Vulkan Y-flip
-    return proj * view
-
-
-LIGHT_VP = [cascade_vp(e) for e in CASCADE_EXTENT]
-
-cascade_ubo.update(
-    b"".join(bytes(glm.transpose(vp)) for vp in LIGHT_VP)
-    + struct.pack("4f", *CASCADE_EXTENT, 0.0)
-    + struct.pack("4f", LIGHT_DIR.x, LIGHT_DIR.y, LIGHT_DIR.z, 0.0))
-
-
 def record(cmd, camera_vp):
     cmd.begin()
     # Three depth-only cascade passes, each into its own shadow layer.
@@ -153,13 +155,28 @@ cmd = ctx.create_command_buffer()
 proj = glm.perspectiveRH_ZO(glm.radians(50.0), W / H, 0.1, 100.0)
 proj[1][1] *= -1
 
+TITLE = "Bazalt Demo - Cascade Shadow Maps (render-to-layer)"
 start = time.time()
+last_time = start
+frame_count = 0
+fps_timer = 0.0
 while window.is_open():
     window.poll_events()
     frame = renderer.begin_frame()
     if frame is None:
         continue
-    t = (time.time() - start) * 0.25
+
+    now = time.time()
+    frame_count += 1
+    fps_timer += now - last_time
+    last_time = now
+    if fps_timer >= 1.0:
+        fps = frame_count / fps_timer
+        window.set_title(f"{TITLE} | {1000.0 / fps:.2f} ms/frame | {fps:.1f} FPS")
+        frame_count = 0
+        fps_timer = 0.0
+
+    t = (now - start) * 0.25
     eye = glm.vec3(16.0 * math.cos(t), 9.0, 16.0 * math.sin(t))
     view = glm.lookAt(eye, glm.vec3(0.0, 1.0, 0.0), glm.vec3(0.0, 1.0, 0.0))
     record(cmd, proj * view)

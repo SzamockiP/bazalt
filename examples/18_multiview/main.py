@@ -180,13 +180,28 @@ cmd = ctx.create_command_buffer()
 proj = glm.perspectiveRH_ZO(glm.radians(60.0), W / H, 0.1, 100.0)
 proj[1][1] *= -1
 
+TITLE = "Bazalt Demo - Multiview Environment Capture"
 start = time.time()
+last_time = start
+frame_count = 0
+fps_timer = 0.0
 while window.is_open():
     window.poll_events()
     frame = renderer.begin_frame()
     if frame is None:
         continue
-    t = (time.time() - start) * 0.5
+
+    now = time.time()
+    frame_count += 1
+    fps_timer += now - last_time
+    last_time = now
+    if fps_timer >= 1.0:
+        fps = frame_count / fps_timer
+        window.set_title(f"{TITLE} | {1000.0 / fps:.2f} ms/frame | {fps:.1f} FPS")
+        frame_count = 0
+        fps_timer = 0.0
+
+    t = (now - start) * 0.5
     eye = glm.vec3(5.0 * math.cos(t), 2.5, 5.0 * math.sin(t))
     view = glm.lookAt(eye, glm.vec3(0.0), glm.vec3(0.0, 1.0, 0.0))
     record(cmd, eye, proj * view)

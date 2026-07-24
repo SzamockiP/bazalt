@@ -14,12 +14,12 @@ layout(location = 0) out vec4 outColor;
 layout(set = 0, binding = 0) uniform Cascades {
     mat4 lightVP[3];
     vec4 cascadeExtent;  // half-size per cascade in .xyz
-    vec4 lightDir;       // .xyz, points from surface toward the light
+    vec4 lightDir;       // .xyz, the direction the light RAYS travel (downward-ish)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2DArrayShadow shadowMap;
 
-const vec3 TINT[3] = vec3[3](vec3(1.0, 0.7, 0.7), vec3(0.7, 1.0, 0.7), vec3(0.7, 0.7, 1.0));
+const vec3 TINT[3] = vec3[3](vec3(1.0, 0.3, 0.3), vec3(0.3, 1.0, 0.3), vec3(0.3, 0.3, 1.0));
 
 int pick_cascade(vec3 p) {
     for (int c = 0; c < 3; ++c) {
@@ -36,7 +36,13 @@ void main() {
     vec2 uv = proj.xy * 0.5 + 0.5;            // xy: NDC -> [0,1]; z is already [0,1] (Vulkan ZO)
     float lit = texture(shadowMap, vec4(uv, float(c), proj.z - 0.002));  // 0.002: constant depth bias
 
-    float ndl = max(dot(normalize(vNormal), normalize(u.lightDir.xyz)), 0.0);
-    float shade = 0.25 + 0.75 * lit * ndl;    // ambient + lit diffuse
-    outColor = vec4(TINT[c] * shade, 1.0);
+    // Direction TO the light is -lightDir (lightDir is the ray travel direction),
+    // so an up-facing ground lit from above gets full diffuse.
+    float ndl = max(dot(normalize(vNormal), -normalize(u.lightDir.xyz)), 0.0);
+    float light = 0.3 + 0.7 * lit * ndl;      // ambient + shadowed diffuse
+
+    // A subtle cascade tint on a bright base makes the split bands visible without
+    // muddying the scene.
+    vec3 tint = mix(vec3(1.0), TINT[c], 0.3);
+    outColor = vec4(tint * light, 1.0);
 }
