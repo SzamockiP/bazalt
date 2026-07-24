@@ -100,6 +100,29 @@ public:
         return VK_NULL_HANDLE;
     }
 
+    // ── Subresource selection (render-to-layer / render-to-mip) ────────────────
+    // Which array layer(s) and mip of each attachment a pass actually writes.
+    // The default is the whole-image, base-subresource case every target used
+    // before 0.13: layer 0, mip 0, one of each. A SubresourceTarget overrides
+    // these so CommandBuffer's attachment barriers hit exactly the layer/mip the
+    // view renders into — the view and the barrier both read from here, so they
+    // cannot drift. extent() (mip-scaled) covers renderArea/viewport/scissor.
+    struct Subresource
+    {
+        std::uint32_t base_layer = 0;
+        std::uint32_t layer_count = 1;
+        std::uint32_t base_mip = 0;
+        std::uint32_t mip_count = 1;
+    };
+    virtual Subresource color_subresource() const
+    {
+        return {};
+    }
+    virtual Subresource depth_subresource() const
+    {
+        return {};
+    }
+
     // The layout the colour attachments must be left in when rendering ends.
     // A swapchain needs PRESENT_SRC_KHR; an offscreen target that will be sampled
     // needs SHADER_READ_ONLY_OPTIMAL. This being a virtual is what removes the
