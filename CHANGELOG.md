@@ -39,24 +39,30 @@ follow the mip's size — no new knob on the rendering verb.
 - **`target.all_layers()` (multiview).** Renders into EVERY layer / cube face in ONE
   pass instead of a pass per layer; the shader selects per-layer work with
   `gl_ViewIndex` (e.g. a per-face matrix for cube capture). Needs a layered target
-  and `ctx.supports_multiview()`; single-sample. Enabled when the GPU advertises the
-  multiview feature.
+  and `ctx.supports_multiview()`; composes with MSAA (each view resolves into its
+  own layer). Enabled when the GPU advertises the multiview feature.
 - **`ctx.supports_multiview()`.** Whether one-pass `all_layers()` is available.
 - **Examples `16_env_capture`, `17_cascade_shadows`, `18_multiview`.** Real-time
   cubemap reflection (six-pass and one-pass multiview variants) and a 3-cascade
   shadow array, driven by `target.layer(i)` / `target.all_layers()`.
+
+### Fixed
+- **STATIC uniform buffers.** `create_buffer(data, UNIFORM, STATIC)` was created
+  without `VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT` (the STATIC path had no `UNIFORM`
+  case), so it failed at bind time with a cryptic validation error. Constant data
+  in a STATIC uniform buffer now works.
 
 ### Notes
 - **No breaking changes** — additive. `layers`/`cube`/`mip_levels` default to the
   scalar case, and a target with none of them is byte-for-byte the previous
   behaviour (the new subresource defaults, `view_mask()==0`, and `viewMask==0` on
   the pipeline all reproduce what the code hardcoded before).
-- **Deliberate ceilings.** MSAA does not compose with `mip_levels>1`, nor with
-  `all_layers()` (multiview) yet — multiview targets are single-sample. The
-  attachment `Image` holds one layout for the whole image, so with per-layer passes
-  render every layer/mip you intend to sample before sampling a layered target
-  (`all_layers()` renders them all at once, so it has no such caveat); sampling a
-  partially rendered target is undefined and validation flags it.
+- **Deliberate ceilings.** MSAA does not compose with `mip_levels>1` (a multisampled
+  image has no mip chain). The attachment `Image` holds one layout for the whole
+  image, so with per-layer passes render every layer/mip you intend to sample before
+  sampling a layered target (`all_layers()` renders them all at once, so it has no
+  such caveat); sampling a partially rendered target is undefined and validation
+  flags it.
 
 ## [0.12.0] — 2026-07-24
 
