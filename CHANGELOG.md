@@ -5,6 +5,51 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.12.0] — 2026-07-24
+
+"MSAA": hardware multisampling, the last effect of the resource/renderer phase.
+It lives entirely on the render target — `samples=N` on a `RenderTarget` or
+`SwapchainRenderer` — which allocates a multisampled image and resolves it into
+the single-sample attachments you already sample and present. A pipeline reads
+the sample count off the target it builds against, so nothing else in a frame
+changes. Depth resolves too (SAMPLE_ZERO), so `target.depth` stays sampleable
+under MSAA. Rides along: per-attachment clears, `RenderTarget` debug names,
+`ctx.max_samples()`, and a sample-rate-shading knob.
+
+### Added
+- **`samples=` on `RenderTarget` and `SwapchainRenderer`.** `bz.RenderTarget(ctx,
+  w, h, color=..., depth=..., samples=4)` renders into a multisampled image and
+  resolves into `target.color[i]` / `target.depth` (which stay single-sample and
+  sampleable — depth resolves with `SAMPLE_ZERO`). `bz.SwapchainRenderer(window,
+  ctx, samples=4)` does the same for a window, resolving into the swapchain image
+  on present (its MSAA colour + depth are recreated with the swapchain on resize).
+  Must be a power of two `<= ctx.max_samples()`. A pipeline built against an MSAA
+  target picks up the count automatically — there is no pipeline `samples` knob.
+- **`ctx.max_samples()`.** The highest sample count the GPU backs for both colour
+  and depth — the valid ceiling for `samples=`.
+- **Per-attachment clears.** `clear_color` on `begin_rendering` / `cmd.rendering`
+  now accepts either a single `[r, g, b, a]` applied to every attachment (as
+  before) or a per-attachment list `[[r,g,b,a], …]` for MRT.
+- **`name=` on `RenderTarget`.** Labels the attachments in validation messages
+  (the 0.8 debug-name mechanism, previously Buffer/Image/Pipeline only).
+- **`builder.sample_shading(enable=True, min_fraction=1.0)`.** Per-sample fragment
+  shading on an MSAA target (cleans up interior/specular aliasing plain MSAA
+  leaves). Needs the `SAMPLE_RATE_SHADING` feature on the Context; `build()` raises
+  `ShaderError` otherwise.
+- **`Image.samples`.** The sample count of an image (1 for everything a
+  RenderTarget hands out, since those are the resolved attachments).
+
+### Notes
+- **No breaking changes** — everything is additive (`samples` defaults to 1, and
+  the single-clear form is unchanged). The non-MSAA path is byte-for-byte the same:
+  every MSAA getter answers "1 / no resolve" at samples=1.
+- **Deliberate ceilings.** The multisampled image keeps only attachment usage and
+  is not `TRANSIENT`/lazily allocated (so MSAA costs its full memory — upgrade if
+  it bites). A pipeline's sample count must match the target it draws into, exactly
+  as its formats must — build against the target you render to.
+- Raw multisampled images are not exposed to Python (they can't be sampled,
+  uploaded to, or read back), so MSAA is reachable only through a render target.
+
 ## [0.11.0] — 2026-07-23
 
 "Mipmaps": the mip chain is no longer hardcoded away for everything except

@@ -474,8 +474,50 @@ struct RenderingScope
 {
     std::shared_ptr<CommandBuffer> cmd;
     std::shared_ptr<RenderTarget> target;
-    std::vector<float> clear_color;
+    std::vector<std::array<float, 4>> clear_color;
 };
+
+// Normalise a Python clear_color into one RGBA per attachment. Accepts both the
+// single form [r,g,b,a] (applied to every attachment — the common case) and the
+// per-attachment form [[r,g,b,a], …] for MRT. Distinguished by whether the first
+// element is itself a sequence.
+static std::vector<std::array<float, 4>> parse_clear_colors(const py::object& obj)
+{
+    std::vector<std::array<float, 4>> out;
+    if (obj.is_none())
+    {
+        return out;
+    }
+    py::sequence seq = py::cast<py::sequence>(obj);
+    if (py::len(seq) == 0)
+    {
+        return out;
+    }
+    auto to_rgba = [](const py::handle& h)
+    {
+        std::array<float, 4> c{0.0f, 0.0f, 0.0f, 1.0f};
+        py::sequence s = py::cast<py::sequence>(h);
+        const std::size_t n = py::len(s);
+        for (std::size_t i = 0; i < 4 && i < n; ++i)
+        {
+            c[i] = py::cast<float>(s[i]);
+        }
+        return c;
+    };
+    const bool per_attachment = py::isinstance<py::sequence>(seq[0]) && !py::isinstance<py::str>(seq[0]);
+    if (per_attachment)
+    {
+        for (auto item : seq)
+        {
+            out.push_back(to_rgba(item));
+        }
+    }
+    else
+    {
+        out.push_back(to_rgba(seq));
+    }
+    return out;
+}
 
 // A GPU timer handle. cmd.timer() records the opening timestamp and returns
 // one of these; it is stopped explicitly (stop) or by a `with` (__exit__), and
@@ -835,6 +877,7 @@ PYBIND11_MODULE(_core, m)
         .def_property_readonly("mip_levels", &Image::mip_levels)
         .def_property_readonly("array_layers", &Image::array_layers)
         .def_property_readonly("is_cube", &Image::is_cube)
+        .def_property_readonly("samples", &Image::samples)
         .def_property_readonly("ready", &Image::ready)
         .def(
             "wait",
@@ -884,6 +927,12 @@ PYBIND11_MODULE(_core, m)
             "topology",
             [](GraphicsPipelineBuilder& self, Topology topology) -> GraphicsPipelineBuilder&
             { return self.topology(topology); })
+        .def(
+            "sample_shading",
+            [](GraphicsPipelineBuilder& self, bool enable, float min_fraction) -> GraphicsPipelineBuilder&
+            { return self.sample_shading(enable, min_fraction); },
+            py::arg("enable") = true,
+            py::arg("min_fraction") = 1.0f)
         .def(
             "push_constant",
             [](GraphicsPipelineBuilder& self, uint32_t size, ShaderStage stage) -> GraphicsPipelineBuilder&
@@ -1029,15 +1078,13 @@ PYBIND11_MODULE(_core, m)
         // swapchain" made presentation a special case disguised as the default.
         .def(
             "begin_rendering",
-            [](std::shared_ptr<CommandBuffer> self,
-               std::shared_ptr<RenderTarget> target,
-               const std::vector<float>& clear_color)
+            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target, const py::object& clear_color)
             {
-                self->begin_rendering(std::move(target), clear_color);
+                self->begin_rendering(std::move(target), parse_clear_colors(clear_color));
                 return self;
             },
             py::arg("target"),
-            py::arg("clear_color") = std::vector<float>{0.0f, 0.0f, 0.0f, 1.0f})
+            py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f))
         .def(
             "end_rendering",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target)
@@ -1051,12 +1098,10 @@ PYBIND11_MODULE(_core, m)
         // end_rendering unconditionally — the pair cannot be left open.
         .def(
             "rendering",
-            [](std::shared_ptr<CommandBuffer> self,
-               std::shared_ptr<RenderTarget> target,
-               const std::vector<float>& clear_color)
-            { return RenderingScope{std::move(self), std::move(target), clear_color}; },
+            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target, const py::object& clear_color)
+            { return RenderingScope{std::move(self), std::move(target), parse_clear_colors(clear_color)}; },
             py::arg("target"),
-            py::arg("clear_color") = std::vector<float>{0.0f, 0.0f, 0.0f, 1.0f})
+            py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f))
         // GPU timer: records the opening timestamp and returns a Timer handle.
         // Stop it with t.stop() or a `with` block; read it back with t.ms.
         .def(
@@ -1371,6 +1416,7 @@ PYBIND11_MODULE(_core, m)
         .def_property_readonly("frames_in_flight", &Context::frames_in_flight)
         .def_property_readonly("logger", &Context::logger)
         .def("supports", &Context::supports, py::arg("feature"))
+        .def("max_samples", &Context::max_samples)
         .def_property_readonly("device_name", &Context::device_name)
         .def_property_readonly(
             "api_version", [](const Context& self) { return api_version_string(self.api_version()); })
@@ -1766,7 +1812,13 @@ PYBIND11_MODULE(_core, m)
         // depth is refused with a migration hint (it was one in 0.4).
         .def(
             py::init(
-                [](Context& context, std::uint32_t width, std::uint32_t height, py::object color, py::object depth)
+                [](Context& context,
+                   std::uint32_t width,
+                   std::uint32_t height,
+                   py::object color,
+                   py::object depth,
+                   std::uint32_t samples,
+                   const std::string& name)
                 {
                     std::vector<Format> colors;
                     if (!color.is_none())
@@ -1801,14 +1853,16 @@ PYBIND11_MODULE(_core, m)
                     }
 
                     return unwrap(
-                        OffscreenTarget::create(context, width, height, std::move(colors), depth_format),
+                        OffscreenTarget::create(context, width, height, std::move(colors), depth_format, samples, name),
                         context.logger().get());
                 }),
             py::arg("context"),
             py::arg("width"),
             py::arg("height"),
             py::arg("color") = Format::RGBA8,
-            py::arg("depth") = py::none())
+            py::arg("depth") = py::none(),
+            py::arg("samples") = 1,
+            py::arg("name") = "")
         .def_property_readonly("width", [](const OffscreenTarget& t) { return t.extent().width; })
         .def_property_readonly("height", [](const OffscreenTarget& t) { return t.extent().height; })
         // The attachments are ordinary Images — this is the whole
@@ -1851,18 +1905,20 @@ PYBIND11_MODULE(_core, m)
     py::class_<SwapchainRenderer, RenderTarget, std::shared_ptr<SwapchainRenderer>>(m, "SwapchainRenderer")
         .def(
             py::init(
-                [](Window& window, std::shared_ptr<Context> context, PresentMode present_mode)
+                [](Window& window, std::shared_ptr<Context> context, PresentMode present_mode, std::uint32_t samples)
                 {
                     auto sp = window.get_surface_provider();
                     return std::shared_ptr<SwapchainRenderer>(unwrap(
-                        SwapchainRenderer::create(context, std::move(sp), present_mode), context->logger().get()));
+                        SwapchainRenderer::create(context, std::move(sp), present_mode, samples),
+                        context->logger().get()));
                 }),
             py::arg("window"),
             py::arg("context"),
-            py::arg("present_mode") = PresentMode::MAILBOX)
+            py::arg("present_mode") = PresentMode::MAILBOX,
+            py::arg("samples") = 1)
         .def(
             py::init(
-                [](uint64_t hwnd, std::shared_ptr<Context> context, PresentMode present_mode)
+                [](uint64_t hwnd, std::shared_ptr<Context> context, PresentMode present_mode, std::uint32_t samples)
                     -> std::shared_ptr<SwapchainRenderer>
                 {
 #ifdef _WIN32
@@ -1922,14 +1978,16 @@ PYBIND11_MODULE(_core, m)
                     };
 
                     return std::shared_ptr<SwapchainRenderer>(unwrap(
-                        SwapchainRenderer::create(context, std::move(sp), present_mode), context->logger().get()));
+                        SwapchainRenderer::create(context, std::move(sp), present_mode, samples),
+                        context->logger().get()));
 #else
             raise_error(err_window("win32_hwnd constructor is only supported on Windows"));
 #endif
                 }),
             py::arg("win32_hwnd"),
             py::arg("context"),
-            py::arg("present_mode") = PresentMode::MAILBOX)
+            py::arg("present_mode") = PresentMode::MAILBOX,
+            py::arg("samples") = 1)
         .def_property_readonly("present_mode", &SwapchainRenderer::present_mode)
         // Frame | None instead of bool: "the frame exists" and "here is the
         // frame" are the same fact, so return it. renderer.submit is gone —

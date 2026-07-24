@@ -73,7 +73,8 @@ public:
         std::uint32_t mip_levels,
         std::uint32_t array_layers = 1,
         bool cube = false,
-        VkImageView storage_view = VK_NULL_HANDLE)
+        VkImageView storage_view = VK_NULL_HANDLE,
+        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT)
         : context_(std::move(context)),
           image_(image),
           allocation_(allocation),
@@ -84,7 +85,8 @@ public:
           height_(height),
           mip_levels_(mip_levels),
           array_layers_(array_layers),
-          cube_(cube)
+          cube_(cube),
+          samples_(samples)
     {
     }
 
@@ -156,6 +158,13 @@ public:
     bool is_cube() const
     {
         return cube_;
+    }
+    // MSAA sample count as a plain int (1/2/4/…). >1 means this is a multisampled
+    // attachment owned by a RenderTarget: it's rendered into and resolved out, so
+    // it cannot be sampled, uploaded to, or read back — read() refuses it.
+    std::uint32_t samples() const
+    {
+        return static_cast<std::uint32_t>(samples_);
     }
 
     // "Has the GPU ever been given contents for this image" — uploaded, copied
@@ -345,12 +354,22 @@ public:
         Format format,
         std::uint32_t mip_levels = 1,
         std::uint32_t array_layers = 1,
-        bool cube = false)
+        bool cube = false,
+        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT)
     {
         if (width == 0 || height == 0)
         {
             return std::unexpected(
                 err_resource(std::format("Image dimensions must be non-zero, got {}x{}", width, height)));
+        }
+        // A multisampled image is an MSAA attachment and nothing else: it can't
+        // carry mips (no blitting between sample counts), can't be a layered
+        // texture, and can't be a cubemap. Fail here rather than at vkCreateImage.
+        if (samples != VK_SAMPLE_COUNT_1_BIT && (mip_levels != 1 || array_layers != 1 || cube))
+        {
+            return std::unexpected(err_resource(
+                "A multisampled image (samples>1) is a render-target attachment only: "
+                "it cannot have mipmaps, array layers, or be a cubemap"));
         }
         const FormatInfo info = format_info(format);
         const VkImageAspectFlags aspect = info.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
@@ -366,9 +385,16 @@ public:
             .extent = {width, height, 1},
             .mipLevels = mip_levels,
             .arrayLayers = array_layers,
-            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .samples = samples,
             .tiling = VK_IMAGE_TILING_OPTIMAL,
-            .usage = usage_for(context, format),
+            // A multisampled attachment is only rendered into and resolved out, so
+            // it keeps just the attachment usage: STORAGE on a multisample image
+            // needs a feature we don't enable, and SAMPLED/TRANSFER are dead weight
+            // (you sample the single-sample resolve, never this).
+            .usage = samples == VK_SAMPLE_COUNT_1_BIT
+                         ? usage_for(context, format)
+                         : (usage_for(context, format) &
+                            (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)),
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = nullptr,
@@ -436,7 +462,8 @@ public:
             mip_levels,
             array_layers,
             cube,
-            storage_view);
+            storage_view,
+            samples);
     }
 
     // From caller-provided pixels (numpy arrays land here). UNORM by default at
@@ -510,6 +537,12 @@ public:
             return std::unexpected(err_resource(
                 "read() called on an Image that has no contents yet; upload to it or "
                 "render into it first"));
+        }
+        if (samples_ != VK_SAMPLE_COUNT_1_BIT)
+        {
+            return std::unexpected(err_resource(
+                "read() called on a multisampled image; read the target's resolved "
+                "single-sample attachment (target.color[i] / target.depth) instead"));
         }
 
         const FormatInfo info = format_info(format_);
@@ -999,6 +1032,7 @@ private:
     std::uint32_t mip_levels_ = 1;
     std::uint32_t array_layers_ = 1;
     bool cube_ = false;
+    VkSampleCountFlagBits samples_ = VK_SAMPLE_COUNT_1_BIT;
     std::atomic<bool> has_contents_{false};
     VkImageLayout layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
 

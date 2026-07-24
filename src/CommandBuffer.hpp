@@ -100,19 +100,15 @@ public:
     // which made presentation a special case dressed up as the default and left
     // no way to name anything else. Naming what you draw into costs one token
     // and buys one rule that holds everywhere.
-    CommandBuffer& begin_rendering(std::shared_ptr<RenderTarget> target, const std::vector<float>& clear_color)
+    // One clear per colour attachment. Empty → black; a single entry clears every
+    // attachment (the common case); N entries clear attachment i with entry i
+    // (per-attachment clears for MRT). The binding accepts both [r,g,b,a] and
+    // [[r,g,b,a], …] and normalises to this.
+    CommandBuffer& begin_rendering(
+        std::shared_ptr<RenderTarget> target, const std::vector<std::array<float, 4>>& clear_colors)
     {
-        std::array<float, 4> cc = {0.0f, 0.0f, 0.0f, 1.0f};
-        if (clear_color.size() >= 4)
-        {
-            cc[0] = clear_color[0];
-            cc[1] = clear_color[1];
-            cc[2] = clear_color[2];
-            cc[3] = clear_color[3];
-        }
-
         commands_.push_back(
-            [cc, target](VkCommandBuffer cmd, const FrameContext& frame)
+            [clear_colors, target](VkCommandBuffer cmd, const FrameContext& frame)
             {
                 RenderTarget* rt = target.get();
 
@@ -148,6 +144,24 @@ public:
                         nullptr,
                         1,
                         &barrier);
+
+                    // With MSAA the single-sample resolve target is a second
+                    // attachment written this pass — it needs the same transition.
+                    if (rt->color_resolve_image(i) != VK_NULL_HANDLE)
+                    {
+                        barrier.image = rt->color_resolve_image(i);
+                        vkCmdPipelineBarrier(
+                            cmd,
+                            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            0,
+                            0,
+                            nullptr,
+                            0,
+                            nullptr,
+                            1,
+                            &barrier);
+                    }
                 }
 
                 if (rt->depth_image() != VK_NULL_HANDLE)
@@ -180,35 +194,65 @@ public:
                         nullptr,
                         1,
                         &depthBarrier);
+
+                    // MSAA depth resolves into a single-sample image (offscreen
+                    // only — a swapchain's scratch depth has no resolve target).
+                    if (rt->depth_resolve_image() != VK_NULL_HANDLE)
+                    {
+                        depthBarrier.image = rt->depth_resolve_image();
+                        vkCmdPipelineBarrier(
+                            cmd,
+                            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                            0,
+                            0,
+                            nullptr,
+                            0,
+                            nullptr,
+                            1,
+                            &depthBarrier);
+                    }
                 }
 
                 std::vector<VkRenderingAttachmentInfo> colorAttachments;
                 colorAttachments.reserve(rt->color_count());
                 for (uint32_t i = 0; i < rt->color_count(); ++i)
                 {
+                    const std::array<float, 4> cc =
+                        clear_colors.empty()
+                            ? std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}
+                            : (i < clear_colors.size() ? clear_colors[i] : clear_colors[0]);
+                    // MSAA: render into the multisampled view, resolve (averaging
+                    // the samples) into the single-sample target. The multisampled
+                    // image is transient — only the resolve is kept (DONT_CARE).
+                    const bool resolve = rt->color_resolve_view(i) != VK_NULL_HANDLE;
                     colorAttachments.push_back(
                         {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
                          .pNext = nullptr,
                          .imageView = rt->color_view(i),
                          .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                         .resolveMode = VK_RESOLVE_MODE_NONE,
-                         .resolveImageView = VK_NULL_HANDLE,
-                         .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                         .resolveMode = resolve ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_NONE,
+                         .resolveImageView = resolve ? rt->color_resolve_view(i) : VK_NULL_HANDLE,
+                         .resolveImageLayout =
+                             resolve ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
                          .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-                         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                         // One clear colour for every attachment; per-attachment
-                         // clears can arrive additively if something needs them.
+                         .storeOp = resolve ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE,
                          .clearValue = {.color = {{cc[0], cc[1], cc[2], cc[3]}}}});
                 }
 
+                // Depth resolve uses SAMPLE_ZERO (averaging depth is meaningless and
+                // not guaranteed; taking sample 0 always is). Only offscreen targets
+                // resolve depth — the swapchain's scratch depth has no resolve view.
+                const bool depthResolve = rt->depth_resolve_view() != VK_NULL_HANDLE;
                 VkRenderingAttachmentInfo depthAttachment{
                     .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
                     .pNext = nullptr,
                     .imageView = rt->depth_view(),
                     .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                    .resolveMode = VK_RESOLVE_MODE_NONE,
-                    .resolveImageView = VK_NULL_HANDLE,
-                    .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                    .resolveMode = depthResolve ? VK_RESOLVE_MODE_SAMPLE_ZERO_BIT : VK_RESOLVE_MODE_NONE,
+                    .resolveImageView = depthResolve ? rt->depth_resolve_view() : VK_NULL_HANDLE,
+                    .resolveImageLayout =
+                        depthResolve ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
                     .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
                     // A depth that will be consumed (shadow maps) must be stored;
                     // the swapchain's scratch depth keeps DONT_CARE.
@@ -268,6 +312,12 @@ public:
                 // be drawn into.)
                 for (uint32_t i = 0; i < target->color_count(); ++i)
                 {
+                    // With MSAA it is the resolve image that must reach the final
+                    // layout (present / sampleable); the multisampled image is
+                    // transient and discarded.
+                    VkImage final_image = target->color_resolve_image(i) != VK_NULL_HANDLE
+                                              ? target->color_resolve_image(i)
+                                              : target->color_image(i);
                     VkImageMemoryBarrier barrier{
                         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                         .pNext = nullptr,
@@ -277,7 +327,7 @@ public:
                         .newLayout = target->final_layout(),
                         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .image = target->color_image(i),
+                        .image = final_image,
                         .subresourceRange = {
                             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                             .baseMipLevel = 0,
@@ -304,6 +354,11 @@ public:
                 if (target->depth_image() != VK_NULL_HANDLE &&
                     target->depth_final_layout() != VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL)
                 {
+                    // Same as colour: the resolved single-sample depth is what gets
+                    // sampled, so it is the one that must reach the final layout.
+                    VkImage final_depth = target->depth_resolve_image() != VK_NULL_HANDLE
+                                              ? target->depth_resolve_image()
+                                              : target->depth_image();
                     VkImageMemoryBarrier depthBarrier{
                         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                         .pNext = nullptr,
@@ -313,7 +368,7 @@ public:
                         .newLayout = target->depth_final_layout(),
                         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .image = target->depth_image(),
+                        .image = final_depth,
                         .subresourceRange = {
                             .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
                             .baseMipLevel = 0,

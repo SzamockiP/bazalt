@@ -292,6 +292,32 @@ public:
         return enabled_features_.contains(feature);
     }
 
+    // The highest MSAA sample count this GPU can back with *both* a colour and a
+    // depth attachment — the intersection is what a RenderTarget actually needs,
+    // since a single count has to serve every attachment in one pass. Returned as
+    // a plain int (1/2/4/8/…) so `RenderTarget(..., samples=ctx.max_samples())` is
+    // the one obvious way to pick a valid count without touching Vulkan flag bits.
+    std::uint32_t max_samples() const
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(vkb_physical_device_.physical_device, &props);
+        VkSampleCountFlags counts =
+            props.limits.framebufferColorSampleCounts & props.limits.framebufferDepthSampleCounts;
+        for (VkSampleCountFlagBits bit : {VK_SAMPLE_COUNT_64_BIT,
+                                          VK_SAMPLE_COUNT_32_BIT,
+                                          VK_SAMPLE_COUNT_16_BIT,
+                                          VK_SAMPLE_COUNT_8_BIT,
+                                          VK_SAMPLE_COUNT_4_BIT,
+                                          VK_SAMPLE_COUNT_2_BIT})
+        {
+            if (counts & bit)
+            {
+                return static_cast<std::uint32_t>(bit);
+            }
+        }
+        return 1;
+    }
+
     std::string device_name() const
     {
         return vkb_physical_device_.properties.deviceName;

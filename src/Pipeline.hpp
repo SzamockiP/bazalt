@@ -465,6 +465,19 @@ public:
         return std::forward<Self>(self);
     }
 
+    // Per-sample fragment shading on an MSAA target: the fragment shader runs once
+    // per sample instead of once per pixel, cleaning up interior/specular aliasing
+    // that plain MSAA (edge coverage only) leaves behind. Needs the
+    // SAMPLE_RATE_SHADING feature — build() rejects it otherwise. min_fraction
+    // (0..1) is the minimum fraction of samples shaded uniquely.
+    template <typename Self>
+    Self&& sample_shading(this Self&& self, bool enable, float min_fraction = 1.0f)
+    {
+        self.sample_shading_ = enable;
+        self.min_sample_shading_ = min_fraction;
+        return std::forward<Self>(self);
+    }
+
     // Debug name applied to the VkPipeline (validation diagnostics). No-op
     // without VK_EXT_debug_utils — see Context::set_debug_name.
     template <typename Self>
@@ -510,11 +523,20 @@ public:
     // A short sequence of named steps. The ~300-line monolith this replaces mixed
     // descriptor-layout creation, vertex-input translation and fixed state into
     // one scroll, with the cleanup loop copy-pasted into every failure branch.
-    std::expected<std::shared_ptr<Pipeline>, Error> build(std::vector<VkFormat> colorFormats, VkFormat depthFormat)
+    std::expected<std::shared_ptr<Pipeline>, Error> build(
+        std::vector<VkFormat> colorFormats,
+        VkFormat depthFormat,
+        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT)
     {
         if (!vertex_shader_)
         {
             return std::unexpected(err_shader("A vertex shader must be provided"));
+        }
+        if (sample_shading_ && !context_.supports(Feature::SAMPLE_RATE_SHADING))
+        {
+            return std::unexpected(err_shader(
+                "sample_shading requires the SAMPLE_RATE_SHADING feature; create the "
+                "Context with features=[bz.Feature.SAMPLE_RATE_SHADING] (or optional=[...])"));
         }
         // A fragment shader is optional only when there is nothing to shade:
         // a depth-only pass (shadow maps) rasterizes straight into the depth
@@ -567,7 +589,10 @@ public:
             .blend_enable = blend_enable_,
             .topology = topology_,
             .color_formats = std::move(colorFormats),
-            .depth_format = depthFormat};
+            .depth_format = depthFormat,
+            .samples = samples,
+            .sample_shading = sample_shading_,
+            .min_sample_shading = min_sample_shading_};
 
         auto pipeline = create_pipeline_(context_, state, pipelineLayout);
         if (!pipeline)
@@ -613,7 +638,9 @@ public:
         {
             colorFormats.push_back(target.color_format(i));
         }
-        return build(std::move(colorFormats), target.depth_format());
+        // The sample count comes off the target too, so a pipeline built for an
+        // MSAA target is automatically multisample-matched — no separate knob.
+        return build(std::move(colorFormats), target.depth_format(), target.samples());
     }
 
 private:
@@ -635,6 +662,9 @@ private:
         Topology topology = Topology::TRIANGLE_LIST;
         std::vector<VkFormat> color_formats;
         VkFormat depth_format = VK_FORMAT_UNDEFINED;
+        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+        bool sample_shading = false;
+        float min_sample_shading = 1.0f;
     };
 
     struct VertexInput
@@ -693,13 +723,17 @@ private:
 
         const VkPipelineRasterizationStateCreateInfo rasterizer = rasterization_state_(s);
 
+        // rasterizationSamples must match the sample count of the target this
+        // pipeline draws into — build(target) reads it off the target so the two
+        // never drift. sample_shading (per-sample fragment execution) is an opt-in
+        // quality knob on top, gated on the SAMPLE_RATE_SHADING feature in build().
         VkPipelineMultisampleStateCreateInfo multisampling{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
-            .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
-            .sampleShadingEnable = VK_FALSE,
-            .minSampleShading = 1.0f,
+            .rasterizationSamples = s.samples,
+            .sampleShadingEnable = s.sample_shading ? VK_TRUE : VK_FALSE,
+            .minSampleShading = s.min_sample_shading,
             .pSampleMask = nullptr,
             .alphaToCoverageEnable = VK_FALSE,
             .alphaToOneEnable = VK_FALSE};
@@ -899,6 +933,8 @@ private:
     FrontFace front_face_ = FrontFace::COUNTER_CLOCKWISE;
     bool blend_enable_ = false;
     Topology topology_ = Topology::TRIANGLE_LIST;
+    bool sample_shading_ = false;
+    float min_sample_shading_ = 1.0f;
     std::string name_;
     PipelineLayoutBuilder layout_;
 };

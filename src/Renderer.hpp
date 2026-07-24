@@ -115,13 +115,19 @@ public:
     static std::expected<std::unique_ptr<SwapchainRenderer>, Error> create(
         std::shared_ptr<Context> context,
         SurfaceProvider surface_provider,
-        PresentMode present_mode = PresentMode::MAILBOX)
+        PresentMode present_mode = PresentMode::MAILBOX,
+        std::uint32_t samples = 1)
     {
         if (!context->swapchain_supported())
         {
             return std::unexpected(err_window(
                 "Vulkan: this Context has no swapchain support, so it cannot present. "
                 "Render to a bazalt.RenderTarget instead, or check ctx.headless."));
+        }
+        auto vk_samples = validate_sample_count(samples, *context);
+        if (!vk_samples)
+        {
+            return std::unexpected(vk_samples.error());
         }
 
         // The frame index lives on the Context and is advanced by whichever renderer
@@ -141,6 +147,7 @@ public:
         // The PREFERENCE is stored, not the resolved mode: swapchain recreation
         // re-negotiates, because availability can change with the surface.
         renderer->preferred_present_mode_ = present_mode;
+        renderer->samples_ = *vk_samples;
 
         // Surface — created via the SurfaceProvider callback
         VkSurfaceKHR surface = renderer->surface_provider_.create_surface(context->instance());
@@ -265,6 +272,7 @@ public:
         {
             vmaDestroyImage(context_->allocator(), depth_image_, depth_image_allocation_);
         }
+        destroy_msaa_color_();
 
         for (auto iv : swapchain_image_views_)
         {
@@ -327,17 +335,32 @@ public:
     {
         return 1;
     }
+    // With MSAA the multisampled image is rendered into and the acquired swapchain
+    // image is its resolve target; without it, the swapchain image is drawn into
+    // directly (msaa_color_image_ is null).
     VkImage color_image(std::uint32_t) const override
     {
-        return swapchain_images_[image_index_];
+        return msaa_color_image_ ? msaa_color_image_ : swapchain_images_[image_index_];
     }
     VkImageView color_view(std::uint32_t) const override
     {
-        return swapchain_image_views_[image_index_];
+        return msaa_color_view_ ? msaa_color_view_ : swapchain_image_views_[image_index_];
     }
     VkFormat color_format(std::uint32_t) const override
     {
         return swapchain_format_;
+    }
+    VkSampleCountFlagBits samples() const override
+    {
+        return samples_;
+    }
+    VkImage color_resolve_image(std::uint32_t) const override
+    {
+        return msaa_color_image_ ? swapchain_images_[image_index_] : VK_NULL_HANDLE;
+    }
+    VkImageView color_resolve_view(std::uint32_t) const override
+    {
+        return msaa_color_image_ ? swapchain_image_views_[image_index_] : VK_NULL_HANDLE;
     }
     VkImageView depth_view() const override
     {
@@ -590,6 +613,15 @@ private:
     VkImageView depth_image_view_ = VK_NULL_HANDLE;
     VkFormat depth_format_ = VK_FORMAT_UNDEFINED;
 
+    // MSAA: a presentable image is always single-sample, so windowed MSAA renders
+    // into this multisampled colour image and resolves into the swapchain image.
+    // The depth image above simply becomes multisampled too (samples_). One shared
+    // image, like depth — sized to the swapchain, recreated with it.
+    VkSampleCountFlagBits samples_ = VK_SAMPLE_COUNT_1_BIT;
+    VkImage msaa_color_image_ = VK_NULL_HANDLE;
+    VmaAllocation msaa_color_allocation_ = VK_NULL_HANDLE;
+    VkImageView msaa_color_view_ = VK_NULL_HANDLE;
+
     bool frame_skipped_ = false;
 
     PresentMode preferred_present_mode_ = PresentMode::MAILBOX;
@@ -812,6 +844,7 @@ private:
             depth_image_ = VK_NULL_HANDLE;
             depth_image_allocation_ = VK_NULL_HANDLE;
         }
+        destroy_msaa_color_();
 
         // Destroy old render-finished semaphores
         for (auto sem : render_finished_semaphores_)
@@ -890,7 +923,7 @@ private:
             .extent = {swapchain_extent_.width, swapchain_extent_.height, 1},
             .mipLevels = 1,
             .arrayLayers = 1,
-            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .samples = samples_,
             .tiling = VK_IMAGE_TILING_OPTIMAL,
             .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -940,7 +973,89 @@ private:
             return std::unexpected(*e);
         }
 
+        // MSAA colour image: same extent/format as the swapchain but multisampled.
+        // The swapchain image is single-sample (it must present) and serves as the
+        // resolve target instead.
+        if (samples_ != VK_SAMPLE_COUNT_1_BIT)
+        {
+            VkImageCreateInfo colorInfo{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .imageType = VK_IMAGE_TYPE_2D,
+                .format = swapchain_format_,
+                .extent = {swapchain_extent_.width, swapchain_extent_.height, 1},
+                .mipLevels = 1,
+                .arrayLayers = 1,
+                .samples = samples_,
+                .tiling = VK_IMAGE_TILING_OPTIMAL,
+                .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                .queueFamilyIndexCount = 0,
+                .pQueueFamilyIndices = nullptr,
+                .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+
+            VmaAllocationCreateInfo allocColorInfo = {};
+            allocColorInfo.usage = VMA_MEMORY_USAGE_AUTO;
+
+            if (auto e = check(
+                    vmaCreateImage(
+                        context_->allocator(),
+                        &colorInfo,
+                        &allocColorInfo,
+                        &msaa_color_image_,
+                        &msaa_color_allocation_,
+                        nullptr),
+                    "create MSAA colour image"))
+            {
+                return std::unexpected(*e);
+            }
+
+            VkImageViewCreateInfo colorViewInfo{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .image = msaa_color_image_,
+                .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                .format = swapchain_format_,
+                .components =
+                    {VK_COMPONENT_SWIZZLE_IDENTITY,
+                     VK_COMPONENT_SWIZZLE_IDENTITY,
+                     VK_COMPONENT_SWIZZLE_IDENTITY,
+                     VK_COMPONENT_SWIZZLE_IDENTITY},
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1}};
+
+            if (auto e = check(
+                    vkCreateImageView(context_->device(), &colorViewInfo, nullptr, &msaa_color_view_),
+                    "create MSAA colour image view"))
+            {
+                return std::unexpected(*e);
+            }
+        }
+
         return {};
+    }
+
+    // Tear down the MSAA colour image + view (destructor and every swapchain
+    // recreate). No-op when not multisampled.
+    void destroy_msaa_color_()
+    {
+        if (msaa_color_view_)
+        {
+            vkDestroyImageView(context_->device(), msaa_color_view_, nullptr);
+            msaa_color_view_ = VK_NULL_HANDLE;
+        }
+        if (msaa_color_image_ && msaa_color_allocation_)
+        {
+            vmaDestroyImage(context_->allocator(), msaa_color_image_, msaa_color_allocation_);
+            msaa_color_image_ = VK_NULL_HANDLE;
+            msaa_color_allocation_ = VK_NULL_HANDLE;
+        }
     }
 };
 // One successfully acquired swapchain frame. begin_frame() hands this out

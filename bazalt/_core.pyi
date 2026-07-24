@@ -282,6 +282,12 @@ class Image:
         """True for a cubemap (sampled through a CUBE view as samplerCube)."""
         ...
     @property
+    def samples(self) -> int:
+        """MSAA sample count (1/2/4/…). >1 only for the multisampled attachment a
+        RenderTarget owns internally; the images it exposes (target.color/depth)
+        are the resolved single-sample ones and always report 1."""
+        ...
+    @property
     def ready(self) -> bool:
         """Non-blocking: is the pixel data on the GPU?
 
@@ -354,10 +360,17 @@ class RenderTarget(RenderTargetBase):
 
     def __init__(self, context: Context, width: int, height: int,
                  color: Optional[Format | Sequence[Format]] = Format.RGBA8,
-                 depth: Optional[Format] = None) -> None:
+                 depth: Optional[Format] = None,
+                 samples: int = 1, name: str = "") -> None:
         """color=None with depth=D32F makes a depth-only (shadow) target;
         a list of formats makes an MRT target. At least one attachment is
-        required."""
+        required.
+
+        samples>1 turns on MSAA: the target renders into a multisampled image and
+        resolves into target.color/target.depth (which stay single-sample and
+        sampleable — depth resolves too, via SAMPLE_ZERO). Must be a power of two
+        <= ctx.max_samples(). name labels the attachments in validation messages.
+        """
         ...
 
     @property
@@ -385,6 +398,14 @@ class GraphicsPipelineBuilder:
     def cull_mode(self, mode: CullMode, front_face: FrontFace) -> GraphicsPipelineBuilder: ...
     def blend(self, enable: bool) -> GraphicsPipelineBuilder: ...
     def topology(self, topology: Topology) -> GraphicsPipelineBuilder: ...
+    def sample_shading(self, enable: bool = True, min_fraction: float = 1.0) -> GraphicsPipelineBuilder:
+        """Per-sample fragment shading on an MSAA target: the fragment shader runs
+        once per sample instead of once per pixel, cleaning up interior/specular
+        aliasing plain MSAA leaves. Requires the SAMPLE_RATE_SHADING feature on the
+        Context (build() raises ShaderError otherwise). The sample count itself
+        comes from the target build() is called with — there is no samples knob
+        here."""
+        ...
     def push_constant(self, size: int, stage: ShaderStage) -> GraphicsPipelineBuilder: ...
     def uniform_buffer(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
     def storage_buffer(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
@@ -436,8 +457,13 @@ class CommandBuffer:
     def begin(self) -> CommandBuffer: ...
 
     def begin_rendering(self, target: RenderTargetBase,
-                        clear_color: Sequence[float] = (0.0, 0.0, 0.0, 1.0)) -> CommandBuffer:
+                        clear_color: Sequence[float] | Sequence[Sequence[float]] = (0.0, 0.0, 0.0, 1.0)
+                        ) -> CommandBuffer:
         """Start rendering into `target`.
+
+        clear_color is either a single [r, g, b, a] applied to every attachment
+        (the common case) or, for MRT, a list of them ([[r,g,b,a], …]) clearing
+        each attachment independently.
 
         Also emits a viewport and scissor covering the whole target, so the
         common case needs no further calls.
@@ -447,13 +473,15 @@ class CommandBuffer:
     def end_rendering(self, target: RenderTargetBase) -> CommandBuffer: ...
 
     def rendering(self, target: RenderTargetBase,
-                  clear_color: Sequence[float] = (0.0, 0.0, 0.0, 1.0)) -> RenderingScope:
+                  clear_color: Sequence[float] | Sequence[Sequence[float]] = (0.0, 0.0, 0.0, 1.0)
+                  ) -> RenderingScope:
         """The begin/end pair as a context manager:
 
             with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
                 c.bind_pipeline(p).draw(3)
 
-        end_rendering is recorded on exit, exceptions included.
+        end_rendering is recorded on exit, exceptions included. clear_color takes
+        the same single-or-per-attachment forms as begin_rendering.
         """
         ...
 
@@ -639,6 +667,11 @@ class Context:
         ...
 
     def supports(self, feature: Feature) -> bool: ...
+    def max_samples(self) -> int:
+        """The highest MSAA sample count (1/2/4/8/…) this GPU supports for both a
+        colour and a depth attachment — the valid ceiling for RenderTarget(...,
+        samples=) and SwapchainRenderer(..., samples=)."""
+        ...
 
     def create_buffer(self, list: list, type: BufferType, usage: MemoryUsage,
                       data_type: Optional[DataType] = None, *, name: str = "") -> Buffer: ...
@@ -789,9 +822,13 @@ class SwapchainRenderer(RenderTargetBase):
     """Presents to a window. One implementation of a render target."""
 
     def __init__(self, window: Window, context: Context,
-                 present_mode: PresentMode = PresentMode.MAILBOX) -> None: ...
+                 present_mode: PresentMode = PresentMode.MAILBOX, samples: int = 1) -> None:
+        """samples>1 turns on windowed MSAA: rendering goes into a multisampled
+        colour+depth image that resolves into the swapchain image on present.
+        Must be a power of two <= ctx.max_samples()."""
+        ...
     def __init__(self, win32_hwnd: int, context: Context,
-                 present_mode: PresentMode = PresentMode.MAILBOX) -> None:
+                 present_mode: PresentMode = PresentMode.MAILBOX, samples: int = 1) -> None:
         """Attach to an existing native window (Windows only)."""
         ...
 
