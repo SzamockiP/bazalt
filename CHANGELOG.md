@@ -7,17 +7,20 @@ patch versions never do).
 
 ## [0.13.0] — 2026-07-24
 
-"Render-to-layer": a graphics pass can now rasterize a scene into one
+"Render-to-layer & Multiview": a graphics pass can now rasterize a scene into one
 subresource — an array layer, a cubemap face, or a mip level — of a render
-target. Compute could write layers/faces/mips since 0.10; this closes the gap
-for the raster pipeline, which is what dynamic environment capture (real-time
+target, one at a time or (via multiview) into every layer in a single pass.
+Compute could write layers/faces/mips since 0.10; this closes the gap for the
+raster pipeline, which is what dynamic environment capture (real-time
 reflections), cascade shadow maps, and render-to-mip are built on. A
 `RenderTarget` grows layered/cube/mipped attachments (the same `layers=` /
 `cube=` / `mip_levels=` kwargs `create_image` already had), and `target.layer(i)`
 / `target.mip(m)` hand back a lightweight view you render into with the existing
-`cmd.rendering(...)`. The whole thing infers from the target: the attachment
-barriers narrow to the layer/mip the view covers, and `renderArea`/viewport
-follow the mip's size — no new knob on the rendering verb.
+`cmd.rendering(...)`; `target.all_layers()` renders them all at once with the
+shader keying off `gl_ViewIndex`. The whole thing infers from the target: the
+attachment barriers narrow to the layer/mip the view covers, `renderArea`/viewport
+follow the mip's size, and the multiview mask flows from the target into both the
+pass and the pipeline — no new knob on the rendering verb.
 
 ### Added
 - **`layers=` / `cube=` / `mip_levels=` on `RenderTarget`.** `bz.RenderTarget(ctx,
