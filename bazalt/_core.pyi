@@ -405,6 +405,15 @@ class RenderTarget(RenderTargetBase):
         cmd.rendering(target.mip(m)). The pass covers exactly that mip's size."""
         ...
 
+    def all_layers(self) -> RenderTargetBase:
+        """A multiview view of the whole target: cmd.rendering(target.all_layers())
+        renders into EVERY layer in ONE pass instead of a pass per layer. The
+        shader selects per-layer work with gl_ViewIndex (e.g. a per-face matrix
+        for cube capture). Needs a layered target and ctx.supports_multiview();
+        single-sample only (no MSAA). Renders every layer, so the result is fully
+        sampleable with no partial-render caveat."""
+        ...
+
     def read_pixels(self) -> np.ndarray:
         """Copy the colour attachment back to host memory as (height, width, 4) uint8.
 
@@ -689,6 +698,10 @@ class Context:
         ...
 
     def supports(self, feature: Feature) -> bool: ...
+    def supports_multiview(self) -> bool:
+        """Whether this GPU supports multiview — one-pass render into every layer
+        of an array/cube target via RenderTarget.all_layers()."""
+        ...
     def max_samples(self) -> int:
         """The highest MSAA sample count (1/2/4/8/…) this GPU supports for both a
         colour and a depth attachment — the valid ceiling for RenderTarget(...,

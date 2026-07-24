@@ -272,8 +272,10 @@ public:
                     .pNext = nullptr,
                     .flags = 0,
                     .renderArea = {{0, 0}, rt->extent()},
+                    // Multiview renders every set layer in one pass (viewMask != 0);
+                    // layerCount is then ignored. 0 keeps the ordinary single-layer path.
                     .layerCount = 1,
-                    .viewMask = 0,
+                    .viewMask = rt->view_mask(),
                     .colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size()),
                     .pColorAttachments = colorAttachments.empty() ? nullptr : colorAttachments.data(),
                     .pDepthAttachment = rt->depth_view() != VK_NULL_HANDLE ? &depthAttachment : nullptr,

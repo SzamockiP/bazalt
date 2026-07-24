@@ -183,6 +183,45 @@ def test_combined_axis_bounds_are_checked(ctx):
         target.layer(2, mip=0)
 
 
+def test_multiview_renders_all_layers_in_one_pass(ctx):
+    """target.all_layers(): a SINGLE draw fills all 3 layers via multiview, each
+    layer coloured by gl_ViewIndex. Sampling each layer proves the draw fanned out
+    with the right per-layer index — and the one-pass barrier over the whole array
+    is validation-clean."""
+    if not ctx.supports_multiview():
+        pytest.skip("GPU reports no multiview support")
+
+    fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+    mv_frag = ctx.compile_shader(str(SHADER_DIR / "multiview_color.frag"), bz.ShaderStage.FRAGMENT)
+
+    target = bz.RenderTarget(ctx, 32, 32, color=bz.Format.RGBA8, layers=3)
+    pipe = (ctx.graphics_pipeline()
+            .vertex_shader(fullscreen)
+            .fragment_shader(mv_frag)
+            .build(target.all_layers()))  # pipeline picks up the view mask
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target.all_layers(), clear_color=[0, 0, 0, 1]) as c:
+        c.bind_pipeline(pipe).draw(3)
+    ctx.submit(cmd)
+
+    for i in range(3):
+        px = _sample_color_layer(ctx, target, i)
+        expected = [round(i / 4 * 255), 64, 128]
+        assert np.allclose(px[16, 16, :3], expected, atol=2), f"layer {i}: {px[16, 16, :3]}"
+
+
+def test_all_layers_refuses_non_layered_and_msaa(ctx):
+    if not ctx.supports_multiview():
+        pytest.skip("GPU reports no multiview support")
+    with pytest.raises(bz.ResourceError):
+        bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA8).all_layers()  # 1 layer
+    if ctx.max_samples() >= 2:
+        with pytest.raises(bz.ResourceError):
+            bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA8, layers=2, samples=2).all_layers()  # MSAA
+
+
 def test_layer_out_of_range_is_refused(ctx):
     target = bz.RenderTarget(ctx, 16, 16, depth=bz.Format.D32F, layers=2)
     with pytest.raises(bz.ResourceError):

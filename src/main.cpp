@@ -1416,6 +1416,7 @@ PYBIND11_MODULE(_core, m)
         .def_property_readonly("frames_in_flight", &Context::frames_in_flight)
         .def_property_readonly("logger", &Context::logger)
         .def("supports", &Context::supports, py::arg("feature"))
+        .def("supports_multiview", &Context::supports_multiview)
         .def("max_samples", &Context::max_samples)
         .def_property_readonly("device_name", &Context::device_name)
         .def_property_readonly(
@@ -1914,7 +1915,9 @@ PYBIND11_MODULE(_core, m)
             "mip",
             [](std::shared_ptr<OffscreenTarget> self, std::uint32_t level)
             { return unwrap(self->mip(level), nullptr); },
-            py::arg("level"));
+            py::arg("level"))
+        // Multiview: one pass into every layer (the shader uses gl_ViewIndex).
+        .def("all_layers", [](std::shared_ptr<OffscreenTarget> self) { return unwrap(self->all_layers(), nullptr); });
 
     // ── SwapchainRenderer ──
     // Inherits RenderTarget: presenting to a window is one way to consume a

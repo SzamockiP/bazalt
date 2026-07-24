@@ -292,6 +292,14 @@ public:
         return enabled_features_.contains(feature);
     }
 
+    // Multiview lives in VkPhysicalDeviceVulkan11Features, not the base-feature
+    // table `supports(Feature)` covers, so it has its own query. True means
+    // RenderTarget.all_layers() (one pass into every layer) is available.
+    bool supports_multiview() const
+    {
+        return multiview_supported_;
+    }
+
     // The highest MSAA sample count this GPU can back with *both* a colour and a
     // depth attachment — the intersection is what a RenderTarget actually needs,
     // since a single count has to serve every attachment in one pass. Returned as
@@ -858,9 +866,16 @@ private:
         // here turns a cryptic device-creation error code into a sentence.
         VkPhysicalDeviceVulkan12Features available12{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = nullptr};
+        // Multiview (core 1.1): render into every layer of an array/cube attachment
+        // in ONE pass, the shader keying per-view work off gl_ViewIndex. Optional —
+        // enable it if present so RenderTarget.all_layers() can offer it, and record
+        // what stuck. Chained after available12 in the same query.
+        VkPhysicalDeviceVulkan11Features available11{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &available12};
         VkPhysicalDeviceFeatures2 available2{
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &available12};
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &available11};
         vkGetPhysicalDeviceFeatures2(ctx.vkb_physical_device_.physical_device, &available2);
+        ctx.multiview_supported_ = available11.multiview == VK_TRUE;
         if (!available12.timelineSemaphore)
         {
             return std::unexpected(err_init(
@@ -899,8 +914,16 @@ private:
             .pNext = nullptr,
             .timelineSemaphore = VK_TRUE};
 
+        // Multiview (core 1.1): enabled only if the device advertised it (queried in
+        // configure_features_). A zero struct is harmless when absent.
+        VkPhysicalDeviceVulkan11Features features11{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+            .pNext = nullptr,
+            .multiview = ctx.multiview_supported_ ? VK_TRUE : VK_FALSE};
+
         auto dev_builder = vkb::DeviceBuilder{ctx.vkb_physical_device_};
         dev_builder.add_pNext(&features12);
+        dev_builder.add_pNext(&features11);
         if (ctx.dynamic_rendering_khr_)
         {
             dev_builder.add_pNext(&dynamic_rendering_khr);
@@ -1051,6 +1074,7 @@ private:
     bool headless_ = false;
     bool swapchain_supported_ = false;
     bool dynamic_rendering_khr_ = false;
+    bool multiview_supported_ = false;
 
     // Set by configure_features_: 1.3 on the core path, 1.2 on the KHR path.
     std::uint32_t negotiated_api_version_ = VK_API_VERSION_1_2;

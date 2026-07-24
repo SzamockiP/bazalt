@@ -526,7 +526,8 @@ public:
     std::expected<std::shared_ptr<Pipeline>, Error> build(
         std::vector<VkFormat> colorFormats,
         VkFormat depthFormat,
-        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT)
+        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT,
+        std::uint32_t view_mask = 0)
     {
         if (!vertex_shader_)
         {
@@ -591,6 +592,7 @@ public:
             .color_formats = std::move(colorFormats),
             .depth_format = depthFormat,
             .samples = samples,
+            .view_mask = view_mask,
             .sample_shading = sample_shading_,
             .min_sample_shading = min_sample_shading_};
 
@@ -638,9 +640,10 @@ public:
         {
             colorFormats.push_back(target.color_format(i));
         }
-        // The sample count comes off the target too, so a pipeline built for an
-        // MSAA target is automatically multisample-matched — no separate knob.
-        return build(std::move(colorFormats), target.depth_format(), target.samples());
+        // The sample count and multiview mask come off the target too, so a
+        // pipeline built for an MSAA or multiview target is automatically matched —
+        // no separate knob. (A multiview pipeline's viewMask must equal the pass's.)
+        return build(std::move(colorFormats), target.depth_format(), target.samples(), target.view_mask());
     }
 
 private:
@@ -663,6 +666,7 @@ private:
         std::vector<VkFormat> color_formats;
         VkFormat depth_format = VK_FORMAT_UNDEFINED;
         VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+        std::uint32_t view_mask = 0;
         bool sample_shading = false;
         float min_sample_shading = 1.0f;
     };
@@ -759,7 +763,10 @@ private:
         VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
             .pNext = nullptr,
-            .viewMask = 0,
+            // Multiview: must equal the viewMask of the pass this pipeline draws into
+            // (build(target) reads it off the target — a MultiviewTarget lights one
+            // bit per layer, everything else is 0).
+            .viewMask = s.view_mask,
             .colorAttachmentCount = static_cast<uint32_t>(s.color_formats.size()),
             .pColorAttachmentFormats = s.color_formats.empty() ? nullptr : s.color_formats.data(),
             .depthAttachmentFormat = s.depth_format != VK_FORMAT_UNDEFINED ? s.depth_format : VK_FORMAT_UNDEFINED,

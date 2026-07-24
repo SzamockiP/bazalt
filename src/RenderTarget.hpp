@@ -125,6 +125,16 @@ public:
         return {};
     }
 
+    // Multiview: a non-zero mask renders every set bit's layer in ONE pass, the
+    // shader keying per-view work off gl_ViewIndex. 0 (the default) is the ordinary
+    // single-layer path. A MultiviewTarget (RenderTarget.all_layers()) returns
+    // (1<<N)-1; its color/depth views span all N layers and its subresource covers
+    // them, so the attachment barriers transition the whole array.
+    virtual std::uint32_t view_mask() const
+    {
+        return 0;
+    }
+
     // The layout the colour attachments must be left in when rendering ends.
     // A swapchain needs PRESENT_SRC_KHR; an offscreen target that will be sampled
     // needs SHADER_READ_ONLY_OPTIMAL. This being a virtual is what removes the
@@ -476,7 +486,7 @@ public:
     VkImageView color_subresource_view(std::uint32_t attachment, std::uint32_t layer, std::uint32_t mip)
     {
         const auto& image = msaa_colors_.empty() ? colors_[attachment] : msaa_colors_[attachment];
-        return subresource_view_(image, VK_IMAGE_ASPECT_COLOR_BIT, layer, mip);
+        return view_(image, VK_IMAGE_ASPECT_COLOR_BIT, layer, 1, mip);
     }
     VkImageView color_resolve_subresource_view(std::uint32_t attachment, std::uint32_t layer, std::uint32_t mip)
     {
@@ -484,7 +494,7 @@ public:
         {
             return VK_NULL_HANDLE;
         }
-        return subresource_view_(colors_[attachment], VK_IMAGE_ASPECT_COLOR_BIT, layer, mip);
+        return view_(colors_[attachment], VK_IMAGE_ASPECT_COLOR_BIT, layer, 1, mip);
     }
     VkImageView depth_subresource_view(std::uint32_t layer, std::uint32_t mip)
     {
@@ -493,7 +503,7 @@ public:
         {
             return VK_NULL_HANDLE;
         }
-        return subresource_view_(image, VK_IMAGE_ASPECT_DEPTH_BIT, layer, mip);
+        return view_(image, VK_IMAGE_ASPECT_DEPTH_BIT, layer, 1, mip);
     }
     VkImageView depth_resolve_subresource_view(std::uint32_t layer, std::uint32_t mip)
     {
@@ -501,7 +511,28 @@ public:
         {
             return VK_NULL_HANDLE;
         }
-        return subresource_view_(depth_, VK_IMAGE_ASPECT_DEPTH_BIT, layer, mip);
+        return view_(depth_, VK_IMAGE_ASPECT_DEPTH_BIT, layer, 1, mip);
+    }
+
+    // Multiview attachment views: a 2D_ARRAY view over ALL layers at mip 0, what a
+    // MultiviewTarget renders every layer through in one pass.
+    VkImageView color_array_view(std::uint32_t attachment)
+    {
+        const auto& image = msaa_colors_.empty() ? colors_[attachment] : msaa_colors_[attachment];
+        return view_(image, VK_IMAGE_ASPECT_COLOR_BIT, 0, layers_, 0);
+    }
+    VkImageView depth_array_view()
+    {
+        const auto& image = msaa_depth_ ? msaa_depth_ : depth_;
+        if (!image)
+        {
+            return VK_NULL_HANDLE;
+        }
+        return view_(image, VK_IMAGE_ASPECT_DEPTH_BIT, 0, layers_, 0);
+    }
+    std::uint32_t array_layers() const
+    {
+        return layers_;
     }
 
     // Bounds-checked slices. Returned as a RenderTargetBase (the view is a
@@ -512,19 +543,29 @@ public:
     std::expected<std::shared_ptr<RenderTarget>, Error> layer(std::uint32_t i, std::uint32_t mip = 0);
     std::expected<std::shared_ptr<RenderTarget>, Error> mip(std::uint32_t m);
 
+    // Multiview: render into EVERY layer in one pass (the shader keys per-view work
+    // off gl_ViewIndex) instead of a pass per layer. Needs a layered target and the
+    // multiview GPU feature; single-sample only for now.
+    std::expected<std::shared_ptr<RenderTarget>, Error> all_layers();
+
 private:
     explicit OffscreenTarget(std::shared_ptr<Context> context)
         : context_(std::move(context))
     {
     }
 
-    // Shared body of the subresource-view accessors: cache lookup keyed by
-    // (VkImage, layer, mip) — the image handle disambiguates render vs resolve vs
-    // depth — on miss create a 2D single-mip single-layer view and store it.
-    VkImageView subresource_view_(
-        const std::shared_ptr<Image>& image, VkImageAspectFlags aspect, std::uint32_t layer, std::uint32_t mip)
+    // Shared body of the view accessors: cache lookup keyed by (VkImage, baseLayer,
+    // layerCount, mip) — the image handle disambiguates render vs resolve vs depth —
+    // on miss create a single-mip view (2D for one layer, 2D_ARRAY for a multiview
+    // span) and store it.
+    VkImageView view_(
+        const std::shared_ptr<Image>& image,
+        VkImageAspectFlags aspect,
+        std::uint32_t base_layer,
+        std::uint32_t layer_count,
+        std::uint32_t mip)
     {
-        auto key = std::tuple{reinterpret_cast<std::uint64_t>(image->vk_image()), layer, mip};
+        auto key = std::tuple{reinterpret_cast<std::uint64_t>(image->vk_image()), base_layer, layer_count, mip};
         if (auto it = subresource_views_.find(key); it != subresource_views_.end())
         {
             return it->second;
@@ -534,10 +575,10 @@ private:
             .pNext = nullptr,
             .flags = 0,
             .image = image->vk_image(),
-            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .viewType = layer_count > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
             .format = format_info(image->format()).vk,
             .components = {},
-            .subresourceRange = {aspect, mip, 1, layer, 1}};
+            .subresourceRange = {aspect, mip, 1, base_layer, layer_count}};
         VkImageView view = VK_NULL_HANDLE;
         // Bounds are checked in layer()/mip() before we get here; a create failure
         // is a genuine driver error, so surface a null and let the caller's
@@ -569,9 +610,9 @@ private:
     std::uint32_t layers_ = 1;
     std::uint32_t mip_levels_ = 1;
 
-    // Lazily created per-subresource views, keyed (VkImage handle, layer, mip).
+    // Lazily created views, keyed (VkImage handle, base layer, layer count, mip).
     // Owned here, destroyed (deferred) in the destructor.
-    std::map<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t>, VkImageView> subresource_views_;
+    std::map<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t>, VkImageView> subresource_views_;
 };
 
 // A render target that is one (layer, mip) subresource of an OffscreenTarget —
@@ -686,6 +727,85 @@ private:
     std::uint32_t mip_;
 };
 
+// Renders into EVERY layer of an OffscreenTarget in one pass via multiview — what
+// target.all_layers() hands back. The attachment views span all layers (2D_ARRAY),
+// view_mask() lights one bit per layer, and the barriers cover the whole array; the
+// shader selects per-layer work with gl_ViewIndex. Single-sample (all_layers rejects
+// MSAA parents), and because it renders every layer, the whole-image sampleable mark
+// is exactly correct — no partial-render caveat.
+class MultiviewTarget : public RenderTarget
+{
+public:
+    explicit MultiviewTarget(std::shared_ptr<OffscreenTarget> parent) : parent_(std::move(parent))
+    {
+    }
+
+    std::uint32_t color_count() const override
+    {
+        return parent_->color_count();
+    }
+    VkImage color_image(std::uint32_t i) const override
+    {
+        return parent_->color_image(i);
+    }
+    VkImageView color_view(std::uint32_t i) const override
+    {
+        return parent_->color_array_view(i);
+    }
+    VkFormat color_format(std::uint32_t i) const override
+    {
+        return parent_->color_format(i);
+    }
+    VkImage depth_image() const override
+    {
+        return parent_->depth_image();
+    }
+    VkImageView depth_view() const override
+    {
+        return parent_->depth_array_view();
+    }
+    VkFormat depth_format() const override
+    {
+        return parent_->depth_format();
+    }
+    VkExtent2D extent() const override
+    {
+        return parent_->extent();
+    }
+
+    std::uint32_t view_mask() const override
+    {
+        const std::uint32_t n = parent_->array_layers();
+        return n >= 32 ? 0xFFFFFFFFu : ((1u << n) - 1u);
+    }
+
+    Subresource color_subresource() const override
+    {
+        return {0, parent_->array_layers(), 0, 1};
+    }
+    Subresource depth_subresource() const override
+    {
+        return {0, parent_->array_layers(), 0, 1};
+    }
+
+    VkImageLayout final_layout() const override
+    {
+        return parent_->final_layout();
+    }
+    VkImageLayout depth_final_layout() const override
+    {
+        return parent_->depth_final_layout();
+    }
+
+    void on_rendering_recorded() override
+    {
+        parent_->on_rendering_recorded();
+    }
+
+private:
+    std::shared_ptr<OffscreenTarget> parent_;
+};
+
 inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::layer(std::uint32_t i, std::uint32_t mip)
 {
     if (i >= layers_)
@@ -709,4 +829,24 @@ inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::mip(
             std::format("mip {} is out of range; this target has {} mip level(s)", m, mip_levels_)));
     }
     return std::make_shared<SubresourceTarget>(shared_from_this(), 0, m);
+}
+
+inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::all_layers()
+{
+    if (!context_->supports_multiview())
+    {
+        return std::unexpected(err_resource(
+            "all_layers() needs the multiview GPU feature, which this device does not support"));
+    }
+    if (layers_ <= 1)
+    {
+        return std::unexpected(err_resource(
+            "all_layers() needs a layered target (layers>1 or cube); this target has 1 layer"));
+    }
+    if (samples_ != VK_SAMPLE_COUNT_1_BIT)
+    {
+        return std::unexpected(err_resource(
+            "all_layers() (multiview) does not support MSAA yet; use samples=1 or render layer by layer"));
+    }
+    return std::make_shared<MultiviewTarget>(shared_from_this());
 }
