@@ -207,6 +207,12 @@ public:
             case BufferType::STORAGE:
                 usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
                 break;
+            // Constant data that never changes (e.g. baked matrices) is a legitimate
+            // STATIC uniform buffer. Without this the buffer was created with only
+            // TRANSFER usage and failed at bind time with a cryptic validation error.
+            case BufferType::UNIFORM:
+                usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+                break;
             default:
                 break;
         }

@@ -158,6 +158,37 @@ def test_uniform_buffer_via_frame_descriptor_set(ctx, fullscreen_vert):
     assert np.allclose(target.read_pixels()[32, 32, :3], [255, 0, 255], atol=2)
 
 
+def test_static_uniform_buffer_binds_and_reads(ctx, fullscreen_vert):
+    """A STATIC uniform buffer (constant data — e.g. baked matrices) binds to a
+    static descriptor set and reaches the shader. Regression: the STATIC path
+    once omitted VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, so a STATIC uniform buffer
+    was created successfully but failed at bind time with a cryptic validation
+    error."""
+    frag = ctx.compile_shader(str(SHADER_DIR / "ubo.frag"), bz.ShaderStage.FRAGMENT)
+    target = bz.RenderTarget(ctx, 64, 64)
+    pipeline = (ctx.graphics_pipeline()
+                .vertex_shader(fullscreen_vert)
+                .fragment_shader(frag)
+                .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
+                .build(target))
+
+    ubuf = ctx.create_buffer([0.0, 0.5, 1.0, 1.0], bz.BufferType.UNIFORM,
+                             bz.MemoryUsage.STATIC)
+    pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4)
+    dset = pool.allocate_set(pipeline, set=0)  # static set for a static buffer
+    dset.set_buffer(0, ubuf)
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.begin_rendering(target, clear_color=CLEAR)
+    cmd.bind_pipeline(pipeline)
+    cmd.bind_descriptor_set(dset, pipeline, set=0)
+    cmd.draw(3)
+    cmd.end_rendering(target)
+    ctx.submit(cmd)
+    assert np.allclose(target.read_pixels()[32, 32, :3], [0, 128, 255], atol=2)
+
+
 # ── storage buffers ───────────────────────────────────────────────────────
 
 
