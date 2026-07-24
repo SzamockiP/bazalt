@@ -112,6 +112,12 @@ public:
             {
                 RenderTarget* rt = target.get();
 
+                // Which layer/mip each attachment barrier must transition. Defaults
+                // to {layer 0, mip 0, one of each}; a SubresourceTarget narrows it to
+                // the single subresource its view renders into (render-to-layer/mip).
+                const RenderTarget::Subresource color_sr = rt->color_subresource();
+                const RenderTarget::Subresource depth_sr = rt->depth_subresource();
+
                 // Every colour attachment enters COLOR_ATTACHMENT_OPTIMAL. UNDEFINED
                 // as the source: contents are cleared each pass anyway.
                 for (uint32_t i = 0; i < rt->color_count(); ++i)
@@ -128,10 +134,10 @@ public:
                         .image = rt->color_image(i),
                         .subresourceRange = {
                             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                            .baseMipLevel = 0,
-                            .levelCount = 1,
-                            .baseArrayLayer = 0,
-                            .layerCount = 1}};
+                            .baseMipLevel = color_sr.base_mip,
+                            .levelCount = color_sr.mip_count,
+                            .baseArrayLayer = color_sr.base_layer,
+                            .layerCount = color_sr.layer_count}};
 
                     vkCmdPipelineBarrier(
                         cmd,
@@ -178,10 +184,10 @@ public:
                         .image = rt->depth_image(),
                         .subresourceRange = {
                             .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-                            .baseMipLevel = 0,
-                            .levelCount = 1,
-                            .baseArrayLayer = 0,
-                            .layerCount = 1}};
+                            .baseMipLevel = depth_sr.base_mip,
+                            .levelCount = depth_sr.mip_count,
+                            .baseArrayLayer = depth_sr.base_layer,
+                            .layerCount = depth_sr.layer_count}};
 
                     vkCmdPipelineBarrier(
                         cmd,
@@ -306,6 +312,9 @@ public:
             {
                 vkCmdEndRendering(cmd);
 
+                const RenderTarget::Subresource color_sr = target->color_subresource();
+                const RenderTarget::Subresource depth_sr = target->depth_subresource();
+
                 // Every colour attachment retires to the target's final layout.
                 // (Was VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, unconditionally, on colour 0
                 // only â€” that one constant is why nothing but a swapchain could ever
@@ -330,10 +339,10 @@ public:
                         .image = final_image,
                         .subresourceRange = {
                             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                            .baseMipLevel = 0,
-                            .levelCount = 1,
-                            .baseArrayLayer = 0,
-                            .layerCount = 1}};
+                            .baseMipLevel = color_sr.base_mip,
+                            .levelCount = color_sr.mip_count,
+                            .baseArrayLayer = color_sr.base_layer,
+                            .layerCount = color_sr.layer_count}};
 
                     vkCmdPipelineBarrier(
                         cmd,
@@ -371,10 +380,10 @@ public:
                         .image = final_depth,
                         .subresourceRange = {
                             .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-                            .baseMipLevel = 0,
-                            .levelCount = 1,
-                            .baseArrayLayer = 0,
-                            .layerCount = 1}};
+                            .baseMipLevel = depth_sr.base_mip,
+                            .levelCount = depth_sr.mip_count,
+                            .baseArrayLayer = depth_sr.base_layer,
+                            .layerCount = depth_sr.layer_count}};
 
                     vkCmdPipelineBarrier(
                         cmd,
