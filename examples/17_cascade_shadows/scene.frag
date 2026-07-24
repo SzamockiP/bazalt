@@ -34,11 +34,22 @@ void main() {
     vec4 lp = u.lightVP[c] * vec4(vWorld, 1.0);
     vec3 proj = lp.xyz / lp.w;
     vec2 uv = proj.xy * 0.5 + 0.5;            // xy: NDC -> [0,1]; z is already [0,1] (Vulkan ZO)
-    float lit = texture(shadowMap, vec4(uv, float(c), proj.z - 0.002));  // 0.002: constant depth bias
 
     // Direction TO the light is -lightDir (lightDir is the ray travel direction),
     // so an up-facing ground lit from above gets full diffuse.
     float ndl = max(dot(normalize(vNormal), -normalize(u.lightDir.xyz)), 0.0);
+
+    // Slope-scaled depth bias: a surface angled to the light needs more bias, or it
+    // self-shadows (acne) — false shadows on open floor with nothing above it.
+    float bias = max(0.0015, 0.006 * (1.0 - ndl));
+
+    float lit;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || proj.z > 1.0) {
+        lit = 1.0;    // outside this cascade's shadow map -> lit, not spuriously dark
+    } else {
+        lit = texture(shadowMap, vec4(uv, float(c), proj.z - bias));
+    }
+
     float light = 0.3 + 0.7 * lit * ndl;      // ambient + shadowed diffuse
 
     // A subtle cascade tint on a bright base makes the split bands visible without
