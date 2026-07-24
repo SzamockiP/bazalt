@@ -222,15 +222,15 @@ public:
                     "mip_levels must be 1..{} for a {}x{} target, got {}", max_mips, width, height, mip_levels)));
             }
         }
-        // MSAA is a single-subresource attachment only (Image forbids samples>1 with
-        // mips/layers/cube): a multisampled array + per-layer resolve is a separate
-        // future feature, so reject the combination here with a clear message
-        // instead of at vkCreateImage.
-        if (samples > 1 && (layers > 1 || cube || mip_levels > 1))
+        // MSAA composes with layers/cube (the multisampled attachment is layered and
+        // resolves per layer), but not with mips: a multisampled image has no mip
+        // chain. Reject that combination here with a clear message instead of at
+        // vkCreateImage.
+        if (samples > 1 && mip_levels > 1)
         {
             return std::unexpected(err_resource(
-                "samples>1 cannot combine with layers/cube/mip_levels: a render-to-layer "
-                "target is single-sample in this release"));
+                "samples>1 cannot combine with mip_levels: a multisampled image has no "
+                "mip chain (MSAA + layers/cube is fine)"));
         }
         for (Format f : colors)
         {
@@ -279,7 +279,9 @@ public:
             target->colors_.push_back(std::move(*resolve));
             if (msaa)
             {
-                auto ms = Image::create_empty(context, width, height, colors[i], 1, 1, false, *vk_samples);
+                // The multisampled image matches the resolve target's layer count
+                // (never cube: it's a plain layered attachment, resolved per layer).
+                auto ms = Image::create_empty(context, width, height, colors[i], 1, layers, false, *vk_samples);
                 if (!ms)
                 {
                     return std::unexpected(ms.error());
@@ -307,7 +309,7 @@ public:
             target->depth_ = std::move(*resolve);
             if (msaa)
             {
-                auto ms = Image::create_empty(context, width, height, *depth, 1, 1, false, *vk_samples);
+                auto ms = Image::create_empty(context, width, height, *depth, 1, layers, false, *vk_samples);
                 if (!ms)
                 {
                     return std::unexpected(ms.error());
@@ -465,21 +467,41 @@ public:
     }
 
     // ── render-to-layer / render-to-mip ────────────────────────────────────────
-    // A single (layer, mip) subresource of a colour/depth attachment, as a plain
-    // 2D view — what a SubresourceTarget renders into. Cached and owned here;
-    // slicing the same subresource twice returns the same view.
+    // A single (layer, mip) subresource of an attachment, as a plain 2D view —
+    // what a SubresourceTarget renders into. Cached and owned here; slicing the
+    // same subresource twice returns the same view. The *_view accessors return
+    // the image actually rendered into (the multisampled one under MSAA); the
+    // *_resolve_view accessors return the single-sample resolve subresource (null
+    // without MSAA), so a layered MSAA target resolves each layer on its own.
     VkImageView color_subresource_view(std::uint32_t attachment, std::uint32_t layer, std::uint32_t mip)
     {
-        return subresource_view_(
-            static_cast<int>(attachment), colors_[attachment], VK_IMAGE_ASPECT_COLOR_BIT, layer, mip);
+        const auto& image = msaa_colors_.empty() ? colors_[attachment] : msaa_colors_[attachment];
+        return subresource_view_(image, VK_IMAGE_ASPECT_COLOR_BIT, layer, mip);
     }
-    VkImageView depth_subresource_view(std::uint32_t layer, std::uint32_t mip)
+    VkImageView color_resolve_subresource_view(std::uint32_t attachment, std::uint32_t layer, std::uint32_t mip)
     {
-        if (!depth_)
+        if (msaa_colors_.empty())
         {
             return VK_NULL_HANDLE;
         }
-        return subresource_view_(-1, depth_, VK_IMAGE_ASPECT_DEPTH_BIT, layer, mip);
+        return subresource_view_(colors_[attachment], VK_IMAGE_ASPECT_COLOR_BIT, layer, mip);
+    }
+    VkImageView depth_subresource_view(std::uint32_t layer, std::uint32_t mip)
+    {
+        const auto& image = msaa_depth_ ? msaa_depth_ : depth_;
+        if (!image)
+        {
+            return VK_NULL_HANDLE;
+        }
+        return subresource_view_(image, VK_IMAGE_ASPECT_DEPTH_BIT, layer, mip);
+    }
+    VkImageView depth_resolve_subresource_view(std::uint32_t layer, std::uint32_t mip)
+    {
+        if (!msaa_depth_)
+        {
+            return VK_NULL_HANDLE;
+        }
+        return subresource_view_(depth_, VK_IMAGE_ASPECT_DEPTH_BIT, layer, mip);
     }
 
     // Bounds-checked slices. Returned as a RenderTargetBase (the view is a
@@ -496,13 +518,13 @@ private:
     {
     }
 
-    // Shared body of the two subresource-view accessors: cache lookup keyed by
-    // (attachment; -1 == depth, layer, mip), on miss create a 2D single-mip
-    // single-layer view and store it.
+    // Shared body of the subresource-view accessors: cache lookup keyed by
+    // (VkImage, layer, mip) — the image handle disambiguates render vs resolve vs
+    // depth — on miss create a 2D single-mip single-layer view and store it.
     VkImageView subresource_view_(
-        int attachment, const std::shared_ptr<Image>& image, VkImageAspectFlags aspect, std::uint32_t layer, std::uint32_t mip)
+        const std::shared_ptr<Image>& image, VkImageAspectFlags aspect, std::uint32_t layer, std::uint32_t mip)
     {
-        auto key = std::tuple{attachment, layer, mip};
+        auto key = std::tuple{reinterpret_cast<std::uint64_t>(image->vk_image()), layer, mip};
         if (auto it = subresource_views_.find(key); it != subresource_views_.end())
         {
             return it->second;
@@ -547,9 +569,9 @@ private:
     std::uint32_t layers_ = 1;
     std::uint32_t mip_levels_ = 1;
 
-    // Lazily created per-subresource render views, keyed (attachment; -1 == depth,
-    // layer, mip). Owned here, destroyed (deferred) in the destructor.
-    std::map<std::tuple<int, std::uint32_t, std::uint32_t>, VkImageView> subresource_views_;
+    // Lazily created per-subresource views, keyed (VkImage handle, layer, mip).
+    // Owned here, destroyed (deferred) in the destructor.
+    std::map<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t>, VkImageView> subresource_views_;
 };
 
 // A render target that is one (layer, mip) subresource of an OffscreenTarget —
@@ -606,9 +628,30 @@ public:
         return {w ? w : 1u, h ? h : 1u};
     }
 
-    // samples()/color_resolve_*/depth_resolve_* keep the base defaults (1 /
-    // VK_NULL_HANDLE): layered/mipped targets are single-sample, so CommandBuffer's
-    // resolve wiring stays off.
+    // MSAA composes with layers: the multisampled attachment and its single-sample
+    // resolve target are both sliced to this subresource, so CommandBuffer resolves
+    // exactly this layer. Without MSAA these return 1 / VK_NULL_HANDLE (from the
+    // parent) and the resolve wiring stays off.
+    VkSampleCountFlagBits samples() const override
+    {
+        return parent_->samples();
+    }
+    VkImage color_resolve_image(std::uint32_t i) const override
+    {
+        return parent_->color_resolve_image(i);
+    }
+    VkImageView color_resolve_view(std::uint32_t i) const override
+    {
+        return parent_->color_resolve_subresource_view(i, layer_, mip_);
+    }
+    VkImage depth_resolve_image() const override
+    {
+        return parent_->depth_resolve_image();
+    }
+    VkImageView depth_resolve_view() const override
+    {
+        return parent_->depth_resolve_subresource_view(layer_, mip_);
+    }
 
     VkImageLayout final_layout() const override
     {

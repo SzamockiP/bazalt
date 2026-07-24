@@ -49,6 +49,34 @@ def _sample_depth_layer(ctx, target, layer):
     return screen.read_pixels()
 
 
+def _sample_color_layer(ctx, target, layer):
+    """Fullscreen-sample one layer of `target`'s colour array into a fresh target
+    and read it back."""
+    fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+    view_frag = ctx.compile_shader(str(SHADER_DIR / "array_view.frag"), bz.ShaderStage.FRAGMENT)
+    screen = bz.RenderTarget(ctx, target.width, target.height)
+    pipe = (ctx.graphics_pipeline()
+            .vertex_shader(fullscreen)
+            .fragment_shader(view_frag)
+            .texture(0, bz.ShaderStage.FRAGMENT, set=0)
+            .push_constant(4, bz.ShaderStage.FRAGMENT)
+            .build(screen))
+    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    dset = pool.allocate_set(pipe, set=0)
+    dset.set_image(0, target.color[0], sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.begin_rendering(screen, clear_color=[0, 0, 0, 1])
+    cmd.bind_pipeline(pipe)
+    cmd.bind_descriptor_set(dset, pipe, set=0)
+    cmd.push_constants(pipe, 0, struct.pack("i", layer))
+    cmd.draw(3)
+    cmd.end_rendering(screen)
+    ctx.submit(cmd)
+    return screen.read_pixels()
+
+
 def test_render_into_specific_layer(ctx, triangle_shaders, triangle_buffers):
     """A 2-layer depth target: clear-only into layer 0, triangle into layer 1.
     Sampling proves the triangle landed in layer 1 and layer 0 saw only the
@@ -176,8 +204,47 @@ def test_cube_target_makes_a_sampleable_cubemap(ctx):
     assert target.depth.array_layers == 6
 
 
-def test_msaa_with_layers_is_refused(ctx):
-    """A multisampled image can't be layered (Image forbids samples>1 + layers);
-    the ctor must reject it up front rather than at vkCreateImage."""
+def test_msaa_with_mips_is_refused(ctx):
+    """A multisampled image has no mip chain; the ctor rejects samples>1 with
+    mip_levels>1 up front rather than at vkCreateImage. (MSAA + layers is fine.)"""
     with pytest.raises(bz.ResourceError):
-        bz.RenderTarget(ctx, 16, 16, samples=4, layers=2)
+        bz.RenderTarget(ctx, 16, 16, samples=4, mip_levels=2)
+
+
+def test_msaa_layered_resolves_per_layer(ctx, triangle_shaders, triangle_buffers):
+    """samples>1 + layers=2: render a triangle into layer 1 (clear-only layer 0).
+    The multisampled attachment resolves PER LAYER into the sampleable colour
+    array — sampling proves layer 1 got the (antialiased) triangle and layer 0
+    only the clear, and the per-layer resolve is validation-clean."""
+    samples = min(4, ctx.max_samples())
+    if samples < 2:
+        pytest.skip("GPU reports no MSAA support")
+    vert, frag = triangle_shaders
+    vbuf, ibuf = triangle_buffers
+
+    clear = [0.1, 0.2, 0.3, 1.0]
+    clear_px = [round(c * 255) for c in clear[:3]]
+    target = bz.RenderTarget(ctx, 64, 64, color=bz.Format.RGBA8, depth=bz.Format.D32F,
+                             layers=2, samples=samples)
+    assert target.color[0].array_layers == 2
+
+    pipe = (ctx.graphics_pipeline()
+            .vertex_shader(vert).fragment_shader(frag)
+            .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+            .depth_test(True)
+            .build(target.layer(0)))  # picks up samples from the target
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.begin_rendering(target.layer(0), clear_color=clear)
+    cmd.end_rendering(target.layer(0))
+    cmd.begin_rendering(target.layer(1), clear_color=clear)
+    cmd.bind_pipeline(pipe).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
+    cmd.end_rendering(target.layer(1))
+    ctx.submit(cmd)
+
+    l0 = _sample_color_layer(ctx, target, 0)
+    l1 = _sample_color_layer(ctx, target, 1)
+    assert np.allclose(l0[40, 32, :3], clear_px, atol=2), "layer 0: only the clear"
+    assert np.allclose(l1[2, 2, :3], clear_px, atol=2), "layer 1 corner: clear"
+    assert not np.allclose(l1[40, 32, :3], clear_px, atol=10), "layer 1 interior: the triangle"
