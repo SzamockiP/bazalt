@@ -5,6 +5,48 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.13.0] — 2026-07-24
+
+"Render-to-layer": a graphics pass can now rasterize a scene into one
+subresource — an array layer, a cubemap face, or a mip level — of a render
+target. Compute could write layers/faces/mips since 0.10; this closes the gap
+for the raster pipeline, which is what dynamic environment capture (real-time
+reflections), cascade shadow maps, and render-to-mip are built on. A
+`RenderTarget` grows layered/cube/mipped attachments (the same `layers=` /
+`cube=` / `mip_levels=` kwargs `create_image` already had), and `target.layer(i)`
+/ `target.mip(m)` hand back a lightweight view you render into with the existing
+`cmd.rendering(...)`. The whole thing infers from the target: the attachment
+barriers narrow to the layer/mip the view covers, and `renderArea`/viewport
+follow the mip's size — no new knob on the rendering verb.
+
+### Added
+- **`layers=` / `cube=` / `mip_levels=` on `RenderTarget`.** `bz.RenderTarget(ctx,
+  w, h, color=..., depth=..., cube=True)` makes the colour attachment a cubemap
+  (so `target.color[0]` samples as a `samplerCube`) with a matching 6-layer depth
+  buffer; `layers=N` makes every attachment an N-layer array; `mip_levels=M`
+  allocates the mip chain. Mirrors `create_image` exactly.
+- **`target.layer(i)` / `target.mip(m)`.** A lightweight `RenderTarget` view of one
+  array layer / cube face / mip level, passed straight to `cmd.rendering(...)`.
+  Cube face `i` is layer `i`, Vulkan order `+X, -X, +Y, -Y, +Z, -Z`. The pass
+  transitions and covers exactly that subresource — a `.mip(m)` pass renders at
+  the mip's own size.
+- **Examples `16_env_capture` and `17_cascade_shadows`.** Real-time cubemap
+  reflection and a 3-cascade shadow array, both driven by `target.layer(i)`.
+
+### Notes
+- **No breaking changes** — additive. `layers`/`cube`/`mip_levels` default to the
+  scalar case, and a target with none of them is byte-for-byte the previous
+  behaviour (the new subresource defaults reproduce the values the attachment
+  barriers used to hardcode).
+- **Single-sample.** `samples>1` cannot combine with `layers`/`cube`/`mip_levels`
+  (a multisampled image can't be layered); the constructor rejects it. Per-layer
+  MSAA + resolve is a separate future feature.
+- **Deliberate ceilings.** One axis per slice (`.layer(i)` or `.mip(m)`, not both
+  at once). The attachment `Image` holds one layout for the whole image, so render
+  every layer/mip you intend to sample before sampling a layered target — sampling
+  a partially rendered one is undefined and validation flags it. Single-pass
+  render-to-all-layers (multiview) is not used; one pass per layer.
+
 ## [0.12.0] — 2026-07-24
 
 "MSAA": hardware multisampling, the last effect of the resource/renderer phase.
