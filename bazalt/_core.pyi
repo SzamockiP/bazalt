@@ -361,7 +361,8 @@ class RenderTarget(RenderTargetBase):
     def __init__(self, context: Context, width: int, height: int,
                  color: Optional[Format | Sequence[Format]] = Format.RGBA8,
                  depth: Optional[Format] = None,
-                 samples: int = 1, name: str = "") -> None:
+                 samples: int = 1, *, layers: int = 1, cube: bool = False,
+                 mip_levels: int = 1, name: str = "") -> None:
         """color=None with depth=D32F makes a depth-only (shadow) target;
         a list of formats makes an MRT target. At least one attachment is
         required.
@@ -370,6 +371,13 @@ class RenderTarget(RenderTargetBase):
         resolves into target.color/target.depth (which stay single-sample and
         sampleable — depth resolves too, via SAMPLE_ZERO). Must be a power of two
         <= ctx.max_samples(). name labels the attachments in validation messages.
+
+        layers>1 / cube=True / mip_levels>1 make the attachments layered / cube /
+        mipped so a scene can be rasterized into one subresource with .layer(i) /
+        .mip(m) (render-to-layer / render-to-mip: dynamic env capture, cascade
+        shadows). cube fixes 6 square layers and gives the colour attachment a
+        CUBE view so target.color[0] samples as a cubemap. Single-sample only:
+        samples>1 cannot combine with layers/cube/mip_levels this release.
         """
         ...
 
@@ -382,6 +390,18 @@ class RenderTarget(RenderTargetBase):
     def width(self) -> int: ...
     @property
     def height(self) -> int: ...
+
+    def layer(self, index: int) -> RenderTargetBase:
+        """A view of one array layer / cube face of this target, to render into
+        with cmd.rendering(target.layer(i)). Cube face i == layer i, Vulkan order
+        +X, -X, +Y, -Y, +Z, -Z. Render every layer you intend to sample before
+        sampling target.color / target.depth."""
+        ...
+
+    def mip(self, level: int) -> RenderTargetBase:
+        """A view of one mip level of this target, to render into with
+        cmd.rendering(target.mip(m)). The pass covers exactly that mip's size."""
+        ...
 
     def read_pixels(self) -> np.ndarray:
         """Copy the colour attachment back to host memory as (height, width, 4) uint8.

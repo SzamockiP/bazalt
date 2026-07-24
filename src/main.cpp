@@ -1818,6 +1818,9 @@ PYBIND11_MODULE(_core, m)
                    py::object color,
                    py::object depth,
                    std::uint32_t samples,
+                   std::uint32_t layers,
+                   bool cube,
+                   std::uint32_t mip_levels,
                    const std::string& name)
                 {
                     std::vector<Format> colors;
@@ -1853,7 +1856,8 @@ PYBIND11_MODULE(_core, m)
                     }
 
                     return unwrap(
-                        OffscreenTarget::create(context, width, height, std::move(colors), depth_format, samples, name),
+                        OffscreenTarget::create(
+                            context, width, height, std::move(colors), depth_format, samples, layers, cube, mip_levels, name),
                         context.logger().get());
                 }),
             py::arg("context"),
@@ -1862,6 +1866,10 @@ PYBIND11_MODULE(_core, m)
             py::arg("color") = Format::RGBA8,
             py::arg("depth") = py::none(),
             py::arg("samples") = 1,
+            py::kw_only(),
+            py::arg("layers") = 1,
+            py::arg("cube") = false,
+            py::arg("mip_levels") = 1,
             py::arg("name") = "")
         .def_property_readonly("width", [](const OffscreenTarget& t) { return t.extent().width; })
         .def_property_readonly("height", [](const OffscreenTarget& t) { return t.extent().height; })
@@ -1892,7 +1900,20 @@ PYBIND11_MODULE(_core, m)
                     raise_error(err_resource("read_pixels() on a depth-only RenderTarget; read target.depth instead"));
                 }
                 return image_to_numpy(*self.colors()[0]);
-            });
+            })
+        // Render-to-layer / render-to-mip: a lightweight view of one subresource.
+        // Pass it straight to cmd.rendering(...). Cube face i == layer i, Vulkan
+        // order +X, -X, +Y, -Y, +Z, -Z.
+        .def(
+            "layer",
+            [](std::shared_ptr<OffscreenTarget> self, std::uint32_t index)
+            { return unwrap(self->layer(index), nullptr); },
+            py::arg("index"))
+        .def(
+            "mip",
+            [](std::shared_ptr<OffscreenTarget> self, std::uint32_t level)
+            { return unwrap(self->mip(level), nullptr); },
+            py::arg("level"));
 
     // ── SwapchainRenderer ──
     // Inherits RenderTarget: presenting to a window is one way to consume a

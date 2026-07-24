@@ -25,7 +25,7 @@ def _sample_depth_layer(ctx, target, layer):
     universally filter."""
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     view_frag = ctx.compile_shader(str(SHADER_DIR / "depth_array_view.frag"), bz.ShaderStage.FRAGMENT)
-    screen = bz.RenderTarget(ctx, target.width(), target.height())
+    screen = bz.RenderTarget(ctx, target.width, target.height)
     pipe = (ctx.graphics_pipeline()
             .vertex_shader(fullscreen)
             .fragment_shader(view_frag)
