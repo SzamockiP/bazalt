@@ -410,8 +410,8 @@ class RenderTarget(RenderTargetBase):
         renders into EVERY layer in ONE pass instead of a pass per layer. The
         shader selects per-layer work with gl_ViewIndex (e.g. a per-face matrix
         for cube capture). Needs a layered target and ctx.supports_multiview();
-        single-sample only (no MSAA). Renders every layer, so the result is fully
-        sampleable with no partial-render caveat."""
+        composes with MSAA (each view resolves into its own layer). Renders every
+        layer, so the result is fully sampleable with no partial-render caveat."""
         ...
 
     def read_pixels(self) -> np.ndarray:

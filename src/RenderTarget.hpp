@@ -515,11 +515,21 @@ public:
     }
 
     // Multiview attachment views: a 2D_ARRAY view over ALL layers at mip 0, what a
-    // MultiviewTarget renders every layer through in one pass.
+    // MultiviewTarget renders every layer through in one pass. The *_resolve_ ones
+    // are the single-sample resolve targets (null without MSAA) — a multiview MSAA
+    // pass resolves every view into the matching resolve layer.
     VkImageView color_array_view(std::uint32_t attachment)
     {
         const auto& image = msaa_colors_.empty() ? colors_[attachment] : msaa_colors_[attachment];
         return view_(image, VK_IMAGE_ASPECT_COLOR_BIT, 0, layers_, 0);
+    }
+    VkImageView color_resolve_array_view(std::uint32_t attachment)
+    {
+        if (msaa_colors_.empty())
+        {
+            return VK_NULL_HANDLE;
+        }
+        return view_(colors_[attachment], VK_IMAGE_ASPECT_COLOR_BIT, 0, layers_, 0);
     }
     VkImageView depth_array_view()
     {
@@ -529,6 +539,14 @@ public:
             return VK_NULL_HANDLE;
         }
         return view_(image, VK_IMAGE_ASPECT_DEPTH_BIT, 0, layers_, 0);
+    }
+    VkImageView depth_resolve_array_view()
+    {
+        if (!msaa_depth_)
+        {
+            return VK_NULL_HANDLE;
+        }
+        return view_(depth_, VK_IMAGE_ASPECT_DEPTH_BIT, 0, layers_, 0);
     }
     std::uint32_t array_layers() const
     {
@@ -545,7 +563,7 @@ public:
 
     // Multiview: render into EVERY layer in one pass (the shader keys per-view work
     // off gl_ViewIndex) instead of a pass per layer. Needs a layered target and the
-    // multiview GPU feature; single-sample only for now.
+    // multiview GPU feature; composes with MSAA (resolves each view per layer).
     std::expected<std::shared_ptr<RenderTarget>, Error> all_layers();
 
 private:
@@ -730,9 +748,9 @@ private:
 // Renders into EVERY layer of an OffscreenTarget in one pass via multiview — what
 // target.all_layers() hands back. The attachment views span all layers (2D_ARRAY),
 // view_mask() lights one bit per layer, and the barriers cover the whole array; the
-// shader selects per-layer work with gl_ViewIndex. Single-sample (all_layers rejects
-// MSAA parents), and because it renders every layer, the whole-image sampleable mark
-// is exactly correct — no partial-render caveat.
+// shader selects per-layer work with gl_ViewIndex. Composes with MSAA (each view
+// resolves into its own layer), and because it renders every layer, the whole-image
+// sampleable mark is exactly correct — no partial-render caveat.
 class MultiviewTarget : public RenderTarget
 {
 public:
@@ -777,6 +795,31 @@ public:
     {
         const std::uint32_t n = parent_->array_layers();
         return n >= 32 ? 0xFFFFFFFFu : ((1u << n) - 1u);
+    }
+
+    // MSAA composes with multiview: one pass renders every layer of the
+    // multisampled attachment and resolves each view into the matching resolve
+    // layer. The array views span all layers, so the resolve is per-view. Without
+    // MSAA these come back 1 / VK_NULL_HANDLE from the parent (resolve wiring off).
+    VkSampleCountFlagBits samples() const override
+    {
+        return parent_->samples();
+    }
+    VkImage color_resolve_image(std::uint32_t i) const override
+    {
+        return parent_->color_resolve_image(i);
+    }
+    VkImageView color_resolve_view(std::uint32_t i) const override
+    {
+        return parent_->color_resolve_array_view(i);
+    }
+    VkImage depth_resolve_image() const override
+    {
+        return parent_->depth_resolve_image();
+    }
+    VkImageView depth_resolve_view() const override
+    {
+        return parent_->depth_resolve_array_view();
     }
 
     Subresource color_subresource() const override
@@ -842,11 +885,6 @@ inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::all_
     {
         return std::unexpected(err_resource(
             "all_layers() needs a layered target (layers>1 or cube); this target has 1 layer"));
-    }
-    if (samples_ != VK_SAMPLE_COUNT_1_BIT)
-    {
-        return std::unexpected(err_resource(
-            "all_layers() (multiview) does not support MSAA yet; use samples=1 or render layer by layer"));
     }
     return std::make_shared<MultiviewTarget>(shared_from_this());
 }

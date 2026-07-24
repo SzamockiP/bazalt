@@ -212,14 +212,43 @@ def test_multiview_renders_all_layers_in_one_pass(ctx):
         assert np.allclose(px[16, 16, :3], expected, atol=2), f"layer {i}: {px[16, 16, :3]}"
 
 
-def test_all_layers_refuses_non_layered_and_msaa(ctx):
+def test_all_layers_refuses_non_layered(ctx):
     if not ctx.supports_multiview():
         pytest.skip("GPU reports no multiview support")
     with pytest.raises(bz.ResourceError):
         bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA8).all_layers()  # 1 layer
-    if ctx.max_samples() >= 2:
-        with pytest.raises(bz.ResourceError):
-            bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA8, layers=2, samples=2).all_layers()  # MSAA
+
+
+def test_msaa_multiview_resolves_all_layers(ctx):
+    """MSAA + multiview: ONE pass renders all 3 layers of a multisampled target,
+    each resolving into its own layer of the sampleable array (gl_ViewIndex colours
+    each). Sampling the resolved array per layer proves the per-view resolve is
+    validation-clean."""
+    if not ctx.supports_multiview():
+        pytest.skip("GPU reports no multiview support")
+    samples = min(4, ctx.max_samples())
+    if samples < 2:
+        pytest.skip("GPU reports no MSAA support")
+
+    fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+    mv_frag = ctx.compile_shader(str(SHADER_DIR / "multiview_color.frag"), bz.ShaderStage.FRAGMENT)
+
+    target = bz.RenderTarget(ctx, 32, 32, color=bz.Format.RGBA8, layers=3, samples=samples)
+    pipe = (ctx.graphics_pipeline()
+            .vertex_shader(fullscreen)
+            .fragment_shader(mv_frag)
+            .build(target.all_layers()))  # picks up both samples and view mask
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target.all_layers(), clear_color=[0, 0, 0, 1]) as c:
+        c.bind_pipeline(pipe).draw(3)
+    ctx.submit(cmd)
+
+    for i in range(3):
+        px = _sample_color_layer(ctx, target, i)
+        expected = [round(i / 4 * 255), 64, 128]
+        assert np.allclose(px[16, 16, :3], expected, atol=3), f"layer {i}: {px[16, 16, :3]}"
 
 
 def test_layer_out_of_range_is_refused(ctx):
