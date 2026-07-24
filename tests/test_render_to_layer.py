@@ -134,6 +134,27 @@ def test_render_into_mip(ctx):
             f"mip {m}: {screen.read_pixels()[4, 4, :3]}"
 
 
+def test_render_into_layer_and_mip(ctx):
+    """Combined axes: a layered AND mipped target, render into (layer 1, mip 1).
+    Same SubresourceTarget machinery as the single-axis slices — this pins that
+    both can be selected at once and the pass is validation-clean (the view and
+    the barrier must agree on {layer 1, mip 1}, or the ctx fixture flags it)."""
+    target = bz.RenderTarget(ctx, 32, 32, color=bz.Format.RGBA8, layers=2, mip_levels=2)
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.begin_rendering(target.layer(1, mip=1), clear_color=[1, 0, 0, 1])
+    cmd.end_rendering(target.layer(1, mip=1))
+    ctx.submit(cmd)
+
+
+def test_combined_axis_bounds_are_checked(ctx):
+    target = bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA8, layers=2, mip_levels=2)
+    with pytest.raises(bz.ResourceError):
+        target.layer(0, mip=2)
+    with pytest.raises(bz.ResourceError):
+        target.layer(2, mip=0)
+
+
 def test_layer_out_of_range_is_refused(ctx):
     target = bz.RenderTarget(ctx, 16, 16, depth=bz.Format.D32F, layers=2)
     with pytest.raises(bz.ResourceError):

@@ -391,11 +391,13 @@ class RenderTarget(RenderTargetBase):
     @property
     def height(self) -> int: ...
 
-    def layer(self, index: int) -> RenderTargetBase:
-        """A view of one array layer / cube face of this target, to render into
-        with cmd.rendering(target.layer(i)). Cube face i == layer i, Vulkan order
-        +X, -X, +Y, -Y, +Z, -Z. Render every layer you intend to sample before
-        sampling target.color / target.depth."""
+    def layer(self, index: int, mip: int = 0) -> RenderTargetBase:
+        """A view of one array layer / cube face (and optionally one mip) of this
+        target, to render into with cmd.rendering(target.layer(i)). `mip=` selects
+        a level for a layered AND mipped target (e.g. a mipped cube for prefiltered
+        reflections). Cube face i == layer i, Vulkan order +X, -X, +Y, -Y, +Z, -Z.
+        Render every layer you intend to sample before sampling target.color /
+        target.depth."""
         ...
 
     def mip(self, level: int) -> RenderTargetBase:

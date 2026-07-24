@@ -1906,9 +1906,10 @@ PYBIND11_MODULE(_core, m)
         // order +X, -X, +Y, -Y, +Z, -Z.
         .def(
             "layer",
-            [](std::shared_ptr<OffscreenTarget> self, std::uint32_t index)
-            { return unwrap(self->layer(index), nullptr); },
-            py::arg("index"))
+            [](std::shared_ptr<OffscreenTarget> self, std::uint32_t index, std::uint32_t mip)
+            { return unwrap(self->layer(index, mip), nullptr); },
+            py::arg("index"),
+            py::arg("mip") = 0)
         .def(
             "mip",
             [](std::shared_ptr<OffscreenTarget> self, std::uint32_t level)

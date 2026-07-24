@@ -483,9 +483,11 @@ public:
     }
 
     // Bounds-checked slices. Returned as a RenderTargetBase (the view is a
-    // RenderTarget), so it passes straight into cmd.rendering(...). The other axis
-    // is pinned to 0: one axis per slice this release (.layer(i).mip(m) deferred).
-    std::expected<std::shared_ptr<RenderTarget>, Error> layer(std::uint32_t i);
+    // RenderTarget), so it passes straight into cmd.rendering(...). `layer(i, mip)`
+    // is the general form (both axes); `mip(m)` is sugar for layer 0. A layered
+    // AND mipped target (e.g. a mipped cube for prefiltered reflections) needs the
+    // combined form.
+    std::expected<std::shared_ptr<RenderTarget>, Error> layer(std::uint32_t i, std::uint32_t mip = 0);
     std::expected<std::shared_ptr<RenderTarget>, Error> mip(std::uint32_t m);
 
 private:
@@ -641,14 +643,19 @@ private:
     std::uint32_t mip_;
 };
 
-inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::layer(std::uint32_t i)
+inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::layer(std::uint32_t i, std::uint32_t mip)
 {
     if (i >= layers_)
     {
         return std::unexpected(err_resource(
             std::format("layer {} is out of range; this target has {} layer(s)", i, layers_)));
     }
-    return std::make_shared<SubresourceTarget>(shared_from_this(), i, 0);
+    if (mip >= mip_levels_)
+    {
+        return std::unexpected(err_resource(
+            std::format("mip {} is out of range; this target has {} mip level(s)", mip, mip_levels_)));
+    }
+    return std::make_shared<SubresourceTarget>(shared_from_this(), i, mip);
 }
 
 inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::mip(std::uint32_t m)
