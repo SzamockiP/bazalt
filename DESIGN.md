@@ -93,6 +93,38 @@ entry. The release is a label, not the organizing axis.
   the state of its own window, and the pump is what updates that state. A call with no
   window raises `WindowError` instead of doing nothing silently.
 
+- **A window mode is one enum and one verb** (0.16). `WindowMode` has four
+  exclusive states (`WINDOWED`, `FRAMELESS`, `FULLSCREEN`, `FULLSCREEN_WINDOWED`) and
+  `set_mode` applies any of them. A `set_fullscreen` plus a `set_decorated` would spell
+  two of the four states twice and leave the caller to invent the rules for combining
+  them. It is a verb rather than a settable property for two reasons: the class already
+  spells mutation that way (`set_title`, `set_cursor_mode`), and this one can fail, so an
+  assignment that raises `WindowError` would read worse than a call that does.
+
+  `FULLSCREEN_WINDOWED` earns its place as a fourth value instead of being composed from
+  `FRAMELESS` plus `set_size`: it costs about five lines, and composing it would force
+  monitor geometry into the public API. `FULLSCREEN` is **not** exclusive fullscreen —
+  see the accepted ceilings.
+
+  The constructor takes `mode=` and then goes through `set_mode` itself, so opening
+  fullscreen and switching to fullscreen cannot drift apart, and the requested
+  width/height are always what `WINDOWED` returns to.
+
+- **The swapchain learns about a mode change the same way it learns about a resize**
+  (0.16). Every mode change resizes the framebuffer, `framebuffer_resize_callback` records
+  it, and `present()` consumes the flag. This is why the release needed no Renderer
+  change: the 0.14 resize path was already the general case.
+
+- **Per-cycle input rotates on read, driven by the reader** (0.16). `poll_events()`
+  increments one process-wide generation counter. Each Window keeps `pending_` (appended
+  by the GLFW callbacks), `current_`, and the generation it last saw; any query with a
+  stale generation promotes `pending_` to `current_`. One counter serves the key edges,
+  the mouse delta and the scroll, because all three are the same problem: state that
+  accumulates during a cycle and must read the same twice inside it.
+
+  The callbacks must never rotate. One that did would mark the generation seen halfway
+  through a cycle and hide every later event of the same cycle.
+
 - **`Device` is dead data** (0.14). `bz.list_devices()` builds a bare VkInstance,
   enumerates, destroys it and returns `list[Device]`. `Context(device=)` then matches on
   `deviceUUID` inside its own instance. `Device` holds neither `VkPhysicalDevice` nor
@@ -161,6 +193,42 @@ entry. The release is a label, not the organizing axis.
 - **MSAA composes with layers and with multiview, but not with mips** (0.13). A layered
   multisampled attachment resolves per layer, and a multiview one resolves per view. Only
   `mip_levels>1` is forbidden with MSAA.
+
+- **`clear_color=None` means preserve, and it is a third state** (0.16). The parameter is
+  an `optional<vector<...>>`: `nullopt` preserves, an empty vector still clears to black,
+  a filled one clears to those colours. They have to stay distinct all the way down,
+  because `None` used to normalise to the same empty vector as `[]`. Colour and depth
+  preserve together — splitting them would put two knobs on the verb for one question,
+  and the multi-pass case wants both.
+
+  Three things a naive version gets wrong, and all three are the actual work:
+
+  1. **The entry barrier cannot use `UNDEFINED`.** That is correct precisely *because*
+     the pass clears, and with `LOAD_OP_LOAD` it discards what is about to be loaded.
+     Preserving takes `oldLayout` from `final_layout()` / `depth_final_layout()` — the
+     layout `end_rendering` retires to — and a source stage covering both ways the image
+     can have got there: written by an earlier pass, or sampled since.
+  2. **The depth store-op became unconditional `STORE`.** It was `DONT_CARE` unless the
+     depth would be consumed, which is cheaper and wrong the moment a second pass loads:
+     the depth is undefined as soon as the first pass ends, so opaque-then-transparent
+     would z-test against garbage. This is the one place the feature costs something for
+     everybody.
+  3. **MSAA plus preserve is rejected, not supported.** The multisampled image is
+     transient and the result lives in the resolve image, which is not what the next pass
+     renders into. The guard lives in `main.cpp` for the same reason as the
+     cross-Context one: it catches a user error, and the recording methods chain.
+
+  Not guarded, and documented instead: a recording whose *only* pass preserves reads an
+  acquired swapchain image, whose contents are undefined at frame start. Same shape as
+  the existing replay rule below.
+
+- **A new pipeline knob is a kwarg on the verb that already owns the question** (0.16).
+  `blend(True, mode=)`, `depth_test(enable, write=, compare=)` and `polygon_mode(mode)`.
+  `depth_test` reuses the `CompareOp` the compare samplers introduced in 0.11 rather than
+  declaring a second eight-value enum, which is what that enum's own comment predicted.
+  `depthWriteEnable` stays gated on `depth_test` as well as on `write`: Vulkan permits
+  writing depth with the test off, and `depth_test(False)` has always meant "this pass has
+  nothing to do with depth".
 
 - **The pipeline infers sample count and formats from its target** (0.12). No parallel knobs
   on the builder. The target is the single source, so the two cannot disagree.
@@ -231,6 +299,20 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
 - **A cross-Context transfer goes through host memory and blocks the source queue** (0.15).
   Without `external_memory` there is no portable alternative, so the documentation calls it
   a setup operation.
+- **`FULLSCREEN` is not exclusive fullscreen** (0.16). It takes the monitor and its
+  current video mode, but the swapchain stays composited, because exclusive fullscreen
+  needs `VK_EXT_full_screen_exclusive`. Upgrade path: a `Feature`, not a fifth
+  `WindowMode` — it is a property of the swapchain, not of the window.
+- **Fullscreen picks the monitor, and nothing picks the video mode** (0.16). The monitor
+  is the one the window overlaps most, which is the difference between "works" and
+  "fullscreens on the other screen". A `monitor=` argument and video-mode enumeration
+  (resolution and refresh rate) are deferred until somebody asks. Upgrade path: both are
+  additive.
+- **A preserved second pass re-transitions the attachment** (0.16). Pass 1 retires the
+  image to `final_layout()` and pass 2 brings it back, so N passes cost N round trips
+  instead of staying in `COLOR_ATTACHMENT_OPTIMAL`. It reuses the existing RenderTarget
+  contract rather than inventing a "this pass may continue" state. Upgrade path: a
+  recording-wide look-ahead, which is the same machinery the depth store-op would want.
 - **Per-subresource layout tracking does not exist in `Image`** (debt #3 territory). It
   touches the core and the gain is small, because it only removes the loud edge of a partial
   render.
@@ -256,12 +338,8 @@ big feature. Each one needs a decision.
 
 **Ranked first by rule 4, because they make effects:**
 
-- **Blend modes.** `blend(enable)` is a bool hard-wired to alpha today (`SRC_ALPHA` and
-  `ONE_MINUS_SRC_ALPHA`). The lack of additive and premultiplied blending hurts immediately
-  with particles and glow. Rule 1 says a kwarg on the existing `blend()`, not a new method.
-- **`depth_write` / `depth_compare`.** `depthWriteEnable` is glued to `depth_test`, and
-  `depthCompareOp` is hard-coded to `LESS_OR_EQUAL`. `depth_test(True, write=False)` is a
-  condition for a correct transparency pass.
+- ✅ **Blend modes** — DONE in 0.16 (`blend(enable, mode=)`).
+- ✅ **`depth_write` / `depth_compare`** — DONE in 0.16 (`depth_test(enable, write=, compare=)`).
 - **Fragment-shader storage images.** Reachable today with a manual image barrier
   (`cmd.barrier`, since 0.10). Auto-tracking needs SPIR-V reflection, so this arrives with
   debt #3.
@@ -333,6 +411,24 @@ says what we did instead.
   per loop.
 - **A per-window `poll_events`** (0.14). Impossible, not merely undesirable:
   `glfwPollEvents(void)` takes no window and the message queue is per thread.
+- **Consuming the input state on read** (0.16). It needs no generation counter at all, and
+  `was_key_pressed(KEY_F11)` twice in one frame answers True then False. A query whose
+  answer depends on how many times you asked is a trap, not an API. We rotate on a
+  generation instead, which makes every per-cycle read idempotent.
+- **A registry of live windows that `poll_events` clears** (0.16). The obvious way to reset
+  per-cycle state, and it needs a global mutable list plus a lock, for work the reader can
+  do itself with one comparison. The reader also gets the better semantics for free: a
+  frame that never reads keeps its events instead of dropping them.
+- **`set_fullscreen(bool)` plus `set_decorated(bool)`** (0.16). Four exclusive states out
+  of two bools spells two of them twice and leaves the combination rules to the caller. We
+  took one enum and one verb.
+- **A settable `window.mode` property** (0.16). The class spells mutation as `set_*`
+  already, and this one can fail — an assignment that raises `WindowError` is worse than a
+  call that does.
+- **A `preserve=` or `load=` bool beside `clear_color`** (0.16). It would let a caller ask
+  for both at once, and the answer to "what does this pass do with the old contents" is
+  single-valued. `clear_color=None` says it with the parameter that already owns the
+  question.
 - **`with cmd.compute()`** — a compute dispatch has no teardown, so a context manager would
   be a false symmetry. Chaining covers the aesthetics.
 - **String keys anywhere the Vulkan primitive is an index or a handle** — return a handle
@@ -382,6 +478,22 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   function needs state that every caller already has, take it as a parameter
   (`record_image_transition(vk, cmd, …)`), do not reach for a global.
 
+- **A query that reports a change must be idempotent within the frame.** The level/edge
+  pair (`is_key_pressed` / `was_key_pressed`) and the mouse delta are all "what happened
+  since the last cycle", and the tempting implementation clears on read. Rotate on a
+  cycle counter instead: two call sites in one frame is normal code, not misuse.
+
+- **One mechanism for everything that expires at the same moment.** The scroll wheel, the
+  key edges and the mouse delta looked like three features and were one: state accumulated
+  during a poll cycle. Finding the shared lifetime turned three implementations into one
+  counter, and it is why the 0.16 input work was small.
+
+- **A default argument can change the behaviour of an existing call.** `depth_test(enable)`
+  derived `depthWriteEnable` from `enable`; adding `write=True` would have made
+  `depth_test(False)` write depth with the test off, which is legal Vulkan and nobody's
+  intent. The new state is gated on the old one (`depth_test && depth_write`). Check what
+  an added parameter's default does to every call that predates it.
+
 ### Mechanical refactors
 
 - **Make sure the old road STOPS working.** A compiler cannot check the replacement of 131
@@ -419,6 +531,18 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   is re-established every frame, and the tracker does not carry contents between submits.
 - **The tracker keys on `Buffer*` and `Image*`** — object identity, not `VkBuffer`, because
   a DynamicBuffer has a per-frame handle.
+
+- **A `VkAttachmentLoadOp` and the entry barrier are one decision.** `UNDEFINED` as
+  `oldLayout` is not a shortcut, it is a *discard*, and it is correct only while the pass
+  clears. Any new load-op has to be read together with the barrier above it, and with the
+  store-op of whatever ran before.
+
+- **`VK_POLYGON_MODE_LINE` is not core-mandatory.** It needs `fillModeNonSolid`, which every
+  desktop driver has and some mobile ones do not, so the wireframe view is a `Feature`
+  (`WIREFRAME`, already in the table since 0.5) and not a free rasterizer flag. This was
+  caught by the validation-as-assert fixture on the first run, not by reading the spec —
+  which is the argument for the fixture. General form: "it is core Vulkan" and "it needs no
+  feature bit" are different claims.
 
 ### pybind, C++ and lifetime
 
@@ -491,6 +615,17 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
 - **Two swapchains need two surfaces**, so `test_multi_window.py` skips without a display and
   runs locally with validation as the referee. A small automated-test yield is a property of
   that feature, not neglect.
+
+- **OS input cannot be synthesized**, so `test_window_input.py` pins the half that is ours:
+  a per-cycle query is repeatable inside one frame, and it starts at rest. The keystrokes
+  themselves are covered by running `examples/21_window_modes`. Do not mistake the thin
+  input tests for the window-mode tests in the same file, which *are* real: each mode
+  renders a frame with validation as the referee.
+
+- **A pixel test for new pipeline state has to be two-sided.** Render the same geometry with
+  and without the setting and compare, because a knob that silently does nothing otherwise
+  passes: `polygon_mode(LINE)` is checked against the FILL pixel count, and
+  `depth_test(write=False)` against the same pair with `write=True`.
 
 ---
 

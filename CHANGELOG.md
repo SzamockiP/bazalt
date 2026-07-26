@@ -5,6 +5,91 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.16.0] — 2026-07-27
+
+"Window modes and input": a window switches between windowed, frameless and two
+fullscreen modes while the application runs. The swapchain half of that needed no
+new code. A mode change resizes the framebuffer, and the resize path already
+recreates the swapchain, so the work was the window state and the monitor choice.
+
+Two input gaps blocked the feature's own demo. There was no scroll wheel at all,
+and `is_key_pressed` reports the level, so an F11 toggle needed a hand-written
+"was it down last frame" flag. Both are fixed by one mechanism: `poll_events()`
+counts its cycles, and every per-cycle query promotes what the callbacks
+collected the first time it is read in a new cycle. One counter serves the key
+edges, the mouse delta and the scroll.
+
+Alongside them, four things the pipeline and the pass used to hard-code: the
+load-op, the blend mode, the depth write flag with its compare op, and the
+polygon mode.
+
+One break, and it is the mouse delta. See **Changed**.
+
+### Added
+- **`WindowMode`.** `window.set_mode(bz.WindowMode.FULLSCREEN)` and
+  `bz.Window(..., mode=)`. Four exclusive states: `WINDOWED`, `FRAMELESS`,
+  `FULLSCREEN` and `FULLSCREEN_WINDOWED`. `WINDOWED` returns to the position and
+  size the window had before it left that mode. Fullscreen takes the monitor the
+  window covers most of, so a two-display setup gets the display the window is
+  on. This is not exclusive fullscreen: the swapchain stays composited, because
+  exclusive fullscreen needs `VK_EXT_full_screen_exclusive`.
+- **Window attributes.** `set_size`, `set_position`, `set_resizable`,
+  `set_always_on_top`, `set_opacity`, and the `position`, `resizable`,
+  `always_on_top`, `opacity` and `content_scale` properties. `content_scale` is
+  framebuffer pixels per screen coordinate, which is why `window.width` and the
+  swapchain extent can disagree on a HiDPI display.
+- **`window.was_key_pressed(key)` and `was_mouse_button_pressed(button)`.** The
+  edge, where the existing queries give the level. Auto-repeat is not an edge.
+  Reading twice inside one frame gives the same answer.
+- **The scroll wheel.** `MouseState` gains `scroll_dx` and `scroll_dy`, plus `x`
+  and `y` for the cursor position. There was no scroll callback before this.
+- **`cmd.rendering(target, clear_color=None)`.** Preserves the colour and the
+  depth instead of clearing them, which is what puts a second pass on one
+  target: opaque, then transparent, then a UI. The first pass of a frame must
+  still clear, because an acquired swapchain image starts undefined. Raises
+  `ResourceError` on a multisampled target, which has nothing to preserve.
+- **`renderer.set_present_mode(mode)`.** Switches vsync at runtime through the
+  swapchain recreation that already existed. The mode stays a preference, so
+  `present_mode` still reports what the driver gave you.
+- **`blend(enable, mode=)`.** `BlendMode.ALPHA` is the previous behaviour and
+  the default. `ADDITIVE` accumulates, which is what particles and glow need.
+  `PREMULTIPLIED` composites a colour that already carries its alpha.
+- **`depth_test(enable, write=, compare=)`.** `write=False` tests without
+  writing, which a transparency pass needs. `compare=` replaces the
+  `LESS_OR_EQUAL` that used to be fixed, and it reuses the `CompareOp` the
+  compare samplers already had. `depth_test(False)` still writes nothing.
+- **`polygon_mode(mode)`.** `PolygonMode.LINE` is the wireframe view. It needs
+  the `WIREFRAME` feature (`fillModeNonSolid`), so ask for it with
+  `Context(optional=[bz.Feature.WIREFRAME])` and `build()` says so if it is
+  missing.
+- **Example `21_window_modes`.** Cycles every window mode, toggles wireframe and
+  vsync, zooms with the wheel, and draws its bar in a second preserved pass with
+  additive blending.
+
+### Changed
+- **`MouseState.dx` and `.dy` are the delta for the last poll cycle**, not a
+  running total since the window opened. Every caller used to subtract the
+  previous total to get a frame delta, and eight examples carried the same three
+  lines to do it. Those lines are gone. If you kept a `last_mouse_dx`, delete it
+  and read `mouse.dx`.
+- **The depth attachment is always stored.** It used to be `DONT_CARE` unless
+  the depth would be sampled later. That is cheaper right up until a second pass
+  preserves it, where it makes the depth undefined the moment the first pass
+  ends. The cost is depth bandwidth on a tiled GPU.
+
+### Notes
+- **The input rotation is driven by the reader, not by `poll_events()`.**
+  `poll_events()` has no list of live windows, and giving it one means a global
+  mutable list plus a lock for work a query can do itself. Consuming the state
+  on read was the other option, and it answers `was_key_pressed` True then False
+  inside one frame, which is a trap.
+- **`set_present_mode` refuses to run between `acquire()` and `present()`**, and
+  raises `ResourceError` naming the reason. Recreating the swapchain there would
+  free the image the frame is holding.
+- **The window tests need a display**, so CI skips them, the same as the
+  multi-window tests. The load-op and the pipeline state are headless and run
+  everywhere.
+
 ## [0.15.0] — 2026-07-26
 
 "Multi-context / multi-GPU": any number of Contexts can be alive at once, on the
