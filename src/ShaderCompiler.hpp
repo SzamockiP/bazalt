@@ -147,8 +147,8 @@ public:
     {
         if (module_ != VK_NULL_HANDLE && context_)
         {
-            context_->defer_destroy([device = context_->device(), old = module_]
-                                    { vkDestroyShaderModule(device, old, nullptr); });
+            context_->defer_destroy([vk = &context_->vk(), device = context_->device(), old = module_]
+                                    { vk->vkDestroyShaderModule(device, old, nullptr); });
         }
         module_ = module;
         includes_ = std::move(includes);
@@ -160,7 +160,7 @@ private:
     {
         if (module_ != VK_NULL_HANDLE && context_)
         {
-            vkDestroyShaderModule(context_->device(), module_, nullptr);
+            context_->vk().vkDestroyShaderModule(context_->device(), module_, nullptr);
         }
     }
 
@@ -496,7 +496,7 @@ private:
 
         VkShaderModule vk_module;
         if (auto e = check(
-                vkCreateShaderModule(context.device(), &createInfo, nullptr, &vk_module),
+                context.vk().vkCreateShaderModule(context.device(), &createInfo, nullptr, &vk_module),
                 "create shader module",
                 ErrorCode::Shader))
         {

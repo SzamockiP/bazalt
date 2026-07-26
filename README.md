@@ -33,6 +33,7 @@ and the Vulkan SDK.
 - **Render-to-Texture, MRT & Shadow Maps:** Target attachments are ordinary `Image` objects in any supported `Format` — sample `target.color[0]` or a depth-only target's `target.depth` like any texture.
 - **Multi-Window:** one Context drives any number of windows. `ctx.begin_frame()` opens the frame; each window does `renderer.acquire()` / `renderer.present(cmd)` and owns its own swapchain, so resizing or closing one leaves the others rendering. See `examples/19_multi_window`.
 - **Pick Your GPU:** `bz.list_devices()` lists every card (name, type, VRAM, API version, per-feature support) before a Context exists; `Context(device=...)` runs on the one you chose. Omit it and bazalt picks for you, as before.
+- **Multi-Context / Multi-GPU:** any number of Contexts can be alive at once, on the same card or on different ones — bake in compute on one GPU, render on the other. `other_ctx.create_image(image)` moves the pixels across, carrying format, layers and cube-ness with them. Resources otherwise stay with their Context: hand one to the wrong command buffer and you get a `ResourceError` naming the mistake, not a driver crash. See `examples/20_multi_context`.
 - **Runs Widely:** Vulkan 1.2 baseline with 1.3 used where available, so bazalt runs on older integrated GPUs too. Capabilities are requested by name, never by version or extension.
 - **Decoupled Architecture:** Clean separation of concerns between Windowing (GLFW), Vulkan Context (GPU initialization), and render targets — a window is one target among others.
 

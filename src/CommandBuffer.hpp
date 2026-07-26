@@ -46,7 +46,7 @@ public:
             .commandBufferCount = ctx->frames_in_flight()};
 
         if (auto e = check(
-                vkAllocateCommandBuffers(ctx->device(), &allocInfo, cmd->command_buffers_.data()),
+                ctx->vk().vkAllocateCommandBuffers(ctx->device(), &allocInfo, cmd->command_buffers_.data()),
                 "allocate command buffers",
                 ErrorCode::Resource))
         {
@@ -64,17 +64,26 @@ public:
         {
             if (timer_pool_ != VK_NULL_HANDLE)
             {
-                context_->defer_destroy([device = context_->device(), pool = timer_pool_]
-                                        { vkDestroyQueryPool(device, pool, nullptr); });
+                context_->defer_destroy([vk = &context_->vk(), device = context_->device(), pool = timer_pool_]
+                                        { vk->vkDestroyQueryPool(device, pool, nullptr); });
             }
             context_->defer_destroy(
-                [device = context_->device(), pool = context_->command_pool(), buffers = std::move(command_buffers_)]
-                { vkFreeCommandBuffers(device, pool, static_cast<uint32_t>(buffers.size()), buffers.data()); });
+                [vk = &context_->vk(),
+                 device = context_->device(),
+                 pool = context_->command_pool(),
+                 buffers = std::move(command_buffers_)]
+                { vk->vkFreeCommandBuffers(device, pool, static_cast<uint32_t>(buffers.size()), buffers.data()); });
         }
     }
 
     CommandBuffer(const CommandBuffer&) = delete;
     CommandBuffer& operator=(const CommandBuffer&) = delete;
+
+    // Which Context this command buffer records for; see Buffer::owner().
+    const Context* owner() const
+    {
+        return context_.get();
+    }
 
     CommandBuffer& begin()
     {
@@ -140,7 +149,7 @@ public:
                             .baseArrayLayer = color_sr.base_layer,
                             .layerCount = color_sr.layer_count}};
 
-                    vkCmdPipelineBarrier(
+                    frame.vk->vkCmdPipelineBarrier(
                         cmd,
                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -157,7 +166,7 @@ public:
                     if (rt->color_resolve_image(i) != VK_NULL_HANDLE)
                     {
                         barrier.image = rt->color_resolve_image(i);
-                        vkCmdPipelineBarrier(
+                        frame.vk->vkCmdPipelineBarrier(
                             cmd,
                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -190,7 +199,7 @@ public:
                             .baseArrayLayer = depth_sr.base_layer,
                             .layerCount = depth_sr.layer_count}};
 
-                    vkCmdPipelineBarrier(
+                    frame.vk->vkCmdPipelineBarrier(
                         cmd,
                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
@@ -207,7 +216,7 @@ public:
                     if (rt->depth_resolve_image() != VK_NULL_HANDLE)
                     {
                         depthBarrier.image = rt->depth_resolve_image();
-                        vkCmdPipelineBarrier(
+                        frame.vk->vkCmdPipelineBarrier(
                             cmd,
                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
@@ -281,7 +290,7 @@ public:
                     .pDepthAttachment = rt->depth_view() != VK_NULL_HANDLE ? &depthAttachment : nullptr,
                     .pStencilAttachment = nullptr};
 
-                vkCmdBeginRendering(cmd, &renderingInfo);
+                frame.vk->vkCmdBeginRendering(cmd, &renderingInfo);
 
                 // Emitted automatically: set_viewport()/set_scissor() took no arguments
                 // and silently read the swapchain, which is magic â€” just less legible
@@ -294,10 +303,10 @@ public:
                     .height = static_cast<float>(rt->extent().height),
                     .minDepth = 0.0f,
                     .maxDepth = 1.0f};
-                vkCmdSetViewport(cmd, 0, 1, &viewport);
+                frame.vk->vkCmdSetViewport(cmd, 0, 1, &viewport);
 
                 VkRect2D scissor{.offset = {0, 0}, .extent = rt->extent()};
-                vkCmdSetScissor(cmd, 0, 1, &scissor);
+                frame.vk->vkCmdSetScissor(cmd, 0, 1, &scissor);
             });
         // vkCmdPipelineBarrier is illegal inside a dynamic rendering scope, so
         // auto barriers discovered between begin and end are hoisted to just
@@ -312,7 +321,7 @@ public:
         commands_.push_back(
             [target](VkCommandBuffer cmd, const FrameContext& frame)
             {
-                vkCmdEndRendering(cmd);
+                frame.vk->vkCmdEndRendering(cmd);
 
                 const RenderTarget::Subresource color_sr = target->color_subresource();
                 const RenderTarget::Subresource depth_sr = target->depth_subresource();
@@ -346,7 +355,7 @@ public:
                             .baseArrayLayer = color_sr.base_layer,
                             .layerCount = color_sr.layer_count}};
 
-                    vkCmdPipelineBarrier(
+                    frame.vk->vkCmdPipelineBarrier(
                         cmd,
                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
@@ -387,7 +396,7 @@ public:
                             .baseArrayLayer = depth_sr.base_layer,
                             .layerCount = depth_sr.layer_count}};
 
-                    vkCmdPipelineBarrier(
+                    frame.vk->vkCmdPipelineBarrier(
                         cmd,
                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
@@ -414,11 +423,11 @@ public:
     CommandBuffer& set_viewport(float x, float y, float width, float height)
     {
         commands_.push_back(
-            [x, y, width, height](VkCommandBuffer cmd, const FrameContext&)
+            [x, y, width, height](VkCommandBuffer cmd, const FrameContext& frame)
             {
                 VkViewport viewport{
                     .x = x, .y = y, .width = width, .height = height, .minDepth = 0.0f, .maxDepth = 1.0f};
-                vkCmdSetViewport(cmd, 0, 1, &viewport);
+                frame.vk->vkCmdSetViewport(cmd, 0, 1, &viewport);
             });
         return *this;
     }
@@ -426,18 +435,18 @@ public:
     CommandBuffer& set_scissor(std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height)
     {
         commands_.push_back(
-            [x, y, width, height](VkCommandBuffer cmd, const FrameContext&)
+            [x, y, width, height](VkCommandBuffer cmd, const FrameContext& frame)
             {
                 VkRect2D scissor{.offset = {x, y}, .extent = {width, height}};
-                vkCmdSetScissor(cmd, 0, 1, &scissor);
+                frame.vk->vkCmdSetScissor(cmd, 0, 1, &scissor);
             });
         return *this;
     }
 
     CommandBuffer& bind_pipeline(std::shared_ptr<Pipeline> pipeline)
     {
-        commands_.push_back([pipeline](VkCommandBuffer cmd, const FrameContext&)
-                            { vkCmdBindPipeline(cmd, pipeline->bind_point(), pipeline->get()); });
+        commands_.push_back([pipeline](VkCommandBuffer cmd, const FrameContext& frame)
+                            { frame.vk->vkCmdBindPipeline(cmd, pipeline->bind_point(), pipeline->get()); });
         return *this;
     }
 
@@ -447,11 +456,11 @@ public:
         // is still before the draw — sound, and simpler than deferring it.
         track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT, false);
         commands_.push_back(
-            [buffer](VkCommandBuffer cmd, const FrameContext&)
+            [buffer](VkCommandBuffer cmd, const FrameContext& frame)
             {
                 VkBuffer vertexBuffers[] = {buffer->get()};
                 VkDeviceSize offsets[] = {0};
-                vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+                frame.vk->vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
             });
         return *this;
     }
@@ -460,11 +469,11 @@ public:
     {
         track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_INDEX_READ_BIT, false);
         commands_.push_back(
-            [buffer](VkCommandBuffer cmd, const FrameContext&)
+            [buffer](VkCommandBuffer cmd, const FrameContext& frame)
             {
                 // Derived from the buffer rather than hardcoded to UINT32: create_buffer
                 // accepts UINT16 indices, which used to be read back at half count.
-                vkCmdBindIndexBuffer(cmd, buffer->get(), 0, buffer->index_type());
+                frame.vk->vkCmdBindIndexBuffer(cmd, buffer->get(), 0, buffer->index_type());
             });
         return *this;
     }
@@ -472,16 +481,16 @@ public:
     CommandBuffer& draw(uint32_t vertexCount)
     {
         track_draw_();
-        commands_.push_back([vertexCount](VkCommandBuffer cmd, const FrameContext&)
-                            { vkCmdDraw(cmd, vertexCount, 1, 0, 0); });
+        commands_.push_back([vertexCount](VkCommandBuffer cmd, const FrameContext& frame)
+                            { frame.vk->vkCmdDraw(cmd, vertexCount, 1, 0, 0); });
         return *this;
     }
 
     CommandBuffer& draw_indexed(uint32_t indexCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0)
     {
         track_draw_();
-        commands_.push_back([indexCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext&)
-                            { vkCmdDrawIndexed(cmd, indexCount, 1, firstIndex, vertexOffset, 0); });
+        commands_.push_back([indexCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext& frame)
+                            { frame.vk->vkCmdDrawIndexed(cmd, indexCount, 1, firstIndex, vertexOffset, 0); });
         return *this;
     }
 
@@ -493,16 +502,16 @@ public:
     {
         track_draw_();
         commands_.push_back(
-            [indexCount, instanceCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext&)
-            { vkCmdDrawIndexed(cmd, indexCount, instanceCount, firstIndex, vertexOffset, 0); });
+            [indexCount, instanceCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext& frame)
+            { frame.vk->vkCmdDrawIndexed(cmd, indexCount, instanceCount, firstIndex, vertexOffset, 0); });
         return *this;
     }
 
     CommandBuffer& dispatch(uint32_t groupCountX, uint32_t groupCountY = 1, uint32_t groupCountZ = 1)
     {
         track_dispatch_();
-        commands_.push_back([groupCountX, groupCountY, groupCountZ](VkCommandBuffer cmd, const FrameContext&)
-                            { vkCmdDispatch(cmd, groupCountX, groupCountY, groupCountZ); });
+        commands_.push_back([groupCountX, groupCountY, groupCountZ](VkCommandBuffer cmd, const FrameContext& frame)
+                            { frame.vk->vkCmdDispatch(cmd, groupCountX, groupCountY, groupCountZ); });
         return *this;
     }
 
@@ -616,7 +625,7 @@ public:
         const StageAccess s = to_vk(src);
         Image* img = image.get();
         commands_.push_back(
-            [image = std::move(image), layout = *src_layout, s](VkCommandBuffer cmd, const FrameContext&)
+            [image = std::move(image), layout = *src_layout, s](VkCommandBuffer cmd, const FrameContext& frame)
             { image->record_generate_mipmaps(cmd, layout, s.stages, s.access); });
         // The image now rests in SHADER_READ_ONLY across every level; keep the
         // tracker in sync so a later automatic sample emits no extra transition.
@@ -678,7 +687,7 @@ public:
             return std::nullopt;
         }
         std::uint64_t ts[2] = {0, 0};
-        if (vkGetQueryPoolResults(
+        if (context_->vk().vkGetQueryPoolResults(
                 context_->device(),
                 timer_pool_,
                 static_cast<std::uint32_t>(2 * index),
@@ -702,9 +711,9 @@ public:
     {
         std::vector<uint8_t> buffer(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
         commands_.push_back(
-            [pipeline, offset, size, buffer](VkCommandBuffer cmd, const FrameContext&)
+            [pipeline, offset, size, buffer](VkCommandBuffer cmd, const FrameContext& frame)
             {
-                vkCmdPushConstants(
+                frame.vk->vkCmdPushConstants(
                     cmd, pipeline->layout(), pipeline->push_constant_stages(), offset, size, buffer.data());
             });
         return *this;
@@ -734,7 +743,8 @@ public:
             [descSet, pipeline, setIndex](VkCommandBuffer cmd, const FrameContext& frame)
             {
                 VkDescriptorSet set = descSet->get(frame.frame_index);
-                vkCmdBindDescriptorSets(cmd, pipeline->bind_point(), pipeline->layout(), setIndex, 1, &set, 0, nullptr);
+                frame.vk->vkCmdBindDescriptorSets(
+                    cmd, pipeline->bind_point(), pipeline->layout(), setIndex, 1, &set, 0, nullptr);
             });
         return *this;
     }
@@ -782,7 +792,7 @@ public:
             ensure_timer_pool_(2 * timer_count_);
             if (timer_pool_ != VK_NULL_HANDLE)
             {
-                vkCmdResetQueryPool(vkCmd, timer_pool_, 0, timer_capacity_);
+                frame.vk->vkCmdResetQueryPool(vkCmd, timer_pool_, 0, timer_capacity_);
             }
         }
 
@@ -801,7 +811,7 @@ public:
                 .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
                                  VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT};
             constexpr VkPipelineStageFlags stages = kAllShaderStages | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
-            vkCmdPipelineBarrier(vkCmd, stages, stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+            frame.vk->vkCmdPipelineBarrier(vkCmd, stages, stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
         }
         for (auto& cmd_func : commands_)
         {
@@ -822,7 +832,7 @@ private:
     void record_barrier_(std::shared_ptr<Buffer> buffer, ResourceTracker::Barrier b)
     {
         hoist_or_push_(
-            [buffer = std::move(buffer), b](VkCommandBuffer cmd, const FrameContext&)
+            [buffer = std::move(buffer), b](VkCommandBuffer cmd, const FrameContext& frame)
             {
                 VkBufferMemoryBarrier barrier{
                     .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -836,7 +846,7 @@ private:
                     .buffer = buffer->get(),
                     .offset = 0,
                     .size = VK_WHOLE_SIZE};
-                vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+                frame.vk->vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 1, &barrier, 0, nullptr);
             });
     }
 
@@ -848,7 +858,7 @@ private:
     void record_image_barrier_(std::shared_ptr<Image> image, ResourceTracker::ImageBarrier b)
     {
         hoist_or_push_(
-            [image = std::move(image), b](VkCommandBuffer cmd, const FrameContext&)
+            [image = std::move(image), b](VkCommandBuffer cmd, const FrameContext& frame)
             {
                 VkImageMemoryBarrier barrier{
                     .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -868,7 +878,7 @@ private:
                         // All layers transition together: the tracker holds one
                         // layout per image, and a cube/array is used as a whole.
                         .layerCount = image->array_layers()}};
-                vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+                frame.vk->vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 0, nullptr, 1, &barrier);
             });
     }
 
@@ -893,11 +903,11 @@ private:
     void record_timer_write_(std::uint32_t slot, VkPipelineStageFlagBits stage)
     {
         commands_.push_back(
-            [this, slot, stage](VkCommandBuffer cmd, const FrameContext&)
+            [this, slot, stage](VkCommandBuffer cmd, const FrameContext& frame)
             {
                 if (timer_pool_ != VK_NULL_HANDLE)
                 {
-                    vkCmdWriteTimestamp(cmd, stage, timer_pool_, slot);
+                    frame.vk->vkCmdWriteTimestamp(cmd, stage, timer_pool_, slot);
                 }
             });
     }
@@ -938,8 +948,8 @@ private:
 
         if (timer_pool_ != VK_NULL_HANDLE)
         {
-            context_->defer_destroy([device = context_->device(), pool = timer_pool_]
-                                    { vkDestroyQueryPool(device, pool, nullptr); });
+            context_->defer_destroy([vk = &context_->vk(), device = context_->device(), pool = timer_pool_]
+                                    { vk->vkDestroyQueryPool(device, pool, nullptr); });
             timer_pool_ = VK_NULL_HANDLE;
         }
         VkQueryPoolCreateInfo poolInfo{
@@ -949,7 +959,7 @@ private:
             .queryType = VK_QUERY_TYPE_TIMESTAMP,
             .queryCount = static_cast<std::uint32_t>(needed),
             .pipelineStatistics = 0};
-        if (vkCreateQueryPool(context_->device(), &poolInfo, nullptr, &timer_pool_) != VK_SUCCESS)
+        if (context_->vk().vkCreateQueryPool(context_->device(), &poolInfo, nullptr, &timer_pool_) != VK_SUCCESS)
         {
             timer_pool_ = VK_NULL_HANDLE;
             return;

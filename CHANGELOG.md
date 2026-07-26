@@ -5,6 +5,65 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.15.0] — 2026-07-26
+
+"Multi-context / multi-GPU": any number of Contexts can be alive at once, on the
+same GPU or on different ones. This pays off tech debt #1, the oldest entry in
+the register. volk installs its Vulkan function pointers as **process globals**
+and `volkLoadDevice` binds them to one `VkDevice`, so a second Context would have
+silently redirected the first one's GPU calls at its own device — an access
+violation with no diagnostic. bazalt had been refusing the second Context outright
+since 0.5. Each Context now loads its entry points into a dispatch table of its
+own (`volkLoadDeviceTable`), and the device-level globals are deliberately never
+loaded at all, so a call site that skipped the table fails immediately instead of
+landing on whichever device was created last.
+
+Nothing breaks: this release removes a restriction and adds one overload.
+
+### Added
+- **N live Contexts.** `bz.Context()` twice no longer raises. Each owns its
+  device, dispatch table, frame ring, upload worker and hot-reload watcher;
+  nothing is shared. Combined with `Context(device=...)` from 0.14, that is
+  bake-on-one-GPU/render-on-the-other, or a compute Context on the integrated
+  chip beside a render Context on the discrete one.
+- **`ctx.create_image(image)`.** A fourth overload of `create_image`, taking an
+  Image from another Context (or this one — that is a clone). Carries size,
+  format, array layers, cube-ness and whether the source was mipped;
+  `other.create_image(img.read())` cannot, because `read()` returns mip 0 of layer
+  0 as a bare array and a cubemap would arrive flattened. Blocking on the *source*
+  Context and routed through host memory — without external memory there is no
+  portable device-to-device path — so it is a setup step, not a per-frame one.
+  The result is an ordinary async Image of the target Context.
+- **Example `20_multi_context`.** Compute bakes a texture on the first device, the
+  image crosses over, a window on the second device draws with it.
+
+### Changed
+- **Resources do not cross Contexts.** Passing a Context's image, buffer,
+  pipeline, descriptor set or target to another Context's command buffer,
+  descriptor set, pool or pipeline build raises `ResourceError` naming the
+  operation. A mistake that was unreachable before is now one object away, and
+  its unguarded symptom is a driver crash or a validation message that does not
+  mention bazalt. Costs a pointer comparison at record time.
+- **The Vulkan 1.2 + `VK_KHR_dynamic_rendering` path is tested.** CI now runs the
+  full suite on lavapipe twice, once with the API version pinned to 1.2
+  (`BAZALT_FORCE_VULKAN_1_2=1`, a test knob rather than public API). That path —
+  where the dynamic-rendering entry points arrive under their KHR names and are
+  aliased onto the core ones — had no coverage anywhere since 0.5, because both
+  CI and the development GPU report 1.3 or newer. Tech debt #2, closed.
+
+### Notes
+- **Instance-level calls stay on volk's globals, on purpose.** `vkGetPhysicalDevice*`,
+  the WSI queries and `vkSetDebugUtilsObjectNameEXT` are loader trampolines that
+  dispatch on the handle passed to them, so one pointer is correct for every
+  instance in the process. Only device-level dispatch was ever the problem.
+- **Sync-validation tests run in-process again.** They used to execute a script in
+  a subprocess purely because `validation="sync"` needs a Context of its own; two
+  Contexts with different validation settings now coexist, which is also the
+  sharpest available proof that the feature works.
+- **Multi-context needs no second GPU to be exercised.** What broke was dispatch
+  between two `VkDevice`s, which happens on one card just as readily, so
+  `test_multi_context.py` runs everywhere including CI's lavapipe.
+
 ## [0.14.0] — 2026-07-26
 
 "Multi-window": a Context can now drive any number of windows. Getting there

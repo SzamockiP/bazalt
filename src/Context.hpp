@@ -4,6 +4,7 @@
 #include <vk_mem_alloc.h>
 
 #include <atomic>
+#include <cstdlib>
 #include <deque>
 #include <expected>
 #include <format>
@@ -116,23 +117,6 @@ public:
         std::shared_ptr<Logger> logger,
         const ContextConfig& config = {})
     {
-        // volk installs its function pointers as globals, and volkLoadDevice binds
-        // them to one specific VkDevice. A second live Context therefore silently
-        // redirects the first one's GPU calls at its own device — an access
-        // violation with no diagnostic whatsoever. Sequential create/destroy is
-        // fine; only overlap is not.
-        //
-        // The real fix is volkLoadDeviceTable + per-Context dispatch tables, which
-        // touches every vk* call site. Until that's worth doing, fail loudly.
-        if (live_contexts_.load() > 0)
-        {
-            return std::unexpected(err_init(
-                "Only one bazalt Context can exist at a time. volk binds its global "
-                "function pointers to a single device, so a second Context would "
-                "silently corrupt the first. Destroy the existing Context before "
-                "creating another (creating them one after another is fine)."));
-        }
-
         if (config.frames_in_flight < 1 || config.frames_in_flight > 4)
         {
             return std::unexpected(
@@ -182,21 +166,11 @@ public:
                     context->headless_ ? ", headless" : ""));
         }
 
-        // Last thing before handing the Context over: only a fully built Context
-        // counts as live, so a failed create() doesn't leave the slot occupied.
-        context->registered_ = true;
-        live_contexts_.fetch_add(1);
-
         return context;
     }
 
     ~Context()
     {
-        if (registered_)
-        {
-            live_contexts_.fetch_sub(1);
-        }
-
         // Before anything it observes goes away: stop the watcher thread. It
         // touches no Vulkan and no Python (errors go through the Logger's own
         // queue), so joining it is unconditional and needs no atexit dance — the
@@ -211,7 +185,7 @@ public:
 
         if (vkb_device_.device)
         {
-            vkDeviceWaitIdle(vkb_device_.device);
+            vk_.vkDeviceWaitIdle(vkb_device_.device);
         }
 
         // Everything is complete now; run whatever is still queued before the
@@ -224,18 +198,18 @@ public:
 
         for (auto& [key, sampler] : sampler_cache_)
         {
-            vkDestroySampler(vkb_device_.device, sampler->get(), nullptr);
+            vk_.vkDestroySampler(vkb_device_.device, sampler->get(), nullptr);
         }
         sampler_cache_.clear();
 
         if (submit_timeline_)
         {
-            vkDestroySemaphore(vkb_device_.device, submit_timeline_, nullptr);
+            vk_.vkDestroySemaphore(vkb_device_.device, submit_timeline_, nullptr);
         }
 
         if (command_pool_)
         {
-            vkDestroyCommandPool(vkb_device_.device, command_pool_, nullptr);
+            vk_.vkDestroyCommandPool(vkb_device_.device, command_pool_, nullptr);
         }
 
         if (allocator_)
@@ -257,6 +231,29 @@ public:
     VkDevice device() const
     {
         return vkb_device_.device;
+    }
+
+    // ── Device dispatch ───────────────────────────────────────────────────────
+    //
+    // Every device-level vk* call in bazalt goes through this table. volk's
+    // globals are process-wide and volkLoadDevice binds them to ONE VkDevice, so
+    // a second live Context used to silently redirect the first one's GPU calls
+    // at its own device. Per-Context tables are what removed that limit — and
+    // they are load-bearing for the upload worker and the hot-reload thread,
+    // which call into their own device from their own threads.
+    //
+    // The device-level globals are deliberately never loaded (create_instance_
+    // calls volkLoadInstanceOnly). They stay null, so a call site that forgot to
+    // go through here dies immediately instead of quietly landing on whichever
+    // device happened to be created last.
+    //
+    // Instance-level calls (vkGetPhysicalDevice*, the WSI queries,
+    // vkDestroySurfaceKHR, vkSetDebugUtilsObjectNameEXT) stay on the globals ON
+    // PURPOSE: those are loader trampolines that dispatch on the handle they are
+    // given, so one pointer is correct for every instance in the process.
+    const VolkDeviceTable& vk() const
+    {
+        return vk_;
     }
     VkPhysicalDevice physical_device() const
     {
@@ -453,7 +450,7 @@ public:
     std::uint64_t completed_submit_serial() const
     {
         std::uint64_t value = 0;
-        vkGetSemaphoreCounterValue(vkb_device_.device, submit_timeline_, &value);
+        vk_.vkGetSemaphoreCounterValue(vkb_device_.device, submit_timeline_, &value);
         return value;
     }
 
@@ -586,7 +583,9 @@ public:
 
         VkSampler handle = VK_NULL_HANDLE;
         if (auto e = check(
-                vkCreateSampler(vkb_device_.device, &info, nullptr, &handle), "create sampler", ErrorCode::Resource))
+                vk_.vkCreateSampler(vkb_device_.device, &info, nullptr, &handle),
+                "create sampler",
+                ErrorCode::Resource))
         {
             return std::unexpected(*e);
         }
@@ -604,6 +603,12 @@ public:
     // requests it when a debug callback is set, i.e. when validation is on, and
     // volk then leaves vkSetDebugUtilsObjectNameEXT null. So names cost nothing
     // in a release run and simply do not appear.
+    //
+    // This one stays on the global rather than moving to vk(): debug utils is an
+    // INSTANCE extension, so vkGetInstanceProcAddr is the sanctioned way to fetch
+    // it (volkLoadInstanceOnly does) and vkGetDeviceProcAddr may legitimately
+    // return null for it. The pointer is a loader trampoline dispatching on the
+    // VkDevice argument, so it is correct for every Context in the process.
     void set_debug_name(VkObjectType type, std::uint64_t handle, const std::string& name)
     {
         if (name.empty() || handle == 0 || vkSetDebugUtilsObjectNameEXT == nullptr)
@@ -658,7 +663,15 @@ private:
         // used to — rejects older Intel iGPUs, MoltenVK and any driver still on 1.2,
         // which is a large slice of real machines. Everything bazalt needs from 1.3
         // is available on 1.2 through VK_KHR_dynamic_rendering.
-        const bool has_1_3 = system_info->is_instance_version_available(1, 3);
+        // A test/CI knob, not public API (same species as BAZALT_HOT_RELOAD_POLL_MS):
+        // negotiate 1.2 even where 1.3 exists, so the 1.2 + VK_KHR_dynamic_rendering
+        // path is reachable on a 1.3 machine. Debt #2 — that path had no coverage
+        // anywhere since 0.5, because both CI (lavapipe) and the dev GPU report 1.3+.
+        // It forces the whole negotiation, not just the aliasing: nulling the core
+        // entry points alone would only crash, since a device that never enabled the
+        // KHR extension has no KHR entry points to alias to either.
+        const char* force_1_2 = std::getenv("BAZALT_FORCE_VULKAN_1_2");
+        const bool has_1_3 = system_info->is_instance_version_available(1, 3) && !(force_1_2 && force_1_2[0] == '1');
         const std::uint32_t target_api = has_1_3 ? VK_API_VERSION_1_3 : VK_API_VERSION_1_2;
 
         // Instance + Debug Messenger
@@ -757,7 +770,13 @@ private:
             return std::unexpected(error);
         }
         ctx.vkb_instance_ = inst_ret.value();
-        volkLoadInstance(ctx.vkb_instance_.instance);
+        // ...Only, not volkLoadInstance: the device-level globals must stay null
+        // so a call site that skipped Context::vk() fails loudly (see vk()). What
+        // this does load is instance-level — loader trampolines that dispatch on
+        // the handle passed in, hence correct no matter which Context created
+        // them last. It also loads the global vkGetDeviceProcAddr that
+        // volkLoadDeviceTable needs, so it must run before create_device_.
+        volkLoadInstanceOnly(ctx.vkb_instance_.instance);
 
         return target_api;
     }
@@ -989,7 +1008,8 @@ private:
             return std::unexpected(error);
         }
         ctx.vkb_device_ = dev_ret.value();
-        volkLoadDevice(ctx.vkb_device_.device);
+        // Into this Context's own table, never into volk's globals — see vk().
+        volkLoadDeviceTable(&ctx.vk_, ctx.vkb_device_.device);
         ctx.alias_dynamic_rendering_entry_points();
 
         auto gq = ctx.vkb_device_.get_queue(vkb::QueueType::graphics);
@@ -1030,7 +1050,7 @@ private:
             .queueFamilyIndex = ctx.graphics_queue_family_};
 
         if (auto e = check(
-                vkCreateCommandPool(ctx.vkb_device_.device, &poolInfo, nullptr, &ctx.command_pool_),
+                ctx.vk_.vkCreateCommandPool(ctx.vkb_device_.device, &poolInfo, nullptr, &ctx.command_pool_),
                 "create command pool"))
         {
             return std::unexpected(*e);
@@ -1046,7 +1066,7 @@ private:
         VkSemaphoreCreateInfo timelineInfo{
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &timelineType, .flags = 0};
         if (auto e = check(
-                vkCreateSemaphore(ctx.vkb_device_.device, &timelineInfo, nullptr, &ctx.submit_timeline_),
+                ctx.vk_.vkCreateSemaphore(ctx.vkb_device_.device, &timelineInfo, nullptr, &ctx.submit_timeline_),
                 "create submission timeline semaphore"))
         {
             return std::unexpected(*e);
@@ -1062,13 +1082,13 @@ private:
     void alias_dynamic_rendering_entry_points()
     {
 #if defined(VK_VERSION_1_3) && defined(VK_KHR_dynamic_rendering)
-        if (!vkCmdBeginRendering && vkCmdBeginRenderingKHR)
+        if (!vk_.vkCmdBeginRendering && vk_.vkCmdBeginRenderingKHR)
         {
-            vkCmdBeginRendering = vkCmdBeginRenderingKHR;
+            vk_.vkCmdBeginRendering = vk_.vkCmdBeginRenderingKHR;
         }
-        if (!vkCmdEndRendering && vkCmdEndRenderingKHR)
+        if (!vk_.vkCmdEndRendering && vk_.vkCmdEndRenderingKHR)
         {
-            vkCmdEndRendering = vkCmdEndRenderingKHR;
+            vk_.vkCmdEndRendering = vk_.vkCmdEndRenderingKHR;
         }
 #endif
     }
@@ -1113,10 +1133,11 @@ private:
     VmaAllocator allocator_ = VK_NULL_HANDLE;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
 
-    static inline std::atomic<int> live_contexts_{0};
+    // Zero-initialized: an entry point the device does not have stays null, which
+    // is what makes the KHR aliasing below (and the null checks) work.
+    VolkDeviceTable vk_{};
 
     std::set<Feature> enabled_features_;
-    bool registered_ = false;
     bool headless_ = false;
     bool swapchain_supported_ = false;
     bool dynamic_rendering_khr_ = false;

@@ -1,0 +1,22 @@
+#version 450
+// Generates an animated procedural image directly in compute — no vertices,
+// no fragment shader, just imageStore per texel into a storage image.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
+
+layout(push_constant) uniform Push {
+    float time;
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(img);
+    if (p.x >= sz.x || p.y >= sz.y) {
+        return;
+    }
+    vec2 uv = vec2(p) / vec2(sz);
+    float v = 0.5 + 0.5 * sin(uv.x * 12.0 + pc.time)
+                        * cos(uv.y * 12.0 - pc.time * 0.7);
+    imageStore(img, p, vec4(v, uv.x, uv.y, 1.0));
+}

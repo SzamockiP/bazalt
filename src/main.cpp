@@ -144,6 +144,30 @@ namespace
         raise_error(result.error());
     }
 
+    // Two Contexts can be alive since 0.15, so "a resource from the other
+    // Context" is now a mistake a user can actually make — and one Vulkan
+    // punishes with a driver crash or an unattributed validation message rather
+    // than an exception. Every place a foreign object could first enter a
+    // recording asks this instead. Costs a pointer comparison at record time.
+    //
+    // It lives at the binding layer, not in the headers: this guards a user
+    // error, and the recording methods return `*this` for chaining, so giving
+    // them an error channel would be a rebuild for one check. The GIL is held
+    // here, which is what makes raising legal at all (see the 0.14 lesson about
+    // raise_error under gil_scoped_release).
+    void require_same_context(const Context* a, const Context* b, const char* what)
+    {
+        if (a != nullptr && b != nullptr && a != b)
+        {
+            raise_error(err_resource(
+                std::format(
+                    "{}: that object belongs to a different Context. Resources cannot "
+                    "cross Contexts — build them from the Context you are recording "
+                    "for, or copy the data over (ctx.create_image(image_from_the_other_context)).",
+                    what)));
+        }
+    }
+
     // Resolves a list's element type from the explicit argument or the first
     // element. `int_default` is the caller's policy: create_buffer infers UINT32
     // for integers going into an INDEX buffer, update infers INT32 — a deliberate
@@ -370,9 +394,10 @@ namespace
     // the recorded buffer afterwards.
     VkCommandBuffer record_frame(CommandBuffer& cmd, const Context& ctx, TimestampRange ts = {})
     {
+        const VolkDeviceTable& vk = ctx.vk();
         const std::uint32_t frame_index = ctx.frame_index();
         VkCommandBuffer vkCmd = cmd.get(frame_index);
-        vkResetCommandBuffer(vkCmd, 0);
+        vk.vkResetCommandBuffer(vkCmd, 0);
 
         VkCommandBufferBeginInfo beginInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -380,7 +405,7 @@ namespace
             .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
             .pInheritanceInfo = nullptr};
 
-        if (auto e = check(vkBeginCommandBuffer(vkCmd, &beginInfo), "begin recording command buffer"))
+        if (auto e = check(vk.vkBeginCommandBuffer(vkCmd, &beginInfo), "begin recording command buffer"))
         {
             raise_error(*e);
         }
@@ -389,18 +414,18 @@ namespace
         // than once up front) keeps them per-frame and needs no hostQueryReset.
         if (ts.pool != VK_NULL_HANDLE)
         {
-            vkCmdResetQueryPool(vkCmd, ts.pool, ts.first, 2);
-            vkCmdWriteTimestamp(vkCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, ts.pool, ts.first);
+            vk.vkCmdResetQueryPool(vkCmd, ts.pool, ts.first, 2);
+            vk.vkCmdWriteTimestamp(vkCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, ts.pool, ts.first);
         }
 
-        cmd.execute(vkCmd, FrameContext{frame_index});
+        cmd.execute(vkCmd, FrameContext{frame_index, &vk});
 
         if (ts.pool != VK_NULL_HANDLE)
         {
-            vkCmdWriteTimestamp(vkCmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, ts.pool, ts.first + 1);
+            vk.vkCmdWriteTimestamp(vkCmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, ts.pool, ts.first + 1);
         }
 
-        if (auto e = check(vkEndCommandBuffer(vkCmd), "record command buffer"))
+        if (auto e = check(vk.vkEndCommandBuffer(vkCmd), "record command buffer"))
         {
             raise_error(*e);
         }
@@ -624,8 +649,9 @@ std::expected<void, Error> context_submit(Context& context, std::shared_ptr<Comm
             .signalSemaphoreCount = 1,
             .pSignalSemaphores = &timeline};
 
-        if (auto e =
-                check(vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE), "submit command buffer"))
+        if (auto e = check(
+                context.vk().vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
+                "submit command buffer"))
         {
             return std::unexpected(*e);
         }
@@ -633,7 +659,7 @@ std::expected<void, Error> context_submit(Context& context, std::shared_ptr<Comm
         // Blocking. There is no swapchain to pace against here; the timeline
         // exists for uploads and deferred destruction, not (yet) for making
         // headless submits asynchronous.
-        if (auto e = check(vkQueueWaitIdle(context.graphics_queue()), "wait for submitted command buffer"))
+        if (auto e = check(context.vk().vkQueueWaitIdle(context.graphics_queue()), "wait for submitted command buffer"))
         {
             return std::unexpected(*e);
         }
@@ -988,6 +1014,7 @@ PYBIND11_MODULE(_core, m)
             "build",
             [](GraphicsPipelineBuilder& builder, std::shared_ptr<RenderTarget> target) -> py::object
             {
+                require_same_context(&builder.context(), target->owner(), "build");
                 auto pipeline = unwrap(builder.build(*target), nullptr);
                 // Watch unconditionally: a pipeline whose shaders were all unwatched
                 // (source=, .spv from a gone file) simply never fires.
@@ -1047,20 +1074,29 @@ PYBIND11_MODULE(_core, m)
         .def(
             "set_image",
             [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Image> image, std::shared_ptr<Sampler> sampler)
-            { unwrap(self.set_image(binding, std::move(image), std::move(sampler)), nullptr); },
+            {
+                require_same_context(self.owner(), image->owner(), "set_image");
+                unwrap(self.set_image(binding, std::move(image), std::move(sampler)), nullptr);
+            },
             py::arg("binding"),
             py::arg("image"),
             py::arg("sampler") = py::none())
         .def(
             "set_storage_image",
             [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Image> image)
-            { unwrap(self.set_storage_image(binding, std::move(image)), nullptr); },
+            {
+                require_same_context(self.owner(), image->owner(), "set_storage_image");
+                unwrap(self.set_storage_image(binding, std::move(image)), nullptr);
+            },
             py::arg("binding"),
             py::arg("image"))
         .def(
             "set_buffer",
             [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Buffer> buffer)
-            { unwrap(self.set_buffer(binding, std::move(buffer)), nullptr); },
+            {
+                require_same_context(self.owner(), buffer->owner(), "set_buffer");
+                unwrap(self.set_buffer(binding, std::move(buffer)), nullptr);
+            },
             py::arg("binding"),
             py::arg("buffer"));
 
@@ -1068,13 +1104,19 @@ PYBIND11_MODULE(_core, m)
         .def(
             "allocate_set",
             [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object
-            { return py::cast(unwrap(pool.allocate_descriptor_set(pipeline, setIndex), pool.logger().get())); },
+            {
+                require_same_context(pool.owner(), pipeline->owner(), "allocate_set");
+                return py::cast(unwrap(pool.allocate_descriptor_set(pipeline, setIndex), pool.logger().get()));
+            },
             py::arg("pipeline"),
             py::arg("set"))
         .def(
             "allocate_frame_set",
             [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object
-            { return py::cast(unwrap(pool.allocate_frame_descriptor_set(pipeline, setIndex), pool.logger().get())); },
+            {
+                require_same_context(pool.owner(), pipeline->owner(), "allocate_frame_set");
+                return py::cast(unwrap(pool.allocate_frame_descriptor_set(pipeline, setIndex), pool.logger().get()));
+            },
             py::arg("pipeline"),
             py::arg("set"));
 
@@ -1098,6 +1140,7 @@ PYBIND11_MODULE(_core, m)
             "begin_rendering",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target, const py::object& clear_color)
             {
+                require_same_context(self->owner(), target->owner(), "begin_rendering");
                 self->begin_rendering(std::move(target), parse_clear_colors(clear_color));
                 return self;
             },
@@ -1117,7 +1160,10 @@ PYBIND11_MODULE(_core, m)
         .def(
             "rendering",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target, const py::object& clear_color)
-            { return RenderingScope{std::move(self), std::move(target), parse_clear_colors(clear_color)}; },
+            {
+                require_same_context(self->owner(), target->owner(), "rendering");
+                return RenderingScope{std::move(self), std::move(target), parse_clear_colors(clear_color)};
+            },
             py::arg("target"),
             py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f))
         // GPU timer: records the opening timestamp and returns a Timer handle.
@@ -1162,6 +1208,7 @@ PYBIND11_MODULE(_core, m)
             "bind_pipeline",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Pipeline> pipeline)
             {
+                require_same_context(self->owner(), pipeline->owner(), "bind_pipeline");
                 self->bind_pipeline(std::move(pipeline));
                 return self;
             },
@@ -1170,6 +1217,7 @@ PYBIND11_MODULE(_core, m)
             "bind_vertex_buffer",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer)
             {
+                require_same_context(self->owner(), buffer->owner(), "bind_vertex_buffer");
                 self->bind_vertex_buffer(std::move(buffer));
                 return self;
             },
@@ -1178,6 +1226,7 @@ PYBIND11_MODULE(_core, m)
             "bind_index_buffer",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer)
             {
+                require_same_context(self->owner(), buffer->owner(), "bind_index_buffer");
                 self->bind_index_buffer(std::move(buffer));
                 return self;
             },
@@ -1232,6 +1281,7 @@ PYBIND11_MODULE(_core, m)
             "barrier",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, Access src, Access dst)
             {
+                require_same_context(self->owner(), buffer->owner(), "barrier");
                 unwrap(self->barrier(std::move(buffer), src, dst), nullptr);
                 return self;
             },
@@ -1242,6 +1292,7 @@ PYBIND11_MODULE(_core, m)
             "barrier",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Image> image, Access src, Access dst)
             {
+                require_same_context(self->owner(), image->owner(), "barrier");
                 unwrap(self->barrier(std::move(image), src, dst), nullptr);
                 return self;
             },
@@ -1255,6 +1306,7 @@ PYBIND11_MODULE(_core, m)
             "generate_mipmaps",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Image> image, Access src)
             {
+                require_same_context(self->owner(), image->owner(), "generate_mipmaps");
                 unwrap(self->generate_mipmaps(std::move(image), src), nullptr);
                 return self;
             },
@@ -1270,6 +1322,7 @@ PYBIND11_MODULE(_core, m)
                uint32_t offset,
                std::string_view data)
             {
+                require_same_context(self->owner(), pipeline->owner(), "push_constants");
                 self->push_constants(std::move(pipeline), offset, static_cast<uint32_t>(data.size()), data.data());
                 return self;
             },
@@ -1283,6 +1336,8 @@ PYBIND11_MODULE(_core, m)
                std::shared_ptr<Pipeline> pipeline,
                uint32_t set)
             {
+                require_same_context(self->owner(), descriptor_set->owner(), "bind_descriptor_set");
+                require_same_context(self->owner(), pipeline->owner(), "bind_descriptor_set");
                 self->bind_descriptor_set(std::move(descriptor_set), std::move(pipeline), set);
                 return self;
             },
@@ -1822,6 +1877,59 @@ PYBIND11_MODULE(_core, m)
             py::arg("mipmaps") = false,
             py::arg("cube") = false,
             py::arg("name") = "")
+        // From an Image on another Context. A fourth overload of create_image
+        // rather than a verb of its own: this is still "make an image on this
+        // Context", the source is just where the pixels come from — same
+        // reasoning that made cubemaps a `cube=` kwarg instead of create_cubemap.
+        //
+        // Without external memory (waiting room) the only portable route between
+        // two devices is host memory, so this is a readback on the source plus an
+        // upload here. `source.read()` + create_image(array) does the same thing
+        // in Python — what it cannot do is carry the format, the layer count and
+        // the cube-ness across, because a numpy array has nowhere to put them.
+        .def(
+            "create_image",
+            [](Context& self, std::shared_ptr<Image> source, std::string name) -> py::object
+            {
+                // ponytail: mip >0 content is regenerated here, not copied — a
+                // hand-authored mip chain (rendered per level) flattens to
+                // generated ones. Per-mip readback if that ever matters.
+                const bool mipmaps = source->mip_levels() > 1;
+                const std::uint32_t layers = source->array_layers();
+                std::expected<std::vector<std::byte>, Error> bytes;
+                {
+                    // Blocking on the SOURCE's queue: it stalls that GPU, not this
+                    // one. A setup operation, never a per-frame one. The failure
+                    // travels back as data and is unwrapped once the GIL is back —
+                    // raising under a released GIL is the 0.14 access violation.
+                    py::gil_scoped_release release;
+                    bytes = source->read(/*all_layers=*/true);
+                }
+                std::vector<std::byte> pixels = unwrap(std::move(bytes), self.logger().get());
+
+                auto image =
+                    layers > 1
+                        ? unwrap(
+                              Image::create_layered_from_pixels(
+                                  self,
+                                  pixels.data(),
+                                  source->width(),
+                                  source->height(),
+                                  layers,
+                                  source->is_cube(),
+                                  source->format(),
+                                  mipmaps),
+                              self.logger().get())
+                        : unwrap(
+                              Image::create_from_pixels(
+                                  self, pixels.data(), source->width(), source->height(), source->format(), mipmaps),
+                              self.logger().get());
+                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                return py::cast(image);
+            },
+            py::arg("source"),
+            py::kw_only(),
+            py::arg("name") = "")
         .def(
             "create_sampler",
             [](Context& self,
@@ -2116,6 +2224,7 @@ PYBIND11_MODULE(_core, m)
             "present",
             [](SwapchainRenderer& self, std::shared_ptr<CommandBuffer> cmd)
             {
+                require_same_context(self.owner(), cmd->owner(), "present");
                 std::expected<void, Error> r;
                 {
                     // May CPU-wait for an upload still decoding — release the GIL.

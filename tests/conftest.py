@@ -26,20 +26,19 @@ SHADER_DIR = pathlib.Path(__file__).parent / "shaders"
 def _session_context():
     """One Context for the whole run.
 
-    Only one Context can be alive per process (volk binds its global function
-    pointers to a single device), so this is session-scoped rather than
-    per-test. Creating and destroying one per test would also work, but only as
-    long as no test leaks a reference to a buffer or pipeline — every resource
-    holds the Context alive. Session scope removes that trap entirely.
+    Session-scoped because every resource holds its Context alive: a per-test
+    Context works only as long as no test leaks a reference to a buffer or a
+    pipeline, and session scope removes that trap entirely. (This used to be
+    forced — one Context per process — until 0.15 gave each one its own dispatch
+    table; tests that want a second Context now just ask for `extra_context`.)
     """
     messages = []
     logger = bz.Logger(min_severity=bz.Severity.INFO)
     logger.on_message(messages.append)
     # hot_reload=True and gpu_timing=True for the whole suite: both run under
-    # every test, so validation-as-assert audits them continuously, and it's the
-    # only way to exercise them given one Context per process. Hot reload for
-    # files that never change never fires; the timestamp path is opt-in so the
-    # gpu_time_ms test needs it on here (default apps pay nothing).
+    # every test, so validation-as-assert audits them continuously. Hot reload
+    # for files that never change never fires; the timestamp path is opt-in so
+    # the gpu_time_ms test needs it on here (default apps pay nothing).
     context = bz.Context(logger, validation="auto", hot_reload=True, gpu_timing=True)
     yield context, logger, messages
 
@@ -68,6 +67,42 @@ def ctx(_session_context):
         if m.source == bz.Source.VALIDATION and m.severity >= bz.Severity.ERROR
     ]
     assert not errors, "validation errors:\n" + "\n".join(f"  {m.text}" for m in errors)
+
+
+@pytest.fixture
+def extra_context():
+    """A factory for Contexts beyond the session one, with the same referee.
+
+    Multi-context (0.15) and sync validation both need a Context of their own,
+    and a Context nobody audits is weaker than the rest of the suite — so this
+    wires up the same validation-as-assert the `ctx` fixture applies, and checks
+    every Context it handed out when the test ends.
+
+        a = extra_context(validation="on")
+
+    Each gets its own Logger: the layers are per-instance, so mixing their
+    output would make "which Context complained" unanswerable.
+    """
+    created = []
+
+    def make(**kwargs):
+        msgs = []
+        logger = bz.Logger(min_severity=bz.Severity.INFO)
+        logger.on_message(msgs.append)
+        kwargs.setdefault("validation", "on")
+        context = bz.Context(logger, **kwargs)
+        created.append((logger, msgs))
+        return context
+
+    yield make
+
+    for logger, msgs in created:
+        logger.flush()
+        errors = [
+            m for m in msgs
+            if m.source == bz.Source.VALIDATION and m.severity >= bz.Severity.ERROR
+        ]
+        assert not errors, "validation errors:\n" + "\n".join(f"  {m.text}" for m in errors)
 
 
 @pytest.fixture
