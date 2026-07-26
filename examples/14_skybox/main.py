@@ -121,9 +121,9 @@ last_time = time.time()
 frame_count = 0
 fps_timer = 0.0
 while window.is_open():
-    window.poll_events()
-    frame = renderer.begin_frame()
-    if frame is None:
+    bz.poll_events()
+    ctx.begin_frame()
+    if not renderer.acquire():
         continue
 
     current_time = time.time()
@@ -145,4 +145,4 @@ while window.is_open():
     pitch = max(-math.pi / 2 + 0.01, min(math.pi / 2 - 0.01, pitch + dy * 0.002))
 
     record(cmd, yaw, pitch)
-    frame.submit(cmd)
+    renderer.present(cmd)

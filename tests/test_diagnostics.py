@@ -1,4 +1,4 @@
-"""Two small 0.8 diagnostics additions: GPU frame timing (frame.gpu_time_ms)
+"""Two small 0.8 diagnostics additions: GPU frame timing (renderer.gpu_time_ms)
 and debug object names (name= / .name())."""
 
 import gc
@@ -54,7 +54,7 @@ def _double_pipeline(ctx):
 
 def test_timer_handle_reports_positive_time_headless(ctx):
     """A timer handle measures a slice of the recording and is readable right
-    after a blocking headless submit — no window, no begin_frame. Both the
+    after a blocking headless submit — no window, no frame loop. Both the
     `with` form and the explicit stop() are exercised, plus two overlapping
     timers. On a device without timestamp support .ms is None (documented
     best-effort), not a failure."""
@@ -109,7 +109,7 @@ def test_stale_timer_handle_reads_none(ctx):
 
 
 def test_gpu_time_ms_is_reported_after_the_ring_cycles(ctx):
-    """frame.gpu_time_ms is None until the frame ring has cycled once, then a
+    """renderer.gpu_time_ms is None until the frame ring has cycled once, then a
     positive float. Windowed only (headless submit is a blocking wait-idle),
     so this skips without a swapchain/display — e.g. on CI's lavapipe."""
     if ctx.headless:
@@ -130,18 +130,18 @@ def test_gpu_time_ms_is_reported_after_the_ring_cycles(ctx):
 
         times = []
         for _ in range(ctx.frames_in_flight + 5):
-            window.poll_events()
-            frame = renderer.begin_frame()
-            if frame is None:
+            bz.poll_events()
+            ctx.begin_frame()
+            if not renderer.acquire():
                 continue
-            times.append(frame.gpu_time_ms)
+            times.append(renderer.gpu_time_ms)
             cmd = ctx.create_command_buffer()
             cmd.begin()
             cmd.begin_rendering(renderer, clear_color=[0, 0, 0, 1])
             cmd.bind_pipeline(pipeline)
             cmd.draw(3)
             cmd.end_rendering(renderer)
-            frame.submit(cmd)
+            renderer.present(cmd)
 
         assert times, "expected at least one acquired frame"
         assert times[0] is None, "the first frame has no prior submission to time"
@@ -149,8 +149,8 @@ def test_gpu_time_ms_is_reported_after_the_ring_cycles(ctx):
         assert measured, "gpu_time_ms should become available once the ring cycles"
         assert all(t > 0 for t in measured), f"GPU times must be positive: {measured}"
     finally:
-        # Drop the renderer before the next test: only one SwapchainRenderer may
-        # exist per Context, and it holds the shared session Context alive.
+        # Drop the renderer before the next test: it holds the shared session
+        # Context alive, and its surface belongs to a window going away here.
         renderer = None
         window = None
         gc.collect()

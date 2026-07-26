@@ -190,11 +190,12 @@ class PresentMode(IntEnum):
     """How presentation paces the frame loop.
 
     FIFO is vsync and the only mode Vulkan guarantees; MAILBOX (the default
-    preference) and IMMEDIATE fall back to FIFO with an Info log when the
-    surface cannot do them."""
+    preference), IMMEDIATE and FIFO_RELAXED fall back to FIFO with an Info log
+    when the surface cannot do them."""
     FIFO = 0
     MAILBOX = 1
     IMMEDIATE = 2
+    FIFO_RELAXED = 3
 
 class CullMode(IntEnum):
     NONE = 0
@@ -624,7 +625,6 @@ class Window:
                  logger: Optional[Logger] = None) -> None: ...
     def is_open(self) -> bool: ...
     def should_close(self) -> bool: ...
-    def poll_events(self) -> None: ...
     def is_key_pressed(self, key: int) -> bool: ...
     def is_mouse_button_pressed(self, button: int) -> bool: ...
     def set_cursor_mode(self, mode: int) -> None: ...
@@ -634,6 +634,71 @@ class Window:
     def width(self) -> int: ...
     @property
     def height(self) -> int: ...
+
+class Device:
+    """One GPU this machine can offer, as inert data — no live Vulkan handle.
+
+    Returned by list_devices(); pass one to Context(device=...). Safe to keep
+    around: it holds copies, not handles, so it stays valid with no Context at
+    all and across Contexts created later.
+    """
+
+    @property
+    def name(self) -> str: ...
+    @property
+    def type(self) -> str:
+        """"discrete", "integrated", "virtual", "cpu" or "other"."""
+        ...
+    @property
+    def api_version(self) -> str: ...
+    @property
+    def memory_mb(self) -> int:
+        """Total device-local memory. On an integrated GPU this is shared
+        system memory."""
+        ...
+
+    def supports(self, feature: Feature) -> bool:
+        """The same question as ctx.supports(), asked before there is a
+        Context — so you can pick the card that can do the job."""
+        ...
+    def supports_multiview(self) -> bool: ...
+
+def poll_events() -> None:
+    """Drain the OS event queue and dispatch each event to the window the OS
+    addressed it to.
+
+    A free function, not a Window method, because there is no such thing as
+    polling one window: the OS message queue is per-thread and glfwPollEvents
+    takes no window. `window_a.poll_events()` would read as A's events while
+    pumping everyone's.
+
+    The per-window distinction is real, it just lives in the queries — each
+    reads one window's own state, which this dispatch is what updates:
+
+        bz.poll_events()
+        if window_a.is_key_pressed(bz.KEY_W):   # only while A has focus
+            ...
+        if renderer_b.acquire():                # False while B is minimized
+            renderer_b.present(cmd_b)
+
+    Raises WindowError when no window exists — with none open there is no queue
+    to drain, and a loop still pumping is a bug rather than a no-op.
+    """
+    ...
+
+def list_devices() -> list[Device]:
+    """Every GPU on this machine, without creating a Context.
+
+        for d in bz.list_devices():
+            print(d.name, d.type, d.memory_mb)
+
+        ctx = bz.Context(device=bz.list_devices()[1])
+
+    Creates and destroys a throwaway Vulkan instance (Vulkan has no way to
+    enumerate GPUs without one), so it costs a few milliseconds; the Devices it
+    returns outlive it.
+    """
+    ...
 
 class Context:
     """The GPU device, and the factory for everything that lives on it.
@@ -646,6 +711,7 @@ class Context:
     def __init__(self, logger: Optional[Logger] = None, validation: str = "auto",
                  features: Sequence[Feature] = (), optional: Sequence[Feature] = (),
                  frames_in_flight: int = 2,
+                 device: Optional[Device] = None,
                  raw_extensions: Sequence[str] = (),
                  auto_barriers: bool = True,
                  hot_reload: bool = False,
@@ -661,6 +727,10 @@ class Context:
             frames_in_flight: how many frames may be recorded ahead of the GPU
                 (1-4). 2 is the classic latency/throughput trade-off; 1 is
                 useful for debugging.
+            device: which GPU to run on, from list_devices(). None picks
+                automatically (prefer discrete, must satisfy `features`) — the
+                choice is still filtered by `features` either way, so a device
+                that cannot do the job raises rather than misrendering.
             raw_extensions: escape hatch. You shouldn't need this.
             auto_barriers: barriers between resources (SSBO -> vertex read,
                 dispatch -> dispatch) are computed automatically at record time.
@@ -673,11 +743,11 @@ class Context:
                 bad edit (typo, wrong size, corrupt file) is logged and the last
                 good version keeps rendering — a mistake never kills the app.
                 Changes apply at begin_frame() and at ctx.submit().
-            gpu_timing: record frame.gpu_time_ms (a timestamp pair around each
+            gpu_timing: record renderer.gpu_time_ms (a timestamp pair around each
                 windowed submit). Off by default because it is a profiling
                 diagnostic — the pool reset and two writes ride in every frame's
                 command buffer, and per-frame queries are not guaranteed free on
-                every GPU. Left off, frame.gpu_time_ms is always None, no cost.
+                every GPU. Left off, renderer.gpu_time_ms is always None, no cost.
         """
         ...
 
@@ -686,7 +756,30 @@ class Context:
     @property
     def frames_in_flight(self) -> int: ...
     @property
+    def frame_index(self) -> int:
+        """Which ring slot the current frame writes into (0..frames_in_flight-1)."""
+        ...
+    @property
     def auto_barriers(self) -> bool: ...
+
+    def begin_frame(self) -> None:
+        """Open one logical frame — the frame verb of a windowed loop.
+
+        Advances the ring slot that CommandBuffer, DynamicBuffer and the
+        per-frame descriptor sets index, applies pending hot reloads, and
+        reclaims deferred handles. All of that is Context-owned, so it happens
+        once per frame no matter how many windows draw into it:
+
+            while window.is_open():
+                bz.poll_events()
+                ctx.begin_frame()
+                if renderer.acquire():
+                    renderer.present(cmd)
+
+        The headless path needs no counterpart: ctx.submit() advances the ring
+        itself.
+        """
+        ...
     @property
     def device_name(self) -> str: ...
     @property
@@ -872,35 +965,32 @@ class SwapchainRenderer(RenderTargetBase):
         """The mode actually in use (post-fallback), not the requested one."""
         ...
 
-    def begin_frame(self) -> Optional[Frame]:
-        """Acquire the next swapchain image.
+    def acquire(self) -> bool:
+        """Take this window's next swapchain image, inside the frame
+        ctx.begin_frame() opened.
 
-        None when the frame should be skipped (minimized, mid-resize):
+        False when this window should sit the frame out (minimized,
+        mid-resize) — the other windows carry on:
 
-            frame = renderer.begin_frame()
-            if frame:
-                frame.submit(cmd)
+            ctx.begin_frame()
+            if renderer.acquire():
+                renderer.present(cmd)
+
+        Acquiring twice on one frame raises ResourceError; in practice that
+        means ctx.begin_frame() was not called.
         """
         ...
 
-    @property
-    def width(self) -> int: ...
-    @property
-    def height(self) -> int: ...
+    def present(self, cmd: CommandBuffer) -> None:
+        """Record the command buffer for this window, submit it and present.
 
-class Frame:
-    """One acquired swapchain frame. Submit it and drop it within one tick.
-
-    Submitting twice, or holding a Frame across begin_frame() calls, raises
-    ResourceError.
-    """
-
-    def submit(self, cmd: CommandBuffer) -> None:
-        """Record the command buffer for this frame, submit it and present."""
+        ResourceError when there is no acquired image — acquire() was not
+        called, returned False, or its image was already presented. Each window
+        needs its own CommandBuffer: one holds a single command buffer per frame
+        slot, so replaying it in two windows would overwrite work in flight.
+        """
         ...
 
-    @property
-    def frame_index(self) -> int: ...
     @property
     def gpu_time_ms(self) -> Optional[float]:
         """GPU time in milliseconds of the frame submitted frames_in_flight ago
@@ -909,6 +999,11 @@ class Frame:
         until the ring has cycled once, and on devices without timestamp
         support."""
         ...
+
+    @property
+    def width(self) -> int: ...
+    @property
+    def height(self) -> int: ...
 
 # ── Keyboard Constants ─────────────────────────────────────────────────
 

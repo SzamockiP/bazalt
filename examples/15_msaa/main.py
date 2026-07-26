@@ -109,13 +109,14 @@ frame_count = 0
 fps_timer = time.time()
 
 while window.is_open():
-    window.poll_events()
-    if frame := renderer.begin_frame():
+    bz.poll_events()
+    ctx.begin_frame()
+    if renderer.acquire():
         t = time.time() - start
         model = glm.rotate(glm.mat4(1.0), t * 0.7, glm.vec3(0.3, 1.0, 0.2))
         mvp = proj * view * model
         ubuf.update(bytes(glm.transpose(mvp)))
-        frame.submit(cmd)
+        renderer.present(cmd)
 
         frame_count += 1
         if time.time() - fps_timer >= 1.0:

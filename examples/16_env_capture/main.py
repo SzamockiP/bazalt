@@ -228,9 +228,9 @@ last_mouse_dy = 0.0
 frame_count = 0
 fps_timer = 0.0
 while window.is_open():
-    window.poll_events()
-    frame = renderer.begin_frame()
-    if frame is None:
+    bz.poll_events()
+    ctx.begin_frame()
+    if not renderer.acquire():
         continue
 
     now = time.time()
@@ -250,4 +250,4 @@ while window.is_open():
     camera.process_keyboard(window, dt)
 
     record(cmd, camera.pos, camera.view_proj(W / H))
-    frame.submit(cmd)
+    renderer.present(cmd)

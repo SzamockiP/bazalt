@@ -49,8 +49,9 @@ frame_count = 0
 fps_timer = 0.0
 
 while window.is_open():
-    window.poll_events()
-    if frame := renderer.begin_frame():
+    bz.poll_events()
+    ctx.begin_frame()
+    if renderer.acquire():
         current_time = time.time()
         dt = current_time - last_time
         last_time = current_time
@@ -63,4 +64,4 @@ while window.is_open():
             frame_count = 0
             fps_timer = 0.0
 
-        frame.submit(cmd)
+        renderer.present(cmd)

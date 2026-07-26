@@ -105,7 +105,8 @@ public:
     // (per-attachment clears for MRT). The binding accepts both [r,g,b,a] and
     // [[r,g,b,a], …] and normalises to this.
     CommandBuffer& begin_rendering(
-        std::shared_ptr<RenderTarget> target, const std::vector<std::array<float, 4>>& clear_colors)
+        std::shared_ptr<RenderTarget> target,
+        const std::vector<std::array<float, 4>>& clear_colors)
     {
         commands_.push_back(
             [clear_colors, target](VkCommandBuffer cmd, const FrameContext& frame)
@@ -224,10 +225,9 @@ public:
                 colorAttachments.reserve(rt->color_count());
                 for (uint32_t i = 0; i < rt->color_count(); ++i)
                 {
-                    const std::array<float, 4> cc =
-                        clear_colors.empty()
-                            ? std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}
-                            : (i < clear_colors.size() ? clear_colors[i] : clear_colors[0]);
+                    const std::array<float, 4> cc = clear_colors.empty()
+                                                        ? std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}
+                                                        : (i < clear_colors.size() ? clear_colors[i] : clear_colors[0]);
                     // MSAA: render into the multisampled view, resolve (averaging
                     // the samples) into the single-sample target. The multisampled
                     // image is transient — only the resolve is kept (DONT_CARE).
@@ -239,8 +239,8 @@ public:
                          .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                          .resolveMode = resolve ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_NONE,
                          .resolveImageView = resolve ? rt->color_resolve_view(i) : VK_NULL_HANDLE,
-                         .resolveImageLayout =
-                             resolve ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                         .resolveImageLayout = resolve ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                                       : VK_IMAGE_LAYOUT_UNDEFINED,
                          .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
                          .storeOp = resolve ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE,
                          .clearValue = {.color = {{cc[0], cc[1], cc[2], cc[3]}}}});
@@ -257,8 +257,8 @@ public:
                     .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                     .resolveMode = depthResolve ? VK_RESOLVE_MODE_SAMPLE_ZERO_BIT : VK_RESOLVE_MODE_NONE,
                     .resolveImageView = depthResolve ? rt->depth_resolve_view() : VK_NULL_HANDLE,
-                    .resolveImageLayout =
-                        depthResolve ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                    .resolveImageLayout = depthResolve ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL
+                                                       : VK_IMAGE_LAYOUT_UNDEFINED,
                     .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
                     // A depth that will be consumed (shadow maps) must be stored;
                     // the swapchain's scratch depth keeps DONT_CARE.
@@ -637,7 +637,7 @@ public:
     // (t.ms). The handle IS the identity — no name, no key — so multiple, nested
     // and overlapping timers all just work.
     //
-    // Unlike 0.8's frame.gpu_time_ms this needs no window and no begin_frame:
+    // Unlike renderer.gpu_time_ms this needs no window and no frame loop:
     // the headless submit blocks, so the readback is ready as soon as
     // ctx.submit() returns (profiling a dispatch is the use case).
     //
@@ -747,6 +747,26 @@ public:
     VkCommandBuffer get(std::uint32_t frame_index) const
     {
         return command_buffers_[frame_index];
+    }
+
+    // One CommandBuffer owns one VkCommandBuffer per ring slot, so replaying it
+    // twice inside one logical frame resets and re-records a buffer the first
+    // replay very likely still has in flight. Unreachable before 0.14 (one
+    // window meant one replay per frame); now it is the obvious way to try to
+    // drive two windows, so it gets a sentence instead of a pending-state VUID
+    // — which a build without the validation layers wouldn't print at all.
+    std::expected<void, Error> claim_for_frame(std::uint64_t serial)
+    {
+        if (recorded_serial_ == serial)
+        {
+            return std::unexpected(err_resource(
+                "This CommandBuffer was already submitted in the current frame. Each "
+                "window needs its own CommandBuffer — one holds a single command "
+                "buffer per frame slot, so replaying it twice would overwrite work "
+                "still in flight."));
+        }
+        recorded_serial_ = serial;
+        return {};
     }
 
     void execute(VkCommandBuffer vkCmd, const FrameContext& frame)
@@ -1078,6 +1098,11 @@ private:
     std::vector<VkCommandBuffer> command_buffers_;
     std::vector<std::function<void(VkCommandBuffer, const FrameContext&)>> commands_;
     std::vector<std::shared_ptr<DescriptorSet>> used_sets_;
+
+    // Frame serial of the last replay; UINT64_MAX = never replayed. A sentinel
+    // rather than 0, because the headless ctx.submit legitimately runs its first
+    // submit at serial 0 (it advances the ring after submitting, not before).
+    std::uint64_t recorded_serial_ = UINT64_MAX;
 
     // ── record-time state (reset by begin(), never touched at execute) ──
     bool auto_barriers_ = true;

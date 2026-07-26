@@ -51,8 +51,9 @@ last_time = time.time()
 frame_count = 0
 fps_timer = 0.0
 while window.is_open():
-    window.poll_events()
-    if frame := renderer.begin_frame():
+    bz.poll_events()
+    ctx.begin_frame()
+    if renderer.acquire():
         current_time = time.time()
         dt = current_time - last_time
         last_time = current_time
@@ -70,8 +71,8 @@ while window.is_open():
             (c.bind_pipeline(pipeline)
               .bind_descriptor_set(desc_set, pipeline, set=0)
               .draw(3))
-        frame.submit(cmd)
+        renderer.present(cmd)
 
         frames += 1
-        if frames % 120 == 0 and frame.gpu_time_ms is not None:
-            print(f"GPU frame time: {frame.gpu_time_ms:.3f} ms")
+        if frames % 120 == 0 and renderer.gpu_time_ms is not None:
+            print(f"GPU frame time: {renderer.gpu_time_ms:.3f} ms")

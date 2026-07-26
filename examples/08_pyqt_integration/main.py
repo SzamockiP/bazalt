@@ -70,8 +70,10 @@ class VulkanWidget(QWidget):
               .draw_indexed(3))
         
     def tick(self):
-        # begin_frame acquires swapchain image and handles automatic resize recreation
-        if frame := self.renderer.begin_frame():
+        # begin_frame opens the logical frame; acquire takes this window's
+        # swapchain image and handles automatic resize recreation
+        self.ctx.begin_frame()
+        if self.renderer.acquire():
             now = time.time()
             self._fps_timer += now - self._last_time
             self._last_time = now
@@ -82,7 +84,7 @@ class VulkanWidget(QWidget):
                     f"Bazalt PyQt6 Integration Demo | {1000.0 / fps:.2f} ms/frame | {fps:.1f} FPS")
                 self._frame_count = 0
                 self._fps_timer = 0.0
-            frame.submit(self.cmd)
+            self.renderer.present(self.cmd)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
