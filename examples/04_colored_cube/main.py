@@ -134,8 +134,6 @@ with cmd.rendering(renderer, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
 # Main loop
 camera = Camera(pos=(0.0, 0.0, 3.0), speed=2.5)
 last_time = time.time()
-last_mouse_dx = 0.0
-last_mouse_dy = 0.0
 frame_count = 0
 fps_timer = 0.0
 
@@ -158,11 +156,8 @@ while window.is_open():
             fps_timer = 0.0
 
         mouse = window.get_mouse_state()
-        dx = mouse.dx - last_mouse_dx
-        dy = mouse.dy - last_mouse_dy
-        last_mouse_dx, last_mouse_dy = mouse.dx, mouse.dy
 
-        right_vec = camera.update_mouse(dx, dy)
+        right_vec = camera.update_mouse(mouse.dx, mouse.dy)
         camera.process_keyboard(window, dt, right_vec)
 
         view, proj, model = camera.get_matrices(1024.0 / 720.0)

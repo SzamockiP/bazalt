@@ -1,0 +1,295 @@
+"""0.16: window modes, window attributes and the per-poll input state.
+
+Both halves need a real window, so both skip without a display — the same
+position test_multi_window is in, and for the same reason. CI's lavapipe has no
+surface to show, so the coverage that matters there is test_load_op and
+test_pipeline_state.
+
+The mode tests render a frame in each mode on purpose: switching mode resizes
+the framebuffer, which recreates the swapchain, and the `ctx` fixture is what
+says whether the semaphores and layout transitions survived it.
+
+The input tests can only assert the shape of the surface. OS input cannot be
+synthesized here, so what they pin down is the part that is ours: a query reads
+the same value twice inside one frame, and it starts at rest.
+"""
+
+import pathlib
+
+import pytest
+
+import bazalt as bz
+
+SHADER_DIR = pathlib.Path(__file__).parent / "shaders"
+
+ALL_MODES = (bz.WindowMode.WINDOWED, bz.WindowMode.FRAMELESS,
+             bz.WindowMode.FULLSCREEN, bz.WindowMode.FULLSCREEN_WINDOWED)
+
+
+def a_window(*, mode=bz.WindowMode.WINDOWED, width=128, height=96):
+    """One window, or a skip. Returned rather than fixtured: it holds the
+    session Context alive, so the caller drops it in a finally."""
+    try:
+        return bz.Window(width, height, "bazalt window modes", mode=mode)
+    except bz.WindowError:
+        pytest.skip("no display available")
+
+
+def solid_pipeline(ctx, target):
+    vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+    frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
+    return ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag).build(target)
+
+
+def pump(ctx, renderer, cmd, frames=3):
+    """Run a few frames, returning how many actually presented."""
+    presented = 0
+    for _ in range(frames):
+        bz.poll_events()
+        ctx.begin_frame()
+        if renderer.acquire():
+            renderer.present(cmd)
+            presented += 1
+    return presented
+
+
+# ── window modes ──────────────────────────────────────────────────────────
+
+
+def test_every_mode_round_trips(ctx):
+    """The property reports what was asked for, through all four values and back."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    try:
+        assert window.mode == bz.WindowMode.WINDOWED
+        for mode in ALL_MODES:
+            window.set_mode(mode)
+            bz.poll_events()
+            assert window.mode == mode
+        window.set_mode(bz.WindowMode.WINDOWED)
+        assert window.mode == bz.WindowMode.WINDOWED
+    finally:
+        window = None
+
+
+def test_windowed_restores_the_size_it_left(ctx):
+    """Leaving WINDOWED saves the rectangle, so coming back is not a guess."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window(width=200, height=150)
+    try:
+        bz.poll_events()
+        before = (window.width, window.height)
+
+        window.set_mode(bz.WindowMode.FULLSCREEN)
+        bz.poll_events()
+        window.set_mode(bz.WindowMode.WINDOWED)
+        bz.poll_events()
+
+        assert (window.width, window.height) == before
+    finally:
+        window = None
+
+
+def test_a_window_can_open_in_a_mode(ctx):
+    """mode= at construction goes through the same set_mode, so the geometry it
+    returns to is the width and height that were asked for."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window(mode=bz.WindowMode.FRAMELESS, width=180, height=120)
+    try:
+        assert window.mode == bz.WindowMode.FRAMELESS
+        bz.poll_events()
+        window.set_mode(bz.WindowMode.WINDOWED)
+        bz.poll_events()
+        assert (window.width, window.height) == (180, 120)
+    finally:
+        window = None
+
+
+def test_the_swapchain_follows_a_mode_change(ctx):
+    """The point of the feature: a mode change is a resize, and the resize path
+    already recreates the swapchain. The referee here is the validation layer,
+    not the pixel."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    renderer = None
+    try:
+        renderer = bz.SwapchainRenderer(window, ctx)
+        pipeline = solid_pipeline(ctx, renderer)
+        cmd = ctx.create_command_buffer()
+        cmd.begin()
+        cmd.begin_rendering(renderer, clear_color=[0, 0, 0, 1])
+        cmd.bind_pipeline(pipeline)
+        cmd.draw(3)
+        cmd.end_rendering(renderer)
+
+        presented = pump(ctx, renderer, cmd)
+        for mode in ALL_MODES:
+            window.set_mode(mode)
+            presented += pump(ctx, renderer, cmd)
+
+        assert presented > 0, "the window never acquired an image in any mode"
+    finally:
+        renderer = None
+        window = None
+
+
+# ── window attributes ─────────────────────────────────────────────────────
+
+
+def test_attributes_read_back_what_was_set(ctx):
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    try:
+        window.set_resizable(False)
+        assert window.resizable is False
+        window.set_resizable(True)
+        assert window.resizable is True
+
+        window.set_always_on_top(True)
+        assert window.always_on_top is True
+        window.set_always_on_top(False)
+        assert window.always_on_top is False
+
+        window.set_size(160, 120)
+        bz.poll_events()
+        assert (window.width, window.height) == (160, 120)
+
+        window.set_position(80, 60)
+        bz.poll_events()
+        assert isinstance(window.position, tuple) and len(window.position) == 2
+
+        scale_x, scale_y = window.content_scale
+        assert scale_x > 0.0 and scale_y > 0.0
+    finally:
+        window = None
+
+
+def test_opacity_is_reported_back(ctx):
+    """Some platforms have no compositor, so the value is allowed to stay 1.0 —
+    what must not happen is an error or a nonsense number."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    try:
+        window.set_opacity(0.5)
+        assert 0.0 <= window.opacity <= 1.0
+    finally:
+        window = None
+
+
+# ── present mode at runtime ───────────────────────────────────────────────
+
+
+def test_present_mode_switches_at_runtime(ctx):
+    """FIFO is the one mode every driver must support, so it is the one a test
+    can insist on getting."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    renderer = None
+    try:
+        renderer = bz.SwapchainRenderer(window, ctx, present_mode=bz.PresentMode.FIFO)
+        pipeline = solid_pipeline(ctx, renderer)
+        cmd = ctx.create_command_buffer()
+        cmd.begin()
+        cmd.begin_rendering(renderer, clear_color=[0, 0, 0, 1])
+        cmd.bind_pipeline(pipeline)
+        cmd.draw(3)
+        cmd.end_rendering(renderer)
+
+        pump(ctx, renderer, cmd)
+        renderer.set_present_mode(bz.PresentMode.IMMEDIATE)
+        pump(ctx, renderer, cmd)
+        renderer.set_present_mode(bz.PresentMode.FIFO)
+        pump(ctx, renderer, cmd)
+
+        assert renderer.present_mode == bz.PresentMode.FIFO
+    finally:
+        renderer = None
+        window = None
+
+
+def test_present_mode_cannot_change_mid_frame(ctx):
+    """Recreating the swapchain would free the image the frame is holding."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    renderer = None
+    try:
+        renderer = bz.SwapchainRenderer(window, ctx, present_mode=bz.PresentMode.FIFO)
+        pipeline = solid_pipeline(ctx, renderer)
+        cmd = ctx.create_command_buffer()
+        cmd.begin()
+        cmd.begin_rendering(renderer, clear_color=[0, 0, 0, 1])
+        cmd.bind_pipeline(pipeline)
+        cmd.draw(3)
+        cmd.end_rendering(renderer)
+
+        bz.poll_events()
+        ctx.begin_frame()
+        if not renderer.acquire():
+            pytest.skip("the window never acquired an image")
+        with pytest.raises(bz.ResourceError, match="acquire"):
+            renderer.set_present_mode(bz.PresentMode.IMMEDIATE)
+        renderer.present(cmd)
+    finally:
+        renderer = None
+        window = None
+
+
+# ── input ─────────────────────────────────────────────────────────────────
+
+
+def test_the_mouse_starts_at_rest(ctx):
+    """Every field exists and reads zero before anything has moved. dx/dy are a
+    per-cycle delta now, so at rest they are 0.0 and stay there."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    try:
+        bz.poll_events()
+        mouse = window.get_mouse_state()
+        assert mouse.dx == 0.0 and mouse.dy == 0.0
+        assert mouse.scroll_dx == 0.0 and mouse.scroll_dy == 0.0
+        # A position exists whether or not the cursor has entered the window.
+        assert isinstance(mouse.x, float) and isinstance(mouse.y, float)
+    finally:
+        window = None
+
+
+def test_a_per_cycle_query_is_repeatable(ctx):
+    """The rotation is driven by the reader, so asking twice inside one frame
+    gives the same answer. Consuming on read would answer True then False."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    try:
+        bz.poll_events()
+        first = window.get_mouse_state()
+        second = window.get_mouse_state()
+        assert (first.dx, first.dy) == (second.dx, second.dy)
+        assert window.was_key_pressed(bz.KEY_F11) == window.was_key_pressed(bz.KEY_F11)
+        assert window.was_mouse_button_pressed(bz.MOUSE_BUTTON_LEFT) == \
+            window.was_mouse_button_pressed(bz.MOUSE_BUTTON_LEFT)
+    finally:
+        window = None
+
+
+def test_an_untouched_key_is_not_an_edge(ctx):
+    """The edge query must not report a key nobody pressed, and it must survive
+    several poll cycles without inventing one."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    try:
+        for _ in range(3):
+            bz.poll_events()
+            assert not window.was_key_pressed(bz.KEY_F11)
+            assert not window.was_mouse_button_pressed(bz.MOUSE_BUTTON_RIGHT)
+    finally:
+        window = None

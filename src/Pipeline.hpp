@@ -14,6 +14,9 @@
 #include "Context.hpp"
 #include "RenderTarget.hpp"
 #include "ScopeGuard.hpp"
+// For CompareOp, which the depth test shares with compare samplers rather than
+// declaring a second eight-value enum of its own.
+#include "Sampler.hpp"
 
 // Renamed from Format: this describes a vertex attribute, and `Format` is needed
 // for pixel formats in 0.5.
@@ -44,6 +47,45 @@ enum class Topology
     POINT_LIST,
     LINE_LIST
 };
+
+// How a fragment's colour combines with what the attachment already holds.
+// blend(True) used to mean ALPHA and nothing else, which left additive glow and
+// premultiplied compositing unreachable.
+enum class BlendMode
+{
+    // src.a * src + (1 - src.a) * dst — ordinary transparency.
+    ALPHA,
+    // src + dst. Particles, glow, light accumulation: order does not matter and
+    // nothing is ever darkened.
+    ADDITIVE,
+    // src + (1 - src.a) * dst, for colours that already carry their alpha —
+    // what a composited texture or a text atlas wants.
+    PREMULTIPLIED
+};
+
+// Fill triangles, or draw only their edges/vertices. LINE is the wireframe debug
+// view. All three are core Vulkan with no feature bit; only a lineWidth other
+// than 1.0 would need the optional wideLines, and nothing here sets one.
+enum class PolygonMode
+{
+    FILL,
+    LINE,
+    POINT
+};
+
+inline constexpr VkPolygonMode to_vk(PolygonMode mode)
+{
+    switch (mode)
+    {
+        case PolygonMode::LINE:
+            return VK_POLYGON_MODE_LINE;
+        case PolygonMode::POINT:
+            return VK_POLYGON_MODE_POINT;
+        case PolygonMode::FILL:
+            return VK_POLYGON_MODE_FILL;
+    }
+    return VK_POLYGON_MODE_FILL;
+}
 
 inline constexpr VkPrimitiveTopology to_vk(Topology topology)
 {
@@ -451,10 +493,17 @@ public:
         return std::forward<Self>(self);
     }
 
+    // write=False keeps the test but stops the pass from updating the depth
+    // buffer, which is the condition for a correct transparency pass: sorted
+    // transparent geometry must test against the opaque depth without occluding
+    // its own siblings. compare= replaces the LESS_OR_EQUAL that used to be
+    // hard-coded — GREATER is a reversed-depth buffer, ALWAYS a full-screen pass.
     template <typename Self>
-    Self&& depth_test(this Self&& self, bool enable)
+    Self&& depth_test(this Self&& self, bool enable, bool write = true, CompareOp compare = CompareOp::LESS_OR_EQUAL)
     {
         self.depth_test_ = enable;
+        self.depth_write_ = write;
+        self.depth_compare_ = compare;
         return std::forward<Self>(self);
     }
 
@@ -466,10 +515,20 @@ public:
         return std::forward<Self>(self);
     }
 
+    // mode= is a kwarg on the existing verb, not a second method: the question
+    // "how does this blend" has one answer per pipeline.
     template <typename Self>
-    Self&& blend(this Self&& self, bool enable)
+    Self&& blend(this Self&& self, bool enable, BlendMode mode = BlendMode::ALPHA)
     {
         self.blend_enable_ = enable;
+        self.blend_mode_ = mode;
+        return std::forward<Self>(self);
+    }
+
+    template <typename Self>
+    Self&& polygon_mode(this Self&& self, PolygonMode mode)
+    {
+        self.polygon_mode_ = mode;
         return std::forward<Self>(self);
     }
 
@@ -554,6 +613,16 @@ public:
                 "sample_shading requires the SAMPLE_RATE_SHADING feature; create the "
                 "Context with features=[bz.Feature.SAMPLE_RATE_SHADING] (or optional=[...])"));
         }
+        // Anything but FILL is the fillModeNonSolid feature, which desktop
+        // drivers all have and some mobile ones do not — so it goes through the
+        // same negotiation as every other optional capability rather than
+        // silently producing a driver-dependent pipeline.
+        if (polygon_mode_ != PolygonMode::FILL && !context_.supports(Feature::WIREFRAME))
+        {
+            return std::unexpected(err_shader(
+                "polygon_mode requires the WIREFRAME feature; create the Context with "
+                "features=[bz.Feature.WIREFRAME] (or optional=[...])"));
+        }
         // A fragment shader is optional only when there is nothing to shade:
         // a depth-only pass (shadow maps) rasterizes straight into the depth
         // attachment and is valid Vulkan without one.
@@ -600,9 +669,13 @@ public:
             .fragment = fragment_shader_,
             .formats = formats_,
             .depth_test = depth_test_,
+            .depth_write = depth_write_,
+            .depth_compare = depth_compare_,
             .cull_mode = cull_mode_,
             .front_face = front_face_,
+            .polygon_mode = polygon_mode_,
             .blend_enable = blend_enable_,
+            .blend_mode = blend_mode_,
             .topology = topology_,
             .color_formats = std::move(colorFormats),
             .depth_format = depthFormat,
@@ -674,9 +747,13 @@ private:
         std::shared_ptr<ShaderModule> fragment;
         std::vector<VertexFormat> formats;
         bool depth_test = false;
+        bool depth_write = true;
+        CompareOp depth_compare = CompareOp::LESS_OR_EQUAL;
         CullMode cull_mode = CullMode::BACK;
         FrontFace front_face = FrontFace::COUNTER_CLOCKWISE;
+        PolygonMode polygon_mode = PolygonMode::FILL;
         bool blend_enable = false;
+        BlendMode blend_mode = BlendMode::ALPHA;
         Topology topology = Topology::TRIANGLE_LIST;
         std::vector<VkFormat> color_formats;
         VkFormat depth_format = VK_FORMAT_UNDEFINED;
@@ -904,7 +981,7 @@ private:
             .flags = 0,
             .depthClampEnable = VK_FALSE,
             .rasterizerDiscardEnable = VK_FALSE,
-            .polygonMode = VK_POLYGON_MODE_FILL,
+            .polygonMode = to_vk(s.polygon_mode),
             .cullMode = vkCullMode,
             .frontFace = s.front_face == FrontFace::CLOCKWISE ? VK_FRONT_FACE_CLOCKWISE
                                                               : VK_FRONT_FACE_COUNTER_CLOCKWISE,
@@ -917,13 +994,46 @@ private:
 
     static VkPipelineColorBlendAttachmentState color_blend_attachment_(const GraphicsState& s)
     {
+        // Blending off is ONE/ZERO — the source replaces the destination — so the
+        // mode is read only when it is on.
+        VkBlendFactor src_color = VK_BLEND_FACTOR_ONE;
+        VkBlendFactor dst_color = VK_BLEND_FACTOR_ZERO;
+        VkBlendFactor src_alpha = VK_BLEND_FACTOR_ONE;
+        VkBlendFactor dst_alpha = VK_BLEND_FACTOR_ZERO;
+
+        if (s.blend_enable)
+        {
+            switch (s.blend_mode)
+            {
+                case BlendMode::ALPHA:
+                    src_color = VK_BLEND_FACTOR_SRC_ALPHA;
+                    dst_color = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                    dst_alpha = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                    break;
+                case BlendMode::ADDITIVE:
+                    // Nothing scales down and nothing is subtracted, so draw
+                    // order stops mattering — the point of additive.
+                    src_color = VK_BLEND_FACTOR_ONE;
+                    dst_color = VK_BLEND_FACTOR_ONE;
+                    dst_alpha = VK_BLEND_FACTOR_ONE;
+                    break;
+                case BlendMode::PREMULTIPLIED:
+                    // The colour already carries its alpha, so only the
+                    // destination is attenuated.
+                    src_color = VK_BLEND_FACTOR_ONE;
+                    dst_color = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                    dst_alpha = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                    break;
+            }
+        }
+
         return {
             .blendEnable = s.blend_enable ? VK_TRUE : VK_FALSE,
-            .srcColorBlendFactor = s.blend_enable ? VK_BLEND_FACTOR_SRC_ALPHA : VK_BLEND_FACTOR_ONE,
-            .dstColorBlendFactor = s.blend_enable ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
+            .srcColorBlendFactor = src_color,
+            .dstColorBlendFactor = dst_color,
             .colorBlendOp = VK_BLEND_OP_ADD,
-            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-            .dstAlphaBlendFactor = s.blend_enable ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
+            .srcAlphaBlendFactor = src_alpha,
+            .dstAlphaBlendFactor = dst_alpha,
             .alphaBlendOp = VK_BLEND_OP_ADD,
             .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
                               VK_COLOR_COMPONENT_A_BIT};
@@ -936,8 +1046,11 @@ private:
             .pNext = nullptr,
             .flags = 0,
             .depthTestEnable = s.depth_test ? VK_TRUE : VK_FALSE,
-            .depthWriteEnable = s.depth_test ? VK_TRUE : VK_FALSE,
-            .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+            // Gated on depth_test as well: Vulkan lets a pipeline write depth
+            // with the test off, and depth_test(False) has always meant "this
+            // pass has nothing to do with depth".
+            .depthWriteEnable = (s.depth_test && s.depth_write) ? VK_TRUE : VK_FALSE,
+            .depthCompareOp = to_vk(s.depth_compare),
             .depthBoundsTestEnable = VK_FALSE,
             .stencilTestEnable = VK_FALSE,
             .front = {},
@@ -951,9 +1064,13 @@ private:
     std::shared_ptr<ShaderModule> fragment_shader_;
     std::vector<VertexFormat> formats_;
     bool depth_test_ = false;
+    bool depth_write_ = true;
+    CompareOp depth_compare_ = CompareOp::LESS_OR_EQUAL;
     CullMode cull_mode_ = CullMode::BACK;
     FrontFace front_face_ = FrontFace::COUNTER_CLOCKWISE;
+    PolygonMode polygon_mode_ = PolygonMode::FILL;
     bool blend_enable_ = false;
+    BlendMode blend_mode_ = BlendMode::ALPHA;
     Topology topology_ = Topology::TRIANGLE_LIST;
     bool sample_shading_ = false;
     float min_sample_shading_ = 1.0f;

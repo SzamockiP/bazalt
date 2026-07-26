@@ -25,6 +25,7 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     RenderingScope,
     Timer,
     MouseState,
+    WindowMode,
     BufferType,
     DataType,
     ShaderStage,
@@ -38,6 +39,8 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     PresentMode,
     CullMode,
     FrontFace,
+    PolygonMode,
+    BlendMode,
     MemoryUsage,
     Severity,
     Source,
@@ -51,7 +54,7 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     ResourceError,
 )
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 
 __all__ = [
     # Core
@@ -80,6 +83,7 @@ __all__ = [
     "Timer",
     # Data types
     "MouseState",
+    "WindowMode",
     "BufferType",
     "DataType",
     "ShaderStage",
@@ -93,6 +97,8 @@ __all__ = [
     "PresentMode",
     "CullMode",
     "FrontFace",
+    "PolygonMode",
+    "BlendMode",
     "MemoryUsage",
     "Severity",
     "Source",
