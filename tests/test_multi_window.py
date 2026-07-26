@@ -51,6 +51,31 @@ def test_frame_index_stays_inside_the_ring(ctx):
         assert 0 <= ctx.frame_index < ctx.frames_in_flight
 
 
+def test_poll_events_without_a_window_is_an_error():
+    """Pumping an event queue that no window feeds is a bug, not a no-op.
+
+    GLFW is only initialized while a Window exists, so glfwPollEvents would set
+    GLFW_NOT_INITIALIZED and return — and before the first window has ever
+    existed bazalt has not installed its error callback yet, so the call would
+    vanish without a trace. Runs headless: it asserts the absence of windows."""
+    with pytest.raises(bz.WindowError):
+        bz.poll_events()
+
+
+def test_poll_events_works_while_a_window_is_open(ctx):
+    """The other half of the guard: it must not fire on the normal path."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    try:
+        window = bz.Window(64, 64, "bazalt poll guard")
+    except bz.WindowError:
+        pytest.skip("no display available")
+    try:
+        bz.poll_events()
+    finally:
+        window = None
+
+
 # ── windowed: two swapchains, one Context ─────────────────────────────────────
 
 

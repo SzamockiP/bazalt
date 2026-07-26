@@ -14,15 +14,6 @@
 #include "Logger.hpp"
 #include "SurfaceProvider.hpp"
 
-// Drain the OS event queue for EVERY window. Free-standing rather than a method
-// on Window, because glfwPollEvents is process-wide and never had a receiver to
-// use: as a method it forced a multi-window loop to keep a closed window alive
-// just to have something to call it on — leaving a frozen window on screen.
-inline void poll_events()
-{
-    glfwPollEvents();
-}
-
 struct WindowDeleter
 {
     void operator()(GLFWwindow* ptr) const noexcept
@@ -296,3 +287,32 @@ private:
         }
     };
 };
+// Drain the OS event queue and dispatch each event to the window the OS
+// addressed it to. Deliberately NOT a method on Window: glfwPollEvents takes no
+// window and the OS message queue is per-thread, so there is no such thing as
+// "poll only this window's events". As a method it both lied about its scope —
+// `window_a.poll_events()` reads as A's events but pumps everyone's — and forced
+// a multi-window loop to keep a *closed* window alive just to have a receiver,
+// leaving a frozen window on screen.
+//
+// The per-window distinction lives in the queries instead, where it is real:
+// is_key_pressed, get_mouse_state, is_open and the framebuffer size are all read
+// off one window's own state, which this dispatch is what updates.
+inline std::expected<void, Error> poll_events()
+{
+    // No window means GLFW is not initialized (Window::create inits on the first
+    // window, ~Window terminates on the last), so glfwPollEvents would set
+    // GLFW_NOT_INITIALIZED and return — and before any window has ever existed
+    // bazalt has not even installed its error callback yet, so the call would
+    // vanish without a trace. A loop pumping events over windows that are all
+    // gone is a bug; say so rather than silently doing nothing.
+    if (Window::window_count_.load() == 0)
+    {
+        return std::unexpected(err_window(
+            "No windows exist, so there is no event queue to drain. poll_events() "
+            "dispatches OS events to the open windows; create a Window first, and "
+            "stop pumping once the last one is closed."));
+    }
+    glfwPollEvents();
+    return {};
+}

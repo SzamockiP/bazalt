@@ -40,10 +40,16 @@ selection visible and overridable instead of automatic-and-silent, and
   rather than waiting for the next interval. Falls back to FIFO like the others.
 - **`renderer.gpu_time_ms`.** Was `frame.gpu_time_ms`; the timestamp pool is
   per-renderer, so with two windows there are two GPU frame times.
-- **`bz.poll_events()`.** Was `window.poll_events()`. GLFW's event queue is
-  process-wide and the method never used its receiver — but being a method forced
-  a multi-window loop to keep a *closed* window alive just to have something to
-  call it on, leaving a frozen window on screen until the app exited.
+- **`bz.poll_events()`.** Was `window.poll_events()`. There is no such thing as
+  polling one window: the OS message queue is per-thread and `glfwPollEvents`
+  takes no window, so `window_a.poll_events()` read as A's events while pumping
+  everyone's — and being a method forced a multi-window loop to keep a *closed*
+  window alive just to have something to call it on, leaving a frozen window on
+  screen until the app exited. The per-window distinction is unchanged and lives
+  where it is real: `is_key_pressed`, `get_mouse_state`, `is_open` and
+  `renderer.acquire()` each read one window's own state. Calling it with no
+  window open raises `WindowError` instead of silently doing nothing (GLFW is
+  only initialized while a Window exists).
 - **Example `19_multi_window`.** Two windows, one Context, one pipeline, one mesh;
   different cameras, tints and present modes.
 

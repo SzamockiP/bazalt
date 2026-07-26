@@ -1391,7 +1391,13 @@ PYBIND11_MODULE(_core, m)
             });
 
     // Free function, not a Window method: GLFW's event queue is process-wide.
-    m.def("poll_events", &poll_events, "Drain the OS event queue for every window. One call services them all.");
+    m.def(
+        "poll_events",
+        []() { unwrap(poll_events(), nullptr); },
+        "Drain the OS event queue and dispatch each event to the window it was\n"
+        "addressed to. One call services every window; the per-window distinction\n"
+        "lives in the queries (is_key_pressed, is_open, renderer.acquire).\n"
+        "Raises WindowError when no window exists.");
 
     m.def(
         "list_devices",

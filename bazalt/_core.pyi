@@ -664,11 +664,25 @@ class Device:
     def supports_multiview(self) -> bool: ...
 
 def poll_events() -> None:
-    """Drain the OS event queue for every window.
+    """Drain the OS event queue and dispatch each event to the window the OS
+    addressed it to.
 
-    A free function, not a Window method: GLFW's queue is process-wide, so one
-    call services every window — and a loop whose last window just closed has
-    nothing left to call a method on.
+    A free function, not a Window method, because there is no such thing as
+    polling one window: the OS message queue is per-thread and glfwPollEvents
+    takes no window. `window_a.poll_events()` would read as A's events while
+    pumping everyone's.
+
+    The per-window distinction is real, it just lives in the queries — each
+    reads one window's own state, which this dispatch is what updates:
+
+        bz.poll_events()
+        if window_a.is_key_pressed(bz.KEY_W):   # only while A has focus
+            ...
+        if renderer_b.acquire():                # False while B is minimized
+            renderer_b.present(cmd_b)
+
+    Raises WindowError when no window exists — with none open there is no queue
+    to drain, and a loop still pumping is a bug rather than a no-op.
     """
     ...
 
