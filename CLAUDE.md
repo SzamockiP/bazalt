@@ -120,15 +120,14 @@ with every API addition.
   text, docstrings and PR descriptions. The `ste-writing` skill applies it, but the rule is
   the convention, not the tool — the skill is a user-level plugin and a fresh clone will not
   have it. Code, identifiers and the comments inside snippets are out of scope. So are this
-  file and `ROADMAP.md`: they argue and justify, and STE flattens exactly that.
-- `CHANGELOG.md` (tracked) is the "what". `ROADMAP.md` is the "why" — design principles,
-  version map, and the tech-debt register. **`ROADMAP.md` is a local working document and
-  `.gitignore` excludes it, so a fresh clone does not have it.** That is deliberate, and it
-  does not block a session: the durable rules are restated in this file (see the API design
-  rules below), and `ROADMAP.md` adds only the release-planning detail. When the file is
-  present, read its STATUS section before planning a release, and keep every decision next
-  to its justification there.
-- **API design rules** (from `ROADMAP.md`, they settle most arguments): one obvious way per
+  file and `DESIGN.md`: they argue and justify, and STE flattens exactly that.
+- `CHANGELOG.md` is the "what" (per release, chronological); `DESIGN.md` is the "why"
+  (per subject, no timeline) — design rules, the scope test, the decisions that still bind
+  the code, the debt register, the accepted ceilings, the proposed features, and the
+  rejected ideas with their reasons. Both are tracked. Read `DESIGN.md` before planning a
+  release or arguing about API shape, and put every new decision there **with** its
+  justification. A decision without a reason gets undone later.
+- **API design rules** (from `DESIGN.md`, they settle most arguments): one obvious way per
   thing — a new resource variant differing by one parameter is a kwarg on the existing
   function, not a new name (`create_image(..., cube=True)`); never cap the ceiling (leave an
   escape hatch like `cmd.barrier()` / `raw_extensions`); must run on >90% of machines
