@@ -121,7 +121,7 @@ last_time = time.time()
 frame_count = 0
 fps_timer = 0.0
 while window.is_open():
-    window.poll_events()
+    bz.poll_events()
     ctx.begin_frame()
     if not renderer.acquire():
         continue

@@ -233,7 +233,7 @@ class DemoApp:
         last_mouse_dy = self.last_mouse_dy
         
         while self.window.is_open():
-            self.window.poll_events()
+            bz.poll_events()
             
             self.ctx.begin_frame()
             

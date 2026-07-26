@@ -109,7 +109,7 @@ frame_count = 0
 fps_timer = time.time()
 
 while window.is_open():
-    window.poll_events()
+    bz.poll_events()
     ctx.begin_frame()
     if renderer.acquire():
         t = time.time() - start

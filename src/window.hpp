@@ -14,6 +14,15 @@
 #include "Logger.hpp"
 #include "SurfaceProvider.hpp"
 
+// Drain the OS event queue for EVERY window. Free-standing rather than a method
+// on Window, because glfwPollEvents is process-wide and never had a receiver to
+// use: as a method it forced a multi-window loop to keep a closed window alive
+// just to have something to call it on — leaving a frozen window on screen.
+inline void poll_events()
+{
+    glfwPollEvents();
+}
+
 struct WindowDeleter
 {
     void operator()(GLFWwindow* ptr) const noexcept
@@ -105,11 +114,6 @@ public:
     bool is_open() const
     {
         return !glfwWindowShouldClose(window_.get());
-    }
-
-    void poll_events()
-    {
-        glfwPollEvents();
     }
 
     bool is_key_pressed(int key) const

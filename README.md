@@ -120,7 +120,7 @@ tex  = ctx.load_image("wall.png")
 pipeline = ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)...build(renderer)
 
 while window.is_open():
-    window.poll_events()
+    bz.poll_events()
     ctx.begin_frame()                  # edits are applied here (and at ctx.submit)
     if renderer.acquire():
         renderer.present(cmd)          # renderer.gpu_time_ms (with gpu_timing=True) gives GPU frame timing
@@ -206,7 +206,7 @@ if __name__ == "__main__":
 
     # Main game/rendering loop
     while window.is_open():
-        window.poll_events()
+        bz.poll_events()
         
         # begin_frame opens one logical frame for every window on this
         # Context; acquire() takes this window's swapchain image and returns

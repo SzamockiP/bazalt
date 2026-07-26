@@ -81,7 +81,7 @@ def test_two_windows_share_one_context(ctx):
 
         presented = 0
         for _ in range(ctx.frames_in_flight + 4):
-            window_a.poll_events()
+            bz.poll_events()
             ctx.begin_frame()
             for renderer, cmd in zip((renderer_a, renderer_b), cmds):
                 if renderer.acquire():
@@ -105,7 +105,7 @@ def test_both_windows_render_on_the_same_ring_slot(ctx):
         renderer_a = bz.SwapchainRenderer(window_a, ctx)
         renderer_b = bz.SwapchainRenderer(window_b, ctx)
 
-        window_a.poll_events()
+        bz.poll_events()
         ctx.begin_frame()
         slot = ctx.frame_index
         renderer_a.acquire()
@@ -137,7 +137,7 @@ def test_one_command_buffer_cannot_serve_two_windows(ctx):
         cmd.draw(3)
         cmd.end_rendering(renderer_a)
 
-        window_a.poll_events()
+        bz.poll_events()
         ctx.begin_frame()
         if not (renderer_a.acquire() and renderer_b.acquire()):
             pytest.skip("windows did not both acquire (minimized?)")
@@ -162,7 +162,7 @@ def test_acquire_twice_without_begin_frame_is_an_error(ctx):
     renderer = None
     try:
         renderer = bz.SwapchainRenderer(window, ctx)
-        window.poll_events()
+        bz.poll_events()
         ctx.begin_frame()
         renderer.acquire()
         with pytest.raises(bz.ResourceError):

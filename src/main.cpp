@@ -1335,7 +1335,6 @@ PYBIND11_MODULE(_core, m)
             py::arg("logger") = py::none())
         .def("is_open", &Window::is_open)
         .def("should_close", &Window::should_close)
-        .def("poll_events", &Window::poll_events)
         .def("is_key_pressed", &Window::is_key_pressed, py::arg("key"))
         .def("is_mouse_button_pressed", &Window::is_mouse_button_pressed, py::arg("button"))
         .def("set_cursor_mode", &Window::set_cursor_mode, py::arg("mode"))
@@ -1390,6 +1389,9 @@ PYBIND11_MODULE(_core, m)
             {
                 return std::format("<bazalt.Device '{}' ({}, {} MB)>", d.name, d.type, d.memory_bytes / (1024 * 1024));
             });
+
+    // Free function, not a Window method: GLFW's event queue is process-wide.
+    m.def("poll_events", &poll_events, "Drain the OS event queue for every window. One call services them all.");
 
     m.def(
         "list_devices",

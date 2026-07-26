@@ -19,8 +19,10 @@ Two things each window needs of its own, because both are per (window, slot):
 its own CommandBuffer (one holds a single command buffer per frame slot) and
 its own DynamicBuffer for the camera.
 
-Close either window to shut it down; the other keeps rendering. Close both to
-exit.
+Close either window and it disappears while the other keeps rendering — which
+is why `bz.poll_events()` is a free function and not a Window method: GLFW's
+event queue is process-wide, so a loop whose windows come and go has nothing
+sensible to call a method on. Close both to exit.
 """
 
 import math
@@ -162,7 +164,13 @@ class View:
             self.fps_timer = time.time()
 
     def close(self):
-        """Drop the swapchain before the window whose surface it holds."""
+        """Drop the swapchain BEFORE the window, in that order: the renderer
+        owns a VkSurfaceKHR created from this window's handle. Dropping the
+        last reference is what makes the window disappear, so nothing outside
+        this object may keep one."""
+        self.cmd = None
+        self.dset = None
+        self.ubuf = None
         self.renderer = None
         self.window = None
 
@@ -174,14 +182,15 @@ views = [
          tint=(0.25, 0.7, 1.0), clear=[0.05, 0.02, 0.03, 1.0], orbit_speed=-0.9),
 ]
 
-# The renderers are owned by the Views now; keeping these around would pin a
-# swapchain past its window.
+# The Views own the windows and renderers now. These names have to go, or a
+# closed window stays on screen as a frozen husk nobody can free.
+window_a = window_b = None
 renderer_a = renderer_b = None
 
 start = time.time()
 while any(v.open for v in views):
-    # glfwPollEvents is global — one call services every window.
-    window_a.poll_events()
+    # Process-wide, so one call services every window — including none.
+    bz.poll_events()
 
     # ONE frame, however many windows draw into it.
     ctx.begin_frame()
@@ -190,10 +199,11 @@ while any(v.open for v in views):
     for v in views:
         v.draw(t)
 
+    # Release a closed window's swapchain and handle right away; the survivors
+    # keep rendering into the same Context.
     for v in views:
-        if not v.open and v.renderer is not None:
+        if not v.open:
             v.close()
 
 for v in views:
     v.close()
-window_a = window_b = None

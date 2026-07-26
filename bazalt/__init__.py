@@ -9,6 +9,7 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     Window,
     Device,
     list_devices,
+    poll_events,
     Logger,
     LogMessage,
     Buffer,
@@ -61,6 +62,7 @@ __all__ = [
     "Window",
     "Device",
     "list_devices",
+    "poll_events",
     "Logger",
     "LogMessage",
     # Resources

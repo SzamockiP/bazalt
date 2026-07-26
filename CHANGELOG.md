@@ -40,6 +40,10 @@ selection visible and overridable instead of automatic-and-silent, and
   rather than waiting for the next interval. Falls back to FIFO like the others.
 - **`renderer.gpu_time_ms`.** Was `frame.gpu_time_ms`; the timestamp pool is
   per-renderer, so with two windows there are two GPU frame times.
+- **`bz.poll_events()`.** Was `window.poll_events()`. GLFW's event queue is
+  process-wide and the method never used its receiver — but being a method forced
+  a multi-window loop to keep a *closed* window alive just to have something to
+  call it on, leaving a frozen window on screen until the app exited.
 - **Example `19_multi_window`.** Two windows, one Context, one pipeline, one mesh;
   different cameras, tints and present modes.
 
@@ -54,10 +58,11 @@ untouched — `ctx.submit()` still advances the ring itself.
 | `frame.gpu_time_ms` | `renderer.gpu_time_ms` |
 | `frame.frame_index` | `ctx.frame_index` |
 | `bz.Frame` | removed — there is nothing left for it to be |
+| `window.poll_events()` | `bz.poll_events()` |
 
 ```python
 while window.is_open():
-    window.poll_events()
+    bz.poll_events()
     ctx.begin_frame()
     if renderer.acquire():
         renderer.present(cmd)

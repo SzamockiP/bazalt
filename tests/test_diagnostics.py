@@ -130,7 +130,7 @@ def test_gpu_time_ms_is_reported_after_the_ring_cycles(ctx):
 
         times = []
         for _ in range(ctx.frames_in_flight + 5):
-            window.poll_events()
+            bz.poll_events()
             ctx.begin_frame()
             if not renderer.acquire():
                 continue
