@@ -235,7 +235,9 @@ class DemoApp:
         while self.window.is_open():
             self.window.poll_events()
             
-            if frame := self.renderer.begin_frame():
+            self.ctx.begin_frame()
+            
+            if self.renderer.acquire():
                 current_time = time.time()
                 dt = current_time - self.last_time
                 self.last_time = current_time
@@ -259,7 +261,7 @@ class DemoApp:
                 view, proj, model = self.camera.get_matrices(1024.0 / 720.0)
                 self.ubuf.update(view.to_bytes() + proj.to_bytes() + model.to_bytes())
                 
-                frame.submit(self.cmd)
+                self.renderer.present(self.cmd)
 
 if __name__ == "__main__":
     app = DemoApp()

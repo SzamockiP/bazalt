@@ -42,6 +42,9 @@ def test_removed_names_are_gone_from_the_stub():
     # "PipelineBuilder" is a substring of "GraphicsPipelineBuilder".
     assert "class PipelineBuilder:" not in text, "PipelineBuilder became GraphicsPipelineBuilder"
     assert "def pipeline_builder" not in text, "pipeline_builder became graphics_pipeline"
+    # 0.14: the frame moved to the Context, so the window's verbs are acquire()
+    # and present() and there is nothing left for a Frame object to be.
+    assert "class Frame" not in text, "Frame was split into ctx.begin_frame + renderer.acquire/present"
 
 
 def test_renamed_and_new_api_is_declared():
@@ -52,14 +55,17 @@ def test_renamed_and_new_api_is_declared():
                      "def flush",
                      # 0.5
                      "class Format(", "class Image", "class Sampler",
-                     "class Frame", "def load_image", "def create_image",
+                     "def load_image", "def create_image",
                      "def create_sampler", "def set_image",
                      # 0.6
                      "class GraphicsPipelineBuilder:", "class ComputePipelineBuilder:",
                      "def graphics_pipeline", "def compute_pipeline",
                      "class Topology(", "def topology",
                      "class Access(", "def dispatch", "def barrier",
-                     "auto_barriers"):
+                     "auto_barriers",
+                     # 0.14
+                     "class Device", "def list_devices", "def begin_frame",
+                     "def acquire", "def present", "FIFO_RELAXED"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 

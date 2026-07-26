@@ -6,8 +6,9 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     RenderTarget,
     RenderTargetBase,
     SwapchainRenderer,
-    Frame,
     Window,
+    Device,
+    list_devices,
     Logger,
     LogMessage,
     Buffer,
@@ -49,7 +50,7 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     ResourceError,
 )
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 __all__ = [
     # Core
@@ -57,8 +58,9 @@ __all__ = [
     "RenderTarget",
     "RenderTargetBase",
     "SwapchainRenderer",
-    "Frame",
     "Window",
+    "Device",
+    "list_devices",
     "Logger",
     "LogMessage",
     # Resources

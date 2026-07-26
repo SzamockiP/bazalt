@@ -10,12 +10,14 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "Device.hpp"
 #include "Error.hpp"
 #include "Features.hpp"
 #include "Logger.hpp"
@@ -95,6 +97,12 @@ struct ContextConfig
     // frame.gpu_time_ms: a timestamp pair recorded around every windowed submit.
     // Off by default because it is a profiling diagnostic
     bool gpu_timing = false;
+
+    // Which GPU to run on, as the UUID of a Device from list_devices(). Empty
+    // means the automatic choice (prefer discrete, must satisfy `required`) —
+    // the only behaviour that existed before 0.14 and still the default, because
+    // picking for the user is right until the user knows better.
+    std::optional<DeviceUUID> device;
 
     // Escape hatch, documented as "you shouldn't need this". Present so that the
     // capability abstraction never becomes a ceiling.
@@ -309,14 +317,15 @@ public:
     {
         VkPhysicalDeviceProperties props{};
         vkGetPhysicalDeviceProperties(vkb_physical_device_.physical_device, &props);
-        VkSampleCountFlags counts =
-            props.limits.framebufferColorSampleCounts & props.limits.framebufferDepthSampleCounts;
-        for (VkSampleCountFlagBits bit : {VK_SAMPLE_COUNT_64_BIT,
-                                          VK_SAMPLE_COUNT_32_BIT,
-                                          VK_SAMPLE_COUNT_16_BIT,
-                                          VK_SAMPLE_COUNT_8_BIT,
-                                          VK_SAMPLE_COUNT_4_BIT,
-                                          VK_SAMPLE_COUNT_2_BIT})
+        VkSampleCountFlags counts = props.limits.framebufferColorSampleCounts &
+                                    props.limits.framebufferDepthSampleCounts;
+        for (VkSampleCountFlagBits bit :
+             {VK_SAMPLE_COUNT_64_BIT,
+              VK_SAMPLE_COUNT_32_BIT,
+              VK_SAMPLE_COUNT_16_BIT,
+              VK_SAMPLE_COUNT_8_BIT,
+              VK_SAMPLE_COUNT_4_BIT,
+              VK_SAMPLE_COUNT_2_BIT})
         {
             if (counts & bit)
             {
@@ -355,7 +364,7 @@ public:
     // ── Frame ring ────────────────────────────────────────────────────────────
     //
     // The Context owns and advances the frame counter; renderers and the
-    // headless submit path both call begin_frame_internal() when a new frame
+    // headless submit path both advance it when a new frame
     // starts. A monotonic serial rather than a wrapping index, because the
     // deletion queue and upload bookkeeping need "how far has the GPU
     // progressed", which a modulo index cannot answer.
@@ -381,17 +390,41 @@ public:
         return static_cast<std::uint32_t>(frame_serial_ % frames_in_flight_);
     }
 
-    // Not exposed to Python: headless users have exactly one verb (ctx.submit),
-    // and a second frame-advancing verb would be a footgun until multiple
-    // submits per frame exist.
-    //
     // Call sites pick the boundary that keeps `buffer.update()` and the submit
-    // that consumes it on the SAME ring slot: SwapchainRenderer::begin_frame
-    // advances on entry (updates happen between begin and submit), the headless
-    // ctx.submit advances after submitting (updates happen before the call).
+    // that consumes it on the SAME ring slot: begin_frame() advances on entry
+    // (updates happen between begin and present), the headless ctx.submit
+    // advances after submitting (updates happen before the call).
     std::uint64_t advance_frame()
     {
         return ++frame_serial_;
+    }
+
+    // Open a new logical frame. THE frame verb of a windowed loop, and the
+    // reason 0.14 could grow a second window: everything below is per-Context,
+    // not per-swapchain. The ring slot indexes CommandBuffer's command buffers,
+    // DynamicBuffer's per-frame copies and the per-frame descriptor sets — all
+    // allocated from pools this Context owns. A renderer only keeps its own
+    // fences and semaphores on that slot, so it has no business advancing it:
+    // with N windows it would advance N times per logical frame and every
+    // consumer above would read a slot nobody wrote.
+    //
+    // Hot reload and the deletion queue hang off the same boundary — once per
+    // frame, not once per window.
+    void begin_frame()
+    {
+        advance_frame();
+
+        // Apply any pending hot reloads before this frame records: pipeline
+        // rebuilds are handle swaps and old handles retire through the deletion
+        // queue keyed by the current submit serial, so in-flight frames are safe.
+        if (hot_reload_)
+        {
+            hot_reload_->drain();
+        }
+
+        // A frame boundary is the natural point to reclaim deferred handles;
+        // the submission timeline says how far the GPU actually got.
+        flush_deletion_queue();
     }
 
     // ── Submission timeline ───────────────────────────────────────────────────
@@ -488,8 +521,8 @@ public:
     // ── Hot reload ────────────────────────────────────────────────────────────
     //
     // Null unless the Context was created with hot_reload=True. The frame path
-    // (SwapchainRenderer::begin_frame) and the headless submit both drain it on
-    // the main thread.
+    // (Context::begin_frame) and the headless submit both drain it on the main
+    // thread.
     HotReloadBase* hot_reload() const
     {
         return hot_reload_.get();
@@ -584,16 +617,6 @@ public:
             .objectHandle = handle,
             .pObjectName = name.c_str()};
         vkSetDebugUtilsObjectNameEXT(vkb_device_.device, &info);
-    }
-
-    // Guards against two SwapchainRenderers fighting over the frame ring.
-    bool has_swapchain_renderer() const
-    {
-        return has_swapchain_renderer_;
-    }
-    void set_has_swapchain_renderer(bool value)
-    {
-        has_swapchain_renderer_ = value;
     }
 
     // VkQueue is externally synchronized. Today every submit happens on the main
@@ -762,6 +785,30 @@ private:
             enable_feature(required_features, feature);
         }
         selector.set_required_features(required_features);
+
+        // An explicitly chosen GPU still has to pass the same suitability gate —
+        // required features and API version are not preferences. select_devices()
+        // is select() without the "and now pick the best one" step, so the choice
+        // is the caller's while the filtering stays ours.
+        if (config.device)
+        {
+            auto all = selector.select_devices();
+            if (all)
+            {
+                for (auto& candidate : all.value())
+                {
+                    if (device_uuid(vkGetPhysicalDeviceProperties2, candidate.physical_device) == *config.device)
+                    {
+                        ctx.vkb_physical_device_ = candidate;
+                        return {};
+                    }
+                }
+            }
+            return std::unexpected(err_init(
+                "Vulkan: the selected GPU is not available to this Context. It may have "
+                "been removed since list_devices(), or it may not meet the requirements "
+                "(check device.supports() for every feature passed as required)."));
+        }
 
         auto phys_ret = selector.select();
         if (!phys_ret)
@@ -1070,7 +1117,6 @@ private:
 
     std::set<Feature> enabled_features_;
     bool registered_ = false;
-    bool has_swapchain_renderer_ = false;
     bool headless_ = false;
     bool swapchain_supported_ = false;
     bool dynamic_rendering_khr_ = false;

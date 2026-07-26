@@ -64,9 +64,10 @@ inline VkSurfaceFormatKHR choose_swap_surface_format(const std::vector<VkSurface
 // added later would be two ways to say one thing.
 enum class PresentMode
 {
-    FIFO,      // vsync — capped to refresh rate
-    MAILBOX,   // uncapped, no tearing (the default preference)
-    IMMEDIATE, // uncapped, tearing possible; for measurements
+    FIFO,         // vsync — capped to refresh rate
+    MAILBOX,      // uncapped, no tearing (the default preference)
+    IMMEDIATE,    // uncapped, tearing possible; for measurements
+    FIFO_RELAXED, // vsync, but a LATE frame presents immediately (tearing once)
 };
 
 inline constexpr VkPresentModeKHR to_vk(PresentMode mode)
@@ -79,6 +80,8 @@ inline constexpr VkPresentModeKHR to_vk(PresentMode mode)
             return VK_PRESENT_MODE_MAILBOX_KHR;
         case PresentMode::IMMEDIATE:
             return VK_PRESENT_MODE_IMMEDIATE_KHR;
+        case PresentMode::FIFO_RELAXED:
+            return VK_PRESENT_MODE_FIFO_RELAXED_KHR;
     }
     // Not std::unreachable(): pybind enums accept arbitrary ints.
     return VK_PRESENT_MODE_FIFO_KHR;
@@ -130,19 +133,10 @@ public:
             return std::unexpected(vk_samples.error());
         }
 
-        // The frame index lives on the Context and is advanced by whichever renderer
-        // ends a frame, so two renderers sharing a Context silently corrupt each
-        // other's in-flight tracking. Say so instead of misrendering.
-        // 0.5 moves the ring onto Context::begin_frame(), which is the real fix and
-        // is what lets this restriction be lifted in 0.6.
-        if (context->has_swapchain_renderer())
-        {
-            return std::unexpected(err_window(
-                "This Context already has a SwapchainRenderer. Two renderers sharing "
-                "one Context would corrupt each other's frame index. Multi-window "
-                "support is planned once frame tracking moves off the Context."));
-        }
-
+        // 0.14 lifted the one-renderer-per-Context restriction: everything below
+        // is per-renderer already (swapchain, surface, semaphores, fences, depth,
+        // MSAA colour, timestamp pool), and the one genuinely shared thing — the
+        // frame ring — moved to ctx.begin_frame(), so N windows advance it once.
         auto renderer = std::unique_ptr<SwapchainRenderer>(new SwapchainRenderer(context, std::move(surface_provider)));
         // The PREFERENCE is stored, not the resolved mode: swapchain recreation
         // re-negotiates, because availability can change with the surface.
@@ -227,7 +221,6 @@ public:
         // gpu_time_ms as None, never an error.
         renderer->create_timestamp_pool_();
 
-        context->set_has_swapchain_renderer(true);
         return renderer;
     }
 
@@ -237,7 +230,6 @@ public:
         {
             return;
         }
-        context_->set_has_swapchain_renderer(false);
 
         if (context_->device())
         {
@@ -407,6 +399,8 @@ public:
                 return PresentMode::MAILBOX;
             case VK_PRESENT_MODE_IMMEDIATE_KHR:
                 return PresentMode::IMMEDIATE;
+            case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+                return PresentMode::FIFO_RELAXED;
             default:
                 return PresentMode::FIFO;
         }
@@ -433,34 +427,34 @@ public:
         return timestamp_pool_;
     }
     // submit() calls this after recording the timestamp pair for current_frame(),
-    // so begin_frame knows the slot has results to read next time round.
+    // so acquire() knows the slot has results to read next time round.
     void mark_timestamp_written()
     {
         slot_written_[current_frame()] = true;
     }
 
-    void submit(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial = 0);
+    void present(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial = 0);
 
-    // Returns true if a frame was successfully acquired and is ready for rendering.
-    // Returns false if the frame was skipped (minimized, resize, etc.) — caller should skip rendering.
-    bool begin_frame()
+    // Take the next swapchain image for THIS window, within the frame the
+    // Context already opened. True when an image is ready to render into;
+    // false when this window sits the frame out (minimized, mid-resize) —
+    // which with N windows must not stop the others, hence a per-window
+    // answer rather than a per-frame one.
+    std::expected<bool, Error> acquire()
     {
-        frame_skipped_ = false;
-
-        // The frame ring advances at the START of a frame, on the Context — not
-        // at the end, on the renderer, as it used to. Everything below indexes
-        // per-frame state through current_frame(), so consistency within one
-        // frame is all that matters. A skipped frame burns a ring slot, which is
-        // harmless: nothing gets submitted under it.
-        context_->advance_frame();
-
-        // Apply any pending hot reloads before this frame records: pipeline
-        // rebuilds are handle swaps and old handles retire through the deletion
-        // queue keyed by the current submit serial, so in-flight frames are safe.
-        if (auto* hr = context_->hot_reload())
+        // Acquiring twice on one ring slot means either a genuine double
+        // acquire or — far more likely — a loop that forgot ctx.begin_frame().
+        // Both leave this window rendering into a slot whose previous submit
+        // may still be in flight, so name them together.
+        if (acquired_serial_ == context_->frame_serial())
         {
-            hr->drain();
+            return std::unexpected(err_resource(
+                "This window already acquired an image for the current frame. Call "
+                "ctx.begin_frame() once per frame, then acquire() once per window."));
         }
+        acquired_serial_ = context_->frame_serial();
+        image_acquired_ = false;
+        frame_skipped_ = false;
 
         // Check framebuffer size — return false if minimized (0x0)
         auto [width, height] = surface_provider_.get_framebuffer_size();
@@ -475,10 +469,6 @@ public:
         // The fence proves this slot's previous submission finished, so its
         // timestamp pair is ready to read (frames_in_flight frames of latency).
         read_timestamps_();
-
-        // A frame boundary is the natural point to reclaim deferred handles;
-        // the submission timeline says how far the GPU actually got.
-        context_->flush_deletion_queue();
 
         VkResult result = vkAcquireNextImageKHR(
             context_->device(),
@@ -506,7 +496,21 @@ public:
         }
 
         vkResetFences(context_->device(), 1, &in_flight_fences_[current_frame()]);
+        image_acquired_ = true;
         return true;
+    }
+
+    // present() may only consume an image acquire() actually handed over, and
+    // only once — the semaphores and the in-flight fence are per (window, slot).
+    std::expected<void, Error> check_presentable() const
+    {
+        if (!image_acquired_)
+        {
+            return std::unexpected(err_resource(
+                "This window has no acquired swapchain image. Call acquire() first, "
+                "and skip present() when it returns False (minimized or resizing)."));
+        }
+        return {};
     }
 
     // upload_wait_serial: the highest submission-timeline value this frame's
@@ -514,6 +518,10 @@ public:
     // wait for 0 is trivially satisfied, so no branching is needed.
     void end_frame(VkCommandBuffer cmd, std::uint64_t upload_wait_serial = 0)
     {
+        // The image is consumed here; a second present() on it would submit
+        // against semaphores this one already signalled.
+        image_acquired_ = false;
+
         VkSemaphore waitSemaphores[] = {image_available_semaphores_[current_frame()], context_->submit_timeline()};
         VkPipelineStageFlags waitStages[] = {
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
@@ -592,6 +600,12 @@ private:
     std::shared_ptr<Context> context_;
     SurfaceProvider surface_provider_;
 
+    // The frame serial this window last acquired at, and whether that acquire
+    // produced an image still waiting to be presented. Together they are the
+    // whole of "did the caller drive this window correctly this frame".
+    std::uint64_t acquired_serial_ = 0;
+    bool image_acquired_ = false;
+
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
     VkFormat swapchain_format_ = VK_FORMAT_UNDEFINED;
     VkExtent2D swapchain_extent_{};
@@ -640,7 +654,7 @@ private:
     void create_timestamp_pool_()
     {
         // Opt-in only. Off (the default), no pool exists, so submit records no
-        // timestamps, begin_frame reads none, and gpu_time_ms stays None — no
+        // timestamps, acquire() reads none, and gpu_time_ms stays None — no
         // per-frame timestamp work at all, which is the point of the default.
         if (!context_->gpu_timing())
         {
@@ -1057,27 +1071,4 @@ private:
             msaa_color_allocation_ = VK_NULL_HANDLE;
         }
     }
-};
-// One successfully acquired swapchain frame. begin_frame() hands this out
-// instead of a bool: "a frame exists" and "here is the frame" are the same
-// fact, and putting submit() on the frame makes submitting without having
-// acquired one unrepresentable.
-//
-// The serial is a generation guard: a Frame held across ticks (the obvious
-// PyQt mistake) fails with a readable error instead of a validation storm.
-struct Frame
-{
-    std::shared_ptr<SwapchainRenderer> renderer;
-    std::uint64_t serial = 0;
-    std::uint32_t frame_index = 0;
-    std::uint32_t image_index = 0;
-    bool submitted = false;
-
-    // The GPU time of the frame frames_in_flight ago, read back when this frame
-    // was acquired; None until the ring has cycled once, and on unsupported
-    // devices. Snapshotted at begin_frame so it is stable for the frame's life.
-    std::optional<double> gpu_time_ms;
-
-    // Records, submits and presents. Defined in main.cpp next to record_frame.
-    std::expected<void, Error> submit(std::shared_ptr<CommandBuffer> cmd);
 };

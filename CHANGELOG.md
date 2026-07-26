@@ -5,6 +5,87 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.14.0] — 2026-07-26
+
+"Multi-window": a Context can now drive any number of windows. Getting there
+meant naming a thing the API had been conflating: the **frame** belongs to the
+Context (its ring slot indexes the command buffers, dynamic buffers and
+descriptor sets the Context allocates), while **acquiring and presenting a
+swapchain image** belongs to a window. With one window the two coincided, so
+`renderer.begin_frame()` could do both; with two, the second window advanced the
+ring a second time and every `update()` landed in a slot nobody read. So the
+frame moved onto `ctx.begin_frame()` and a window's verbs became `acquire()` and
+`present()` — which is also the whole reason the one-renderer-per-Context guard
+could go. Alongside it: `bz.list_devices()` and `Context(device=...)` make GPU
+selection visible and overridable instead of automatic-and-silent, and
+`FIFO_RELAXED` completes the present modes.
+
+### Added
+- **N windows on one Context.** `bz.SwapchainRenderer(window_b, ctx)` no longer
+  raises. Each renderer owns its swapchain, surface, semaphores, fences, depth and
+  MSAA images, so resizing or closing one window leaves the others rendering.
+- **`ctx.begin_frame()`.** Opens one logical frame: advances the ring slot,
+  applies pending hot reloads, reclaims deferred handles. Once per frame no matter
+  how many windows draw into it. `ctx.frame_index` reports the slot.
+- **`renderer.acquire()` / `renderer.present(cmd)`.** A window's two verbs.
+  `acquire()` returns `False` when that window sits the frame out (minimized,
+  mid-resize) without stopping the others.
+- **`bz.list_devices()` and `Context(device=...)`.** Every GPU on the machine —
+  `name`, `type`, `memory_mb`, `api_version`, `supports(Feature)`,
+  `supports_multiview()` — before a Context exists, so the choice can be informed.
+  Pass one back as `device=`; matching is by `deviceUUID`, never by name or index.
+  `device=None` (the default) keeps the previous automatic selection, and an
+  explicit device is still filtered by `features=`.
+- **`PresentMode.FIFO_RELAXED`.** vsync that lets a late frame present immediately
+  rather than waiting for the next interval. Falls back to FIFO like the others.
+- **`renderer.gpu_time_ms`.** Was `frame.gpu_time_ms`; the timestamp pool is
+  per-renderer, so with two windows there are two GPU frame times.
+- **Example `19_multi_window`.** Two windows, one Context, one pipeline, one mesh;
+  different cameras, tints and present modes.
+
+### Changed (breaking)
+Every windowed loop gains one line and renames two calls. Headless code is
+untouched — `ctx.submit()` still advances the ring itself.
+
+| 0.13 | 0.14 |
+|---|---|
+| `if frame := renderer.begin_frame():` | `ctx.begin_frame()` then `if renderer.acquire():` |
+| `frame.submit(cmd)` | `renderer.present(cmd)` |
+| `frame.gpu_time_ms` | `renderer.gpu_time_ms` |
+| `frame.frame_index` | `ctx.frame_index` |
+| `bz.Frame` | removed — there is nothing left for it to be |
+
+```python
+while window.is_open():
+    window.poll_events()
+    ctx.begin_frame()
+    if renderer.acquire():
+        renderer.present(cmd)
+```
+
+The `Frame` object's guards survive as errors on the new verbs: acquiring twice
+in one frame (in practice, a loop that forgot `ctx.begin_frame()`) and presenting
+without an acquired image both raise `ResourceError`.
+
+### Fixed
+- **A failed submit could crash instead of raising.** Both submit paths run with
+  the GIL released, where raising a Python exception is undefined; an upload that
+  failed to become resident did exactly that. Errors now travel back as values and
+  are raised by the caller.
+
+### Notes
+- **One CommandBuffer per window.** A `CommandBuffer` holds one command buffer per
+  frame slot, and both windows now render on the same slot, so replaying one in two
+  windows would overwrite work in flight. Doing so raises `ResourceError` with that
+  sentence rather than a pending-state validation message (which a build without
+  the validation layers would not print at all).
+- **Multi-window is verified by hand.** Two swapchains need two real surfaces, so
+  CI's lavapipe skips those tests; they run locally against a real driver, and the
+  validation-as-assert fixture is the referee. The frame/window split itself is
+  covered headless.
+- **Still one Context per process** (tech debt #1) — that is the 0.15 feature.
+  Multi-window deliberately needs no volk dispatch tables: N windows are one device.
+
 ## [0.13.0] — 2026-07-24
 
 "Render-to-layer & Multiview": a graphics pass can now rasterize a scene into one

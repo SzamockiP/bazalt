@@ -110,7 +110,10 @@ set_target_properties(_core PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}" SUFFIX "
 
 target_compile_features(_core PRIVATE cxx_std_23)
 if(MSVC)
-    target_compile_options(_core PRIVATE /Zc:__cplusplus)
+    # /bigobj: main.cpp is the whole binding layer in one translation unit, and
+    # 0.14 pushed it past COFF's 65,536-section limit. Every pybind lambda is a
+    # template instantiation, so this only ever grows.
+    target_compile_options(_core PRIVATE /Zc:__cplusplus /bigobj)
 else()
     target_compile_options(_core PRIVATE -Wno-interference-size)
 endif()

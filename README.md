@@ -28,9 +28,11 @@ and the Vulkan SDK.
 - **Command Buffers:** Explicit, yet simple command recording — calls chain (`cmd.bind_pipeline(p).draw(3)`), and `with cmd.rendering(target):` closes the pass for you.
 - **Asynchronous Texture Streaming:** `ctx.load_image()` returns immediately while the decode and GPU copy run in the background; anything that samples the image waits for it automatically. `ctx.upload_progress` gives you a loading bar for free.
 - **Hot Reload:** `Context(hot_reload=True)` watches the shaders (and their `#include`s) and images you loaded and applies edits live — shaders recompile and rebuild their pipelines in place, images re-upload into the same handle. A typo or a bad file is logged and the last good version keeps rendering, so a mistake never takes the app down. See `examples/12_hot_reload`.
-- **Frame Timing & Debug Names:** `Context(gpu_timing=True)` makes `frame.gpu_time_ms` report the GPU time of a recent frame (opt-in — off by default it costs nothing); `t = cmd.timer()` … `t.stop()` … `t.ms` times any slice of a recording (handle-based, no `with` required) and reads back headless; `name=` / `.name()` label buffers, images and pipelines so validation messages name the culprit.
+- **Frame Timing & Debug Names:** `Context(gpu_timing=True)` makes `renderer.gpu_time_ms` report the GPU time of a recent frame (opt-in — off by default it costs nothing); `t = cmd.timer()` … `t.stop()` … `t.ms` times any slice of a recording (handle-based, no `with` required) and reads back headless; `name=` / `.name()` label buffers, images and pipelines so validation messages name the culprit.
 - **Headless Rendering:** Draw into an offscreen `RenderTarget` and read the pixels back as a NumPy array — no window, no display required.
 - **Render-to-Texture, MRT & Shadow Maps:** Target attachments are ordinary `Image` objects in any supported `Format` — sample `target.color[0]` or a depth-only target's `target.depth` like any texture.
+- **Multi-Window:** one Context drives any number of windows. `ctx.begin_frame()` opens the frame; each window does `renderer.acquire()` / `renderer.present(cmd)` and owns its own swapchain, so resizing or closing one leaves the others rendering. See `examples/19_multi_window`.
+- **Pick Your GPU:** `bz.list_devices()` lists every card (name, type, VRAM, API version, per-feature support) before a Context exists; `Context(device=...)` runs on the one you chose. Omit it and bazalt picks for you, as before.
 - **Runs Widely:** Vulkan 1.2 baseline with 1.3 used where available, so bazalt runs on older integrated GPUs too. Capabilities are requested by name, never by version or extension.
 - **Decoupled Architecture:** Clean separation of concerns between Windowing (GLFW), Vulkan Context (GPU initialization), and render targets — a window is one target among others.
 
@@ -119,8 +121,9 @@ pipeline = ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)...b
 
 while window.is_open():
     window.poll_events()
-    if frame := renderer.begin_frame():   # edits are applied here (and at ctx.submit)
-        frame.submit(cmd)                 # ...frame.gpu_time_ms (with gpu_timing=True) gives GPU frame timing
+    ctx.begin_frame()                  # edits are applied here (and at ctx.submit)
+    if renderer.acquire():
+        renderer.present(cmd)          # renderer.gpu_time_ms (with gpu_timing=True) gives GPU frame timing
 ```
 
 Editing `shader.frag` rebuilds the pipeline in place; re-saving `wall.png` (same
@@ -205,8 +208,10 @@ if __name__ == "__main__":
     while window.is_open():
         window.poll_events()
         
-        # begin_frame returns a Frame, or None when this frame should be
-        # skipped (window minimized, mid-resize)
-        if frame := renderer.begin_frame():
-            frame.submit(cmd)
+        # begin_frame opens one logical frame for every window on this
+        # Context; acquire() takes this window's swapchain image and returns
+        # False when it should sit the frame out (minimized, mid-resize)
+        ctx.begin_frame()
+        if renderer.acquire():
+            renderer.present(cmd)
 ```

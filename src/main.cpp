@@ -35,7 +35,7 @@ namespace py = pybind11;
 
 // Renders a command buffer into whatever targets it captured, with no swapchain
 // and no present. This is the headless path — and the one the test suite uses.
-void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd);
+std::expected<void, Error> context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd);
 
 // ── Error boundary ────────────────────────────────────────────────────────────
 //
@@ -368,8 +368,9 @@ namespace
     // Reset, begin, replay and end the per-frame VkCommandBuffer. Shared by the
     // swapchain and headless submit paths, which only differ in what happens to
     // the recorded buffer afterwards.
-    VkCommandBuffer record_frame(CommandBuffer& cmd, std::uint32_t frame_index, TimestampRange ts = {})
+    VkCommandBuffer record_frame(CommandBuffer& cmd, const Context& ctx, TimestampRange ts = {})
     {
+        const std::uint32_t frame_index = ctx.frame_index();
         VkCommandBuffer vkCmd = cmd.get(frame_index);
         vkResetCommandBuffer(vkCmd, 0);
 
@@ -408,17 +409,17 @@ namespace
     }
 
 } // namespace
-void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial)
+void SwapchainRenderer::present(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial)
 {
     TimestampRange ts{};
     if (timestamps_supported())
     {
         ts = {timestamp_pool(), 2 * current_frame()};
     }
-    end_frame(record_frame(*cmd, current_frame(), ts), upload_wait_serial);
+    end_frame(record_frame(*cmd, *context(), ts), upload_wait_serial);
     if (timestamps_supported())
     {
-        // The slot now holds results begin_frame can read once its fence signals.
+        // The slot now holds results acquire() can read once its fence signals.
         mark_timestamp_written();
     }
 }
@@ -429,7 +430,7 @@ void SwapchainRenderer::submit(std::shared_ptr<CommandBuffer> cmd, std::uint64_t
 // timeline for the highest upload it depends on (zero CPU stall in the steady
 // state). Images with no pending upload — RTT attachments, synchronous
 // uploads — short-circuit to 0.
-std::uint64_t require_uploads_resident(CommandBuffer& cmd)
+std::expected<std::uint64_t, Error> require_uploads_resident(CommandBuffer& cmd)
 {
     std::uint64_t wait_serial = 0;
     for (const auto& set : cmd.used_sets())
@@ -439,7 +440,7 @@ std::uint64_t require_uploads_resident(CommandBuffer& cmd)
             auto serial = bi.image->require_resident();
             if (!serial)
             {
-                raise_error(serial.error());
+                return std::unexpected(serial.error());
             }
             wait_serial = (std::max)(wait_serial, *serial);
         }
@@ -447,22 +448,27 @@ std::uint64_t require_uploads_resident(CommandBuffer& cmd)
     return wait_serial;
 }
 
-std::expected<void, Error> Frame::submit(std::shared_ptr<CommandBuffer> cmd)
+// The Python-facing present(): everything acquire() promised must still hold,
+// and every image this recording samples has to be at least submitted.
+std::expected<void, Error> present_command_buffer(SwapchainRenderer& renderer, std::shared_ptr<CommandBuffer> cmd)
 {
-    if (submitted)
+    if (auto r = renderer.check_presentable(); !r)
     {
-        return std::unexpected(
-            err_resource("This Frame was already submitted. Call begin_frame() again to get the next one."));
+        return std::unexpected(r.error());
     }
-    if (serial != renderer->current_serial())
+    // Claimed here rather than inside record_frame: both submit paths run with
+    // the GIL released, so a diagnosis has to travel back as an Error and be
+    // raised by the caller, never thrown from under the release.
+    if (auto r = cmd->claim_for_frame(renderer.context()->frame_serial()); !r)
     {
-        return std::unexpected(err_resource(
-            "This Frame is stale: begin_frame() has run again since it was acquired. "
-            "Acquire, submit and drop a Frame within one tick."));
+        return std::unexpected(r.error());
     }
-    const std::uint64_t upload_wait_serial = require_uploads_resident(*cmd);
-    renderer->submit(std::move(cmd), upload_wait_serial);
-    submitted = true;
+    auto upload_wait_serial = require_uploads_resident(*cmd);
+    if (!upload_wait_serial)
+    {
+        return std::unexpected(upload_wait_serial.error());
+    }
+    renderer.present(std::move(cmd), *upload_wait_serial);
     return {};
 }
 
@@ -566,7 +572,7 @@ py::array image_to_numpy(Image& image)
     return out;
 }
 
-void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd)
+std::expected<void, Error> context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd)
 {
     // Drain hot reloads BEFORE recording, so an edit-then-submit picks up the new
     // pipeline in THIS submit. The headless path advances the ring only after
@@ -577,8 +583,19 @@ void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd)
         hr->drain();
     }
 
-    const std::uint64_t upload_wait_serial = require_uploads_resident(*cmd);
-    VkCommandBuffer vkCmd = record_frame(*cmd, context.frame_index());
+    // Same claim the windowed present makes. Sequential headless submits can
+    // never collide (the ring advances after each one), but mixing a present
+    // and a ctx.submit of one CommandBuffer inside a frame can.
+    if (auto r = cmd->claim_for_frame(context.frame_serial()); !r)
+    {
+        return std::unexpected(r.error());
+    }
+    auto upload_wait_serial = require_uploads_resident(*cmd);
+    if (!upload_wait_serial)
+    {
+        return std::unexpected(upload_wait_serial.error());
+    }
+    VkCommandBuffer vkCmd = record_frame(*cmd, context);
 
     VkSemaphore timeline = context.submit_timeline();
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -591,7 +608,7 @@ void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd)
             .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
             .pNext = nullptr,
             .waitSemaphoreValueCount = 1,
-            .pWaitSemaphoreValues = &upload_wait_serial,
+            .pWaitSemaphoreValues = &*upload_wait_serial,
             .signalSemaphoreValueCount = 1,
             .pSignalSemaphoreValues = &serial};
         VkSubmitInfo submitInfo{
@@ -610,7 +627,7 @@ void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd)
         if (auto e =
                 check(vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE), "submit command buffer"))
         {
-            raise_error(*e);
+            return std::unexpected(*e);
         }
 
         // Blocking. There is no swapchain to pace against here; the timeline
@@ -618,7 +635,7 @@ void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd)
         // headless submits asynchronous.
         if (auto e = check(vkQueueWaitIdle(context.graphics_queue()), "wait for submitted command buffer"))
         {
-            raise_error(*e);
+            return std::unexpected(*e);
         }
     }
 
@@ -630,6 +647,7 @@ void context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd)
     // forever). After, not before, submitting — an update() made before this
     // call must land in the slot this submit reads.
     context.advance_frame();
+    return {};
 }
 
 // Attach a debug name to a Vulkan handle (empty name -> no-op). Non-dispatchable
@@ -1353,6 +1371,36 @@ PYBIND11_MODULE(_core, m)
         .def_property("min_severity", &Logger::min_severity, &Logger::set_min_severity);
 
     // ── Context ──
+    // ── Device ──
+    // Inert data, not a live handle: see Device.hpp on why a VkPhysicalDevice
+    // could not survive the enumeration that produced it.
+    py::class_<Device>(m, "Device")
+        .def_readonly("name", &Device::name)
+        .def_readonly("type", &Device::type)
+        .def_property_readonly("api_version", [](const Device& d) { return api_version_string(d.api_version); })
+        // Megabytes rather than bytes: the number is read by a human choosing a
+        // card, and "8188" beats "8584495104".
+        .def_property_readonly(
+            "memory_mb", [](const Device& d) { return static_cast<std::uint64_t>(d.memory_bytes / (1024 * 1024)); })
+        .def("supports", &Device::supports, py::arg("feature"))
+        .def("supports_multiview", [](const Device& d) { return d.multiview; })
+        .def(
+            "__repr__",
+            [](const Device& d)
+            {
+                return std::format("<bazalt.Device '{}' ({}, {} MB)>", d.name, d.type, d.memory_bytes / (1024 * 1024));
+            });
+
+    m.def(
+        "list_devices",
+        []()
+        {
+            auto devices = list_devices();
+            return unwrap(std::move(devices), nullptr);
+        },
+        "Every GPU on this machine, without creating a Context. Pass one to\n"
+        "Context(device=...) to run on it; the default picks automatically.");
+
     py::class_<Context, std::shared_ptr<Context>>(m, "Context")
         .def(
             py::init(
@@ -1361,6 +1409,7 @@ PYBIND11_MODULE(_core, m)
                    std::vector<Feature> features,
                    std::vector<Feature> optional,
                    std::uint32_t frames_in_flight,
+                   std::optional<Device> device,
                    std::vector<std::string> raw_extensions,
                    bool auto_barriers,
                    bool hot_reload,
@@ -1379,6 +1428,10 @@ PYBIND11_MODULE(_core, m)
                     config.required = std::move(features);
                     config.optional = std::move(optional);
                     config.frames_in_flight = frames_in_flight;
+                    if (device)
+                    {
+                        config.device = device->uuid;
+                    }
                     config.raw_extensions = std::move(raw_extensions);
                     config.auto_barriers = auto_barriers;
                     config.gpu_timing = gpu_timing;
@@ -1408,12 +1461,20 @@ PYBIND11_MODULE(_core, m)
             py::arg("features") = std::vector<Feature>{},
             py::arg("optional") = std::vector<Feature>{},
             py::arg("frames_in_flight") = 2,
+            py::arg("device") = py::none(),
             py::arg("raw_extensions") = std::vector<std::string>{},
             py::arg("auto_barriers") = true,
             py::arg("hot_reload") = false,
             py::arg("gpu_timing") = false)
         .def_property_readonly("auto_barriers", &Context::auto_barriers)
         .def_property_readonly("frames_in_flight", &Context::frames_in_flight)
+        // The frame verb of a windowed loop: opens one logical frame for every
+        // window on this Context. Advances the ring slot that CommandBuffer,
+        // DynamicBuffer and the per-frame descriptor sets index, applies pending
+        // hot reloads and reclaims deferred handles — all Context-owned, hence
+        // once per frame rather than once per window.
+        .def("begin_frame", &Context::begin_frame)
+        .def_property_readonly("frame_index", &Context::frame_index)
         .def_property_readonly("logger", &Context::logger)
         .def("supports", &Context::supports, py::arg("feature"))
         .def("supports_multiview", &Context::supports_multiview)
@@ -1794,14 +1855,18 @@ PYBIND11_MODULE(_core, m)
             [](Context& self, std::optional<bool> auto_barriers) -> py::object
             { return py::cast(unwrap(CommandBuffer::create(self, auto_barriers), self.logger().get())); },
             py::arg("auto_barriers") = py::none())
-        // The headless counterpart of frame.submit(): no swapchain, no present.
+        // The headless counterpart of renderer.present(): no swapchain, no present.
         .def(
             "submit",
             [](Context& self, std::shared_ptr<CommandBuffer> cmd)
             {
-                // Blocking (wait-idle inside) — release the GIL for the duration.
-                py::gil_scoped_release release;
-                context_submit(self, std::move(cmd));
+                std::expected<void, Error> r;
+                {
+                    // Blocking (wait-idle inside) — release the GIL for the duration.
+                    py::gil_scoped_release release;
+                    r = context_submit(self, std::move(cmd));
+                }
+                unwrap(std::move(r), self.logger().get());
             },
             py::arg("cmd"));
 
@@ -1858,7 +1923,16 @@ PYBIND11_MODULE(_core, m)
 
                     return unwrap(
                         OffscreenTarget::create(
-                            context, width, height, std::move(colors), depth_format, samples, layers, cube, mip_levels, name),
+                            context,
+                            width,
+                            height,
+                            std::move(colors),
+                            depth_format,
+                            samples,
+                            layers,
+                            cube,
+                            mip_levels,
+                            name),
                         context.logger().get());
                 }),
             py::arg("context"),
@@ -1925,7 +1999,8 @@ PYBIND11_MODULE(_core, m)
     py::enum_<PresentMode>(m, "PresentMode")
         .value("FIFO", PresentMode::FIFO)
         .value("MAILBOX", PresentMode::MAILBOX)
-        .value("IMMEDIATE", PresentMode::IMMEDIATE);
+        .value("IMMEDIATE", PresentMode::IMMEDIATE)
+        .value("FIFO_RELAXED", PresentMode::FIFO_RELAXED);
 
     py::class_<SwapchainRenderer, RenderTarget, std::shared_ptr<SwapchainRenderer>>(m, "SwapchainRenderer")
         .def(
@@ -2014,56 +2089,46 @@ PYBIND11_MODULE(_core, m)
             py::arg("present_mode") = PresentMode::MAILBOX,
             py::arg("samples") = 1)
         .def_property_readonly("present_mode", &SwapchainRenderer::present_mode)
-        // Frame | None instead of bool: "the frame exists" and "here is the
-        // frame" are the same fact, so return it. renderer.submit is gone —
-        // submitting lives on the Frame you were handed.
+        // bool, not a Frame: the frame belongs to the Context (ctx.begin_frame),
+        // and what a window contributes to it is one acquired image. False means
+        // "this window sits this frame out" — the others carry on.
         .def(
-            "begin_frame",
-            [](std::shared_ptr<SwapchainRenderer> self) -> py::object
+            "acquire",
+            [](SwapchainRenderer& self) -> bool
             {
-                bool acquired;
+                std::expected<bool, Error> acquired;
                 {
                     // Waits on the in-flight fence — release the GIL meanwhile.
                     py::gil_scoped_release release;
-                    acquired = self->begin_frame();
+                    acquired = self.acquire();
                 }
-                if (!acquired)
-                {
-                    return py::none();
-                }
-                auto frame = std::make_shared<Frame>();
-                frame->renderer = self;
-                frame->serial = self->current_serial();
-                frame->frame_index = self->current_frame();
-                frame->image_index = self->current_image_index();
-                // Snapshot the GPU time read back during begin_frame, so it stays
-                // stable for the frame's lifetime regardless of later begin_frames.
-                frame->gpu_time_ms = self->gpu_time_ms();
-                return py::cast(frame);
+                return unwrap(std::move(acquired), self.context()->logger().get());
             })
-        .def_property_readonly("width", [](const SwapchainRenderer& r) { return r.extent().width; })
-        .def_property_readonly("height", [](const SwapchainRenderer& r) { return r.extent().height; });
-
-    py::class_<Frame, std::shared_ptr<Frame>>(m, "Frame")
         .def(
-            "submit",
-            [](Frame& self, std::shared_ptr<CommandBuffer> cmd)
+            "present",
+            [](SwapchainRenderer& self, std::shared_ptr<CommandBuffer> cmd)
             {
                 std::expected<void, Error> r;
                 {
                     // May CPU-wait for an upload still decoding — release the GIL.
                     py::gil_scoped_release release;
-                    r = self.submit(std::move(cmd));
+                    r = present_command_buffer(self, std::move(cmd));
                 }
                 unwrap(std::move(r), nullptr);
             },
             py::arg("cmd"))
-        .def_property_readonly("frame_index", [](const Frame& f) { return f.frame_index; })
         // float milliseconds, or None until the ring has cycled once / on
-        // devices without timestamp support.
+        // devices without timestamp support. Per renderer, because the timestamp
+        // pool is: two windows have two GPU frame times.
         .def_property_readonly(
             "gpu_time_ms",
-            [](const Frame& f) -> py::object { return f.gpu_time_ms ? py::cast(*f.gpu_time_ms) : py::none(); });
+            [](const SwapchainRenderer& r) -> py::object
+            {
+                auto ms = r.gpu_time_ms();
+                return ms ? py::cast(*ms) : py::none();
+            })
+        .def_property_readonly("width", [](const SwapchainRenderer& r) { return r.extent().width; })
+        .def_property_readonly("height", [](const SwapchainRenderer& r) { return r.extent().height; });
 
     // ── Key Constants ──
     m.attr("KEY_SPACE") = GLFW_KEY_SPACE;
