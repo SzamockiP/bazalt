@@ -83,13 +83,22 @@ jobs:
           path: ./wheelhouse/*.whl
 
   # ── Full GPU suite on lavapipe (Mesa software rasterizer) ─────
-  # First CI leg that actually renders: deterministic, no GPU runner
-  # needed. Mesa 24.x lavapipe advertises Vulkan 1.3, so this exercises
-  # the 1.3-core path only — the 1.2+KHR-alias path remains untested.
+  # First CI leg that actually renders: deterministic, no GPU runner needed.
+  #
+  # Twice, because lavapipe advertises Vulkan 1.3 and bazalt's baseline is 1.2:
+  # on the api-1.3 leg dynamic rendering is core, on the api-1.2 leg it comes
+  # from VK_KHR_dynamic_rendering and Context aliases the KHR entry points onto
+  # the core names. That second path had no coverage anywhere from 0.5 to 0.15
+  # (both CI and the dev GPU report 1.3+), which is what made every touch of
+  # version negotiation a leap of faith.
   test_lavapipe:
-    name: Tests · lavapipe
+    name: Tests · lavapipe (api ${{ matrix.api }})
     needs: build_wheels
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        api: ["1.3", "1.2"]
     steps:
       - uses: actions/checkout@v4
 
@@ -141,10 +150,17 @@ jobs:
       # negative test that needs them skips here. The debug messenger itself
       # was proven alive (a deliberate host-side error is delivered), so the
       # suite's validation-as-assert is NOT vacuous.
+      #
+      # BAZALT_FORCE_VULKAN_1_2 makes Context negotiate 1.2 even where 1.3 is
+      # available — the whole negotiation, not just the aliasing, since a device
+      # that never enabled VK_KHR_dynamic_rendering has no KHR entry points to
+      # alias to either. A bazalt-side knob rather than MESA_VK_VERSION_OVERRIDE
+      # so the same leg is reproducible on any driver, including a dev GPU.
       - name: Run test suite
         working-directory: ${{ runner.temp }}
         env:
           BAZALT_SYNCVAL_UNSUPPORTED: "1"
+          BAZALT_FORCE_VULKAN_1_2: ${{ matrix.api == '1.2' && '1' || '0' }}
         run: python -m pytest ${{ github.workspace }}/tests -q
 
   # ── Publish to PyPI on release ────────────────────────────────

@@ -184,14 +184,15 @@ public:
         for (size_t i = 0; i < context->frames_in_flight(); i++)
         {
             if (auto e = check(
-                    vkCreateSemaphore(
+                    context->vk().vkCreateSemaphore(
                         context->device(), &semaphoreInfo, nullptr, &renderer->image_available_semaphores_[i]),
                     "create image available semaphore"))
             {
                 return std::unexpected(*e);
             }
             if (auto e = check(
-                    vkCreateFence(context->device(), &fenceInfo, nullptr, &renderer->in_flight_fences_[i]),
+                    context->vk().vkCreateFence(
+                        context->device(), &fenceInfo, nullptr, &renderer->in_flight_fences_[i]),
                     "create in flight fence"))
             {
                 return std::unexpected(*e);
@@ -202,7 +203,7 @@ public:
         for (size_t i = 0; i < renderer->swapchain_images_.size(); i++)
         {
             if (auto e = check(
-                    vkCreateSemaphore(
+                    context->vk().vkCreateSemaphore(
                         context->device(), &semaphoreInfo, nullptr, &renderer->render_finished_semaphores_[i]),
                     "create render finished semaphore"))
             {
@@ -234,31 +235,31 @@ public:
         if (context_->device())
         {
             std::lock_guard lock(context_->queue_mutex());
-            vkDeviceWaitIdle(context_->device());
+            context_->vk().vkDeviceWaitIdle(context_->device());
         }
 
         for (size_t i = 0; i < image_available_semaphores_.size(); ++i)
         {
             if (image_available_semaphores_[i])
-                vkDestroySemaphore(context_->device(), image_available_semaphores_[i], nullptr);
+                context_->vk().vkDestroySemaphore(context_->device(), image_available_semaphores_[i], nullptr);
             if (in_flight_fences_[i])
-                vkDestroyFence(context_->device(), in_flight_fences_[i], nullptr);
+                context_->vk().vkDestroyFence(context_->device(), in_flight_fences_[i], nullptr);
         }
 
         for (auto sem : render_finished_semaphores_)
         {
             if (sem)
-                vkDestroySemaphore(context_->device(), sem, nullptr);
+                context_->vk().vkDestroySemaphore(context_->device(), sem, nullptr);
         }
 
         if (timestamp_pool_)
         {
-            vkDestroyQueryPool(context_->device(), timestamp_pool_, nullptr);
+            context_->vk().vkDestroyQueryPool(context_->device(), timestamp_pool_, nullptr);
         }
 
         if (depth_image_view_)
         {
-            vkDestroyImageView(context_->device(), depth_image_view_, nullptr);
+            context_->vk().vkDestroyImageView(context_->device(), depth_image_view_, nullptr);
         }
         if (depth_image_ && depth_image_allocation_)
         {
@@ -268,12 +269,12 @@ public:
 
         for (auto iv : swapchain_image_views_)
         {
-            vkDestroyImageView(context_->device(), iv, nullptr);
+            context_->vk().vkDestroyImageView(context_->device(), iv, nullptr);
         }
 
         if (swapchain_)
         {
-            vkDestroySwapchainKHR(context_->device(), swapchain_, nullptr);
+            context_->vk().vkDestroySwapchainKHR(context_->device(), swapchain_, nullptr);
         }
 
         if (surface_)
@@ -284,6 +285,11 @@ public:
 
     SwapchainRenderer(const SwapchainRenderer&) = delete;
     SwapchainRenderer& operator=(const SwapchainRenderer&) = delete;
+
+    const Context* owner() const override
+    {
+        return context_.get();
+    }
 
     std::shared_ptr<Context> context() const
     {
@@ -464,13 +470,13 @@ public:
             return false;
         }
 
-        vkWaitForFences(context_->device(), 1, &in_flight_fences_[current_frame()], VK_TRUE, UINT64_MAX);
+        context_->vk().vkWaitForFences(context_->device(), 1, &in_flight_fences_[current_frame()], VK_TRUE, UINT64_MAX);
 
         // The fence proves this slot's previous submission finished, so its
         // timestamp pair is ready to read (frames_in_flight frames of latency).
         read_timestamps_();
 
-        VkResult result = vkAcquireNextImageKHR(
+        VkResult result = context_->vk().vkAcquireNextImageKHR(
             context_->device(),
             swapchain_,
             UINT64_MAX,
@@ -495,7 +501,7 @@ public:
             return false;
         }
 
-        vkResetFences(context_->device(), 1, &in_flight_fences_[current_frame()]);
+        context_->vk().vkResetFences(context_->device(), 1, &in_flight_fences_[current_frame()]);
         image_acquired_ = true;
         return true;
     }
@@ -569,8 +575,8 @@ public:
                 .signalSemaphoreCount = 2,
                 .pSignalSemaphores = signalSemaphores};
 
-            if (VkResult submit_result =
-                    vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
+            if (VkResult submit_result = context_->vk().vkQueueSubmit(
+                    context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
                 submit_result != VK_SUCCESS)
             {
                 if (auto l = context_->logger())
@@ -580,7 +586,7 @@ public:
                         std::format("Failed to submit draw command buffer ({})", vk_result_name(submit_result)));
             }
 
-            result = vkQueuePresentKHR(present_queue_, &presentInfo);
+            result = context_->vk().vkQueuePresentKHR(present_queue_, &presentInfo);
         }
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR ||
@@ -685,7 +691,7 @@ private:
             .queryType = VK_QUERY_TYPE_TIMESTAMP,
             .queryCount = 2 * context_->frames_in_flight(),
             .pipelineStatistics = 0};
-        if (vkCreateQueryPool(context_->device(), &poolInfo, nullptr, &timestamp_pool_) != VK_SUCCESS)
+        if (context_->vk().vkCreateQueryPool(context_->device(), &poolInfo, nullptr, &timestamp_pool_) != VK_SUCCESS)
         {
             timestamp_pool_ = VK_NULL_HANDLE;
             return;
@@ -707,7 +713,7 @@ private:
             return;
         }
         std::uint64_t ts[2] = {0, 0};
-        if (vkGetQueryPoolResults(
+        if (context_->vk().vkGetQueryPoolResults(
                 context_->device(),
                 timestamp_pool_,
                 2 * slot,
@@ -790,7 +796,8 @@ private:
 
         VkSwapchainKHR new_swapchain;
         if (auto e = check(
-                vkCreateSwapchainKHR(context_->device(), &createInfo, nullptr, &new_swapchain), "create swapchain"))
+                context_->vk().vkCreateSwapchainKHR(context_->device(), &createInfo, nullptr, &new_swapchain),
+                "create swapchain"))
         {
             return std::unexpected(*e);
         }
@@ -801,9 +808,10 @@ private:
 
         // Retrieve swapchain images
         uint32_t actual_image_count;
-        vkGetSwapchainImagesKHR(context_->device(), swapchain_, &actual_image_count, nullptr);
+        context_->vk().vkGetSwapchainImagesKHR(context_->device(), swapchain_, &actual_image_count, nullptr);
         swapchain_images_.resize(actual_image_count);
-        vkGetSwapchainImagesKHR(context_->device(), swapchain_, &actual_image_count, swapchain_images_.data());
+        context_->vk().vkGetSwapchainImagesKHR(
+            context_->device(), swapchain_, &actual_image_count, swapchain_images_.data());
 
         // Create swapchain image views
         swapchain_image_views_.resize(actual_image_count);
@@ -829,7 +837,8 @@ private:
                     .layerCount = 1}};
 
             if (auto e = check(
-                    vkCreateImageView(context_->device(), &viewInfo, nullptr, &swapchain_image_views_[i]),
+                    context_->vk().vkCreateImageView(
+                        context_->device(), &viewInfo, nullptr, &swapchain_image_views_[i]),
                     "create swapchain image view"))
             {
                 return std::unexpected(*e);
@@ -843,13 +852,13 @@ private:
     {
         {
             std::lock_guard lock(context_->queue_mutex());
-            vkDeviceWaitIdle(context_->device());
+            context_->vk().vkDeviceWaitIdle(context_->device());
         }
 
         // Destroy old depth resources
         if (depth_image_view_)
         {
-            vkDestroyImageView(context_->device(), depth_image_view_, nullptr);
+            context_->vk().vkDestroyImageView(context_->device(), depth_image_view_, nullptr);
             depth_image_view_ = VK_NULL_HANDLE;
         }
         if (depth_image_ && depth_image_allocation_)
@@ -864,14 +873,14 @@ private:
         for (auto sem : render_finished_semaphores_)
         {
             if (sem)
-                vkDestroySemaphore(context_->device(), sem, nullptr);
+                context_->vk().vkDestroySemaphore(context_->device(), sem, nullptr);
         }
         render_finished_semaphores_.clear();
 
         // Destroy old swapchain image views
         for (auto iv : swapchain_image_views_)
         {
-            vkDestroyImageView(context_->device(), iv, nullptr);
+            context_->vk().vkDestroyImageView(context_->device(), iv, nullptr);
         }
         swapchain_image_views_.clear();
         swapchain_images_.clear();
@@ -890,7 +899,7 @@ private:
 
         if (old_swapchain != VK_NULL_HANDLE)
         {
-            vkDestroySwapchainKHR(context_->device(), old_swapchain, nullptr);
+            context_->vk().vkDestroySwapchainKHR(context_->device(), old_swapchain, nullptr);
         }
 
         // Recreate render-finished semaphores (one per swapchain image)
@@ -899,8 +908,8 @@ private:
         render_finished_semaphores_.resize(swapchain_images_.size());
         for (size_t i = 0; i < swapchain_images_.size(); i++)
         {
-            if (vkCreateSemaphore(context_->device(), &semaphoreInfo, nullptr, &render_finished_semaphores_[i]) !=
-                VK_SUCCESS)
+            if (context_->vk().vkCreateSemaphore(
+                    context_->device(), &semaphoreInfo, nullptr, &render_finished_semaphores_[i]) != VK_SUCCESS)
             {
                 if (auto l = context_->logger())
                     l->log(Severity::Error, Source::Device, "Failed to recreate render finished semaphores");
@@ -981,7 +990,7 @@ private:
                 .layerCount = 1}};
 
         if (auto e = check(
-                vkCreateImageView(context_->device(), &viewInfo, nullptr, &depth_image_view_),
+                context_->vk().vkCreateImageView(context_->device(), &viewInfo, nullptr, &depth_image_view_),
                 "create depth image view"))
         {
             return std::unexpected(*e);
@@ -1045,7 +1054,7 @@ private:
                     .layerCount = 1}};
 
             if (auto e = check(
-                    vkCreateImageView(context_->device(), &colorViewInfo, nullptr, &msaa_color_view_),
+                    context_->vk().vkCreateImageView(context_->device(), &colorViewInfo, nullptr, &msaa_color_view_),
                     "create MSAA colour image view"))
             {
                 return std::unexpected(*e);
@@ -1061,7 +1070,7 @@ private:
     {
         if (msaa_color_view_)
         {
-            vkDestroyImageView(context_->device(), msaa_color_view_, nullptr);
+            context_->vk().vkDestroyImageView(context_->device(), msaa_color_view_, nullptr);
             msaa_color_view_ = VK_NULL_HANDLE;
         }
         if (msaa_color_image_ && msaa_color_allocation_)

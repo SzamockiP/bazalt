@@ -6,14 +6,11 @@ replay. The validation-as-assert fixture is the referee — a wrong or missing
 auto barrier surfaces as a validation error and fails the test.
 
 The one thing core validation CANNOT see is a missing barrier (that takes
-synchronization validation), which is why the manual-mode negative test runs
-in a subprocess with validation="sync".
+synchronization validation), which is why the manual-mode negative test spins
+up a second Context with validation="sync" of its own.
 """
 
 import os
-import subprocess
-import sys
-import textwrap
 
 import numpy as np
 import pytest
@@ -215,7 +212,7 @@ def test_context_wide_manual_mode_is_inherited(ctx):
     """create_command_buffer() without the kwarg takes the Context's default."""
     assert ctx.auto_barriers is True
     # The per-CB override is the only way to go manual on this (auto) Context;
-    # the flag's plumbing from ContextConfig is exercised in the subprocess test.
+    # the flag's plumbing from ContextConfig is exercised by run_sync_case.
     cmd = ctx.create_command_buffer(auto_barriers=False)
     assert cmd is not None
 
@@ -223,73 +220,51 @@ def test_context_wide_manual_mode_is_inherited(ctx):
 # ── sync validation: the proof that manual mode is really manual ─────────
 
 
-SYNC_SCRIPT = textwrap.dedent("""
-    import sys
-    import numpy as np
-    import bazalt as bz
+def run_sync_case(mode):
+    """One dispatch-pair recording under a sync-validation Context, returning the
+    hazards the layer reported.
 
-    shader = sys.argv[1]
-    mode = sys.argv[2]              # "nobarrier" | "barrier" | "auto"
-    with_barrier = mode == "barrier"
-    auto = mode == "auto"
-
+    In-process since 0.15. This used to be a script-in-a-string run through
+    subprocess, purely because sync validation needs its own Context and only one
+    could be alive per process — so this doubles as the sharpest proof that two
+    Contexts with different validation settings now coexist: the session Context
+    is right here, on "auto", while this one runs the sync layer.
+    """
     hazards = []
     log = bz.Logger(min_severity=bz.Severity.INFO)
 
     @log.on_message
     def _(msg):
-        if msg.source != bz.Source.VALIDATION:
-            return
-        # Dumped so a failing CI run shows what the layer actually said.
-        print("VMSG:", str(msg.severity), msg.text.replace(chr(10), " ")[:400],
-              file=sys.stderr)
         # "hazard detected" on recent layers, "Hazard WRITE_AFTER_WRITE" on
         # older ones.
-        if "hazard" in msg.text.lower():
+        if msg.source == bz.Source.VALIDATION and "hazard" in msg.text.lower():
             hazards.append(msg.text)
 
-    ctx = bz.Context(log, validation="sync", auto_barriers=auto)
-    assert ctx.auto_barriers is auto
+    auto = mode == "auto"
+    context = bz.Context(log, validation="sync", auto_barriers=auto)
+    assert context.auto_barriers is auto
 
-    comp = ctx.compile_shader(shader, bz.ShaderStage.COMPUTE)
-    pipeline = ctx.compute_pipeline().shader(comp).storage_buffer(0).build()
-    sbuf = ctx.create_buffer(np.arange(64, dtype=np.float32),
-                             bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-    pool = ctx.create_descriptor_pool(max_sets=8, storage_buffers=8)
+    comp = context.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
+    pipeline = context.compute_pipeline().shader(comp).storage_buffer(0).build()
+    sbuf = context.create_buffer(np.arange(64, dtype=np.float32),
+                                 bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    pool = context.create_descriptor_pool(max_sets=8, storage_buffers=8)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, sbuf)
 
-    cmd = ctx.create_command_buffer()
+    cmd = context.create_command_buffer()
     cmd.begin()
     cmd.bind_pipeline(pipeline)
     cmd.bind_descriptor_set(dset, pipeline, set=0)
     cmd.dispatch(1)
-    if with_barrier:
+    if mode == "barrier":
         cmd.barrier(sbuf, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
         cmd.barrier(sbuf, bz.Access.SHADER_WRITE, bz.Access.SHADER_WRITE)
     cmd.dispatch(1)
-    ctx.submit(cmd)
+    context.submit(cmd)
 
     log.flush()
-    print("HAZARDS:", len(hazards))
-""")
-
-
-def run_sync_script(tmp_path, mode):
-    """Subprocess because sync validation needs its own Context (one per
-    process — volk's function pointers are global) and because it is far too
-    slow to tax the whole suite with."""
-    script = tmp_path / "sync_check.py"
-    script.write_text(SYNC_SCRIPT, encoding="utf-8")
-    result = subprocess.run(
-        [sys.executable, str(script), str(SHADER_DIR / "double.comp"), mode],
-        capture_output=True, text=True, timeout=120)
-    assert result.returncode == 0, result.stderr
-    dump = f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
-    for line in result.stdout.splitlines():
-        if line.startswith("HAZARDS:"):
-            return int(line.split(":")[1]), dump
-    pytest.fail(f"no HAZARDS line in output:\n{dump}")
+    return hazards
 
 
 @pytest.mark.skipif(
@@ -299,20 +274,18 @@ def run_sync_script(tmp_path, mode):
            "noble, stays silent even with the settings file forcing "
            "validate_sync + syncval_shader_accesses_heuristic; 1.4.350 "
            "reports them — the messenger itself was proven alive)")
-def test_missing_barrier_in_manual_mode_trips_sync_validation(ctx, tmp_path):
+def test_missing_barrier_in_manual_mode_trips_sync_validation(ctx):
     """If this test fails, manual mode is not really manual (or sync validation
     is not really on) — either way the mode would be a lie."""
-    count, dump = run_sync_script(tmp_path, "nobarrier")
-    assert count > 0, dump
+    hazards = run_sync_case("nobarrier")
+    assert hazards
 
 
-def test_explicit_barrier_in_manual_mode_satisfies_sync_validation(ctx, tmp_path):
-    count, dump = run_sync_script(tmp_path, "barrier")
-    assert count == 0, dump
+def test_explicit_barrier_in_manual_mode_satisfies_sync_validation(ctx):
+    assert run_sync_case("barrier") == []
 
 
-def test_auto_barriers_satisfy_sync_validation(ctx, tmp_path):
+def test_auto_barriers_satisfy_sync_validation(ctx):
     """The auto tracker's barriers hold up under the same referee that catches
     the missing ones — not just under core validation, which is blind here."""
-    count, dump = run_sync_script(tmp_path, "auto")
-    assert count == 0, dump
+    assert run_sync_case("auto") == []

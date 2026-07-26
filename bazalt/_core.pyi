@@ -703,9 +703,14 @@ def list_devices() -> list[Device]:
 class Context:
     """The GPU device, and the factory for everything that lives on it.
 
-    Only one Context may be alive per process: volk binds its global function
-    pointers to a single device, so a second one silently corrupts the first.
-    Creating them one after another is fine.
+    Any number of Contexts may be alive at once, on the same GPU or on
+    different ones — pick with `device=` (see list_devices()). Each owns its
+    own device, frame ring and upload worker; nothing is shared between them.
+
+    Resources belong to the Context that made them. Handing one to another
+    Context's command buffer or descriptor set raises ResourceError rather than
+    reaching the driver. To move pixels across, pass the image to the other
+    Context's create_image().
     """
 
     def __init__(self, logger: Optional[Logger] = None, validation: str = "auto",
@@ -914,6 +919,24 @@ class Context:
         cubemap when `cube=True` (exactly 6 square faces, order
         +X,-X,+Y,-Y,+Z,-Z). Every layer must share shape and dtype. `mipmaps=True`
         generates the full chain across every layer."""
+        ...
+    def create_image(self, source: Image, *, name: str = "") -> Image:
+        """From an Image on another Context (or this one — that is a clone).
+
+            texture = viewer_ctx.create_image(baked_on_the_other_gpu)
+
+        Carries size, format, array layers, cube-ness and whether the source was
+        mipped. `other.create_image(img.read())` cannot: read() returns mip 0 of
+        layer 0 as a bare array, so a cubemap would arrive flattened.
+
+        Blocking on the SOURCE Context, and it routes through host memory —
+        without external memory there is no portable device-to-device path. A
+        setup step, not a per-frame one. The result is an ordinary async Image
+        of this Context (`.ready()` / `.wait()`).
+
+        Mip levels above 0 are regenerated here rather than copied, so a
+        hand-authored chain (rendered per level) becomes a generated one.
+        ResourceError if the source is multisampled or still has no contents."""
         ...
     def create_sampler(self, filter: Filter = Filter.LINEAR,
                        address_mode: AddressMode = AddressMode.REPEAT,

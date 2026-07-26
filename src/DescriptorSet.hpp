@@ -113,7 +113,7 @@ public:
                 .pImageInfo = &imageInfo,
                 .pBufferInfo = nullptr,
                 .pTexelBufferView = nullptr};
-            vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
+            context_->vk().vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
         bound_images_.push_back({std::move(image), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER});
         samplers_.push_back(std::move(sampler));
@@ -169,7 +169,7 @@ public:
                 .pImageInfo = &imageInfo,
                 .pBufferInfo = nullptr,
                 .pTexelBufferView = nullptr};
-            vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
+            context_->vk().vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
         // A storage image is a compute output: after the dispatch it holds
         // contents, in GENERAL. Marking it here (record time) is the same
@@ -230,7 +230,7 @@ public:
                 .pImageInfo = nullptr,
                 .pBufferInfo = &bufferInfo,
                 .pTexelBufferView = nullptr};
-            vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
+            context_->vk().vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
         buffers_.push_back({std::move(buffer), descType});
         return {};
@@ -264,6 +264,13 @@ public:
     const std::vector<BoundBuffer>& buffers() const
     {
         return buffers_;
+    }
+
+private:
+public:
+    const Context* owner() const
+    {
+        return context_.get();
     }
 
 private:
@@ -326,7 +333,7 @@ public:
 
         VkDescriptorPool pool;
         if (auto e = check(
-                vkCreateDescriptorPool(context.device(), &poolInfo, nullptr, &pool),
+                context.vk().vkCreateDescriptorPool(context.device(), &poolInfo, nullptr, &pool),
                 "create descriptor pool",
                 ErrorCode::Resource))
         {
@@ -342,8 +349,8 @@ public:
     {
         if (pool_ != VK_NULL_HANDLE && context_)
         {
-            context_->defer_destroy([device = context_->device(), pool = pool_]
-                                    { vkDestroyDescriptorPool(device, pool, nullptr); });
+            context_->defer_destroy([vk = &context_->vk(), device = context_->device(), pool = pool_]
+                                    { vk->vkDestroyDescriptorPool(device, pool, nullptr); });
         }
     }
 
@@ -379,7 +386,7 @@ public:
 
         VkDescriptorSet set;
         if (auto e = check(
-                vkAllocateDescriptorSets(context_->device(), &allocInfo, &set),
+                context_->vk().vkAllocateDescriptorSets(context_->device(), &allocInfo, &set),
                 "allocate descriptor set from pool (pool may be full)",
                 ErrorCode::Resource))
         {
@@ -416,7 +423,7 @@ public:
 
         std::vector<VkDescriptorSet> sets(frames);
         if (auto e = check(
-                vkAllocateDescriptorSets(context_->device(), &allocInfo, sets.data()),
+                context_->vk().vkAllocateDescriptorSets(context_->device(), &allocInfo, sets.data()),
                 "allocate frame descriptor sets from pool (pool may be full)",
                 ErrorCode::Resource))
         {
@@ -439,6 +446,13 @@ private:
     {
     }
 
+public:
+    const Context* owner() const
+    {
+        return context_.get();
+    }
+
+private:
     std::shared_ptr<Context> context_;
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
 };
@@ -449,7 +463,7 @@ inline DescriptorSet::~DescriptorSet()
     if (context_ && pool_ && !sets_.empty())
     {
         context_->defer_destroy(
-            [device = context_->device(), pool = pool_->get(), sets = std::move(sets_)]
-            { vkFreeDescriptorSets(device, pool, static_cast<uint32_t>(sets.size()), sets.data()); });
+            [vk = &context_->vk(), device = context_->device(), pool = pool_->get(), sets = std::move(sets_)]
+            { vk->vkFreeDescriptorSets(device, pool, static_cast<uint32_t>(sets.size()), sets.data()); });
     }
 }

@@ -64,14 +64,17 @@ def test_invalid_validation_mode_names_the_valid_ones():
         assert mode in str(info.value)
 
 
-def test_second_live_context_is_refused(ctx):
-    """volk's function pointers are global, so a second Context corrupts the first.
+def test_second_live_context_is_allowed(ctx, extra_context):
+    """The inverse of what this asserted until 0.15.
 
-    This used to be an access violation with no diagnostic.
+    volk's function pointers are process globals, so a second Context used to be
+    refused outright — without the guard it silently redirected the first one's
+    GPU calls at its own device. Per-Context dispatch tables removed the reason,
+    so the guard went with it. The rest of the story is in test_multi_context.py.
     """
-    with pytest.raises(bz.InitializationError) as info:
-        bz.Context(validation="off")
-    assert "one bazalt Context" in str(info.value)
+    second = extra_context()
+    assert second.device_name
+    assert ctx.device_name
 
 
 def test_empty_buffer_list_is_rejected(ctx):

@@ -42,11 +42,12 @@ inline std::expected<VkSampleCountFlagBits, Error> validate_sample_count(std::ui
     std::uint32_t max = context.max_samples();
     if (samples == 0 || (samples & (samples - 1)) != 0 || samples > max)
     {
-        return std::unexpected(err_resource(std::format(
-            "samples={} is not a valid MSAA count on this GPU; use a power of two "
-            "in 1..{} (query it with bz.Context.max_samples())",
-            samples,
-            max)));
+        return std::unexpected(err_resource(
+            std::format(
+                "samples={} is not a valid MSAA count on this GPU; use a power of two "
+                "in 1..{} (query it with bz.Context.max_samples())",
+                samples,
+                max)));
     }
     return static_cast<VkSampleCountFlagBits>(samples);
 }
@@ -70,6 +71,12 @@ public:
     virtual VkFormat depth_format() const = 0;
 
     virtual VkExtent2D extent() const = 0;
+
+    // Which Context this object belongs to. Multi-context (0.15) made "a
+    // resource from the other Context" a reachable mistake, and its symptom
+    // without a check is a driver crash or a validation message from Vulkan
+    // rather than from bazalt; the binding layer compares owners at record time.
+    virtual const Context* owner() const = 0;
 
     // ── MSAA ──────────────────────────────────────────────────────────────────
     // A non-multisampled target answers 1-sample / VK_NULL_HANDLE to all of these,
@@ -169,6 +176,13 @@ public:
 struct FrameContext
 {
     std::uint32_t frame_index = 0;
+
+    // The recording Context's device dispatch table (Context::vk()). Every
+    // vkCmd* inside a recorded lambda goes through this — one field instead of
+    // capturing a table pointer in each of the ~35 lambdas, and it keeps the
+    // rule that a deferred lambda holds nothing that (indirectly) holds the
+    // Context. A raw pointer into a Context that outlives its own recordings.
+    const VolkDeviceTable* vk = nullptr;
 };
 
 // A render target backed by Images this object owns, with no swapchain and no
@@ -206,13 +220,14 @@ public:
         {
             if (layers != 1 && layers != 6)
             {
-                return std::unexpected(err_resource(std::format(
-                    "a cube RenderTarget implies 6 layers; drop layers= or pass layers=6, got {}", layers)));
+                return std::unexpected(err_resource(
+                    std::format(
+                        "a cube RenderTarget implies 6 layers; drop layers= or pass layers=6, got {}", layers)));
             }
             if (width != height)
             {
-                return std::unexpected(err_resource(std::format(
-                    "a cube RenderTarget needs square faces, got {}x{}", width, height)));
+                return std::unexpected(
+                    err_resource(std::format("a cube RenderTarget needs square faces, got {}x{}", width, height)));
             }
             layers = 6;
         }
@@ -228,8 +243,9 @@ public:
             const std::uint32_t max_mips = Image::full_mip_count(width, height);
             if (mip_levels > max_mips)
             {
-                return std::unexpected(err_resource(std::format(
-                    "mip_levels must be 1..{} for a {}x{} target, got {}", max_mips, width, height, mip_levels)));
+                return std::unexpected(err_resource(
+                    std::format(
+                        "mip_levels must be 1..{} for a {}x{} target, got {}", max_mips, width, height, mip_levels)));
             }
         }
         // MSAA composes with layers/cube (the multisampled attachment is layered and
@@ -466,11 +482,11 @@ public:
                 views.push_back(view);
             }
             context_->defer_destroy(
-                [device = context_->device(), views = std::move(views)]
+                [vk = &context_->vk(), device = context_->device(), views = std::move(views)]
                 {
                     for (VkImageView v : views)
                     {
-                        vkDestroyImageView(device, v, nullptr);
+                        vk->vkDestroyImageView(device, v, nullptr);
                     }
                 });
         }
@@ -566,6 +582,11 @@ public:
     // multiview GPU feature; composes with MSAA (resolves each view per layer).
     std::expected<std::shared_ptr<RenderTarget>, Error> all_layers();
 
+    const Context* owner() const override
+    {
+        return context_.get();
+    }
+
 private:
     explicit OffscreenTarget(std::shared_ptr<Context> context)
         : context_(std::move(context))
@@ -601,7 +622,7 @@ private:
         // Bounds are checked in layer()/mip() before we get here; a create failure
         // is a genuine driver error, so surface a null and let the caller's
         // validation-as-assert catch the bad attachment rather than crashing.
-        if (vkCreateImageView(context_->device(), &info, nullptr, &view) != VK_SUCCESS)
+        if (context_->vk().vkCreateImageView(context_->device(), &info, nullptr, &view) != VK_SUCCESS)
         {
             return VK_NULL_HANDLE;
         }
@@ -643,8 +664,15 @@ private:
 class SubresourceTarget : public RenderTarget
 {
 public:
+    const Context* owner() const override
+    {
+        return parent_->owner();
+    }
+
     SubresourceTarget(std::shared_ptr<OffscreenTarget> parent, std::uint32_t layer, std::uint32_t mip)
-        : parent_(std::move(parent)), layer_(layer), mip_(mip)
+        : parent_(std::move(parent)),
+          layer_(layer),
+          mip_(mip)
     {
     }
 
@@ -754,7 +782,13 @@ private:
 class MultiviewTarget : public RenderTarget
 {
 public:
-    explicit MultiviewTarget(std::shared_ptr<OffscreenTarget> parent) : parent_(std::move(parent))
+    const Context* owner() const override
+    {
+        return parent_->owner();
+    }
+
+    explicit MultiviewTarget(std::shared_ptr<OffscreenTarget> parent)
+        : parent_(std::move(parent))
     {
     }
 
@@ -853,13 +887,13 @@ inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::laye
 {
     if (i >= layers_)
     {
-        return std::unexpected(err_resource(
-            std::format("layer {} is out of range; this target has {} layer(s)", i, layers_)));
+        return std::unexpected(
+            err_resource(std::format("layer {} is out of range; this target has {} layer(s)", i, layers_)));
     }
     if (mip >= mip_levels_)
     {
-        return std::unexpected(err_resource(
-            std::format("mip {} is out of range; this target has {} mip level(s)", mip, mip_levels_)));
+        return std::unexpected(
+            err_resource(std::format("mip {} is out of range; this target has {} mip level(s)", mip, mip_levels_)));
     }
     return std::make_shared<SubresourceTarget>(shared_from_this(), i, mip);
 }
@@ -868,8 +902,8 @@ inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::mip(
 {
     if (m >= mip_levels_)
     {
-        return std::unexpected(err_resource(
-            std::format("mip {} is out of range; this target has {} mip level(s)", m, mip_levels_)));
+        return std::unexpected(
+            err_resource(std::format("mip {} is out of range; this target has {} mip level(s)", m, mip_levels_)));
     }
     return std::make_shared<SubresourceTarget>(shared_from_this(), 0, m);
 }
@@ -878,13 +912,13 @@ inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::all_
 {
     if (!context_->supports_multiview())
     {
-        return std::unexpected(err_resource(
-            "all_layers() needs the multiview GPU feature, which this device does not support"));
+        return std::unexpected(
+            err_resource("all_layers() needs the multiview GPU feature, which this device does not support"));
     }
     if (layers_ <= 1)
     {
-        return std::unexpected(err_resource(
-            "all_layers() needs a layered target (layers>1 or cube); this target has 1 layer"));
+        return std::unexpected(
+            err_resource("all_layers() needs a layered target (layers>1 or cube); this target has 1 layer"));
     }
     return std::make_shared<MultiviewTarget>(shared_from_this());
 }

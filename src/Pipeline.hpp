@@ -200,8 +200,8 @@ public:
         }
         if (pipeline_ != VK_NULL_HANDLE)
         {
-            context_->defer_destroy([device = context_->device(), old = pipeline_]
-                                    { vkDestroyPipeline(device, old, nullptr); });
+            context_->defer_destroy([vk = &context_->vk(), device = context_->device(), old = pipeline_]
+                                    { vk->vkDestroyPipeline(device, old, nullptr); });
         }
         pipeline_ = fresh.value();
         return {};
@@ -244,26 +244,41 @@ private:
             return;
         }
         context_->defer_destroy(
-            [device = context_->device(), pipeline = pipeline_, layout = layout_, desc_layouts = desc_layouts_]
+            [vk = &context_->vk(),
+             device = context_->device(),
+             pipeline = pipeline_,
+             layout = layout_,
+             desc_layouts = desc_layouts_]
             {
                 if (pipeline != VK_NULL_HANDLE)
                 {
-                    vkDestroyPipeline(device, pipeline, nullptr);
+                    vk->vkDestroyPipeline(device, pipeline, nullptr);
                 }
                 if (layout != VK_NULL_HANDLE)
                 {
-                    vkDestroyPipelineLayout(device, layout, nullptr);
+                    vk->vkDestroyPipelineLayout(device, layout, nullptr);
                 }
                 for (auto dl : desc_layouts)
                 {
                     if (dl != VK_NULL_HANDLE)
                     {
-                        vkDestroyDescriptorSetLayout(device, dl, nullptr);
+                        vk->vkDestroyDescriptorSetLayout(device, dl, nullptr);
                     }
                 }
             });
     }
 
+public:
+    // Which Context this object belongs to. Multi-context (0.15) made "a
+    // resource from the other Context" a reachable mistake, and its symptom
+    // without a check is a driver crash or a validation message from Vulkan
+    // rather than from bazalt; the binding layer compares owners at record time.
+    const Context* owner() const
+    {
+        return context_.get();
+    }
+
+private:
     std::shared_ptr<Context> context_;
     VkPipeline pipeline_;
     VkPipelineLayout layout_;
@@ -338,7 +353,7 @@ public:
 
             VkDescriptorSetLayout layout;
             if (auto e = check(
-                    vkCreateDescriptorSetLayout(context.device(), &layoutInfo, nullptr, &layout),
+                    context.vk().vkCreateDescriptorSetLayout(context.device(), &layoutInfo, nullptr, &layout),
                     "create descriptor set layout for set " + std::to_string(s)))
             {
                 return std::unexpected(*e);
@@ -373,7 +388,7 @@ public:
 
         VkPipelineLayout pipelineLayout;
         if (auto e = check(
-                vkCreatePipelineLayout(context.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout),
+                context.vk().vkCreatePipelineLayout(context.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout),
                 "create pipeline layout"))
         {
             return std::unexpected(*e);
@@ -560,7 +575,7 @@ public:
             {
                 for (auto dl : descriptorSetLayouts)
                 {
-                    vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
+                    context_.vk().vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
                 }
             });
         if (auto r = layout_.create_set_layouts(context_, descriptorSetLayouts, allBindingTypes); !r)
@@ -574,8 +589,8 @@ public:
             return std::unexpected(layout.error());
         }
         VkPipelineLayout pipelineLayout = layout.value();
-        ScopeGuard cleanup_pipeline_layout([&]
-                                           { vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr); });
+        ScopeGuard cleanup_pipeline_layout(
+            [&] { context_.vk().vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr); });
 
         // The rebuildable slice of state: everything vkCreateGraphicsPipelines
         // needs except the layout. Copied into the recreate closure below so a
@@ -798,7 +813,7 @@ private:
         // almost always a shader/state mismatch the caller can fix and retry, and
         // hot reload (0.8) depends on catching exactly this as recoverable.
         if (auto e = check(
-                vkCreateGraphicsPipelines(
+                context.vk().vkCreateGraphicsPipelines(
                     context.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline),
                 "create graphics pipeline",
                 ErrorCode::Shader))
@@ -1025,7 +1040,7 @@ public:
             {
                 for (auto dl : descriptorSetLayouts)
                 {
-                    vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
+                    context_.vk().vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
                 }
             });
         if (auto r = layout_.create_set_layouts(context_, descriptorSetLayouts, allBindingTypes); !r)
@@ -1039,8 +1054,8 @@ public:
             return std::unexpected(layout.error());
         }
         VkPipelineLayout pipelineLayout = layout.value();
-        ScopeGuard cleanup_pipeline_layout([&]
-                                           { vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr); });
+        ScopeGuard cleanup_pipeline_layout(
+            [&] { context_.vk().vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr); });
 
         auto pipeline = create_pipeline_(context_, shader_, pipelineLayout);
         if (!pipeline)
@@ -1100,7 +1115,8 @@ private:
         // fails to build is a shader/state mismatch the caller can fix and
         // retry, and hot reload (0.8) depends on catching exactly that.
         if (auto e = check(
-                vkCreateComputePipelines(context.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline),
+                context.vk().vkCreateComputePipelines(
+                    context.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline),
                 "create compute pipeline",
                 ErrorCode::Shader))
         {

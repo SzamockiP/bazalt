@@ -43,7 +43,7 @@ public:
             .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
             .queueFamilyIndex = context.graphics_queue_family()};
         // Command pools are externally synchronized; the worker gets its own.
-        vkCreateCommandPool(context.device(), &poolInfo, nullptr, &pool_);
+        context.vk().vkCreateCommandPool(context.device(), &poolInfo, nullptr, &pool_);
 
         worker_ = std::jthread([this](std::stop_token stop) { run_(stop); });
     }
@@ -71,13 +71,13 @@ public:
         // has joined, so this thread is the pool's sole owner).
         {
             std::lock_guard lock(context_.queue_mutex());
-            vkDeviceWaitIdle(context_.device());
+            context_.vk().vkDeviceWaitIdle(context_.device());
         }
         context_.flush_deletion_queue();
 
         if (pool_ != VK_NULL_HANDLE)
         {
-            vkDestroyCommandPool(context_.device(), pool_, nullptr);
+            context_.vk().vkDestroyCommandPool(context_.device(), pool_, nullptr);
         }
     }
 
@@ -270,7 +270,7 @@ public:
                 .semaphoreCount = 1,
                 .pSemaphores = &timeline,
                 .pValues = &wait_serial};
-            vkWaitSemaphores(context_.device(), &waitInfo, UINT64_MAX);
+            context_.vk().vkWaitSemaphores(context_.device(), &waitInfo, UINT64_MAX);
         }
     }
 
@@ -405,7 +405,7 @@ private:
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
             .commandBufferCount = 1};
         VkCommandBuffer cmd = VK_NULL_HANDLE;
-        if (vkAllocateCommandBuffers(context_.device(), &allocInfo, &cmd) != VK_SUCCESS)
+        if (context_.vk().vkAllocateCommandBuffers(context_.device(), &allocInfo, &cmd) != VK_SUCCESS)
         {
             vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
             fail_(job, "failed to allocate an upload command buffer");
@@ -417,14 +417,14 @@ private:
             .pNext = nullptr,
             .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
             .pInheritanceInfo = nullptr};
-        vkBeginCommandBuffer(cmd, &beginInfo);
+        context_.vk().vkBeginCommandBuffer(cmd, &beginInfo);
         // Only the initial layout transition differs: a reload preserves the live
         // contents against in-flight reads, a first upload discards UNDEFINED.
         if (job.reload)
             job.image->record_reload_commands(cmd, stagingBuffer, job.mips);
         else
             job.image->record_upload_commands(cmd, stagingBuffer, job.mips);
-        vkEndCommandBuffer(cmd);
+        context_.vk().vkEndCommandBuffer(cmd);
 
         std::uint64_t serial = 0;
         {
@@ -449,10 +449,10 @@ private:
                 .pCommandBuffers = &cmd,
                 .signalSemaphoreCount = 1,
                 .pSignalSemaphores = &timeline};
-            if (vkQueueSubmit(context_.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+            if (context_.vk().vkQueueSubmit(context_.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
             {
                 vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
-                vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
+                context_.vk().vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
                 if (job.reload)
                     warn_reload_(job, "failed to submit the upload command buffer");
                 else
@@ -528,7 +528,7 @@ private:
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
             .commandBufferCount = 1};
         VkCommandBuffer cmd = VK_NULL_HANDLE;
-        if (vkAllocateCommandBuffers(context_.device(), &allocInfo, &cmd) != VK_SUCCESS)
+        if (context_.vk().vkAllocateCommandBuffers(context_.device(), &allocInfo, &cmd) != VK_SUCCESS)
         {
             vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
             fail_(job, "failed to allocate an upload command buffer");
@@ -540,9 +540,9 @@ private:
             .pNext = nullptr,
             .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
             .pInheritanceInfo = nullptr};
-        vkBeginCommandBuffer(cmd, &beginInfo);
+        context_.vk().vkBeginCommandBuffer(cmd, &beginInfo);
         job.image->record_upload_commands(cmd, stagingBuffer, job.mips);
-        vkEndCommandBuffer(cmd);
+        context_.vk().vkEndCommandBuffer(cmd);
 
         std::uint64_t serial = 0;
         {
@@ -567,10 +567,10 @@ private:
                 .pCommandBuffers = &cmd,
                 .signalSemaphoreCount = 1,
                 .pSignalSemaphores = &timeline};
-            if (vkQueueSubmit(context_.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+            if (context_.vk().vkQueueSubmit(context_.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
             {
                 vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
-                vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
+                context_.vk().vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
                 fail_(job, "failed to submit the upload command buffer");
                 return;
             }
@@ -602,7 +602,7 @@ private:
             {
                 if (entry.first <= completed)
                 {
-                    vkFreeCommandBuffers(context_.device(), pool_, 1, &entry.second);
+                    context_.vk().vkFreeCommandBuffers(context_.device(), pool_, 1, &entry.second);
                     return true;
                 }
                 return false;

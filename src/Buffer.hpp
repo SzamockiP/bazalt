@@ -66,6 +66,12 @@ public:
     // the current frame's copy directly.
     virtual std::expected<std::vector<std::byte>, Error> read_bytes() = 0;
 
+    // Which Context this object belongs to. Multi-context (0.15) made "a
+    // resource from the other Context" a reachable mistake, and its symptom
+    // without a check is a driver crash or a validation message from Vulkan
+    // rather than from bazalt; the binding layer compares owners at record time.
+    virtual const Context* owner() const = 0;
+
     // Remembered so bind_index_buffer doesn't have to assume. It used to hardcode
     // VK_INDEX_TYPE_UINT32 while create_buffer happily accepted UINT16 indices,
     // which were then read back at half the count with no error.
@@ -97,6 +103,11 @@ protected:
 class StaticBuffer : public Buffer
 {
 public:
+    const Context* owner() const override
+    {
+        return context_.get();
+    }
+
     StaticBuffer(std::shared_ptr<Context> context, VkBuffer buffer, VmaAllocation allocation, size_t size)
         : context_(context),
           buffer_(buffer),
@@ -161,7 +172,7 @@ public:
             [&](VkCommandBuffer cmd)
             {
                 VkBufferCopy region{.srcOffset = 0, .dstOffset = 0, .size = size_};
-                vkCmdCopyBuffer(cmd, buffer_, staging, 1, &region);
+                context_->vk().vkCmdCopyBuffer(cmd, buffer_, staging, 1, &region);
             });
         if (!submitted)
         {
@@ -293,7 +304,7 @@ public:
             [&](VkCommandBuffer cmd)
             {
                 VkBufferCopy copyRegion{.srcOffset = 0, .dstOffset = 0, .size = data_size};
-                vkCmdCopyBuffer(cmd, stagingBuffer, buffer, 1, &copyRegion);
+                context.vk().vkCmdCopyBuffer(cmd, stagingBuffer, buffer, 1, &copyRegion);
             });
 
         vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
@@ -316,6 +327,11 @@ private:
 class DynamicBuffer : public Buffer
 {
 public:
+    const Context* owner() const override
+    {
+        return context_.get();
+    }
+
     // One buffer per frame in flight; the count is a runtime property of the
     // Context now, so these are vectors sized at creation.
     DynamicBuffer(

@@ -23,6 +23,7 @@
 // Formerly a private of Texture; RenderTarget grew its own copy, which is
 // exactly the drift this ends.
 inline void record_image_transition(
+    const VolkDeviceTable& vk,
     VkCommandBuffer cmd,
     VkImage image,
     VkImageLayout oldLayout,
@@ -52,7 +53,7 @@ inline void record_image_transition(
             .levelCount = mipCount,
             .baseArrayLayer = 0,
             .layerCount = layerCount}};
-    vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    vk.vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
 // A GPU image: VkImage + view + format. Nothing else — the sampler it used to
@@ -96,7 +97,8 @@ public:
         if (context_)
         {
             context_->defer_destroy(
-                [device = context_->device(),
+                [vk = &context_->vk(),
+                 device = context_->device(),
                  allocator = context_->allocator(),
                  view = view_,
                  storage_view = storage_view_,
@@ -104,11 +106,11 @@ public:
                  allocation = allocation_]
                 {
                     if (view != VK_NULL_HANDLE)
-                        vkDestroyImageView(device, view, nullptr);
+                        vk->vkDestroyImageView(device, view, nullptr);
                     // A separate 2D_ARRAY view exists only for cubemaps (storage
                     // binding can't use a CUBE view); non-cube images share view_.
                     if (storage_view != VK_NULL_HANDLE)
-                        vkDestroyImageView(device, storage_view, nullptr);
+                        vk->vkDestroyImageView(device, storage_view, nullptr);
                     if (image != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE)
                     {
                         vmaDestroyImage(allocator, image, allocation);
@@ -237,7 +239,7 @@ public:
                 .pSemaphores = &timeline,
                 .pValues = &serial};
             if (auto e = check(
-                    vkWaitSemaphores(context_->device(), &waitInfo, UINT64_MAX),
+                    context_->vk().vkWaitSemaphores(context_->device(), &waitInfo, UINT64_MAX),
                     "wait for image upload",
                     ErrorCode::Resource))
             {
@@ -427,7 +429,7 @@ public:
 
         VkImageView view = VK_NULL_HANDLE;
         if (auto e = check(
-                vkCreateImageView(context.device(), &viewInfo, nullptr, &view),
+                context.vk().vkCreateImageView(context.device(), &viewInfo, nullptr, &view),
                 std::format("create {} image view", format_name(format)),
                 ErrorCode::Resource))
         {
@@ -443,11 +445,11 @@ public:
         {
             viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
             if (auto e = check(
-                    vkCreateImageView(context.device(), &viewInfo, nullptr, &storage_view),
+                    context.vk().vkCreateImageView(context.device(), &viewInfo, nullptr, &storage_view),
                     std::format("create {} storage view", format_name(format)),
                     ErrorCode::Resource))
             {
-                vkDestroyImageView(context.device(), view, nullptr);
+                context.vk().vkDestroyImageView(context.device(), view, nullptr);
                 vmaDestroyImage(context.allocator(), image, allocation);
                 return std::unexpected(*e);
             }
@@ -527,8 +529,16 @@ public:
     // Copies mip 0 back to host memory. Blocking, stalls the GPU — a debugging
     // and test path, not a per-frame one. Size and dtype come from the format
     // table; the binding layer shapes the bytes into a numpy array.
-    std::expected<std::vector<std::byte>, Error> read()
+    //
+    // `all_layers` reads every array layer back to back (layer 0, layer 1, …),
+    // which is exactly the layout create_layered_from_pixels expects — that is
+    // what makes ctx_b.create_image(image_from_ctx_a) a cubemap on the other
+    // side too. Python's image.read() keeps layer 0 only: a numpy array has no
+    // place to put the cube-ness, so returning six faces stacked would be a
+    // shape the caller has to guess at.
+    std::expected<std::vector<std::byte>, Error> read(bool all_layers = false)
     {
+        const std::uint32_t layers = all_layers ? array_layers_ : 1;
         // A pending async upload is finished first — read() is blocking anyway.
         if (auto w = wait(); !w)
         {
@@ -548,7 +558,7 @@ public:
         }
 
         const FormatInfo info = format_info(format_);
-        const VkDeviceSize size = static_cast<VkDeviceSize>(width_) * height_ * info.bytes_per_pixel;
+        const VkDeviceSize size = static_cast<VkDeviceSize>(width_) * height_ * info.bytes_per_pixel * layers;
         const VkImageAspectFlags aspect = info.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
 
         VkBufferCreateInfo bufferInfo{
@@ -580,6 +590,7 @@ public:
             [&](VkCommandBuffer cmd)
             {
                 record_image_transition(
+                    context_->vk(),
                     cmd,
                     image_,
                     layout_,
@@ -590,18 +601,21 @@ public:
                     VK_PIPELINE_STAGE_TRANSFER_BIT,
                     aspect,
                     0,
-                    mip_levels_);
+                    mip_levels_,
+                    array_layers_);
 
                 VkBufferImageCopy region{
                     .bufferOffset = 0,
                     .bufferRowLength = 0,
                     .bufferImageHeight = 0,
-                    .imageSubresource = {aspect, 0, 0, 1},
+                    .imageSubresource = {aspect, 0, 0, layers},
                     .imageOffset = {0, 0, 0},
                     .imageExtent = {width_, height_, 1}};
-                vkCmdCopyImageToBuffer(cmd, image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
+                context_->vk().vkCmdCopyImageToBuffer(
+                    cmd, image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
 
                 record_image_transition(
+                    context_->vk(),
                     cmd,
                     image_,
                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -612,7 +626,8 @@ public:
                     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                     aspect,
                     0,
-                    mip_levels_);
+                    mip_levels_,
+                    array_layers_);
             });
         if (!submitted)
         {
@@ -645,6 +660,7 @@ public:
     void record_upload_commands(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips)
     {
         record_image_transition(
+            context_->vk(),
             cmd,
             image_,
             VK_IMAGE_LAYOUT_UNDEFINED,
@@ -670,6 +686,7 @@ public:
     void record_reload_commands(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips)
     {
         record_image_transition(
+            context_->vk(),
             cmd,
             image_,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -703,6 +720,7 @@ public:
         // mip 0 -> TRANSFER_SRC (this transition is also the barrier waiting on
         // the producer of mip 0).
         record_image_transition(
+            context_->vk(),
             cmd,
             image_,
             src_layout,
@@ -718,6 +736,7 @@ public:
 
         // The other levels hold nothing worth keeping -> discard into TRANSFER_DST.
         record_image_transition(
+            context_->vk(),
             cmd,
             image_,
             VK_IMAGE_LAYOUT_UNDEFINED,
@@ -746,7 +765,7 @@ public:
                 .srcOffsets = {{0, 0, 0}, {mip_width, mip_height, 1}},
                 .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, array_layers_},
                 .dstOffsets = {{0, 0, 0}, {next_width, next_height, 1}}};
-            vkCmdBlitImage(
+            context_->vk().vkCmdBlitImage(
                 cmd,
                 image_,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -758,6 +777,7 @@ public:
 
             // Level i-1 is done being read from -> retire to SHADER_READ_ONLY.
             record_image_transition(
+                context_->vk(),
                 cmd,
                 image_,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -775,6 +795,7 @@ public:
             {
                 // Level i becomes the source for the next blit.
                 record_image_transition(
+                    context_->vk(),
                     cmd,
                     image_,
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -792,6 +813,7 @@ public:
             {
                 // The last level retires straight to SHADER_READ_ONLY.
                 record_image_transition(
+                    context_->vk(),
                     cmd,
                     image_,
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -915,15 +937,16 @@ private:
             .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, array_layers_},
             .imageOffset = {0, 0, 0},
             .imageExtent = {width_, height_, 1}};
-        vkCmdCopyBufferToImage(cmd, staging, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        context_->vk().vkCmdCopyBufferToImage(cmd, staging, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
         if (mips > 1)
         {
-            record_mip_generation(cmd, image_, width_, height_, mips, array_layers_);
+            record_mip_generation(context_->vk(), cmd, image_, width_, height_, mips, array_layers_);
         }
         else
         {
             record_image_transition(
+                context_->vk(),
                 cmd,
                 image_,
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -944,6 +967,7 @@ private:
     // SHADER_READ_ONLY; the last level retires after the loop. Every level ends
     // in SHADER_READ_ONLY.
     static void record_mip_generation(
+        const VolkDeviceTable& vk,
         VkCommandBuffer cmd,
         VkImage image,
         std::uint32_t width,
@@ -959,6 +983,7 @@ private:
         for (std::uint32_t i = 1; i < mips; ++i)
         {
             record_image_transition(
+                vk,
                 cmd,
                 image,
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -980,7 +1005,7 @@ private:
                 .srcOffsets = {{0, 0, 0}, {mip_width, mip_height, 1}},
                 .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, layers},
                 .dstOffsets = {{0, 0, 0}, {next_width, next_height, 1}}};
-            vkCmdBlitImage(
+            vk.vkCmdBlitImage(
                 cmd,
                 image,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -991,6 +1016,7 @@ private:
                 VK_FILTER_LINEAR);
 
             record_image_transition(
+                vk,
                 cmd,
                 image,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -1009,6 +1035,7 @@ private:
         }
 
         record_image_transition(
+            vk,
             cmd,
             image,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -1023,6 +1050,17 @@ private:
             layers);
     }
 
+public:
+    // Which Context this object belongs to. Multi-context (0.15) made "a
+    // resource from the other Context" a reachable mistake, and its symptom
+    // without a check is a driver crash or a validation message from Vulkan
+    // rather than from bazalt; the binding layer compares owners at record time.
+    const Context* owner() const
+    {
+        return context_.get();
+    }
+
+private:
     std::shared_ptr<Context> context_;
     VkImage image_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
