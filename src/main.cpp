@@ -168,6 +168,28 @@ namespace
         }
     }
 
+    // clear_color=None preserves the attachment, and a multisampled target has
+    // nothing to preserve: its multisampled image is transient (storeOp
+    // DONT_CARE) and the pass result lives in the resolve image, which is not
+    // what the next pass renders into. Lifting the ceiling means storing the
+    // multisampled image, which costs every MSAA pass to serve the rare one.
+    //
+    // Here rather than in CommandBuffer for the same reason as
+    // require_same_context above: a user error, and the recording methods chain.
+    void require_preservable(const RenderTarget& target, bool preserve, const char* what)
+    {
+        if (preserve && target.samples() != VK_SAMPLE_COUNT_1_BIT)
+        {
+            raise_error(err_resource(
+                std::format(
+                    "{}(clear_color=None) preserves the attachment, but a multisampled target has "
+                    "nothing to preserve. The multisampled image is discarded at the end of each pass. "
+                    "The result goes to the resolve image, and the next pass does not render into that "
+                    "image. Use a target with samples=1 for a multi-pass sequence.",
+                    what)));
+        }
+    }
+
     // Resolves a list's element type from the explicit argument or the first
     // element. `int_default` is the caller's policy: create_buffer infers UINT32
     // for integers going into an INDEX buffer, update infers INT32 — a deliberate
@@ -505,20 +527,25 @@ struct RenderingScope
 {
     std::shared_ptr<CommandBuffer> cmd;
     std::shared_ptr<RenderTarget> target;
-    std::vector<std::array<float, 4>> clear_color;
+    std::optional<std::vector<std::array<float, 4>>> clear_color;
+    float clear_depth = 1.0f;
 };
 
 // Normalise a Python clear_color into one RGBA per attachment. Accepts both the
 // single form [r,g,b,a] (applied to every attachment — the common case) and the
 // per-attachment form [[r,g,b,a], …] for MRT. Distinguished by whether the first
 // element is itself a sequence.
-static std::vector<std::array<float, 4>> parse_clear_colors(const py::object& obj)
+//
+// None is not "clear to black": it is nullopt, which means preserve what the
+// attachment holds. An empty vector is still black, so the two stay distinct all
+// the way down to the load-op.
+static std::optional<std::vector<std::array<float, 4>>> parse_clear_colors(const py::object& obj)
 {
-    std::vector<std::array<float, 4>> out;
     if (obj.is_none())
     {
-        return out;
+        return std::nullopt;
     }
+    std::vector<std::array<float, 4>> out;
     py::sequence seq = py::cast<py::sequence>(obj);
     if (py::len(seq) == 0)
     {
@@ -548,6 +575,38 @@ static std::vector<std::array<float, 4>> parse_clear_colors(const py::object& ob
         out.push_back(to_rgba(seq));
     }
     return out;
+}
+
+// source= is text or ready SPIR-V, and the Python type is what says which.
+// `bytes` has to be tested FIRST: pybind converts both str and bytes to
+// std::string, so an `optional<std::string>` parameter would silently compile a
+// SPIR-V blob as GLSL and report a syntax error on binary garbage.
+//
+// The length check is here rather than in the compiler because it is about the
+// Python object: a bytes object of the wrong length is not a truncated SPIR-V
+// binary, it is the wrong argument.
+static std::optional<ShaderSource> parse_shader_source(const py::object& obj)
+{
+    if (obj.is_none())
+    {
+        return std::nullopt;
+    }
+    if (py::isinstance<py::bytes>(obj))
+    {
+        const std::string blob = py::cast<std::string>(obj);
+        if (blob.size() % sizeof(std::uint32_t) != 0)
+        {
+            raise_error(err_shader(
+                std::format(
+                    "source= got {} bytes, which is not a whole number of SPIR-V words. SPIR-V is a stream of "
+                    "32-bit words, so its length is always a multiple of 4.",
+                    blob.size())));
+        }
+        std::vector<std::uint32_t> words(blob.size() / sizeof(std::uint32_t));
+        std::memcpy(words.data(), blob.data(), blob.size());
+        return ShaderSource{std::move(words)};
+    }
+    return ShaderSource{py::cast<std::string>(obj)};
 }
 
 // A GPU timer handle. cmd.timer() records the opening timestamp and returns
@@ -829,6 +888,18 @@ PYBIND11_MODULE(_core, m)
         .value("GREATER_OR_EQUAL", CompareOp::GREATER_OR_EQUAL)
         .value("ALWAYS", CompareOp::ALWAYS);
 
+    py::enum_<BlendMode>(m, "BlendMode")
+        .value("ALPHA", BlendMode::ALPHA)
+        .value("ADDITIVE", BlendMode::ADDITIVE)
+        .value("PREMULTIPLIED", BlendMode::PREMULTIPLIED)
+        .export_values();
+
+    py::enum_<PolygonMode>(m, "PolygonMode")
+        .value("FILL", PolygonMode::FILL)
+        .value("LINE", PolygonMode::LINE)
+        .value("POINT", PolygonMode::POINT)
+        .export_values();
+
     py::enum_<CullMode>(m, "CullMode")
         .value("NONE", CullMode::NONE)
         .value("BACK", CullMode::BACK)
@@ -846,7 +917,13 @@ PYBIND11_MODULE(_core, m)
         .value("DYNAMIC", MemoryUsage::DYNAMIC)
         .export_values();
 
-    py::class_<MouseState>(m, "MouseState").def_readonly("dx", &MouseState::dx).def_readonly("dy", &MouseState::dy);
+    py::class_<MouseState>(m, "MouseState")
+        .def_readonly("x", &MouseState::x)
+        .def_readonly("y", &MouseState::y)
+        .def_readonly("dx", &MouseState::dx)
+        .def_readonly("dy", &MouseState::dy)
+        .def_readonly("scroll_dx", &MouseState::scroll_dx)
+        .def_readonly("scroll_dy", &MouseState::scroll_dy);
 
     py::class_<Buffer, std::shared_ptr<Buffer>>(m, "Buffer")
         .def(
@@ -936,7 +1013,11 @@ PYBIND11_MODULE(_core, m)
             })
         .def("read", [](Image& self) -> py::array { return image_to_numpy(self); });
 
-    py::class_<Sampler, std::shared_ptr<Sampler>>(m, "Sampler");
+    // name is readable because it accumulates: the cache shares one sampler
+    // between identical descriptions, so what the object is called is the list
+    // of everyone who named it, and a caller cannot predict that from its own
+    // create_sampler call alone.
+    py::class_<Sampler, std::shared_ptr<Sampler>>(m, "Sampler").def_property_readonly("name", &Sampler::debug_name);
 
     py::class_<Pipeline, std::shared_ptr<Pipeline>>(m, "Pipeline");
 
@@ -958,15 +1039,37 @@ PYBIND11_MODULE(_core, m)
             { return self.vertex_format(formats); })
         .def(
             "depth_test",
-            [](GraphicsPipelineBuilder& self, bool enable) -> GraphicsPipelineBuilder&
-            { return self.depth_test(enable); })
+            [](GraphicsPipelineBuilder& self, bool enable, bool write, CompareOp compare) -> GraphicsPipelineBuilder&
+            { return self.depth_test(enable, write, compare); },
+            py::arg("enable"),
+            py::arg("write") = true,
+            py::arg("compare") = CompareOp::LESS_OR_EQUAL)
         .def(
             "cull_mode",
             [](GraphicsPipelineBuilder& self, CullMode mode, FrontFace frontFace) -> GraphicsPipelineBuilder&
             { return self.cull_mode(mode, frontFace); })
         .def(
+            "polygon_mode",
+            [](GraphicsPipelineBuilder& self, PolygonMode mode) -> GraphicsPipelineBuilder&
+            { return self.polygon_mode(mode); },
+            py::arg("mode"))
+        .def(
+            "line_width",
+            [](GraphicsPipelineBuilder& self, float width) -> GraphicsPipelineBuilder&
+            { return self.line_width(width); },
+            py::arg("width"))
+        .def(
+            "depth_bias",
+            [](GraphicsPipelineBuilder& self, float constant, float slope) -> GraphicsPipelineBuilder&
+            { return self.depth_bias(constant, slope); },
+            py::arg("constant"),
+            py::arg("slope") = 0.0f)
+        .def(
             "blend",
-            [](GraphicsPipelineBuilder& self, bool enable) -> GraphicsPipelineBuilder& { return self.blend(enable); })
+            [](GraphicsPipelineBuilder& self, bool enable, BlendMode mode) -> GraphicsPipelineBuilder&
+            { return self.blend(enable, mode); },
+            py::arg("enable"),
+            py::arg("mode") = BlendMode::ALPHA)
         .def(
             "topology",
             [](GraphicsPipelineBuilder& self, Topology topology) -> GraphicsPipelineBuilder&
@@ -1138,14 +1241,20 @@ PYBIND11_MODULE(_core, m)
         // swapchain" made presentation a special case disguised as the default.
         .def(
             "begin_rendering",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target, const py::object& clear_color)
+            [](std::shared_ptr<CommandBuffer> self,
+               std::shared_ptr<RenderTarget> target,
+               const py::object& clear_color,
+               float clear_depth)
             {
                 require_same_context(self->owner(), target->owner(), "begin_rendering");
-                self->begin_rendering(std::move(target), parse_clear_colors(clear_color));
+                auto clears = parse_clear_colors(clear_color);
+                require_preservable(*target, !clears.has_value(), "begin_rendering");
+                self->begin_rendering(std::move(target), clears, clear_depth);
                 return self;
             },
             py::arg("target"),
-            py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f))
+            py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f),
+            py::arg("clear_depth") = 1.0f)
         .def(
             "end_rendering",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target)
@@ -1159,13 +1268,19 @@ PYBIND11_MODULE(_core, m)
         // end_rendering unconditionally — the pair cannot be left open.
         .def(
             "rendering",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target, const py::object& clear_color)
+            [](std::shared_ptr<CommandBuffer> self,
+               std::shared_ptr<RenderTarget> target,
+               const py::object& clear_color,
+               float clear_depth)
             {
                 require_same_context(self->owner(), target->owner(), "rendering");
-                return RenderingScope{std::move(self), std::move(target), parse_clear_colors(clear_color)};
+                auto clears = parse_clear_colors(clear_color);
+                require_preservable(*target, !clears.has_value(), "rendering");
+                return RenderingScope{std::move(self), std::move(target), std::move(clears), clear_depth};
             },
             py::arg("target"),
-            py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f))
+            py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f),
+            py::arg("clear_depth") = 1.0f)
         // GPU timer: records the opening timestamp and returns a Timer handle.
         // Stop it with t.stop() or a `with` block; read it back with t.ms.
         .def(
@@ -1350,7 +1465,7 @@ PYBIND11_MODULE(_core, m)
             "__enter__",
             [](RenderingScope& self)
             {
-                self.cmd->begin_rendering(self.target, self.clear_color);
+                self.cmd->begin_rendering(self.target, self.clear_color, self.clear_depth);
                 return self.cmd;
             })
         .def(
@@ -1375,26 +1490,54 @@ PYBIND11_MODULE(_core, m)
             "ms", [](const Timer& self) { return self.cmd->read_timer(self.index, self.generation); });
 
     // ── Window (GLFW) ──
+    py::enum_<WindowMode>(m, "WindowMode")
+        .value("WINDOWED", WindowMode::WINDOWED)
+        .value("FRAMELESS", WindowMode::FRAMELESS)
+        .value("FULLSCREEN", WindowMode::FULLSCREEN)
+        .value("FULLSCREEN_WINDOWED", WindowMode::FULLSCREEN_WINDOWED)
+        .export_values();
+
     py::class_<Window>(m, "Window")
         .def(
             py::init(
-                [](int width, int height, const std::string& title, std::shared_ptr<Logger> logger)
+                [](int width, int height, const std::string& title, std::shared_ptr<Logger> logger, WindowMode mode)
                 {
                     // Window used to have no way to reach a Logger at all, so GLFW's own
                     // diagnostics went nowhere.
-                    return unwrap(Window::create(width, height, title, logger), logger.get());
+                    return unwrap(Window::create(width, height, title, logger, mode), logger.get());
                 }),
             py::arg("width"),
             py::arg("height"),
             py::arg("title"),
-            py::arg("logger") = py::none())
+            py::arg("logger") = py::none(),
+            py::arg("mode") = WindowMode::WINDOWED)
         .def("is_open", &Window::is_open)
         .def("should_close", &Window::should_close)
         .def("is_key_pressed", &Window::is_key_pressed, py::arg("key"))
         .def("is_mouse_button_pressed", &Window::is_mouse_button_pressed, py::arg("button"))
+        .def("was_key_pressed", &Window::was_key_pressed, py::arg("key"))
+        .def("was_mouse_button_pressed", &Window::was_mouse_button_pressed, py::arg("button"))
         .def("set_cursor_mode", &Window::set_cursor_mode, py::arg("mode"))
         .def("get_mouse_state", &Window::get_mouse_state)
         .def("set_title", &Window::set_title, py::arg("title"))
+        .def(
+            "set_mode",
+            // nullptr logger: GLFW's own error callback has already logged the
+            // reason through the Window's Logger, so passing it here would say
+            // the same thing twice.
+            [](Window& self, WindowMode mode) { unwrap(self.set_mode(mode), nullptr); },
+            py::arg("mode"))
+        .def("set_size", &Window::set_size, py::arg("width"), py::arg("height"))
+        .def("set_position", &Window::set_position, py::arg("x"), py::arg("y"))
+        .def("set_resizable", &Window::set_resizable, py::arg("enable"))
+        .def("set_always_on_top", &Window::set_always_on_top, py::arg("enable"))
+        .def("set_opacity", &Window::set_opacity, py::arg("opacity"))
+        .def_property_readonly("mode", &Window::mode)
+        .def_property_readonly("position", &Window::get_position)
+        .def_property_readonly("resizable", &Window::is_resizable)
+        .def_property_readonly("always_on_top", &Window::is_always_on_top)
+        .def_property_readonly("opacity", &Window::get_opacity)
+        .def_property_readonly("content_scale", &Window::get_content_scale)
         .def_property_readonly("width", &Window::get_width)
         .def_property_readonly("height", &Window::get_height);
 
@@ -1620,14 +1763,19 @@ PYBIND11_MODULE(_core, m)
             { return std::make_shared<ComputePipelineBuilder>(self); })
         .def(
             "compile_shader",
-            [](Context& self, const std::string& path, ShaderStage stage, std::optional<std::string> source)
-                -> py::object
+            [](Context& self,
+               const std::string& path,
+               ShaderStage stage,
+               const py::object& source,
+               const std::vector<std::string>& include_dirs,
+               const std::string& entry_point) -> py::object
             {
                 // Only file-backed shaders are watchable: a source= virtual name may
                 // not exist on disk, and .spv is recompiled from its own path too.
-                const bool from_file = !source.has_value();
-                auto module =
-                    unwrap(ShaderCompiler::compile(self, path, stage, std::move(source)), self.logger().get());
+                const bool from_file = source.is_none();
+                auto module = unwrap(
+                    ShaderCompiler::compile(self, path, stage, parse_shader_source(source), include_dirs, entry_point),
+                    self.logger().get());
                 if (auto* hr = self.hot_reload(); hr && from_file && std::filesystem::exists(path))
                 {
                     hr->watch_shader(module);
@@ -1637,7 +1785,9 @@ PYBIND11_MODULE(_core, m)
             py::arg("path"),
             py::arg("stage"),
             py::kw_only(),
-            py::arg("source") = py::none())
+            py::arg("source") = py::none(),
+            py::arg("include_dirs") = py::tuple(),
+            py::arg("entry_point") = "")
         .def(
             "load_image",
             [](Context& self, const std::string& path, bool mipmaps, const std::string& name) -> py::object
@@ -1936,16 +2086,21 @@ PYBIND11_MODULE(_core, m)
                Filter filter,
                AddressMode address_mode,
                bool anisotropy,
-               std::optional<CompareOp> compare) -> py::object
+               std::optional<CompareOp> compare,
+               const std::string& name) -> py::object
             {
                 // Cached: identical descriptions return the identical object.
+                // Which is why name= accumulates rather than replacing — see
+                // Sampler::add_debug_name.
                 return py::cast(unwrap(
-                    self.get_sampler(SamplerDesc{filter, address_mode, anisotropy, compare}), self.logger().get()));
+                    self.get_sampler(SamplerDesc{filter, address_mode, anisotropy, compare}, name),
+                    self.logger().get()));
             },
             py::arg("filter") = Filter::LINEAR,
             py::arg("address_mode") = AddressMode::REPEAT,
             py::arg("anisotropy") = true,
-            py::arg("compare") = py::none())
+            py::arg("compare") = py::none(),
+            py::arg("name") = "")
         .def(
             "create_descriptor_pool",
             [](Context& self,
@@ -2205,6 +2360,22 @@ PYBIND11_MODULE(_core, m)
             py::arg("present_mode") = PresentMode::MAILBOX,
             py::arg("samples") = 1)
         .def_property_readonly("present_mode", &SwapchainRenderer::present_mode)
+        // A verb, not a settable property, because the request is a preference:
+        // read present_mode back to see what the driver actually gave you.
+        .def(
+            "set_present_mode",
+            [](SwapchainRenderer& self, PresentMode mode)
+            {
+                std::expected<void, Error> result;
+                {
+                    // Recreation takes the device idle — release the GIL for the
+                    // wait, and unwrap only once it is back (raising needs it).
+                    py::gil_scoped_release release;
+                    result = self.set_present_mode(mode);
+                }
+                unwrap(std::move(result), nullptr);
+            },
+            py::arg("mode"))
         // bool, not a Frame: the frame belongs to the Context (ctx.begin_frame),
         // and what a window contributes to it is one acquired image. False means
         // "this window sits this frame out" — the others carry on.

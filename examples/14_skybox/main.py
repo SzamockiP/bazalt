@@ -115,8 +115,6 @@ def record(cmd, yaw, pitch):
 
 cmd = ctx.create_command_buffer()
 yaw, pitch = 0.0, 0.0
-last_mouse_dx = 0.0
-last_mouse_dy = 0.0
 last_time = time.time()
 frame_count = 0
 fps_timer = 0.0
@@ -138,11 +136,8 @@ while window.is_open():
         fps_timer = 0.0
 
     mouse = window.get_mouse_state()
-    dx = mouse.dx - last_mouse_dx
-    dy = mouse.dy - last_mouse_dy
-    last_mouse_dx, last_mouse_dy = mouse.dx, mouse.dy
-    yaw += dx * 0.002
-    pitch = max(-math.pi / 2 + 0.01, min(math.pi / 2 - 0.01, pitch + dy * 0.002))
+    yaw += mouse.dx * 0.002
+    pitch = max(-math.pi / 2 + 0.01, min(math.pi / 2 - 0.01, pitch + mouse.dy * 0.002))
 
     record(cmd, yaw, pitch)
     renderer.present(cmd)

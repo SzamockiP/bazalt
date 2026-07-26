@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 
 // How to read texels. Deliberately small: these knobs cover every example and
 // test; per-axis address modes can be added additively if something ever needs
@@ -104,7 +105,34 @@ public:
         return desc_;
     }
 
+    // Debug names ACCUMULATE, because the object they name is shared: the cache
+    // keys on the description, so create_sampler(name="shadow") and
+    // create_sampler(name="terrain") with the same filtering are one VkSampler.
+    //
+    // The alternatives are both worse. Naming only the first caller silently
+    // drops a name, which is confusing exactly when you are reading validation
+    // output. Putting the name in the cache key gives a named sampler its own
+    // handle, which makes a debug label change what the program allocates.
+    // A list of every user is true, and it is what a validation message should
+    // say. Returns false when the name adds nothing, so the caller can skip the
+    // Vulkan call.
+    bool add_debug_name(const std::string& name)
+    {
+        if (name.empty() || debug_name_.find(name) != std::string::npos)
+        {
+            return false;
+        }
+        debug_name_ = debug_name_.empty() ? name : debug_name_ + " + " + name;
+        return true;
+    }
+
+    const std::string& debug_name() const
+    {
+        return debug_name_;
+    }
+
 private:
     VkSampler handle_ = VK_NULL_HANDLE;
     SamplerDesc desc_{};
+    std::string debug_name_;
 };

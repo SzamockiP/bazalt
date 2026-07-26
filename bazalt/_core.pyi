@@ -136,6 +136,24 @@ class Topology(IntEnum):
     POINT_LIST = 1
     LINE_LIST = 2
 
+class BlendMode(IntEnum):
+    """How a fragment combines with what the attachment already holds.
+
+    Read only when blend() is enabled. ALPHA is ordinary transparency,
+    ADDITIVE is order-independent accumulation (particles, glow), and
+    PREMULTIPLIED is for colours that already carry their alpha.
+    """
+    ALPHA = 0
+    ADDITIVE = 1
+    PREMULTIPLIED = 2
+
+class PolygonMode(IntEnum):
+    """Fill triangles, or draw only their edges (the wireframe view) or
+    vertices. All three are core Vulkan and need no Feature."""
+    FILL = 0
+    LINE = 1
+    POINT = 2
+
 class Access(IntEnum):
     """What a command does to a buffer — the vocabulary of cmd.barrier()
     in manual mode (auto_barriers=False)."""
@@ -212,10 +230,37 @@ class MemoryUsage(IntEnum):
     DYNAMIC = 1
 
 class MouseState:
+    """A snapshot from window.get_mouse_state().
+
+    x/y are the current cursor position. dx/dy and the scroll are the change
+    during the last poll_events() cycle, so a camera uses them directly and
+    keeps no previous value of its own. Reading twice in one frame gives the
+    same answer.
+    """
+    @property
+    def x(self) -> float: ...
+    @property
+    def y(self) -> float: ...
     @property
     def dx(self) -> float: ...
     @property
     def dy(self) -> float: ...
+    @property
+    def scroll_dx(self) -> float: ...
+    @property
+    def scroll_dy(self) -> float: ...
+
+class WindowMode(IntEnum):
+    """How the window presents itself.
+
+    FULLSCREEN takes the monitor at its current video mode. It is not
+    exclusive fullscreen: the swapchain stays composited, because exclusive
+    fullscreen needs VK_EXT_full_screen_exclusive.
+    """
+    WINDOWED = 0
+    FRAMELESS = 1
+    FULLSCREEN = 2
+    FULLSCREEN_WINDOWED = 3
 
 # ── Resources ──────────────────────────────────────────────────────────
 
@@ -320,7 +365,12 @@ class Image:
 class Sampler:
     """How to read texels. Cached on the Context: identical descriptions are
     the identical object."""
-    ...
+
+    @property
+    def name(self) -> str:
+        """The debug name, which is every name this shared sampler was given,
+        joined with " + ". Empty when nobody named it."""
+        ...
 
 class Pipeline: ...
 
@@ -426,9 +476,33 @@ class GraphicsPipelineBuilder:
     def vertex_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder: ...
     def fragment_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder: ...
     def vertex_format(self, formats: list[VertexFormat]) -> GraphicsPipelineBuilder: ...
-    def depth_test(self, enable: bool) -> GraphicsPipelineBuilder: ...
+    def depth_test(self, enable: bool, write: bool = True,
+                   compare: CompareOp = CompareOp.LESS_OR_EQUAL) -> GraphicsPipelineBuilder:
+        """Depth test, depth write and the compare op.
+
+        write=False keeps the test and stops the depth update, which is what a
+        transparency pass needs. Nothing is written when enable is False,
+        whatever write says.
+        """
+        ...
     def cull_mode(self, mode: CullMode, front_face: FrontFace) -> GraphicsPipelineBuilder: ...
-    def blend(self, enable: bool) -> GraphicsPipelineBuilder: ...
+    def polygon_mode(self, mode: PolygonMode) -> GraphicsPipelineBuilder: ...
+    def line_width(self, width: float) -> GraphicsPipelineBuilder:
+        """Line width in pixels for PolygonMode.LINE or Topology.LINE_LIST.
+
+        Anything other than 1.0 needs Feature.WIDE_LINES — build() raises
+        ShaderError without it, because a driver may support exactly one width.
+        """
+        ...
+    def depth_bias(self, constant: float, slope: float = 0.0) -> GraphicsPipelineBuilder:
+        """Offset the depth this pipeline writes. The fix for shadow acne.
+
+        `slope` scales with the polygon's depth gradient, which is what makes
+        one setting hold at every angle. depth_bias(0) is the same pipeline as
+        no call at all.
+        """
+        ...
+    def blend(self, enable: bool, mode: BlendMode = BlendMode.ALPHA) -> GraphicsPipelineBuilder: ...
     def topology(self, topology: Topology) -> GraphicsPipelineBuilder: ...
     def sample_shading(self, enable: bool = True, min_fraction: float = 1.0) -> GraphicsPipelineBuilder:
         """Per-sample fragment shading on an MSAA target: the fragment shader runs
@@ -489,13 +563,23 @@ class CommandBuffer:
     def begin(self) -> CommandBuffer: ...
 
     def begin_rendering(self, target: RenderTargetBase,
-                        clear_color: Sequence[float] | Sequence[Sequence[float]] = (0.0, 0.0, 0.0, 1.0)
-                        ) -> CommandBuffer:
+                        clear_color: Sequence[float] | Sequence[Sequence[float]] | None = (0.0, 0.0, 0.0, 1.0),
+                        clear_depth: float = 1.0) -> CommandBuffer:
         """Start rendering into `target`.
 
         clear_color is either a single [r, g, b, a] applied to every attachment
         (the common case) or, for MRT, a list of them ([[r,g,b,a], …]) clearing
         each attachment independently.
+
+        None preserves the colour and the depth instead of clearing them, which
+        is how a second pass draws over the first one on the same target. The
+        first pass of a frame must still clear, because an acquired swapchain
+        image starts with undefined contents. Raises ResourceError on a
+        multisampled target, which has nothing to preserve.
+
+        clear_depth is the depth value, not a second preserve switch: 1.0 is the
+        far plane, and 0.0 is where a reversed-depth buffer starts (the only way
+        depth_test(compare=GREATER) can pass). Ignored when the pass preserves.
 
         Also emits a viewport and scissor covering the whole target, so the
         common case needs no further calls.
@@ -505,15 +589,16 @@ class CommandBuffer:
     def end_rendering(self, target: RenderTargetBase) -> CommandBuffer: ...
 
     def rendering(self, target: RenderTargetBase,
-                  clear_color: Sequence[float] | Sequence[Sequence[float]] = (0.0, 0.0, 0.0, 1.0)
-                  ) -> RenderingScope:
+                  clear_color: Sequence[float] | Sequence[Sequence[float]] | None = (0.0, 0.0, 0.0, 1.0),
+                  clear_depth: float = 1.0) -> RenderingScope:
         """The begin/end pair as a context manager:
 
             with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
                 c.bind_pipeline(p).draw(3)
 
         end_rendering is recorded on exit, exceptions included. clear_color takes
-        the same single-or-per-attachment forms as begin_rendering.
+        the same single-or-per-attachment forms as begin_rendering, and None
+        preserves the attachment for a second pass.
         """
         ...
 
@@ -622,14 +707,65 @@ class Timer:
 
 class Window:
     def __init__(self, width: int, height: int, title: str,
-                 logger: Optional[Logger] = None) -> None: ...
+                 logger: Optional[Logger] = None,
+                 mode: WindowMode = WindowMode.WINDOWED) -> None:
+        """width/height/mode describe the window it opens with.
+
+        Whatever mode it opens in, that width and height are what WINDOWED
+        returns to later.
+        """
+        ...
     def is_open(self) -> bool: ...
     def should_close(self) -> bool: ...
     def is_key_pressed(self, key: int) -> bool: ...
     def is_mouse_button_pressed(self, button: int) -> bool: ...
+    def was_key_pressed(self, key: int) -> bool:
+        """True when the key went down during the last poll_events() cycle.
+
+        The edge, where is_key_pressed is the level. Use it for a toggle, and
+        read it as often as you like within one frame. Key auto-repeat does not
+        count as an edge.
+        """
+        ...
+    def was_mouse_button_pressed(self, button: int) -> bool: ...
     def set_cursor_mode(self, mode: int) -> None: ...
     def get_mouse_state(self) -> MouseState: ...
     def set_title(self, title: str) -> None: ...
+    def set_mode(self, mode: WindowMode) -> None:
+        """Switch between windowed, frameless and the two fullscreen modes.
+
+        WINDOWED restores the position and size the window had before it left
+        that mode. Fullscreen takes the monitor the window covers most of. The
+        swapchain follows on its own, through the same path a resize takes.
+        Raises WindowError when no monitor reports a video mode.
+        """
+        ...
+    def set_size(self, width: int, height: int) -> None: ...
+    def set_position(self, x: int, y: int) -> None: ...
+    def set_resizable(self, enable: bool) -> None: ...
+    def set_always_on_top(self, enable: bool) -> None: ...
+    def set_opacity(self, opacity: float) -> None:
+        """0.0 is invisible and 1.0 is opaque. Ignored where the platform has
+        no compositor."""
+        ...
+    @property
+    def mode(self) -> WindowMode: ...
+    @property
+    def position(self) -> tuple[int, int]: ...
+    @property
+    def resizable(self) -> bool: ...
+    @property
+    def always_on_top(self) -> bool: ...
+    @property
+    def opacity(self) -> float: ...
+    @property
+    def content_scale(self) -> tuple[float, float]:
+        """Framebuffer pixels per screen coordinate — 2.0 on a HiDPI display.
+
+        This is why width/height (screen coordinates) and the swapchain extent
+        (pixels) can disagree.
+        """
+        ...
     @property
     def width(self) -> int: ...
     @property
@@ -816,27 +952,42 @@ class Context:
     def graphics_pipeline(self) -> GraphicsPipelineBuilder: ...
     def compute_pipeline(self) -> ComputePipelineBuilder: ...
     def compile_shader(self, path: str, stage: ShaderStage, *,
-                       source: Optional[str] = None) -> ShaderModule:
+                       source: Optional[str | bytes] = None,
+                       include_dirs: Sequence[str] = (),
+                       entry_point: str = "") -> ShaderModule:
         """Compile or load a shader. One function for every form: the extension
         of `path` decides how it is handled.
 
-        - `.hlsl` — HLSL (entry point `main`, one file per stage). Use
-          `[[vk::binding(n, set)]]` on resources; bare `register()` piles
-          everything into one Vulkan binding space.
+        - `.hlsl` — HLSL. Use `[[vk::binding(n, set)]]` on resources; bare
+          `register()` piles everything into one Vulkan binding space.
         - `.spv` — a prebuilt SPIR-V binary: loaded, not compiled. `stage` is
           verified against the binary's entry points (ShaderError on mismatch).
         - anything else — GLSL.
 
-        `source=` compiles the given string instead of reading a file; `path`
-        becomes a virtual name that still picks the language, tags diagnostics
-        (ShaderError.path) and anchors relative #include resolution (a name
-        with no directory resolves includes against the working directory).
+        `source=` supplies the content instead of reading a file, and its type
+        says what it is. A `str` is compiled as text. `bytes` is taken as ready
+        SPIR-V words: nothing is compiled, the extension of `path` stops
+        mattering, and the binary gets the same magic-number and stage checks a
+        `.spv` file gets. With `source=`, `path` becomes a virtual name that
+        still picks the language, tags diagnostics (ShaderError.path) and anchors
+        relative #include resolution (a name with no directory resolves includes
+        against the working directory).
+
+        `entry_point=` names an HLSL entry point, for a file that holds several
+        (VSMain, PSMain). It is an error for GLSL, whose entry point must be
+        main. The default is main.
 
         GLSL `#include "x"` / `<x>` resolve relative to the directory of the
         including file, recursively; the files used are recorded in
-        ShaderModule.includes. A missing top-level file is a ResourceError; a
-        missing include is a ShaderError (the compiler discovered it, and the
-        error is recoverable — fix the include and recompile).
+        ShaderModule.includes. `include_dirs=` adds fallback directories, tried
+        in order and only when the name is not beside the including file, so
+        adding one cannot change what an existing shader includes. A missing
+        top-level file is a ResourceError; a missing include is a ShaderError
+        (the compiler discovered it, and the error is recoverable — fix the
+        include and recompile).
+
+        A hot reload recompiles with the include_dirs and entry_point of the
+        first compile.
         """
         ...
 
@@ -941,13 +1092,19 @@ class Context:
     def create_sampler(self, filter: Filter = Filter.LINEAR,
                        address_mode: AddressMode = AddressMode.REPEAT,
                        anisotropy: bool = True,
-                       compare: Optional[CompareOp] = None) -> Sampler:
+                       compare: Optional[CompareOp] = None,
+                       name: str = "") -> Sampler:
         """Cached: identical descriptions return the identical object.
 
         `compare=` makes a compare sampler (GLSL `sampler2DShadow`): reads
         return the comparison result instead of the texel, and LINEAR filtering
         becomes hardware PCF. (Linear filtering of depth formats is a format
-        feature — universal on desktop GPUs, not spec-guaranteed.)"""
+        feature — universal on desktop GPUs, not spec-guaranteed.)
+
+        `name=` labels the sampler for validation messages. Because the cache
+        shares one sampler between identical descriptions, names accumulate: two
+        calls that differ only by name give one object named "a + b", which
+        `sampler.name` reports."""
         ...
     def create_descriptor_pool(self, max_sets: int, samplers: int = 0,
                                uniform_buffers: int = 0,
@@ -986,6 +1143,16 @@ class SwapchainRenderer(RenderTargetBase):
     @property
     def present_mode(self) -> PresentMode:
         """The mode actually in use (post-fallback), not the requested one."""
+        ...
+
+    def set_present_mode(self, mode: PresentMode) -> None:
+        """Switch vsync at runtime. Recreates the swapchain.
+
+        The mode is a preference, so read present_mode back to see what the
+        driver gave you. Call it outside the acquire/present pair: raises
+        ResourceError while an image is acquired, because recreation would
+        destroy the swapchain that image belongs to.
+        """
         ...
 
     def acquire(self) -> bool:

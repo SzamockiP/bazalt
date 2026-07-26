@@ -81,8 +81,6 @@ class DemoApp:
         
         self.camera = Camera()
         self.last_time = time.time()
-        self.last_mouse_dx = 0.0
-        self.last_mouse_dy = 0.0
         self.frame_count = 0
         self.fps_timer = 0.0
         
@@ -229,8 +227,6 @@ class DemoApp:
 
     def run(self):
         print("Rendering started")
-        last_mouse_dx = self.last_mouse_dx
-        last_mouse_dy = self.last_mouse_dy
         
         while self.window.is_open():
             bz.poll_events()
@@ -251,11 +247,8 @@ class DemoApp:
                     self.fps_timer = 0.0
                     
                 mouse = self.window.get_mouse_state()
-                dx = mouse.dx - last_mouse_dx
-                dy = mouse.dy - last_mouse_dy
-                last_mouse_dx, last_mouse_dy = mouse.dx, mouse.dy
                 
-                right_vec = self.camera.update_mouse(dx, dy)
+                right_vec = self.camera.update_mouse(mouse.dx, mouse.dy)
                 self.camera.process_keyboard(self.window, dt, right_vec)
                 
                 view, proj, model = self.camera.get_matrices(1024.0 / 720.0)

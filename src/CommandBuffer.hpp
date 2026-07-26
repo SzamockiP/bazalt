@@ -113,14 +113,29 @@ public:
     // attachment (the common case); N entries clear attachment i with entry i
     // (per-attachment clears for MRT). The binding accepts both [r,g,b,a] and
     // [[r,g,b,a], …] and normalises to this.
+    //
+    // nullopt means PRESERVE: load what the attachment already holds instead of
+    // clearing it, which is what puts a second pass on one target (opaque then
+    // transparent, or a UI over a scene). It has to be a distinct state from an
+    // empty vector, because empty already means "clear to black".
+    //
+    // Colour and depth preserve together. Splitting them would be two knobs on
+    // the verb for one question, and the multi-pass case wants both.
+    //
+    // clear_depth is the value, not a second preserve switch: 1.0 is the far
+    // plane and the default, 0.0 is what a reversed-depth buffer starts from
+    // (which is the only way depth_test(compare=GREATER) can ever pass). It is
+    // ignored when the pass preserves.
     CommandBuffer& begin_rendering(
         std::shared_ptr<RenderTarget> target,
-        const std::vector<std::array<float, 4>>& clear_colors)
+        const std::optional<std::vector<std::array<float, 4>>>& clear_colors,
+        float clear_depth = 1.0f)
     {
         commands_.push_back(
-            [clear_colors, target](VkCommandBuffer cmd, const FrameContext& frame)
+            [clear_colors, clear_depth, target](VkCommandBuffer cmd, const FrameContext& frame)
             {
                 RenderTarget* rt = target.get();
+                const bool preserve = !clear_colors.has_value();
 
                 // Which layer/mip each attachment barrier must transition. Defaults
                 // to {layer 0, mip 0, one of each}; a SubresourceTarget narrows it to
@@ -130,14 +145,31 @@ public:
 
                 // Every colour attachment enters COLOR_ATTACHMENT_OPTIMAL. UNDEFINED
                 // as the source: contents are cleared each pass anyway.
+                //
+                // Except when preserving, where UNDEFINED discards exactly what
+                // is about to be loaded. The source is then the layout the
+                // previous pass retired to (end_rendering below), and the source
+                // stage covers both ways the attachment can have got there:
+                // written by an earlier pass, or sampled since.
+                const VkImageLayout color_old_layout = preserve ? rt->final_layout() : VK_IMAGE_LAYOUT_UNDEFINED;
+                const VkAccessFlags color_src_access =
+                    preserve ? (VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT) : 0;
+                const VkPipelineStageFlags color_src_stage =
+                    preserve ? (VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+                             : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+
                 for (uint32_t i = 0; i < rt->color_count(); ++i)
                 {
                     VkImageMemoryBarrier barrier{
                         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                         .pNext = nullptr,
-                        .srcAccessMask = 0,
-                        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                        .srcAccessMask = color_src_access,
+                        // LOAD_OP_LOAD reads the attachment, so preserving needs
+                        // the read bit as well as the write.
+                        .dstAccessMask = static_cast<VkAccessFlags>(
+                            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                            (preserve ? VK_ACCESS_COLOR_ATTACHMENT_READ_BIT : 0)),
+                        .oldLayout = color_old_layout,
                         .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -151,7 +183,7 @@ public:
 
                     frame.vk->vkCmdPipelineBarrier(
                         cmd,
-                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        color_src_stage,
                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                         0,
                         0,
@@ -168,7 +200,7 @@ public:
                         barrier.image = rt->color_resolve_image(i);
                         frame.vk->vkCmdPipelineBarrier(
                             cmd,
-                            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            color_src_stage,
                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                             0,
                             0,
@@ -180,14 +212,27 @@ public:
                     }
                 }
 
+                // Depth follows colour: preserving takes it from the layout the
+                // previous pass left it in, and a swapchain's scratch depth never
+                // leaves DEPTH_ATTACHMENT_OPTIMAL, which is exactly what
+                // depth_final_layout() reports for it.
+                const VkImageLayout depth_old_layout = preserve ? rt->depth_final_layout() : VK_IMAGE_LAYOUT_UNDEFINED;
+                const VkAccessFlags depth_src_access =
+                    preserve ? (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT) : 0;
+                const VkPipelineStageFlags depth_src_stage =
+                    preserve ? (VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+                             : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+
                 if (rt->depth_image() != VK_NULL_HANDLE)
                 {
                     VkImageMemoryBarrier depthBarrier{
                         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                         .pNext = nullptr,
-                        .srcAccessMask = 0,
-                        .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                        .srcAccessMask = depth_src_access,
+                        .dstAccessMask = static_cast<VkAccessFlags>(
+                            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                            (preserve ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT : 0)),
+                        .oldLayout = depth_old_layout,
                         .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -201,7 +246,7 @@ public:
 
                     frame.vk->vkCmdPipelineBarrier(
                         cmd,
-                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        depth_src_stage,
                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
                         0,
                         0,
@@ -218,7 +263,7 @@ public:
                         depthBarrier.image = rt->depth_resolve_image();
                         frame.vk->vkCmdPipelineBarrier(
                             cmd,
-                            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                            depth_src_stage,
                             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
                             0,
                             0,
@@ -234,9 +279,10 @@ public:
                 colorAttachments.reserve(rt->color_count());
                 for (uint32_t i = 0; i < rt->color_count(); ++i)
                 {
-                    const std::array<float, 4> cc = clear_colors.empty()
+                    const std::array<float, 4> cc = preserve || clear_colors->empty()
                                                         ? std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}
-                                                        : (i < clear_colors.size() ? clear_colors[i] : clear_colors[0]);
+                                                        : (i < clear_colors->size() ? (*clear_colors)[i]
+                                                                                    : (*clear_colors)[0]);
                     // MSAA: render into the multisampled view, resolve (averaging
                     // the samples) into the single-sample target. The multisampled
                     // image is transient — only the resolve is kept (DONT_CARE).
@@ -250,7 +296,7 @@ public:
                          .resolveImageView = resolve ? rt->color_resolve_view(i) : VK_NULL_HANDLE,
                          .resolveImageLayout = resolve ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
                                                        : VK_IMAGE_LAYOUT_UNDEFINED,
-                         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                         .loadOp = preserve ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR,
                          .storeOp = resolve ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE,
                          .clearValue = {.color = {{cc[0], cc[1], cc[2], cc[3]}}}});
                 }
@@ -268,13 +314,17 @@ public:
                     .resolveImageView = depthResolve ? rt->depth_resolve_view() : VK_NULL_HANDLE,
                     .resolveImageLayout = depthResolve ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL
                                                        : VK_IMAGE_LAYOUT_UNDEFINED,
-                    .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-                    // A depth that will be consumed (shadow maps) must be stored;
-                    // the swapchain's scratch depth keeps DONT_CARE.
-                    .storeOp = rt->depth_final_layout() == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL
-                                   ? VK_ATTACHMENT_STORE_OP_DONT_CARE
-                                   : VK_ATTACHMENT_STORE_OP_STORE,
-                    .clearValue = {.depthStencil = {1.0f, 0}}};
+                    .loadOp = preserve ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR,
+                    // Always stored. It used to be DONT_CARE unless the depth
+                    // would be consumed (shadow maps), which is the cheaper
+                    // choice right up until a second pass preserves it: DONT_CARE
+                    // makes the depth undefined the moment the first pass ends, so
+                    // opaque-then-transparent on one target would z-test against
+                    // garbage. The cost is depth bandwidth on tiled GPUs, and the
+                    // upgrade path is deriving the store-op from whether a later
+                    // pass in the same recording loads.
+                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                    .clearValue = {.depthStencil = {clear_depth, 0}}};
 
                 VkRenderingInfo renderingInfo{
                     .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,

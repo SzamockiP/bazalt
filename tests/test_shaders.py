@@ -114,6 +114,51 @@ def test_changing_included_file_changes_compile_result(ctx, tmp_path):
     assert before != after
 
 
+def test_include_dirs_are_a_fallback(ctx, tmp_path):
+    """0.16: a search path, tried only when the name is not beside the including
+    file. A shader that already compiled must keep resolving the same way, so
+    the primary rule stays first."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "shared.glsl").write_text("const float S = 0.5;\n")
+
+    main = tmp_path / "uses_lib.frag"
+    main.write_text(
+        "#version 450\n"
+        '#include "shared.glsl"\n'
+        "layout(location = 0) out vec4 o;\n"
+        "void main() { o = vec4(S, 0.0, 0.0, 1.0); }\n")
+
+    # Without the search path there is no shared.glsl anywhere near the shader.
+    with pytest.raises(bz.ShaderError):
+        ctx.compile_shader(str(main), bz.ShaderStage.FRAGMENT)
+
+    shader = ctx.compile_shader(str(main), bz.ShaderStage.FRAGMENT, include_dirs=[str(lib)])
+    assert len(shader.spirv) > 0
+    recorded = {pathlib.Path(p).resolve() for p in shader.includes}
+    assert recorded == {(lib / "shared.glsl").resolve()}
+
+
+def test_a_neighbouring_file_wins_over_the_search_path(ctx, tmp_path):
+    """The order is what keeps include_dirs safe to add: a directory added later
+    must not shadow a file the shader has been including all along."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "shared.glsl").write_text("const float S = 0.25;\n")
+    (tmp_path / "shared.glsl").write_text("const float S = 0.75;\n")
+
+    main = tmp_path / "prefers_neighbour.frag"
+    main.write_text(
+        "#version 450\n"
+        '#include "shared.glsl"\n'
+        "layout(location = 0) out vec4 o;\n"
+        "void main() { o = vec4(S, 0.0, 0.0, 1.0); }\n")
+
+    shader = ctx.compile_shader(str(main), bz.ShaderStage.FRAGMENT, include_dirs=[str(lib)])
+    recorded = {pathlib.Path(p).resolve() for p in shader.includes}
+    assert recorded == {(tmp_path / "shared.glsl").resolve()}
+
+
 def test_error_in_included_file_reports_that_file_and_line(ctx, tmp_path):
     """ShaderError.path names the file the error is actually in — the include,
     not the top-level shader. That is the file the user (and the 0.8 watcher)
@@ -211,6 +256,70 @@ def test_source_plus_spv_path_is_an_error(ctx):
         ctx.compile_shader("x.spv", bz.ShaderStage.VERTEX, source="void main() {}")
 
 
+# ── SPIR-V straight from memory (0.16) ────────────────────────────────────
+
+
+def test_source_bytes_are_taken_as_spirv(ctx, triangle_shaders):
+    """0.16: source= is text when it is str and SPIR-V when it is bytes.
+
+    The type is the whole signal, and it has to be, since pybind converts both
+    to std::string — an implementation that ignored it would try to compile a
+    binary as GLSL. The path stops mattering, so a .frag name carrying vertex
+    SPIR-V is fine.
+    """
+    vert, _ = triangle_shaders
+    reloaded = ctx.compile_shader("anything.frag", bz.ShaderStage.VERTEX, source=vert.spirv)
+    assert reloaded.spirv == vert.spirv
+
+
+def test_spirv_bytes_get_the_same_checks_as_a_file(ctx):
+    """Bytes from memory deserve the diagnostics a .spv file gets, because the
+    two paths share one validator."""
+    frag = ctx.compile_shader("mem.frag", bz.ShaderStage.FRAGMENT, source=FRAG_OK)
+
+    with pytest.raises(bz.ShaderError, match="VERTEX"):
+        ctx.compile_shader("mem.frag", bz.ShaderStage.VERTEX, source=frag.spirv)
+
+    with pytest.raises(bz.ShaderError, match="magic number"):
+        ctx.compile_shader("junk.frag", bz.ShaderStage.FRAGMENT, source=b"\x00" * 16)
+
+    # Not a whole number of 32-bit words: the wrong argument, not a truncated
+    # binary, so the message says so instead of reporting a bad magic number.
+    with pytest.raises(bz.ShaderError, match="multiple of 4"):
+        ctx.compile_shader("junk.frag", bz.ShaderStage.FRAGMENT, source=b"\x00" * 15)
+
+
+def test_spirv_bytes_render(ctx, triangle_shaders, triangle_buffers):
+    """The round trip that makes the feature worth having: compile once, keep
+    the words, build a pipeline from them later with no file involved."""
+    vert, frag = triangle_shaders
+    vbuf, ibuf = triangle_buffers
+
+    def render(vs, fs):
+        target = bz.RenderTarget(ctx, 64, 64)
+        pipeline = (ctx.graphics_pipeline()
+                    .vertex_shader(vs)
+                    .fragment_shader(fs)
+                    .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+                    .build(target))
+        cmd = ctx.create_command_buffer()
+        cmd.begin()
+        cmd.begin_rendering(target, clear_color=[0.1, 0.2, 0.3, 1])
+        cmd.bind_pipeline(pipeline)
+        cmd.bind_vertex_buffer(vbuf)
+        cmd.bind_index_buffer(ibuf)
+        cmd.draw_indexed(3)
+        cmd.end_rendering(target)
+        ctx.submit(cmd)
+        return target.read_pixels()
+
+    reference = render(vert, frag)
+    from_bytes = render(
+        ctx.compile_shader("v", bz.ShaderStage.VERTEX, source=vert.spirv),
+        ctx.compile_shader("f", bz.ShaderStage.FRAGMENT, source=frag.spirv))
+    assert np.array_equal(from_bytes, reference)
+
+
 # ── HLSL ──────────────────────────────────────────────────────────────────
 
 
@@ -234,6 +343,51 @@ def test_hlsl_error_is_a_shader_error(ctx):
         ctx.compile_shader("bad.hlsl", bz.ShaderStage.FRAGMENT,
                            source="float4 main() : SV_Target0 { return undefined; }")
     assert info.value.path == "bad.hlsl"
+
+
+def test_entry_point_picks_a_function_out_of_one_hlsl_file(ctx):
+    """0.16: one .hlsl holding VSMain and PSMain, which is how a shader pack
+    written for D3D normally looks.
+
+    Both entry points come out of the SAME file, and the image matches the
+    one-function-per-file HLSL pair — so choosing the entry point changed which
+    function was compiled, not merely that something compiled.
+    """
+    both = str(SHADER_DIR / "two_entry_points.hlsl")
+    vs = ctx.compile_shader(both, bz.ShaderStage.VERTEX, entry_point="VSMain")
+    ps = ctx.compile_shader(both, bz.ShaderStage.FRAGMENT, entry_point="PSMain")
+
+    reference = render_fullscreen(
+        ctx,
+        ctx.compile_shader(str(SHADER_DIR / "fullscreen_vs.hlsl"), bz.ShaderStage.VERTEX),
+        ctx.compile_shader(str(SHADER_DIR / "uv_gradient_ps.hlsl"), bz.ShaderStage.FRAGMENT))
+    assert np.array_equal(render_fullscreen(ctx, vs, ps), reference)
+
+
+def test_an_entry_point_that_matches_nothing_compiles_to_an_empty_shader(ctx):
+    """An accepted ceiling, pinned here because it is a trap.
+
+    glslang does not treat an unknown HLSL entry point as an error. It
+    synthesizes an empty one under the requested name, so the compile succeeds
+    and the shader draws nothing. Catching it needs SPIR-V reflection (debt #3).
+
+    The size comparison is the only cheap signal: the real function is several
+    times the empty stub. If glslang ever starts erroring, this test fails and
+    the ceiling can be promoted to a real diagnostic — which is the point of
+    pinning it.
+    """
+    both = str(SHADER_DIR / "two_entry_points.hlsl")
+    real = ctx.compile_shader(both, bz.ShaderStage.VERTEX, entry_point="VSMain")
+    bogus = ctx.compile_shader(both, bz.ShaderStage.VERTEX, entry_point="NoSuchFunction")
+    assert len(bogus.spirv) < len(real.spirv) // 2
+
+
+def test_entry_point_on_glsl_says_so(ctx):
+    """The one compile knob that exists for a single language, so the wrong
+    language gets a sentence rather than a shaderc error to decode."""
+    with pytest.raises(bz.ShaderError, match="entry_point"):
+        ctx.compile_shader("x.frag", bz.ShaderStage.FRAGMENT, source=FRAG_OK,
+                           entry_point="PSMain")
 
 
 # ── compare samplers ──────────────────────────────────────────────────────

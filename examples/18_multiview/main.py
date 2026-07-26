@@ -224,8 +224,6 @@ camera = Camera(pos=(0.0, 2.5, 5.0), yaw=-math.pi / 2, pitch=-0.45)
 
 TITLE = "Bazalt Demo - Multiview Environment Capture"
 last_time = time.time()
-last_mouse_dx = 0.0
-last_mouse_dy = 0.0
 frame_count = 0
 fps_timer = 0.0
 while window.is_open():
@@ -246,8 +244,7 @@ while window.is_open():
         fps_timer = 0.0
 
     mouse = window.get_mouse_state()
-    camera.update_mouse(mouse.dx - last_mouse_dx, mouse.dy - last_mouse_dy)
-    last_mouse_dx, last_mouse_dy = mouse.dx, mouse.dy
+    camera.update_mouse(mouse.dx, mouse.dy)
     camera.process_keyboard(window, dt)
 
     record(cmd, camera.pos, camera.view_proj(W / H))

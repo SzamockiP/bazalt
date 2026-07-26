@@ -412,6 +412,31 @@ public:
         }
     }
 
+    // Switch vsync at runtime. The present mode is a swapchain creation
+    // parameter, so this is the preference plus the recreation that already
+    // exists for a resize. Read present_mode() back afterwards: the request is
+    // a preference, and a driver that lacks the mode falls back to FIFO.
+    std::expected<void, Error> set_present_mode(PresentMode mode)
+    {
+        if (mode == preferred_present_mode_)
+        {
+            return {};
+        }
+        // Recreation destroys the swapchain an acquired image belongs to, so
+        // between acquire() and present() this is a use-after-free waiting for a
+        // driver to notice. Same shape as the double-acquire guard: name the
+        // mistake instead of letting validation describe the symptom.
+        if (image_acquired_)
+        {
+            return std::unexpected(err_resource(
+                "set_present_mode() recreates the swapchain, so it cannot run between "
+                "acquire() and present(). Call it before ctx.begin_frame(), or after present()."));
+        }
+        preferred_present_mode_ = mode;
+        recreate_swapchain();
+        return {};
+    }
+
     // ── GPU timing ────────────────────────────────────────────────────────────
     //
     // The GPU duration of the frame submitted `frames_in_flight` frames ago (a

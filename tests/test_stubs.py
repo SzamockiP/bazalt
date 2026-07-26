@@ -69,7 +69,14 @@ def test_renamed_and_new_api_is_declared():
                      # 0.14
                      "class Device", "def list_devices", "def begin_frame",
                      "def acquire", "def present", "FIFO_RELAXED",
-                     "def poll_events()"):
+                     "def poll_events()",
+                     # 0.16
+                     "class WindowMode(", "def set_mode", "FULLSCREEN_WINDOWED",
+                     "def was_key_pressed", "def scroll_dy", "def content_scale",
+                     "def set_present_mode", "class BlendMode(", "PREMULTIPLIED",
+                     "class PolygonMode(", "def polygon_mode",
+                     "clear_depth", "def line_width", "def depth_bias",
+                     "include_dirs", "entry_point"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 
