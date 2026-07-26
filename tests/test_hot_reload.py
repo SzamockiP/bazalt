@@ -127,6 +127,35 @@ def test_editing_a_fragment_shader_rebuilds_the_pipeline(ctx, tmp_path):
     assert is_green(poll_until(render, is_green))
 
 
+def test_a_reload_keeps_the_include_dirs(ctx, tmp_path):
+    """0.16: the watcher holds only the module, so every setting the first
+    compile depended on has to live on it.
+
+    The include here resolves ONLY through include_dirs. A recompile that
+    dropped them cannot find it, logs a ShaderError and keeps the old red
+    pipeline — so the green assertion is the carry-through.
+    """
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "tint.glsl").write_text("const vec3 TINT = vec3(1.0, 0.0, 0.0);\n")
+
+    frag_path = tmp_path / "tinted.frag"
+    frag_path.write_text(
+        "#version 450\n"
+        '#include "tint.glsl"\n'
+        "layout(location = 0) out vec4 o;\n"
+        "void main() { o = vec4(TINT, 1.0); }\n")
+
+    frag = ctx.compile_shader(str(frag_path), bz.ShaderStage.FRAGMENT, include_dirs=[str(lib)])
+    target = bz.RenderTarget(ctx, 32, 32)
+    render = make_renderer(ctx, target, fullscreen_pipeline(ctx, frag, target))
+    assert is_red(render())
+
+    # Edit the INCLUDED file, which is watched because it was recorded.
+    touch(lib / "tint.glsl", "const vec3 TINT = vec3(0.0, 1.0, 0.0);\n")
+    assert is_green(poll_until(render, is_green))
+
+
 def test_a_typo_is_logged_and_the_old_pipeline_survives(ctx, tmp_path, messages):
     frag_path = tmp_path / "solid.frag"
     frag_path.write_text(solid_frag(1, 0, 0))

@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <cctype>
+#include <variant>
 
 #include "Context.hpp"
 #include "Error.hpp"
@@ -21,6 +22,22 @@ enum class ShaderStage
     FRAGMENT,
     COMPUTE
 };
+
+// The content of a shader when it does not come from its path: GLSL or HLSL
+// text, or ready SPIR-V words. One parameter with two types, because from the
+// caller's side both answer the same question — "here is the content instead of
+// the file" — and two mutually exclusive parameters in one signature is the
+// shape 0.15 already rejected for the cross-Context transfer.
+//
+// `path` keeps its other jobs whichever arrives: the language, the diagnostic
+// tag, ShaderError.path and the base directory for #include. With SPIR-V words
+// the extension stops mattering, because nothing is compiled.
+using ShaderSource = std::variant<std::string, std::vector<std::uint32_t>>;
+
+// Extra directories to resolve #include against, tried in order AFTER the
+// directory of the including file. A shader carries its own list, so a hot
+// reload recompiles it the same way the first compile did.
+using IncludeDirs = std::vector<std::string>;
 
 // A real switch, deliberately with no default case: adding a new stage makes
 // every conversion site a compiler error instead of silently aliasing the new
@@ -65,13 +82,17 @@ public:
         const std::string& path,
         ShaderStage stage,
         std::vector<std::string> includes,
-        std::vector<uint32_t> spirv)
+        std::vector<uint32_t> spirv,
+        IncludeDirs include_dirs = {},
+        std::string entry_point = {})
         : context_(context),
           module_(module),
           path_(path),
           stage_(stage),
           includes_(std::move(includes)),
-          spirv_(std::move(spirv))
+          spirv_(std::move(spirv)),
+          include_dirs_(std::move(include_dirs)),
+          entry_point_(std::move(entry_point))
     {
     }
 
@@ -89,7 +110,9 @@ public:
           path_(std::move(other.path_)),
           stage_(other.stage_),
           includes_(std::move(other.includes_)),
-          spirv_(std::move(other.spirv_))
+          spirv_(std::move(other.spirv_)),
+          include_dirs_(std::move(other.include_dirs_)),
+          entry_point_(std::move(other.entry_point_))
     {
         other.module_ = VK_NULL_HANDLE;
     }
@@ -105,6 +128,8 @@ public:
             stage_ = other.stage_;
             includes_ = std::move(other.includes_);
             spirv_ = std::move(other.spirv_);
+            include_dirs_ = std::move(other.include_dirs_);
+            entry_point_ = std::move(other.entry_point_);
             other.module_ = VK_NULL_HANDLE;
         }
         return *this;
@@ -133,6 +158,16 @@ public:
     const std::vector<uint32_t>& spirv() const
     {
         return spirv_;
+    }
+    // The two compile settings a recompile cannot re-derive from the file. Empty
+    // entry_point means the language default ("main").
+    const IncludeDirs& include_dirs() const
+    {
+        return include_dirs_;
+    }
+    const std::string& entry_point() const
+    {
+        return entry_point_;
     }
 
     // Swap in a freshly compiled body (hot reload). MAIN THREAD ONLY: the
@@ -170,6 +205,11 @@ private:
     ShaderStage stage_;
     std::vector<std::string> includes_;
     std::vector<uint32_t> spirv_;
+    // Carried so a hot reload recompiles the way the first compile did. A
+    // watcher only has the module, so anything the compile depended on has to
+    // live here or the reloaded shader is quietly a different shader.
+    IncludeDirs include_dirs_;
+    std::string entry_point_;
 };
 
 // Resolves #include relative to the directory of the INCLUDING file (both "..."
@@ -181,6 +221,11 @@ private:
 class RecordingIncluder final : public shaderc::CompileOptions::IncluderInterface
 {
 public:
+    explicit RecordingIncluder(IncludeDirs search_dirs = {})
+        : search_dirs_(std::move(search_dirs))
+    {
+    }
+
     shaderc_include_result* GetInclude(
         const char* requested_source,
         shaderc_include_type /*type*/,
@@ -188,13 +233,7 @@ public:
         size_t /*include_depth*/) override
     {
         namespace fs = std::filesystem;
-        fs::path raw = fs::path(requesting_source).parent_path() / requested_source;
-        std::error_code ec;
-        fs::path resolved = fs::weakly_canonical(raw, ec);
-        if (ec)
-        {
-            resolved = raw;
-        }
+        fs::path resolved = resolve_(fs::path(requesting_source).parent_path(), requested_source);
 
         // Each result gets its own heap Holder: shaderc may hold several results
         // at once, and every one must stay valid until its ReleaseInclude.
@@ -236,6 +275,42 @@ public:
     }
 
 private:
+    // The including file's directory first, so every shader that already
+    // compiled keeps resolving exactly as it did. The search dirs are a
+    // FALLBACK, tried in order, and only for a name that is not there: a
+    // search path that could shadow a neighbouring file would change the
+    // meaning of existing shaders the moment a directory was added.
+    //
+    // The last candidate is returned even when nothing exists, so the "cannot
+    // open" message names the primary location rather than the last directory
+    // tried.
+    std::filesystem::path resolve_(const std::filesystem::path& including_dir, const char* requested) const
+    {
+        namespace fs = std::filesystem;
+        const fs::path primary = normalize_(including_dir / requested);
+        std::error_code ec;
+        if (fs::exists(primary, ec))
+        {
+            return primary;
+        }
+        for (const std::string& dir : search_dirs_)
+        {
+            const fs::path candidate = normalize_(fs::path(dir) / requested);
+            if (fs::exists(candidate, ec))
+            {
+                return candidate;
+            }
+        }
+        return primary;
+    }
+
+    static std::filesystem::path normalize_(const std::filesystem::path& raw)
+    {
+        std::error_code ec;
+        std::filesystem::path resolved = std::filesystem::weakly_canonical(raw, ec);
+        return ec ? raw : resolved;
+    }
+
     struct Holder
     {
         std::string name;
@@ -243,6 +318,7 @@ private:
         shaderc_include_result result{};
     };
 
+    IncludeDirs search_dirs_;
     std::vector<std::string> included_;
 };
 
@@ -268,9 +344,11 @@ public:
         Context& context,
         const std::string& path,
         ShaderStage stage,
-        std::optional<std::string> source = std::nullopt)
+        std::optional<ShaderSource> source = std::nullopt,
+        IncludeDirs include_dirs = {},
+        const std::string& entry_point = {})
     {
-        auto parts = compile_parts(context, path, stage, std::move(source));
+        auto parts = compile_parts(context, path, stage, std::move(source), include_dirs, entry_point);
         if (!parts)
         {
             return std::unexpected(parts.error());
@@ -281,7 +359,9 @@ public:
             path,
             stage,
             std::move(parts->includes),
-            std::move(parts->spirv));
+            std::move(parts->spirv),
+            std::move(include_dirs),
+            entry_point);
     }
 
     // The compile without the wrapper. Reads the file fresh from `path` (unless
@@ -293,18 +373,35 @@ public:
         Context& context,
         const std::string& path,
         ShaderStage stage,
-        std::optional<std::string> source = std::nullopt)
+        std::optional<ShaderSource> source = std::nullopt,
+        const IncludeDirs& include_dirs = {},
+        const std::string& entry_point = {})
     {
+        // Ready SPIR-V short-circuits everything: nothing is compiled, so the
+        // extension, the include dirs and the entry point have no work to do.
+        if (source && std::holds_alternative<std::vector<std::uint32_t>>(*source))
+        {
+            return parts_from_spirv(context, std::get<std::vector<std::uint32_t>>(std::move(*source)), stage, path);
+        }
+
         if (lowercase_extension(path) == ".spv")
         {
             if (source)
             {
                 return std::unexpected(err_shader(
-                    "source= provides text for compilation; .spv is a binary format — pass a file path", path));
+                    "source= gave text for compilation, and .spv is a binary format. Pass a file path, or pass "
+                    "the SPIR-V itself as bytes.",
+                    path));
             }
             return load_spv(context, path, stage);
         }
-        return compile_text(context, path, stage, std::move(source));
+
+        std::optional<std::string> text;
+        if (source)
+        {
+            text = std::get<std::string>(std::move(*source));
+        }
+        return compile_text(context, path, stage, std::move(text), include_dirs, entry_point);
     }
 
 private:
@@ -322,7 +419,9 @@ private:
         Context& context,
         const std::string& path,
         ShaderStage stage,
-        std::optional<std::string> source)
+        std::optional<std::string> source,
+        const IncludeDirs& include_dirs,
+        const std::string& entry_point)
     {
         std::string text;
         if (source)
@@ -354,21 +453,34 @@ private:
         options.SetOptimizationLevel(shaderc_optimization_level_performance);
 
         // Language is an attribute of the file name, not a second API path.
-        // Entry point stays "main" (shaderc's HLSL default) — one file per stage.
-        if (lowercase_extension(path) == ".hlsl")
+        const bool hlsl = lowercase_extension(path) == ".hlsl";
+        if (hlsl)
         {
             options.SetSourceLanguage(shaderc_source_language_hlsl);
         }
 
+        // entry_point= exists for HLSL, where one file legitimately holds VSMain
+        // and PSMain. A GLSL entry point must be main, so a name here is a
+        // mistake worth naming rather than a shaderc error to decode.
+        if (!entry_point.empty() && !hlsl)
+        {
+            return std::unexpected(err_shader(
+                "entry_point= applies to HLSL. A GLSL entry point must be main, so remove the argument or "
+                "rename the file to .hlsl.",
+                path));
+        }
+
         // Keep a raw pointer before the unique_ptr moves into options; the
         // recorded includes are read back only while `options` is alive.
-        auto includer = std::make_unique<RecordingIncluder>();
+        auto includer = std::make_unique<RecordingIncluder>(include_dirs);
         RecordingIncluder* recorder = includer.get();
         options.SetIncluder(std::move(includer));
 
         shaderc_shader_kind kind = to_shaderc_kind(stage);
+        const std::string entry = entry_point.empty() ? "main" : entry_point;
 
-        shaderc::SpvCompilationResult module = compiler.CompileGlslToSpv(text, kind, path.c_str(), options);
+        shaderc::SpvCompilationResult module =
+            compiler.CompileGlslToSpv(text, kind, path.c_str(), entry.c_str(), options);
 
         if (module.GetCompilationStatus() != shaderc_compilation_status_success)
         {
@@ -405,10 +517,22 @@ private:
         file.seekg(0);
         file.read(reinterpret_cast<char*>(spirv.data()), fileSize);
 
+        return parts_from_spirv(context, std::move(spirv), stage, path);
+    }
+
+    // Validate ready SPIR-V words and wrap them. Shared by the .spv file path
+    // and by source= bytes, so the two cannot check different things — bytes
+    // from memory deserve exactly the diagnostics a file gets.
+    static std::expected<CompiledParts, Error> parts_from_spirv(
+        Context& context,
+        std::vector<std::uint32_t> spirv,
+        ShaderStage stage,
+        const std::string& tag)
+    {
         constexpr uint32_t spirv_magic = 0x07230203u;
         if (spirv.empty() || spirv[0] != spirv_magic)
         {
-            return std::unexpected(err_shader(path + " is not a SPIR-V binary (bad magic number)", path));
+            return std::unexpected(err_shader(tag + " is not a SPIR-V binary (bad magic number)", tag));
         }
 
         if (!spv_declares_stage(spirv, stage))
@@ -416,9 +540,9 @@ private:
             return std::unexpected(err_shader(
                 std::format(
                     "{} declares no {} entry point — the binary was built for a different stage",
-                    path,
+                    tag,
                     stage_name(stage)),
-                path));
+                tag));
         }
 
         auto vk_module = make_vk_module(context, spirv);

@@ -365,7 +365,12 @@ class Image:
 class Sampler:
     """How to read texels. Cached on the Context: identical descriptions are
     the identical object."""
-    ...
+
+    @property
+    def name(self) -> str:
+        """The debug name, which is every name this shared sampler was given,
+        joined with " + ". Empty when nobody named it."""
+        ...
 
 class Pipeline: ...
 
@@ -482,6 +487,21 @@ class GraphicsPipelineBuilder:
         ...
     def cull_mode(self, mode: CullMode, front_face: FrontFace) -> GraphicsPipelineBuilder: ...
     def polygon_mode(self, mode: PolygonMode) -> GraphicsPipelineBuilder: ...
+    def line_width(self, width: float) -> GraphicsPipelineBuilder:
+        """Line width in pixels for PolygonMode.LINE or Topology.LINE_LIST.
+
+        Anything other than 1.0 needs Feature.WIDE_LINES — build() raises
+        ShaderError without it, because a driver may support exactly one width.
+        """
+        ...
+    def depth_bias(self, constant: float, slope: float = 0.0) -> GraphicsPipelineBuilder:
+        """Offset the depth this pipeline writes. The fix for shadow acne.
+
+        `slope` scales with the polygon's depth gradient, which is what makes
+        one setting hold at every angle. depth_bias(0) is the same pipeline as
+        no call at all.
+        """
+        ...
     def blend(self, enable: bool, mode: BlendMode = BlendMode.ALPHA) -> GraphicsPipelineBuilder: ...
     def topology(self, topology: Topology) -> GraphicsPipelineBuilder: ...
     def sample_shading(self, enable: bool = True, min_fraction: float = 1.0) -> GraphicsPipelineBuilder:
@@ -543,8 +563,8 @@ class CommandBuffer:
     def begin(self) -> CommandBuffer: ...
 
     def begin_rendering(self, target: RenderTargetBase,
-                        clear_color: Sequence[float] | Sequence[Sequence[float]] | None = (0.0, 0.0, 0.0, 1.0)
-                        ) -> CommandBuffer:
+                        clear_color: Sequence[float] | Sequence[Sequence[float]] | None = (0.0, 0.0, 0.0, 1.0),
+                        clear_depth: float = 1.0) -> CommandBuffer:
         """Start rendering into `target`.
 
         clear_color is either a single [r, g, b, a] applied to every attachment
@@ -557,6 +577,10 @@ class CommandBuffer:
         image starts with undefined contents. Raises ResourceError on a
         multisampled target, which has nothing to preserve.
 
+        clear_depth is the depth value, not a second preserve switch: 1.0 is the
+        far plane, and 0.0 is where a reversed-depth buffer starts (the only way
+        depth_test(compare=GREATER) can pass). Ignored when the pass preserves.
+
         Also emits a viewport and scissor covering the whole target, so the
         common case needs no further calls.
         """
@@ -565,8 +589,8 @@ class CommandBuffer:
     def end_rendering(self, target: RenderTargetBase) -> CommandBuffer: ...
 
     def rendering(self, target: RenderTargetBase,
-                  clear_color: Sequence[float] | Sequence[Sequence[float]] | None = (0.0, 0.0, 0.0, 1.0)
-                  ) -> RenderingScope:
+                  clear_color: Sequence[float] | Sequence[Sequence[float]] | None = (0.0, 0.0, 0.0, 1.0),
+                  clear_depth: float = 1.0) -> RenderingScope:
         """The begin/end pair as a context manager:
 
             with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
@@ -928,27 +952,42 @@ class Context:
     def graphics_pipeline(self) -> GraphicsPipelineBuilder: ...
     def compute_pipeline(self) -> ComputePipelineBuilder: ...
     def compile_shader(self, path: str, stage: ShaderStage, *,
-                       source: Optional[str] = None) -> ShaderModule:
+                       source: Optional[str | bytes] = None,
+                       include_dirs: Sequence[str] = (),
+                       entry_point: str = "") -> ShaderModule:
         """Compile or load a shader. One function for every form: the extension
         of `path` decides how it is handled.
 
-        - `.hlsl` — HLSL (entry point `main`, one file per stage). Use
-          `[[vk::binding(n, set)]]` on resources; bare `register()` piles
-          everything into one Vulkan binding space.
+        - `.hlsl` — HLSL. Use `[[vk::binding(n, set)]]` on resources; bare
+          `register()` piles everything into one Vulkan binding space.
         - `.spv` — a prebuilt SPIR-V binary: loaded, not compiled. `stage` is
           verified against the binary's entry points (ShaderError on mismatch).
         - anything else — GLSL.
 
-        `source=` compiles the given string instead of reading a file; `path`
-        becomes a virtual name that still picks the language, tags diagnostics
-        (ShaderError.path) and anchors relative #include resolution (a name
-        with no directory resolves includes against the working directory).
+        `source=` supplies the content instead of reading a file, and its type
+        says what it is. A `str` is compiled as text. `bytes` is taken as ready
+        SPIR-V words: nothing is compiled, the extension of `path` stops
+        mattering, and the binary gets the same magic-number and stage checks a
+        `.spv` file gets. With `source=`, `path` becomes a virtual name that
+        still picks the language, tags diagnostics (ShaderError.path) and anchors
+        relative #include resolution (a name with no directory resolves includes
+        against the working directory).
+
+        `entry_point=` names an HLSL entry point, for a file that holds several
+        (VSMain, PSMain). It is an error for GLSL, whose entry point must be
+        main. The default is main.
 
         GLSL `#include "x"` / `<x>` resolve relative to the directory of the
         including file, recursively; the files used are recorded in
-        ShaderModule.includes. A missing top-level file is a ResourceError; a
-        missing include is a ShaderError (the compiler discovered it, and the
-        error is recoverable — fix the include and recompile).
+        ShaderModule.includes. `include_dirs=` adds fallback directories, tried
+        in order and only when the name is not beside the including file, so
+        adding one cannot change what an existing shader includes. A missing
+        top-level file is a ResourceError; a missing include is a ShaderError
+        (the compiler discovered it, and the error is recoverable — fix the
+        include and recompile).
+
+        A hot reload recompiles with the include_dirs and entry_point of the
+        first compile.
         """
         ...
 
@@ -1053,13 +1092,19 @@ class Context:
     def create_sampler(self, filter: Filter = Filter.LINEAR,
                        address_mode: AddressMode = AddressMode.REPEAT,
                        anisotropy: bool = True,
-                       compare: Optional[CompareOp] = None) -> Sampler:
+                       compare: Optional[CompareOp] = None,
+                       name: str = "") -> Sampler:
         """Cached: identical descriptions return the identical object.
 
         `compare=` makes a compare sampler (GLSL `sampler2DShadow`): reads
         return the comparison result instead of the texel, and LINEAR filtering
         becomes hardware PCF. (Linear filtering of depth formats is a format
-        feature — universal on desktop GPUs, not spec-guaranteed.)"""
+        feature — universal on desktop GPUs, not spec-guaranteed.)
+
+        `name=` labels the sampler for validation messages. Because the cache
+        shares one sampler between identical descriptions, names accumulate: two
+        calls that differ only by name give one object named "a + b", which
+        `sampler.name` reports."""
         ...
     def create_descriptor_pool(self, max_sets: int, samplers: int = 0,
                                uniform_buffers: int = 0,

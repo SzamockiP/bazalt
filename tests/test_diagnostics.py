@@ -47,6 +47,30 @@ def test_empty_name_is_a_no_op(ctx):
     assert img.width == 4
 
 
+def test_sampler_names_accumulate_on_the_shared_object(ctx):
+    """The sampler cache keys on the description, so two differently named
+    requests for the same filtering are ONE VkSampler.
+
+    Naming only the first caller would drop a name silently, and putting the
+    name in the cache key would make a debug label change what gets allocated.
+    So the shared object lists its users, and .name says so.
+    """
+    first = ctx.create_sampler(filter=bz.Filter.NEAREST, anisotropy=False, name="shadow_pcf")
+    second = ctx.create_sampler(filter=bz.Filter.NEAREST, anisotropy=False, name="terrain")
+
+    assert first is second, "identical descriptions must still share one sampler"
+    assert first.name == "shadow_pcf + terrain"
+
+    # Naming it the same thing twice adds nothing.
+    third = ctx.create_sampler(filter=bz.Filter.NEAREST, anisotropy=False, name="terrain")
+    assert third.name == "shadow_pcf + terrain"
+
+    # A different description is a different sampler, and starts unnamed.
+    other = ctx.create_sampler(filter=bz.Filter.LINEAR, anisotropy=False)
+    assert other is not first
+    assert other.name == ""
+
+
 def _double_pipeline(ctx):
     comp = ctx.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
     return ctx.compute_pipeline().shader(comp).storage_buffer(0).build()

@@ -62,9 +62,46 @@ One break, and it is the mouse delta. See **Changed**.
   the `WIREFRAME` feature (`fillModeNonSolid`), so ask for it with
   `Context(optional=[bz.Feature.WIREFRAME])` and `build()` says so if it is
   missing.
+- **`clear_depth=` on `rendering` and `begin_rendering`.** The depth clear value,
+  which used to be fixed at 1.0. That fixed value is also what made
+  `depth_test(compare=GREATER)` useless, because nothing is ever greater than the
+  far plane: reversed depth needs `clear_depth=0.0`. Ignored when the pass
+  preserves.
+- **`line_width(width)`.** For `PolygonMode.LINE` and `Topology.LINE_LIST`. A
+  1-pixel wireframe nearly disappears on a HiDPI display. Anything other than
+  1.0 needs the `WIDE_LINES` feature, because a driver may support exactly one
+  width.
+- **`depth_bias(constant, slope=0.0)`.** The fix for shadow acne. Note that a
+  floating-point depth buffer scales `constant` by about 2^-24, so the small
+  numbers from a D24 tutorial do nothing and a visible offset needs five or six
+  digits.
+- **`create_sampler(name=)` and `sampler.name`.** The sampler was the one object
+  with no debug name. Because the cache shares one sampler between identical
+  descriptions, names accumulate: two calls that differ only by name give one
+  object named "a + b". Naming only the first caller would drop a name in
+  silence, and putting the name in the cache key would let a debug label change
+  what the program allocates.
+- **`compile_shader(include_dirs=)`.** Extra directories for `#include`, tried in
+  order and only when the name is not beside the including file. Adding a
+  directory therefore cannot change what an existing shader includes.
+- **`compile_shader(entry_point=)`.** Names an HLSL entry point, for one file
+  that holds VSMain and PSMain. It is an error for GLSL, whose entry point must
+  be main.
+- **`compile_shader(source=)` takes SPIR-V bytes.** `str` is compiled as text and
+  `bytes` is taken as ready SPIR-V: nothing is compiled, the extension of `path`
+  stops mattering, and the words get the same magic-number and stage checks a
+  `.spv` file gets. `ctx.compile_shader("v", stage, source=other.spirv)` is a
+  round trip with no file involved.
 - **Example `21_window_modes`.** Cycles every window mode, toggles wireframe and
   vsync, zooms with the wheel, and draws its bar in a second preserved pass with
   additive blending.
+
+### Fixed
+- **A pipeline stage names the entry point its module was compiled with.** It
+  always said `main`, which is right for GLSL and for HLSL compiled the old way.
+  With `entry_point=` the SPIR-V declares that name instead, and a stage asking
+  for `main` fails to create the pipeline. Compute stages get the same rule, so
+  an HLSL `CSMain` works too.
 
 ### Changed
 - **`MouseState.dx` and `.dy` are the delta for the last poll cycle**, not a
@@ -89,6 +126,15 @@ One break, and it is the mouse delta. See **Changed**.
 - **The window tests need a display**, so CI skips them, the same as the
   multi-window tests. The load-op and the pipeline state are headless and run
   everywhere.
+- **An HLSL entry point that matches no function is not an error.** glslang
+  synthesizes an empty one under the requested name, so the compile succeeds and
+  the shader draws nothing. Catching that needs SPIR-V reflection, which is tech
+  debt #3. The behaviour is pinned by a test so a future glslang that does
+  complain is noticed.
+- **A shader carries its `include_dirs` and `entry_point`.** A hot reload only
+  has the module, so a recompile that dropped them would resolve a different
+  include or pick a different function, and the failure would look like a broken
+  shader edit.
 
 ## [0.15.0] — 2026-07-26
 

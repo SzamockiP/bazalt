@@ -528,6 +528,7 @@ struct RenderingScope
     std::shared_ptr<CommandBuffer> cmd;
     std::shared_ptr<RenderTarget> target;
     std::optional<std::vector<std::array<float, 4>>> clear_color;
+    float clear_depth = 1.0f;
 };
 
 // Normalise a Python clear_color into one RGBA per attachment. Accepts both the
@@ -574,6 +575,38 @@ static std::optional<std::vector<std::array<float, 4>>> parse_clear_colors(const
         out.push_back(to_rgba(seq));
     }
     return out;
+}
+
+// source= is text or ready SPIR-V, and the Python type is what says which.
+// `bytes` has to be tested FIRST: pybind converts both str and bytes to
+// std::string, so an `optional<std::string>` parameter would silently compile a
+// SPIR-V blob as GLSL and report a syntax error on binary garbage.
+//
+// The length check is here rather than in the compiler because it is about the
+// Python object: a bytes object of the wrong length is not a truncated SPIR-V
+// binary, it is the wrong argument.
+static std::optional<ShaderSource> parse_shader_source(const py::object& obj)
+{
+    if (obj.is_none())
+    {
+        return std::nullopt;
+    }
+    if (py::isinstance<py::bytes>(obj))
+    {
+        const std::string blob = py::cast<std::string>(obj);
+        if (blob.size() % sizeof(std::uint32_t) != 0)
+        {
+            raise_error(err_shader(
+                std::format(
+                    "source= got {} bytes, which is not a whole number of SPIR-V words. SPIR-V is a stream of "
+                    "32-bit words, so its length is always a multiple of 4.",
+                    blob.size())));
+        }
+        std::vector<std::uint32_t> words(blob.size() / sizeof(std::uint32_t));
+        std::memcpy(words.data(), blob.data(), blob.size());
+        return ShaderSource{std::move(words)};
+    }
+    return ShaderSource{py::cast<std::string>(obj)};
 }
 
 // A GPU timer handle. cmd.timer() records the opening timestamp and returns
@@ -980,7 +1013,11 @@ PYBIND11_MODULE(_core, m)
             })
         .def("read", [](Image& self) -> py::array { return image_to_numpy(self); });
 
-    py::class_<Sampler, std::shared_ptr<Sampler>>(m, "Sampler");
+    // name is readable because it accumulates: the cache shares one sampler
+    // between identical descriptions, so what the object is called is the list
+    // of everyone who named it, and a caller cannot predict that from its own
+    // create_sampler call alone.
+    py::class_<Sampler, std::shared_ptr<Sampler>>(m, "Sampler").def_property_readonly("name", &Sampler::debug_name);
 
     py::class_<Pipeline, std::shared_ptr<Pipeline>>(m, "Pipeline");
 
@@ -1016,6 +1053,17 @@ PYBIND11_MODULE(_core, m)
             [](GraphicsPipelineBuilder& self, PolygonMode mode) -> GraphicsPipelineBuilder&
             { return self.polygon_mode(mode); },
             py::arg("mode"))
+        .def(
+            "line_width",
+            [](GraphicsPipelineBuilder& self, float width) -> GraphicsPipelineBuilder&
+            { return self.line_width(width); },
+            py::arg("width"))
+        .def(
+            "depth_bias",
+            [](GraphicsPipelineBuilder& self, float constant, float slope) -> GraphicsPipelineBuilder&
+            { return self.depth_bias(constant, slope); },
+            py::arg("constant"),
+            py::arg("slope") = 0.0f)
         .def(
             "blend",
             [](GraphicsPipelineBuilder& self, bool enable, BlendMode mode) -> GraphicsPipelineBuilder&
@@ -1193,16 +1241,20 @@ PYBIND11_MODULE(_core, m)
         // swapchain" made presentation a special case disguised as the default.
         .def(
             "begin_rendering",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target, const py::object& clear_color)
+            [](std::shared_ptr<CommandBuffer> self,
+               std::shared_ptr<RenderTarget> target,
+               const py::object& clear_color,
+               float clear_depth)
             {
                 require_same_context(self->owner(), target->owner(), "begin_rendering");
                 auto clears = parse_clear_colors(clear_color);
                 require_preservable(*target, !clears.has_value(), "begin_rendering");
-                self->begin_rendering(std::move(target), clears);
+                self->begin_rendering(std::move(target), clears, clear_depth);
                 return self;
             },
             py::arg("target"),
-            py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f))
+            py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f),
+            py::arg("clear_depth") = 1.0f)
         .def(
             "end_rendering",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target)
@@ -1216,15 +1268,19 @@ PYBIND11_MODULE(_core, m)
         // end_rendering unconditionally — the pair cannot be left open.
         .def(
             "rendering",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target, const py::object& clear_color)
+            [](std::shared_ptr<CommandBuffer> self,
+               std::shared_ptr<RenderTarget> target,
+               const py::object& clear_color,
+               float clear_depth)
             {
                 require_same_context(self->owner(), target->owner(), "rendering");
                 auto clears = parse_clear_colors(clear_color);
                 require_preservable(*target, !clears.has_value(), "rendering");
-                return RenderingScope{std::move(self), std::move(target), std::move(clears)};
+                return RenderingScope{std::move(self), std::move(target), std::move(clears), clear_depth};
             },
             py::arg("target"),
-            py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f))
+            py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f),
+            py::arg("clear_depth") = 1.0f)
         // GPU timer: records the opening timestamp and returns a Timer handle.
         // Stop it with t.stop() or a `with` block; read it back with t.ms.
         .def(
@@ -1409,7 +1465,7 @@ PYBIND11_MODULE(_core, m)
             "__enter__",
             [](RenderingScope& self)
             {
-                self.cmd->begin_rendering(self.target, self.clear_color);
+                self.cmd->begin_rendering(self.target, self.clear_color, self.clear_depth);
                 return self.cmd;
             })
         .def(
@@ -1707,14 +1763,19 @@ PYBIND11_MODULE(_core, m)
             { return std::make_shared<ComputePipelineBuilder>(self); })
         .def(
             "compile_shader",
-            [](Context& self, const std::string& path, ShaderStage stage, std::optional<std::string> source)
-                -> py::object
+            [](Context& self,
+               const std::string& path,
+               ShaderStage stage,
+               const py::object& source,
+               const std::vector<std::string>& include_dirs,
+               const std::string& entry_point) -> py::object
             {
                 // Only file-backed shaders are watchable: a source= virtual name may
                 // not exist on disk, and .spv is recompiled from its own path too.
-                const bool from_file = !source.has_value();
-                auto module =
-                    unwrap(ShaderCompiler::compile(self, path, stage, std::move(source)), self.logger().get());
+                const bool from_file = source.is_none();
+                auto module = unwrap(
+                    ShaderCompiler::compile(self, path, stage, parse_shader_source(source), include_dirs, entry_point),
+                    self.logger().get());
                 if (auto* hr = self.hot_reload(); hr && from_file && std::filesystem::exists(path))
                 {
                     hr->watch_shader(module);
@@ -1724,7 +1785,9 @@ PYBIND11_MODULE(_core, m)
             py::arg("path"),
             py::arg("stage"),
             py::kw_only(),
-            py::arg("source") = py::none())
+            py::arg("source") = py::none(),
+            py::arg("include_dirs") = py::tuple(),
+            py::arg("entry_point") = "")
         .def(
             "load_image",
             [](Context& self, const std::string& path, bool mipmaps, const std::string& name) -> py::object
@@ -2023,16 +2086,21 @@ PYBIND11_MODULE(_core, m)
                Filter filter,
                AddressMode address_mode,
                bool anisotropy,
-               std::optional<CompareOp> compare) -> py::object
+               std::optional<CompareOp> compare,
+               const std::string& name) -> py::object
             {
                 // Cached: identical descriptions return the identical object.
+                // Which is why name= accumulates rather than replacing — see
+                // Sampler::add_debug_name.
                 return py::cast(unwrap(
-                    self.get_sampler(SamplerDesc{filter, address_mode, anisotropy, compare}), self.logger().get()));
+                    self.get_sampler(SamplerDesc{filter, address_mode, anisotropy, compare}, name),
+                    self.logger().get()));
             },
             py::arg("filter") = Filter::LINEAR,
             py::arg("address_mode") = AddressMode::REPEAT,
             py::arg("anisotropy") = true,
-            py::arg("compare") = py::none())
+            py::arg("compare") = py::none(),
+            py::arg("name") = "")
         .def(
             "create_descriptor_pool",
             [](Context& self,

@@ -121,12 +121,18 @@ public:
     //
     // Colour and depth preserve together. Splitting them would be two knobs on
     // the verb for one question, and the multi-pass case wants both.
+    //
+    // clear_depth is the value, not a second preserve switch: 1.0 is the far
+    // plane and the default, 0.0 is what a reversed-depth buffer starts from
+    // (which is the only way depth_test(compare=GREATER) can ever pass). It is
+    // ignored when the pass preserves.
     CommandBuffer& begin_rendering(
         std::shared_ptr<RenderTarget> target,
-        const std::optional<std::vector<std::array<float, 4>>>& clear_colors)
+        const std::optional<std::vector<std::array<float, 4>>>& clear_colors,
+        float clear_depth = 1.0f)
     {
         commands_.push_back(
-            [clear_colors, target](VkCommandBuffer cmd, const FrameContext& frame)
+            [clear_colors, clear_depth, target](VkCommandBuffer cmd, const FrameContext& frame)
             {
                 RenderTarget* rt = target.get();
                 const bool preserve = !clear_colors.has_value();
@@ -318,7 +324,7 @@ public:
                     // upgrade path is deriving the store-op from whether a later
                     // pass in the same recording loads.
                     .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                    .clearValue = {.depthStencil = {1.0f, 0}}};
+                    .clearValue = {.depthStencil = {clear_depth, 0}}};
 
                 VkRenderingInfo renderingInfo{
                     .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,

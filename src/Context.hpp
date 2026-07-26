@@ -534,11 +534,21 @@ public:
     // Identical descriptions share one VkSampler; Texture used to create a
     // fresh sampler per texture. Cached handles live until ~Context — the
     // descriptor space is a handful of combinations, never worth evicting.
-    std::expected<std::shared_ptr<Sampler>, Error> get_sampler(const SamplerDesc& desc)
+    std::expected<std::shared_ptr<Sampler>, Error> get_sampler(const SamplerDesc& desc, const std::string& name = {})
     {
         const std::uint32_t key = sampler_cache_key(desc);
         if (auto it = sampler_cache_.find(key); it != sampler_cache_.end())
         {
+            // A cache hit with a new name renames the shared object to list both
+            // users. See Sampler::add_debug_name for why that beats dropping the
+            // name or splitting the cache entry.
+            if (it->second->add_debug_name(name))
+            {
+                set_debug_name(
+                    VK_OBJECT_TYPE_SAMPLER,
+                    reinterpret_cast<std::uint64_t>(it->second->get()),
+                    it->second->debug_name());
+            }
             return it->second;
         }
 
@@ -591,6 +601,10 @@ public:
         }
 
         auto sampler = std::make_shared<Sampler>(handle, desc);
+        if (sampler->add_debug_name(name))
+        {
+            set_debug_name(VK_OBJECT_TYPE_SAMPLER, reinterpret_cast<std::uint64_t>(handle), sampler->debug_name());
+        }
         sampler_cache_.emplace(key, sampler);
         return sampler;
     }

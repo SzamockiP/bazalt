@@ -532,6 +532,34 @@ public:
         return std::forward<Self>(self);
     }
 
+    // Width in pixels of a LINE polygon mode or a LINE_LIST topology. Anything
+    // other than 1.0 needs the WIDE_LINES feature — build() rejects it
+    // otherwise — because a driver is free to support exactly one width.
+    // A wireframe at 1.0 nearly disappears on a HiDPI display, which is what
+    // this is for.
+    template <typename Self>
+    Self&& line_width(this Self&& self, float width)
+    {
+        self.line_width_ = width;
+        return std::forward<Self>(self);
+    }
+
+    // Offset every depth value this pipeline writes. The fix for shadow acne:
+    // a shadow map compared against itself self-shadows at grazing angles, and
+    // pushing the depth away by a constant plus a slope-scaled term separates
+    // the surface from its own shadow.
+    //
+    // slope scales with the polygon's depth gradient, which is what makes one
+    // setting work at every angle. The bias clamp stays 0: a non-zero clamp is
+    // the depthBiasClamp feature, and nothing here needs it.
+    template <typename Self>
+    Self&& depth_bias(this Self&& self, float constant, float slope = 0.0f)
+    {
+        self.depth_bias_constant_ = constant;
+        self.depth_bias_slope_ = slope;
+        return std::forward<Self>(self);
+    }
+
     template <typename Self>
     Self&& topology(this Self&& self, Topology topology)
     {
@@ -623,6 +651,12 @@ public:
                 "polygon_mode requires the WIREFRAME feature; create the Context with "
                 "features=[bz.Feature.WIREFRAME] (or optional=[...])"));
         }
+        if (line_width_ != 1.0f && !context_.supports(Feature::WIDE_LINES))
+        {
+            return std::unexpected(err_shader(
+                "line_width other than 1.0 requires the WIDE_LINES feature; create the "
+                "Context with features=[bz.Feature.WIDE_LINES] (or optional=[...])"));
+        }
         // A fragment shader is optional only when there is nothing to shade:
         // a depth-only pass (shadow maps) rasterizes straight into the depth
         // attachment and is valid Vulkan without one.
@@ -674,6 +708,9 @@ public:
             .cull_mode = cull_mode_,
             .front_face = front_face_,
             .polygon_mode = polygon_mode_,
+            .line_width = line_width_,
+            .depth_bias_constant = depth_bias_constant_,
+            .depth_bias_slope = depth_bias_slope_,
             .blend_enable = blend_enable_,
             .blend_mode = blend_mode_,
             .topology = topology_,
@@ -752,6 +789,9 @@ private:
         CullMode cull_mode = CullMode::BACK;
         FrontFace front_face = FrontFace::COUNTER_CLOCKWISE;
         PolygonMode polygon_mode = PolygonMode::FILL;
+        float line_width = 1.0f;
+        float depth_bias_constant = 0.0f;
+        float depth_bias_slope = 0.0f;
         bool blend_enable = false;
         BlendMode blend_mode = BlendMode::ALPHA;
         Topology topology = Topology::TRIANGLE_LIST;
@@ -911,7 +951,7 @@ private:
              .flags = 0,
              .stage = VK_SHADER_STAGE_VERTEX_BIT,
              .module = s.vertex->get(),
-             .pName = "main",
+             .pName = entry_name_(*s.vertex),
              .pSpecializationInfo = nullptr});
         if (s.fragment)
         {
@@ -921,10 +961,22 @@ private:
                  .flags = 0,
                  .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
                  .module = s.fragment->get(),
-                 .pName = "main",
+                 .pName = entry_name_(*s.fragment),
                  .pSpecializationInfo = nullptr});
         }
         return stages;
+    }
+
+    // The SPIR-V keeps the entry point under the name it was compiled with, so a
+    // module built with entry_point="VSMain" declares VSMain and a stage that
+    // says "main" fails pipeline creation. The name lives on the module for this
+    // reason as much as for the hot reload.
+    //
+    // The pointer stays valid because GraphicsState holds the module by
+    // shared_ptr and create_pipeline_ consumes the stages before returning.
+    static const char* entry_name_(const ShaderModule& module)
+    {
+        return module.entry_point().empty() ? "main" : module.entry_point().c_str();
     }
 
     // Translates the VertexFormat list into a binding + attribute descriptions
@@ -985,11 +1037,13 @@ private:
             .cullMode = vkCullMode,
             .frontFace = s.front_face == FrontFace::CLOCKWISE ? VK_FRONT_FACE_CLOCKWISE
                                                               : VK_FRONT_FACE_COUNTER_CLOCKWISE,
-            .depthBiasEnable = VK_FALSE,
-            .depthBiasConstantFactor = 0.0f,
+            // Enabled by having a bias, so depth_bias(0) builds the same pipeline
+            // as no call at all instead of a no-op the driver still honours.
+            .depthBiasEnable = (s.depth_bias_constant != 0.0f || s.depth_bias_slope != 0.0f) ? VK_TRUE : VK_FALSE,
+            .depthBiasConstantFactor = s.depth_bias_constant,
             .depthBiasClamp = 0.0f,
-            .depthBiasSlopeFactor = 0.0f,
-            .lineWidth = 1.0f};
+            .depthBiasSlopeFactor = s.depth_bias_slope,
+            .lineWidth = s.line_width};
     }
 
     static VkPipelineColorBlendAttachmentState color_blend_attachment_(const GraphicsState& s)
@@ -1069,6 +1123,9 @@ private:
     CullMode cull_mode_ = CullMode::BACK;
     FrontFace front_face_ = FrontFace::COUNTER_CLOCKWISE;
     PolygonMode polygon_mode_ = PolygonMode::FILL;
+    float line_width_ = 1.0f;
+    float depth_bias_constant_ = 0.0f;
+    float depth_bias_slope_ = 0.0f;
     bool blend_enable_ = false;
     BlendMode blend_mode_ = BlendMode::ALPHA;
     Topology topology_ = Topology::TRIANGLE_LIST;
@@ -1221,7 +1278,9 @@ private:
                  .flags = 0,
                  .stage = VK_SHADER_STAGE_COMPUTE_BIT,
                  .module = shader->get(),
-                 .pName = "main",
+                 // Same rule as the graphics stages: the name the module was
+                 // compiled with, so an HLSL CSMain works here too.
+                 .pName = shader->entry_point().empty() ? "main" : shader->entry_point().c_str(),
                  .pSpecializationInfo = nullptr},
             .layout = pipelineLayout,
             .basePipelineHandle = VK_NULL_HANDLE,

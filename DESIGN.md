@@ -222,6 +222,24 @@ entry. The release is a label, not the organizing axis.
   acquired swapchain image, whose contents are undefined at frame start. Same shape as
   the existing replay rule below.
 
+- **`clear_depth` is the clear VALUE, not a second preserve switch** (0.16). Preserving is
+  already one question answered by `clear_color=None` for colour and depth together, so
+  `clear_depth` only says what a clearing pass clears to. It exists because the fixed 1.0 is
+  what made `depth_test(compare=GREATER)` unusable: nothing is ever greater than the far
+  plane, so reversed depth needs `clear_depth=0.0`. A knob that only makes sense together
+  with another knob added in the same release is a sign the first one was incomplete.
+
+- **A sampler debug name accumulates on the shared object** (0.16). The cache keys on the
+  description, so `create_sampler(name="shadow")` and `create_sampler(name="terrain")` with
+  the same filtering are one `VkSampler`, and the object ends up called "shadow + terrain".
+
+  Both alternatives are worse, which is why this sat in the deferred list for six releases.
+  Naming only the first caller drops a name silently, and it does so exactly when somebody
+  is reading validation output. Putting the name in the cache key gives a named sampler its
+  own handle, which means **turning debug names on changes what the program allocates** — a
+  debug label must never do that. Listing every user is true, and `sampler.name` is readable
+  precisely because no single caller can predict it.
+
 - **A new pipeline knob is a kwarg on the verb that already owns the question** (0.16).
   `blend(True, mode=)`, `depth_test(enable, write=, compare=)` and `polygon_mode(mode)`.
   `depth_test` reuses the `CompareOp` the compare samplers introduced in 0.11 rather than
@@ -254,6 +272,39 @@ entry. The release is a label, not the organizing axis.
 
 - **The handle is the identity** (0.9). No string keys on an API whose primitive is an index
   or a handle: `cmd.timer()` returns a `Timer` and you read `t.ms`.
+
+### Shader compilation
+
+- **`source=` is one parameter with two types** (0.16). A `str` is text to compile, `bytes`
+  is ready SPIR-V. From the caller's side both answer the same question — "here is the
+  content instead of the file" — and two mutually exclusive parameters in one signature is
+  the shape the 0.15 cross-Context transfer already rejected. Internally it is a
+  `std::variant`, and the file-backed `.spv` path and the bytes path share one validator, so
+  words from memory get exactly the diagnostics a file gets.
+
+  **The `bytes` test has to come first in the binding.** pybind converts both `str` and
+  `bytes` to `std::string`, so an `optional<std::string>` parameter would take a SPIR-V blob
+  and report a GLSL syntax error on binary garbage. The length check (a multiple of 4) lives
+  in the binding rather than the compiler, because a `bytes` of the wrong length is the wrong
+  argument, not a truncated binary.
+
+- **`include_dirs` is a fallback, never a shadow** (0.16). The directory of the including
+  file is still tried first, and the search path only answers names that are not there. The
+  other order is what a C compiler does, and here it would mean that adding a directory can
+  change which file an existing shader includes.
+
+- **`entry_point` is HLSL-only, and says so** (0.16). One file holding VSMain and PSMain is
+  ordinary HLSL; a GLSL entry point must be main. So a name on a GLSL compile is rejected
+  with a sentence instead of being passed to shaderc for it to fail obscurely. This is the
+  first compile knob that exists for one language, which was the reservation about it — the
+  answer is that the knob names something only that language has.
+
+- **A shader carries the settings a recompile cannot re-derive** (0.16). `include_dirs` and
+  `entry_point` live on the `ShaderModule` next to `path` and `stage`, because the hot-reload
+  watcher holds only the module. A recompile that dropped them would resolve a different
+  include or compile a different function, and the failure would read as a broken shader
+  edit. General form: anything a compile depends on that is not in the file has to be stored
+  with the result.
 
 ### Errors and the pybind boundary
 
@@ -308,6 +359,14 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
   "fullscreens on the other screen". A `monitor=` argument and video-mode enumeration
   (resolution and refresh rate) are deferred until somebody asks. Upgrade path: both are
   additive.
+- **An HLSL entry point that matches no function compiles to an empty shader** (0.16).
+  glslang does not treat it as an error: it synthesizes an entry point under the requested
+  name, so the compile succeeds and the shader draws nothing. Detecting it needs SPIR-V
+  reflection (debt #3). A test pins the behaviour by SPIR-V size, so a future glslang that
+  does complain is noticed and the ceiling can become a real diagnostic.
+- **`line_width` other than 1.0 needs `WIDE_LINES`** (0.16), because a driver may support
+  exactly one width. Same shape as `polygon_mode` needing `WIREFRAME`: the rasterizer looks
+  like free fixed-function state and is not.
 - **A preserved second pass re-transitions the attachment** (0.16). Pass 1 retires the
   image to `final_layout()` and pass 2 brings it back, so N passes cost N round trips
   instead of staying in `COLOR_ATTACHMENT_OPTIMAL`. It reuses the existing RenderTarget
@@ -325,7 +384,6 @@ Additive work with no assigned release. Pull each one in when it really hurts.
 
 - Async headless submit.
 - An async `StaticBuffer`.
-- Sampler debug names.
 - A narrower `recreate_swapchain` (see the accepted ceilings above).
 - A per-level mip copy on a cross-Context transfer.
 
@@ -344,14 +402,8 @@ big feature. Each one needs a decision.
   (`cmd.barrier`, since 0.10). Auto-tracking needs SPIR-V reflection, so this arrives with
   debt #3.
 
-**Shader compilation:**
-
-- **`include_dirs` for `#include`** — a search path as a second resolution rule, a kwarg,
-  when somebody asks.
-- **HLSL `entry_point=`** — files with several entry points (VSMain, PSMain). It would be
-  the first compilation knob that exists for one language only.
-- **In-memory SPIR-V bytes** — `source=` takes only text today. Load ready bytes when a use
-  case appears.
+**Shader compilation:** all three DONE in 0.16 — `include_dirs=`, HLSL `entry_point=`, and
+SPIR-V bytes through `source=`.
 
 **Performance:**
 
@@ -537,6 +589,20 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   clears. Any new load-op has to be read together with the barrier above it, and with the
   store-op of whatever ran before.
 
+- **`VkPipelineShaderStageCreateInfo::pName` must match the name the SPIR-V was compiled
+  with.** It was `"main"` everywhere, which is right until `entry_point=` exists: the module
+  then declares `VSMain` and pipeline creation fails with `VK_ERROR_UNKNOWN` and no
+  validation message worth reading. This is the second reason the module stores its entry
+  point, next to the hot reload. Whenever a compile gains a knob, check what downstream still
+  assumes the old default.
+
+- **A floating-point depth buffer scales `depthBiasConstantFactor` by roughly 2^-24.** The
+  spec scales it by 2^(exponent of the largest depth in the primitive − mantissa bits), so at
+  z = 0.9 the factor is about 6e-8, and the 0.001-ish constants every D24_UNORM tutorial
+  quotes move the depth by literally nothing. A visible offset on D32F needs five or six
+  digits. Anything the spec defines "in units of the depth format" has to be re-derived per
+  format, not copied.
+
 - **`VK_POLYGON_MODE_LINE` is not core-mandatory.** It needs `fillModeNonSolid`, which every
   desktop driver has and some mobile ones do not, so the wireframe view is a `Feature`
   (`WIREFRAME`, already in the table since 0.5) and not a free rasterizer flag. This was
@@ -573,6 +639,12 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   compile time.
 
 ### numpy, Windows and shaderc
+
+- **pybind converts `str` AND `bytes` to `std::string`.** A parameter typed
+  `std::optional<std::string>` accepts both and cannot tell them apart, so a `bytes` argument
+  meant as SPIR-V would be compiled as GLSL. Take `py::object` and test
+  `py::isinstance<py::bytes>` FIRST whenever the Python type is the thing that carries the
+  meaning.
 
 - **`memcpy` ignores strides.** `arr.T` and `arr[::2]` upload garbage. Use
   `py::array::c_style | forcecast`, or check contiguity explicitly and raise with the hint
