@@ -1,46 +1,45 @@
 # Bazalt
 
-**Bazalt** is a modern Python library for rapid prototyping and building graphical applications using the Vulkan API. It provides a clean, intuitive interface over a high-performance C++ core, allowing developers to create rendering applications quickly without the typical boilerplate.
+**Bazalt** is a Python library for the Vulkan API. Use it to prototype GPU and shader
+work, and to build graphical applications. A C++23 core does the Vulkan work. The Python
+layer keeps the setup code short.
 
 ## Installation
 
-You can install `bazalt` easily via `pip`:
+Install `bazalt` with `pip`:
 
 ```bash
 pip install bazalt
 ```
 
-Prebuilt wheels are provided for Windows and Linux. Building from source
-requires a C++23 compiler — GCC 14+ or MSVC 19.36+ (Visual Studio 17.6) —
-and the Vulkan SDK.
+Bazalt supplies prebuilt wheels for Windows and Linux. To build from source, you need a
+C++23 compiler (GCC 14+ or MSVC 19.36+, Visual Studio 17.6) and the Vulkan SDK.
 
 ## Key Features
 
-- **Modern Graphics API:** Built on top of Vulkan for optimal hardware utilization.
-- **Easy to Use Interface:** Write clear and concise code with an intuitive API.
-- **Automatic Shader Compilation:** Compile GLSL shaders (Vertex/Fragment/Compute) directly from your code.
-- **Compute Pipelines:** `ctx.compute_pipeline()` + `cmd.dispatch()` — run GPU compute with results straight back into NumPy, no images required.
-- **Storage Images:** compute shaders write images too — `.storage_image(binding)` + `set_storage_image()` bind a read/write image for `imageStore`/`imageLoad` (post-processing, procedural textures). The barriers and layout transitions between the dispatch and a later sample are recorded for you.
-- **Cubemaps & Texture Arrays:** pass a list of layers (`ctx.create_image([...], cube=True)` or `ctx.load_image([...6 paths...], cube=True)`) for a cubemap, or without `cube=` for a texture array — one mechanism, sampled as `samplerCube` / `sampler2DArray`. Empty layered images can be filled in compute (procedural skyboxes). See `examples/14_skybox`.
-- **Mipmaps:** `load_image()` mips files by default (`mipmaps=False` to opt out); `create_image(array, mipmaps=True)` mips a numpy texture; `create_image(w, h, mip_levels=N)` allocates an empty chain and `cmd.generate_mipmaps(image)` fills it from mip 0 (for compute- or render-generated textures) — across every array layer / cube face.
-- **Automatic Barriers:** Hazards between resources (dispatch → dispatch, compute-written buffer → vertex fetch, compute-written image → sample) get their barriers computed at record time. `Context(auto_barriers=False)` hands you full manual control via `cmd.barrier()`.
-- **Pipeline & Buffer Management:** Easy builder pattern for graphics pipelines and unified buffer creation.
-- **Command Buffers:** Explicit, yet simple command recording — calls chain (`cmd.bind_pipeline(p).draw(3)`), and `with cmd.rendering(target):` closes the pass for you.
-- **Asynchronous Texture Streaming:** `ctx.load_image()` returns immediately while the decode and GPU copy run in the background; anything that samples the image waits for it automatically. `ctx.upload_progress` gives you a loading bar for free.
-- **Hot Reload:** `Context(hot_reload=True)` watches the shaders (and their `#include`s) and images you loaded and applies edits live — shaders recompile and rebuild their pipelines in place, images re-upload into the same handle. A typo or a bad file is logged and the last good version keeps rendering, so a mistake never takes the app down. See `examples/12_hot_reload`.
-- **Frame Timing & Debug Names:** `Context(gpu_timing=True)` makes `renderer.gpu_time_ms` report the GPU time of a recent frame (opt-in — off by default it costs nothing); `t = cmd.timer()` … `t.stop()` … `t.ms` times any slice of a recording (handle-based, no `with` required) and reads back headless; `name=` / `.name()` label buffers, images and pipelines so validation messages name the culprit.
-- **Headless Rendering:** Draw into an offscreen `RenderTarget` and read the pixels back as a NumPy array — no window, no display required.
-- **Render-to-Texture, MRT & Shadow Maps:** Target attachments are ordinary `Image` objects in any supported `Format` — sample `target.color[0]` or a depth-only target's `target.depth` like any texture.
-- **Multi-Window:** one Context drives any number of windows. `ctx.begin_frame()` opens the frame; each window does `renderer.acquire()` / `renderer.present(cmd)` and owns its own swapchain, so resizing or closing one leaves the others rendering. See `examples/19_multi_window`.
-- **Pick Your GPU:** `bz.list_devices()` lists every card (name, type, VRAM, API version, per-feature support) before a Context exists; `Context(device=...)` runs on the one you chose. Omit it and bazalt picks for you, as before.
-- **Multi-Context / Multi-GPU:** any number of Contexts can be alive at once, on the same card or on different ones — bake in compute on one GPU, render on the other. `other_ctx.create_image(image)` moves the pixels across, carrying format, layers and cube-ness with them. Resources otherwise stay with their Context: hand one to the wrong command buffer and you get a `ResourceError` naming the mistake, not a driver crash. See `examples/20_multi_context`.
-- **Runs Widely:** Vulkan 1.2 baseline with 1.3 used where available, so bazalt runs on older integrated GPUs too. Capabilities are requested by name, never by version or extension.
-- **Decoupled Architecture:** Clean separation of concerns between Windowing (GLFW), Vulkan Context (GPU initialization), and render targets — a window is one target among others.
+- **Vulkan Core:** Bazalt calls Vulkan for all GPU work. You keep explicit control of the hardware.
+- **Shader Compilation:** `ctx.compile_shader()` compiles GLSL vertex, fragment and compute shaders from your code.
+- **Compute Pipelines:** `ctx.compute_pipeline()` and `cmd.dispatch()` run GPU compute. The results go back into NumPy. You need no images.
+- **Storage Images:** Compute shaders also write images. `.storage_image(binding)` and `set_storage_image()` bind a read/write image for `imageStore` and `imageLoad`. Use this for post-processing and procedural textures. Bazalt records the barriers and the layout transitions between the dispatch and a later sample.
+- **Cubemaps and Texture Arrays:** Pass a list of layers to `ctx.create_image([...], cube=True)` or to `ctx.load_image([...6 paths...], cube=True)` for a cubemap. Omit `cube=` for a texture array. One mechanism gives you `samplerCube` and `sampler2DArray`. Compute can fill empty layered images, for example a procedural skybox. See `examples/14_skybox`.
+- **Mipmaps:** `load_image()` makes mips for files by default. Pass `mipmaps=False` to stop this. `create_image(array, mipmaps=True)` makes mips for a NumPy texture. `create_image(w, h, mip_levels=N)` allocates an empty chain, and `cmd.generate_mipmaps(image)` fills it from mip 0. This works across every array layer and every cube face.
+- **Automatic Barriers:** Bazalt computes the barriers for hazards between resources at record time. Examples: dispatch to dispatch, a compute-written buffer to a vertex fetch, a compute-written image to a sample. `Context(auto_barriers=False)` gives you manual control through `cmd.barrier()`.
+- **Pipeline and Buffer Management:** A builder makes graphics pipelines. One function makes every buffer type.
+- **Command Buffers:** Command recording is explicit. Calls chain, as in `cmd.bind_pipeline(p).draw(3)`. The block `with cmd.rendering(target):` ends the pass for you.
+- **Asynchronous Texture Streaming:** `ctx.load_image()` returns immediately. The decode and the GPU copy run in the background. Anything that samples the image waits for it. `ctx.upload_progress` gives you the data for a loading bar.
+- **Hot Reload:** `Context(hot_reload=True)` watches the shaders you loaded, their `#include` files, and your images. Bazalt applies edits live: shaders recompile and rebuild their pipelines in place, and images upload again into the same handle. Bazalt logs a typo or a bad file and keeps the last good version on screen. A mistake does not stop the application. See `examples/12_hot_reload`.
+- **Frame Timing and Debug Names:** `Context(gpu_timing=True)` makes `renderer.gpu_time_ms` report the GPU time of a recent frame. This is opt-in and costs nothing when off. Use `t = cmd.timer()` and `t.stop()` to time a slice of a recording, then read `t.ms`. A timer is a handle, so you need no `with` block, and it reads back headless. The `name=` argument and the `.name()` method label buffers, images and pipelines, so validation messages name the object.
+- **Headless Rendering:** Draw into an offscreen `RenderTarget` and read the pixels back as a NumPy array. You need no window and no display.
+- **Render-to-Texture, MRT and Shadow Maps:** Target attachments are ordinary `Image` objects in any supported `Format`. Sample `target.color[0]`, or `target.depth` on a depth-only target, like any other texture.
+- **Multi-Window:** One Context drives any number of windows. `ctx.begin_frame()` opens the frame. Each window calls `renderer.acquire()` and `renderer.present(cmd)`, and owns its own swapchain. If you resize or close one window, the other windows continue to render. See `examples/19_multi_window`.
+- **GPU Selection:** `bz.list_devices()` lists every card with its name, type, VRAM, API version and per-feature support, before a Context exists. `Context(device=...)` runs on the card you chose. Omit the argument and bazalt chooses for you.
+- **Multi-Context and Multi-GPU:** Any number of Contexts can be alive at the same time, on one card or on different cards. You can bake with compute on one GPU and render on the other. `other_ctx.create_image(image)` moves the pixels across with their format, their layers and their cube property. Every other resource stays with its Context. If you give a resource to the wrong command buffer, you get a `ResourceError` that names the mistake, not a driver crash. See `examples/20_multi_context`.
+- **Wide Hardware Support:** Bazalt needs Vulkan 1.2 and uses 1.3 where the driver has it, so it also runs on older integrated GPUs. You request capabilities by name, never by version or by extension.
+- **Separated Layers:** Windowing (GLFW), the Vulkan Context (GPU initialization) and render targets stay separate. A window is one render target among others.
 
 ## Quick Start: Rendering Without a Window
 
-Everything below works with no display attached, which makes it usable from CI
-and tests:
+The code below runs with no display attached. You can use it from CI and from tests:
 
 ```python
 import bazalt as bz
@@ -73,8 +72,8 @@ pixels = target.read_pixels()   # numpy (600, 800, 4) uint8
 
 ## Quick Start: GPU Compute
 
-Compute needs no window and no images — dispatch, then read the storage
-buffer back as a NumPy array:
+Compute needs no window and no images. Dispatch, then read the storage buffer back as a
+NumPy array:
 
 ```python
 import numpy as np
@@ -103,14 +102,14 @@ ctx.submit(cmd)
 assert np.allclose(sbuf.read(np.float32), data * 2)
 ```
 
-Compute mixes freely with rendering in one command buffer — a dispatch that
-writes vertices and a draw that consumes them need no ceremony; the barrier
-between them is recorded automatically (see `examples/11_particles`).
+You can mix compute and rendering in one command buffer. A dispatch writes the vertices
+and a draw reads them, with no extra code. Bazalt records the barrier between them. See
+`examples/11_particles`.
 
 ## Quick Start: Hot Reload
 
-Add one keyword and bazalt watches the files it loaded — shaders (and their
-`#include`s) and images — recompiling and re-uploading on save:
+Add one keyword argument. Bazalt then watches the files it loaded: the shaders, their
+`#include` files, and the images. On each save, bazalt recompiles and uploads again:
 
 ```python
 ctx = bz.Context(logger, hot_reload=True)
@@ -127,14 +126,16 @@ while window.is_open():
         renderer.present(cmd)          # renderer.gpu_time_ms (with gpu_timing=True) gives GPU frame timing
 ```
 
-Editing `shader.frag` rebuilds the pipeline in place; re-saving `wall.png` (same
-size and format) re-uploads into the same handle, so descriptor sets need no
-rewrite. A shader typo logs a `ShaderError` and the last good pipeline keeps
-rendering — a mistake never crashes the app. Full demo: `examples/12_hot_reload`.
+When you edit `shader.frag`, bazalt rebuilds the pipeline in place. When you save
+`wall.png` again with the same size and the same format, bazalt uploads it into the same
+handle, so the descriptor sets stay correct. A shader typo logs a `ShaderError`, and the
+last good pipeline continues to render. A mistake does not stop the application. For the
+full demo, see `examples/12_hot_reload`.
 
 ## Quick Start: Drawing a Triangle
 
-Here is a minimal example demonstrating how to initialize the window, Vulkan Context, and SwapchainRenderer, compile shaders, create a pipeline, and draw a colorful triangle.
+This example starts the window, the Vulkan Context and the SwapchainRenderer. It then
+compiles the shaders, creates a pipeline and draws a triangle with three colors.
 
 ```python
 import bazalt as bz
