@@ -118,10 +118,12 @@ One break, and it is `draw_indexed_instanced`. See **Changed**.
 - **A `DEPTH_STENCIL` attachment cannot be sampled.** Its view carries both
   aspects and Vulkan forbids sampling through such a view, so bazalt does not
   ask for `SAMPLED` usage on it. A sampleable depth buffer stays `D32F`.
-- **Tech debt #4 is closed.** LunarG packages validation layer 1.4.350 for
-  noble, which does report shader-access sync hazards, so the negative test that
-  proves manual barrier mode is really manual now runs in CI. The workflow fails
-  if the installed layer is older, rather than skipping the test in silence.
+- **Tech debt #4 stays open, but it now closes itself.** The sync-validation
+  negative test needs validation layer 1.4.350; LunarG's newest package for
+  Ubuntu noble is still 1.4.313. CI used to declare the skip with a hard-coded
+  environment variable, and now computes it from the installed package version.
+  When a new enough layer is packaged, the test starts running with no change
+  here — and the job says which version it found either way.
 
 ## [0.16.0] — 2026-07-27
 

@@ -418,11 +418,18 @@ permanent ceiling.
    what a claim with no test behind it does. What reflection still buys is the automatic
    barrier, optional binding declarators, and a real diagnostic for the empty-HLSL-entry-point
    ceiling. Target: before 1.0.
-4. ✅ **The sync-validation test was skipped in CI** — PAID in 0.17. LunarG packages 1.4.350
-   for noble, which does report shader-access hazards, so the skip and its environment knob
-   are gone. The workflow asserts the installed layer version instead: an older package fails
-   the job with the reason, rather than silently disabling the one test that proves manual
-   barrier mode is really manual.
+4. **The sync-validation test is skipped in CI** — the LunarG layer for noble is still
+   1.4.313 and does not report shader hazards. Version 1.4.350 does, but SDK 1.4.350 being
+   *released* is not the same thing as a package for noble existing, which is what 0.17 got
+   wrong: the workflow was changed to assert the version and the job failed on the assert.
+   It now COMPUTES `BAZALT_SYNCVAL_UNSUPPORTED` from `dpkg-query` instead, so the test starts
+   running by itself the day the package appears and nobody has to notice. Target: 1.0, and
+   it depends on the environment.
+
+   The lesson generalizes past this entry: **a CI gate on someone else's release schedule
+   should compute a knob, not assert a version.** An assert turns their timetable into your
+   red build, and the thing being gated (one skipped test) is strictly less bad than a job
+   that refuses to run at all.
 
 ### Ceilings accepted on purpose
 
