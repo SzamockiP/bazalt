@@ -48,6 +48,10 @@ def test_removed_names_are_gone_from_the_stub():
     # 0.14: glfwPollEvents is process-wide, so it stopped pretending to be a
     # method on one window.
     assert "def poll_events(self)" not in text, "Window.poll_events became the free bz.poll_events()"
+    # 0.17: an instance count is an argument of a draw, not a second verb.
+    # "def " on purpose: the migration note in draw_indexed's docstring names
+    # the old method, and that mention is the point of it.
+    assert "def draw_indexed_instanced" not in text, "draw_indexed_instanced became draw_indexed(instances=)"
 
 
 def test_renamed_and_new_api_is_declared():
@@ -76,7 +80,16 @@ def test_renamed_and_new_api_is_declared():
                      "def set_present_mode", "class BlendMode(", "PREMULTIPLIED",
                      "class PolygonMode(", "def polygon_mode",
                      "clear_depth", "def line_width", "def depth_bias",
-                     "include_dirs", "entry_point"):
+                     "include_dirs", "entry_point",
+                     # 0.17
+                     "def instance_format", "UBYTE4_NORM", "TRIANGLE_STRIP",
+                     "instances: int = 1", "binding: int = 0",
+                     "class StencilOp(", "def stencil_test", "DEPTH_STENCIL",
+                     "clear_stencil", "def color_mask", "def depth_clamp",
+                     "def alpha_to_coverage", "def constant", "def copy_image",
+                     "def clear_image", "def wait_idle", "R32_UINT",
+                     "class BorderColor(", "CLAMP_TO_BORDER", "mip_lod_bias",
+                     "stencil: bool = False", "INDEPENDENT_BLEND"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 

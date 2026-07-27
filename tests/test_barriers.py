@@ -10,8 +10,6 @@ synchronization validation), which is why the manual-mode negative test spins
 up a second Context with validation="sync" of its own.
 """
 
-import os
-
 import numpy as np
 import pytest
 
@@ -267,16 +265,14 @@ def run_sync_case(mode):
     return hazards
 
 
-@pytest.mark.skipif(
-    os.environ.get("BAZALT_SYNCVAL_UNSUPPORTED") == "1",
-    reason="this environment's validation layer cannot report shader-access "
-           "sync hazards (verified: 1.4.313, the newest packaged for Ubuntu "
-           "noble, stays silent even with the settings file forcing "
-           "validate_sync + syncval_shader_accesses_heuristic; 1.4.350 "
-           "reports them — the messenger itself was proven alive)")
 def test_missing_barrier_in_manual_mode_trips_sync_validation(ctx):
     """If this test fails, manual mode is not really manual (or sync validation
-    is not really on) — either way the mode would be a lie."""
+    is not really on) — either way the mode would be a lie.
+
+    This used to skip on CI: LunarG's newest layer for noble was 1.4.313, which
+    reports no shader-access hazard at all even with the settings file forcing
+    validate_sync + syncval_shader_accesses_heuristic. 1.4.350 reports them, and
+    the workflow now refuses to run against anything older (tech debt #4)."""
     hazards = run_sync_case("nobarrier")
     assert hazards
 

@@ -122,7 +122,12 @@ jobs:
           sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-noble.list https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
           sudo apt-get update
           sudo apt-get install -y libvulkan1 mesa-vulkan-drivers vulkan-validationlayers vulkan-tools
+          # Printed, and checked: the sync-validation test below needs 1.4.350
+          # or newer to report shader-access hazards at all. Failing here names
+          # the reason, instead of leaving one test quietly red.
           dpkg -s vulkan-validationlayers | grep -E "^Version"
+          VERSION=$(dpkg-query -W -f='${Version}' vulkan-validationlayers)
+          dpkg --compare-versions "$VERSION" ge "1.4.350"             || { echo "validation layer $VERSION is older than 1.4.350: shader-access sync hazards are not reported (tech debt #4)"; exit 1; }
 
       # Asked of the package, not hardcoded: the manifest's location has
       # already moved between Ubuntu releases.
@@ -144,12 +149,10 @@ jobs:
       # has no _core and would shadow the installed wheel on sys.path.
       # VK_ICD_FILENAMES/VK_DRIVER_FILES come from the locate step's GITHUB_ENV.
       #
-      # BAZALT_SYNCVAL_UNSUPPORTED: this runner's validation layer (1.4.313,
-      # the newest LunarG packages for noble) does not report shader-access
-      # sync hazards even when forced via the layer-settings file, so the one
-      # negative test that needs them skips here. The debug messenger itself
-      # was proven alive (a deliberate host-side error is delivered), so the
-      # suite's validation-as-assert is NOT vacuous.
+      # The sync-validation skip is gone (tech debt #4, closed in 0.17): LunarG
+      # now packages 1.4.350 for noble, which does report shader-access hazards,
+      # and the install step above refuses anything older. The negative test
+      # that proves manual mode is really manual therefore runs in CI.
       #
       # BAZALT_FORCE_VULKAN_1_2 makes Context negotiate 1.2 even where 1.3 is
       # available — the whole negotiation, not just the aliasing, since a device
@@ -159,7 +162,6 @@ jobs:
       - name: Run test suite
         working-directory: ${{ runner.temp }}
         env:
-          BAZALT_SYNCVAL_UNSUPPORTED: "1"
           BAZALT_FORCE_VULKAN_1_2: ${{ matrix.api == '1.2' && '1' || '0' }}
         run: python -m pytest ${{ github.workspace }}/tests -q
 

@@ -153,9 +153,15 @@ public:
     // depth ends sampleable, which is the whole of what makes `shadow.depth` a
     // texture with zero extra API. end_rendering also derives its store-op from
     // this: a depth that will be consumed must be stored.
+    //
+    // DEPTH_ATTACHMENT_OPTIMAL covers the depth aspect alone, and Vulkan
+    // forbids it outright for an image that also carries stencil — so the
+    // default reads the format rather than naming one layout. A window with
+    // stencil=True lands here, and it is the reason this is not a constant.
     virtual VkImageLayout depth_final_layout() const
     {
-        return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        return has_stencil(depth_format()) ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                                           : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     }
 
     // Called by CommandBuffer when the end-of-rendering barrier is recorded into
@@ -271,8 +277,11 @@ public:
         }
         if (depth && !format_info(*depth).depth)
         {
-            return std::unexpected(
-                err_resource(std::format("{} is not a depth format; use bz.Format.D32F", format_name(*depth))));
+            return std::unexpected(err_resource(
+                std::format(
+                    "{} is not a depth format; use bz.Format.D32F, or bz.Format.DEPTH_STENCIL "
+                    "when the pass needs a stencil buffer",
+                    format_name(*depth))));
         }
         auto vk_samples = validate_sample_count(samples, context);
         if (!vk_samples)
@@ -370,7 +379,7 @@ public:
     }
     VkFormat color_format(std::uint32_t i) const override
     {
-        return format_info(colors_[i]->format()).vk;
+        return colors_[i]->vk_format();
     }
     VkImage depth_image() const override
     {
@@ -390,7 +399,7 @@ public:
     }
     VkFormat depth_format() const override
     {
-        return depth_ ? format_info(depth_->format()).vk : VK_FORMAT_UNDEFINED;
+        return depth_ ? depth_->vk_format() : VK_FORMAT_UNDEFINED;
     }
     VkExtent2D extent() const override
     {
@@ -424,8 +433,16 @@ public:
     {
         return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
+    // A depth-only attachment is left sampleable, which is the whole of what
+    // makes `shadow.depth` a texture. A combined depth/stencil one is not: its
+    // view carries two aspects and no sampler can read it, so it stays in the
+    // attachment layout and a second pass loads it with no round trip.
     VkImageLayout depth_final_layout() const override
     {
+        if (depth_ && has_stencil(depth_->vk_format()))
+        {
+            return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        }
         return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
 
@@ -519,7 +536,7 @@ public:
         {
             return VK_NULL_HANDLE;
         }
-        return view_(image, VK_IMAGE_ASPECT_DEPTH_BIT, layer, 1, mip);
+        return view_(image, image->aspect(), layer, 1, mip);
     }
     VkImageView depth_resolve_subresource_view(std::uint32_t layer, std::uint32_t mip)
     {
@@ -527,7 +544,7 @@ public:
         {
             return VK_NULL_HANDLE;
         }
-        return view_(depth_, VK_IMAGE_ASPECT_DEPTH_BIT, layer, 1, mip);
+        return view_(depth_, depth_->aspect(), layer, 1, mip);
     }
 
     // Multiview attachment views: a 2D_ARRAY view over ALL layers at mip 0, what a
@@ -554,7 +571,7 @@ public:
         {
             return VK_NULL_HANDLE;
         }
-        return view_(image, VK_IMAGE_ASPECT_DEPTH_BIT, 0, layers_, 0);
+        return view_(image, image->aspect(), 0, layers_, 0);
     }
     VkImageView depth_resolve_array_view()
     {
@@ -562,7 +579,7 @@ public:
         {
             return VK_NULL_HANDLE;
         }
-        return view_(depth_, VK_IMAGE_ASPECT_DEPTH_BIT, 0, layers_, 0);
+        return view_(depth_, depth_->aspect(), 0, layers_, 0);
     }
     std::uint32_t array_layers() const
     {
@@ -615,7 +632,7 @@ private:
             .flags = 0,
             .image = image->vk_image(),
             .viewType = layer_count > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
-            .format = format_info(image->format()).vk,
+            .format = image->vk_format(),
             .components = {},
             .subresourceRange = {aspect, mip, 1, base_layer, layer_count}};
         VkImageView view = VK_NULL_HANDLE;

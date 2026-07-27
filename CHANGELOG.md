@@ -5,6 +5,124 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.17.0] — 2026-07-27
+
+"What the pipeline still hard-codes". 0.16 removed the fixed blend mode, depth
+write, polygon mode and load-op. Three fixed things were left: the **vertex
+input** (one buffer, always advanced per vertex, three float formats), the
+**stencil** (always off, and no format carried a stencil aspect), and **pipeline
+creation** itself (no cache, no specialization constants, one blend state for
+every attachment of an MRT target).
+
+The two big ones are instancing and the stencil buffer. Instancing gives a
+second vertex buffer that advances once per instance, so ten thousand objects
+are one draw call with the mesh stored once. The stencil gives a pass a mask:
+"draw only where something else was drawn", which is what an outline, a portal
+and a decal are made of.
+
+One break, and it is `draw_indexed_instanced`. See **Changed**.
+
+### Added
+- **`instance_format([...])` on the graphics pipeline.** Declares a second
+  vertex binding whose attributes advance once per instance.
+  `cmd.bind_vertex_buffer(buf, binding=1)` feeds it and
+  `draw_indexed(36, instances=20000)` runs the mesh that many times. Locations
+  continue after the vertex attributes, so `vertex_format` of three puts the
+  first instance attribute at location 3.
+- **`bind_vertex_buffer(buffer, binding=)`.** Which binding a buffer feeds.
+- **`instances=` on `draw` and `draw_indexed`.** A non-indexed draw could not be
+  instanced at all before this.
+- **`VertexFormat.FLOAT`, `UBYTE4_NORM` and `UINT`.** `UBYTE4_NORM` is a colour
+  or a set of weights in four bytes instead of the sixteen a `FLOAT4` takes, and
+  it reads as 0..1 in the shader. `UINT` is an integer attribute, e.g. a
+  material index.
+- **`Topology.TRIANGLE_STRIP` and `LINE_STRIP`.** There is no restart index: one
+  strip per draw.
+- **`Format.DEPTH_STENCIL`.** A depth attachment with a stencil aspect. One name
+  rather than two: the spec guarantees only that *one* of the two combined
+  formats works on a given device, so bazalt picks. Attachment only — a combined
+  texel has no numpy dtype, and `read()` says so.
+- **`stencil_test(enable, compare=, ref=, pass_op=, fail_op=, depth_fail_op=,
+  read_mask=, write_mask=)`.** The stencil test in one verb. It reuses the
+  `CompareOp` the depth test and the compare samplers already use; only
+  `StencilOp` is new. Front and back faces share the state.
+- **`clear_stencil=` on `rendering` and `begin_rendering`.** The stencil clear
+  value, exactly as `clear_depth` is the depth one.
+- **`SwapchainRenderer(window, ctx, stencil=True)`.** Gives the window's depth
+  buffer a stencil aspect, so a masked pass works on screen and not only into an
+  offscreen target.
+- **Specialization constants: `.constant(id, value, stage)` on the graphics
+  builder and `.constant(id, value)` on the compute one.** A value baked into
+  the SPIR-V when the pipeline is built, so one compiled shader serves several
+  pipelines that differ by a number: quality levels, a kernel radius, a branch
+  the driver can then delete. `bool`, `int` and `float`.
+- **A pipeline cache.** One per Context, used by every `build()`. Nothing is
+  written to disk: the blob's format belongs to the driver, and persisting it
+  waits for 1.0 and a frozen API. Hot reload benefits most, because a rebuild
+  differs from its predecessor by one shader.
+- **`blend(..., attachment=)` and `color_mask(red, green, blue, alpha,
+  attachment=)`.** A different blend state or write mask per colour attachment
+  of an MRT target. Needs the new `Feature.INDEPENDENT_BLEND` when the
+  attachments actually differ.
+- **`storage_image(binding, stage, set)` on the GRAPHICS builder.** A fragment
+  shader can now bind a storage image and `imageStore` into it. The automatic
+  tracker still does not see those writes — that needs shader reflection — so
+  pair it with `cmd.barrier(image, ...)`, exactly like an SSBO written from a
+  graphics shader.
+- **`depth_clamp(enable)`.** Clamps depth to the view volume instead of clipping
+  the primitive, so a shadow caster between the light and the near plane still
+  casts. Needs `Feature.DEPTH_CLAMP`, which was in the table with no API using
+  it.
+- **`alpha_to_coverage(enable)`.** Turns a fragment's alpha into an MSAA
+  coverage mask: antialiased cutout foliage and hair with no sorting.
+- **`cmd.copy_image(src, dst, src_access=)`.** Copies one image into another of
+  the same size and format — the history buffer a temporal effect needs, or a
+  compute ping-pong. `src_access` names where the source currently is, the same
+  vocabulary `generate_mipmaps` uses.
+- **`cmd.clear_image(image, color)`.** Fills a colour image with no pipeline and
+  no pass. A depth image is refused: its clear belongs to the pass that renders
+  into it.
+- **`ctx.wait_idle()`.** Blocks until the device has finished everything.
+  Releases the GIL while it waits.
+- **`Format.R32_UINT` and `Format.R11G11B10F`.** An integer target is an id
+  buffer, so mouse picking is `read_pixels` on one. `R11G11B10F` is HDR colour
+  in four bytes instead of eight — a bloom or light-accumulation target at half
+  the bandwidth of `RGBA16F`.
+- **`AddressMode.CLAMP_TO_BORDER` with `create_sampler(border_color=)`, and
+  `mip_lod_bias=`.** The standard shadow-map fix: past the edge of the map,
+  `CLAMP` smears the edge texel over the whole scene, while a white border means
+  "nothing occludes here".
+- **Examples `22_instancing` and `23_outline`.** Twenty thousand cubes in one
+  draw, and a two-pass stencil outline on a selected object.
+
+### Changed (breaking)
+- **`draw_indexed_instanced(n, k)` is gone; use `draw_indexed(n, instances=k)`.**
+  A separate method name for one extra argument is the shape the design rules
+  reject, and `draw` needed the same argument anyway. One line per call site.
+
+### Fixed
+- **A depth attachment that carries stencil is transitioned as one.** Every
+  target used to name `DEPTH_ATTACHMENT_OPTIMAL`, which Vulkan forbids for an
+  image with a stencil aspect. The layout and the aspect mask are now derived
+  from the depth format, in one place, for the barriers, the views and the
+  attachment infos alike.
+
+### Notes
+- **The pipeline cache is invisible.** It changes no result and needs no
+  parameter. If it ever needs to be turned off, that is a Context flag, and
+  nothing has asked for one.
+- **Specializing a compute workgroup size needs Vulkan 1.3.**
+  `layout(local_size_x_id = 0)` compiles to `OpExecutionMode LocalSizeId`, which
+  requires `maintenance4`. The baseline is 1.2, so specialize the numbers the
+  shader reads instead.
+- **A `DEPTH_STENCIL` attachment cannot be sampled.** Its view carries both
+  aspects and Vulkan forbids sampling through such a view, so bazalt does not
+  ask for `SAMPLED` usage on it. A sampleable depth buffer stays `D32F`.
+- **Tech debt #4 is closed.** LunarG packages validation layer 1.4.350 for
+  noble, which does report shader-access sync hazards, so the negative test that
+  proves manual barrier mode is really manual now runs in CI. The workflow fails
+  if the installed layer is older, rather than skipping the test in silence.
+
 ## [0.16.0] — 2026-07-27
 
 "Window modes and input": a window switches between windowed, frameless and two

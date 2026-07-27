@@ -21,6 +21,8 @@
 #include "Device.hpp"
 #include "Error.hpp"
 #include "Features.hpp"
+// For Format and its device-resolved spelling (vk_format below).
+#include "Format.hpp"
 #include "Logger.hpp"
 #include "Sampler.hpp"
 
@@ -212,6 +214,11 @@ public:
             vk_.vkDestroyCommandPool(vkb_device_.device, command_pool_, nullptr);
         }
 
+        if (pipeline_cache_)
+        {
+            vk_.vkDestroyPipelineCache(vkb_device_.device, pipeline_cache_, nullptr);
+        }
+
         if (allocator_)
         {
             vmaDestroyAllocator(allocator_);
@@ -275,9 +282,50 @@ public:
     {
         return command_pool_;
     }
+    // Shared by every pipeline built on this Context, so a second pipeline that
+    // repeats work the first one did (the common case under hot reload, where a
+    // rebuild differs from its predecessor by one shader) reuses the driver's
+    // compilation instead of redoing it. Nothing is written to disk: the cache
+    // blob's format is tied to the driver, and persisting it belongs to 1.0
+    // together with a frozen API. VK_NULL_HANDLE if creation failed, which
+    // vkCreate*Pipelines accepts as "no cache".
+    VkPipelineCache pipeline_cache() const
+    {
+        return pipeline_cache_;
+    }
     std::shared_ptr<Logger> logger() const
     {
         return logger_;
+    }
+
+    // The VkFormat behind a bazalt Format. Every format maps 1:1 except
+    // DEPTH_STENCIL, whose spelling is a per-device choice (the spec guarantees
+    // only that one of the two combined formats works), so every call site asks
+    // the Context instead of reading format_info().vk directly.
+    VkFormat vk_format(Format format) const
+    {
+        const VkFormat vk = format_info(format).vk;
+        return vk != VK_FORMAT_UNDEFINED ? vk : depth_stencil_format_;
+    }
+
+    VkFormat depth_stencil_format() const
+    {
+        return depth_stencil_format_;
+    }
+
+    // Block until the device has finished everything. The submit paths already
+    // wait on the timeline where they must, so this is for the cases outside a
+    // frame: timing a batch of work, or making sure nothing is in flight before
+    // a measurement. Takes the queue mutex because the upload worker submits
+    // from its own thread and every VkQueue must be externally synchronized.
+    std::expected<void, Error> wait_idle()
+    {
+        std::lock_guard lock(queue_mutex_);
+        if (auto e = check(vk_.vkDeviceWaitIdle(vkb_device_.device), "wait for device idle"))
+        {
+            return std::unexpected(*e);
+        }
+        return {};
     }
 
     // Internal — for use by renderers and other subsystems
@@ -537,7 +585,9 @@ public:
     std::expected<std::shared_ptr<Sampler>, Error> get_sampler(const SamplerDesc& desc, const std::string& name = {})
     {
         const std::uint32_t key = sampler_cache_key(desc);
-        if (auto it = sampler_cache_.find(key); it != sampler_cache_.end())
+        // The key hashes a float, so equality of keys is not equality of
+        // descriptions: compare the description before handing the handle back.
+        if (auto it = sampler_cache_.find(key); it != sampler_cache_.end() && it->second->desc() == desc)
         {
             // A cache hit with a new name renames the shared object to list both
             // users. See Sampler::add_debug_name for why that beats dropping the
@@ -566,6 +616,9 @@ public:
             case AddressMode::MIRROR:
                 address = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
                 break;
+            case AddressMode::CLAMP_TO_BORDER:
+                address = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+                break;
         }
 
         VkSamplerCreateInfo info{
@@ -579,7 +632,7 @@ public:
             .addressModeU = address,
             .addressModeV = address,
             .addressModeW = address,
-            .mipLodBias = 0.0f,
+            .mipLodBias = desc.mip_lod_bias,
             .anisotropyEnable = anisotropy ? VK_TRUE : VK_FALSE,
             .maxAnisotropy = anisotropy ? 16.0f : 1.0f,
             .compareEnable = desc.compare ? VK_TRUE : VK_FALSE,
@@ -588,7 +641,10 @@ public:
             // The whole mip chain. The old per-texture sampler had maxLod = 0,
             // which would have clamped every mip away the moment mips existed.
             .maxLod = VK_LOD_CLAMP_NONE,
-            .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+            // Float rather than int: every sampled format bazalt exposes reads
+            // as floats, and an int border on a float image is undefined.
+            .borderColor = desc.border_color == BorderColor::OPAQUE_WHITE ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE
+                                                                          : VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
             .unnormalizedCoordinates = VK_FALSE};
 
         VkSampler handle = VK_NULL_HANDLE;
@@ -605,7 +661,7 @@ public:
         {
             set_debug_name(VK_OBJECT_TYPE_SAMPLER, reinterpret_cast<std::uint64_t>(handle), sampler->debug_name());
         }
-        sampler_cache_.emplace(key, sampler);
+        sampler_cache_.insert_or_assign(key, sampler);
         return sampler;
     }
 
@@ -1070,6 +1126,38 @@ private:
             return std::unexpected(*e);
         }
 
+        // Which combined depth/stencil format this device gets. The float
+        // variant comes first where it exists: bazalt's plain depth format is
+        // D32F, and a depth_bias tuned against a float buffer would mean
+        // something else entirely on a 24-bit integer one (the bias is scaled in
+        // units of the format). Falling back the other way is still correct —
+        // the spec promises at least one of the two.
+        for (const VkFormat candidate : {VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT})
+        {
+            VkFormatProperties props{};
+            vkGetPhysicalDeviceFormatProperties(ctx.vkb_physical_device_.physical_device, candidate, &props);
+            if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+            {
+                ctx.depth_stencil_format_ = candidate;
+                break;
+            }
+        }
+
+        // The pipeline cache is an optimization, so a failure here is not an
+        // error: vkCreate*Pipelines takes VK_NULL_HANDLE and compiles from
+        // scratch, which is exactly what happened before this existed.
+        VkPipelineCacheCreateInfo cacheInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .initialDataSize = 0,
+            .pInitialData = nullptr};
+        if (ctx.vk_.vkCreatePipelineCache(ctx.vkb_device_.device, &cacheInfo, nullptr, &ctx.pipeline_cache_) !=
+            VK_SUCCESS)
+        {
+            ctx.pipeline_cache_ = VK_NULL_HANDLE;
+        }
+
         // The submission timeline (see submit_timeline() above). Core 1.2; the
         // feature bit was enabled in create_device_.
         VkSemaphoreTypeCreateInfo timelineType{
@@ -1146,6 +1234,8 @@ private:
 
     VmaAllocator allocator_ = VK_NULL_HANDLE;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
+    VkPipelineCache pipeline_cache_ = VK_NULL_HANDLE;
+    VkFormat depth_stencil_format_ = VK_FORMAT_UNDEFINED;
 
     // Zero-initialized: an entry point the device does not have stays null, which
     // is what makes the KHR aliasing below (and the null checks) work.

@@ -128,7 +128,7 @@ with cmd.rendering(renderer, clear_color=[0.05, 0.05, 0.05, 1.0]) as c:
       .bind_descriptor_set(desc_set, pipeline, set=0)
       .bind_vertex_buffer(vbuf)
       .bind_index_buffer(ibuf)
-      .draw_indexed_instanced(36, 11))
+      .draw_indexed(36, instances=11))
 
 # Main loop
 camera = Camera(pos=(0.0, 0.0, 5.0), speed=5.0)

@@ -41,6 +41,8 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     FrontFace,
     PolygonMode,
     BlendMode,
+    StencilOp,
+    BorderColor,
     MemoryUsage,
     Severity,
     Source,
@@ -54,7 +56,7 @@ from bazalt._core import (  # noqa: F401 — explicit re-exports for IDE visibil
     ResourceError,
 )
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 
 __all__ = [
     # Core
@@ -99,6 +101,8 @@ __all__ = [
     "FrontFace",
     "PolygonMode",
     "BlendMode",
+    "StencilOp",
+    "BorderColor",
     "MemoryUsage",
     "Severity",
     "Source",

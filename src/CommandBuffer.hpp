@@ -129,13 +129,24 @@ public:
     CommandBuffer& begin_rendering(
         std::shared_ptr<RenderTarget> target,
         const std::optional<std::vector<std::array<float, 4>>>& clear_colors,
-        float clear_depth = 1.0f)
+        float clear_depth = 1.0f,
+        std::uint32_t clear_stencil = 0)
     {
         commands_.push_back(
-            [clear_colors, clear_depth, target](VkCommandBuffer cmd, const FrameContext& frame)
+            [clear_colors, clear_depth, clear_stencil, target](VkCommandBuffer cmd, const FrameContext& frame)
             {
                 RenderTarget* rt = target.get();
                 const bool preserve = !clear_colors.has_value();
+
+                // A depth attachment that carries a stencil aspect is one image
+                // in one layout: DEPTH_ATTACHMENT_OPTIMAL covers the depth
+                // aspect only, so a combined format needs the combined layout,
+                // and every barrier, view and attachment info below reads both
+                // from here.
+                const VkImageAspectFlags depth_aspect = aspect_mask_for(rt->depth_format());
+                const bool stencil = has_stencil(rt->depth_format());
+                const VkImageLayout depth_layout = stencil ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                                                           : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
 
                 // Which layer/mip each attachment barrier must transition. Defaults
                 // to {layer 0, mip 0, one of each}; a SubresourceTarget narrows it to
@@ -233,12 +244,12 @@ public:
                             VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
                             (preserve ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT : 0)),
                         .oldLayout = depth_old_layout,
-                        .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                        .newLayout = depth_layout,
                         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                         .image = rt->depth_image(),
                         .subresourceRange = {
-                            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                            .aspectMask = depth_aspect,
                             .baseMipLevel = depth_sr.base_mip,
                             .levelCount = depth_sr.mip_count,
                             .baseArrayLayer = depth_sr.base_layer,
@@ -309,11 +320,10 @@ public:
                     .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
                     .pNext = nullptr,
                     .imageView = rt->depth_view(),
-                    .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                    .imageLayout = depth_layout,
                     .resolveMode = depthResolve ? VK_RESOLVE_MODE_SAMPLE_ZERO_BIT : VK_RESOLVE_MODE_NONE,
                     .resolveImageView = depthResolve ? rt->depth_resolve_view() : VK_NULL_HANDLE,
-                    .resolveImageLayout = depthResolve ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL
-                                                       : VK_IMAGE_LAYOUT_UNDEFINED,
+                    .resolveImageLayout = depthResolve ? depth_layout : VK_IMAGE_LAYOUT_UNDEFINED,
                     .loadOp = preserve ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR,
                     // Always stored. It used to be DONT_CARE unless the depth
                     // would be consumed (shadow maps), which is the cheaper
@@ -324,7 +334,14 @@ public:
                     // upgrade path is deriving the store-op from whether a later
                     // pass in the same recording loads.
                     .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                    .clearValue = {.depthStencil = {clear_depth, 0}}};
+                    .clearValue = {.depthStencil = {clear_depth, clear_stencil}}};
+
+                // The stencil aspect of the same image, named separately because
+                // dynamic rendering takes two attachment pointers. It follows the
+                // depth attachment in everything except which half of the clear
+                // value it reads — one image, one layout, one load-op, so a pass
+                // cannot preserve depth while clearing stencil.
+                VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
 
                 VkRenderingInfo renderingInfo{
                     .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
@@ -338,7 +355,8 @@ public:
                     .colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size()),
                     .pColorAttachments = colorAttachments.empty() ? nullptr : colorAttachments.data(),
                     .pDepthAttachment = rt->depth_view() != VK_NULL_HANDLE ? &depthAttachment : nullptr,
-                    .pStencilAttachment = nullptr};
+                    .pStencilAttachment = (stencil && rt->depth_view() != VK_NULL_HANDLE) ? &stencilAttachment
+                                                                                          : nullptr};
 
                 frame.vk->vkCmdBeginRendering(cmd, &renderingInfo);
 
@@ -421,8 +439,11 @@ public:
                 // Depth retires to its own final layout when it will be consumed
                 // (offscreen: SHADER_READ_ONLY, which is what makes `target.depth`
                 // sampleable). The swapchain's depth stays put â€” no barrier.
-                if (target->depth_image() != VK_NULL_HANDLE &&
-                    target->depth_final_layout() != VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL)
+                const VkImageAspectFlags depth_aspect = aspect_mask_for(target->depth_format());
+                const VkImageLayout depth_layout = has_stencil(target->depth_format())
+                                                       ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                                                       : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+                if (target->depth_image() != VK_NULL_HANDLE && target->depth_final_layout() != depth_layout)
                 {
                     // Same as colour: the resolved single-sample depth is what gets
                     // sampled, so it is the one that must reach the final layout.
@@ -434,13 +455,13 @@ public:
                         .pNext = nullptr,
                         .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                         .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
-                        .oldLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                        .oldLayout = depth_layout,
                         .newLayout = target->depth_final_layout(),
                         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                         .image = final_depth,
                         .subresourceRange = {
-                            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                            .aspectMask = depth_aspect,
                             .baseMipLevel = depth_sr.base_mip,
                             .levelCount = depth_sr.mip_count,
                             .baseArrayLayer = depth_sr.base_layer,
@@ -500,17 +521,21 @@ public:
         return *this;
     }
 
-    CommandBuffer& bind_vertex_buffer(std::shared_ptr<Buffer> buffer)
+    // binding= selects which of the pipeline's vertex bindings this buffer
+    // feeds: 0 is vertex_format (per vertex), 1 is instance_format (per
+    // instance). A kwarg on the existing verb rather than a second method —
+    // binding one buffer and binding the other are the same operation.
+    CommandBuffer& bind_vertex_buffer(std::shared_ptr<Buffer> buffer, std::uint32_t binding = 0)
     {
         // The read truly happens at draw, but a barrier placed before the bind
         // is still before the draw — sound, and simpler than deferring it.
         track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT, false);
         commands_.push_back(
-            [buffer](VkCommandBuffer cmd, const FrameContext& frame)
+            [buffer, binding](VkCommandBuffer cmd, const FrameContext& frame)
             {
                 VkBuffer vertexBuffers[] = {buffer->get()};
                 VkDeviceSize offsets[] = {0};
-                frame.vk->vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+                frame.vk->vkCmdBindVertexBuffers(cmd, binding, 1, vertexBuffers, offsets);
             });
         return *this;
     }
@@ -528,32 +553,27 @@ public:
         return *this;
     }
 
-    CommandBuffer& draw(uint32_t vertexCount)
+    // instances= is a kwarg on both draw verbs rather than a third verb: the
+    // instance count is one argument of a draw, and draw_indexed_instanced was a
+    // second name for a call that already existed.
+    CommandBuffer& draw(uint32_t vertexCount, uint32_t instances = 1)
     {
         track_draw_();
-        commands_.push_back([vertexCount](VkCommandBuffer cmd, const FrameContext& frame)
-                            { frame.vk->vkCmdDraw(cmd, vertexCount, 1, 0, 0); });
+        commands_.push_back([vertexCount, instances](VkCommandBuffer cmd, const FrameContext& frame)
+                            { frame.vk->vkCmdDraw(cmd, vertexCount, instances, 0, 0); });
         return *this;
     }
 
-    CommandBuffer& draw_indexed(uint32_t indexCount, uint32_t firstIndex = 0, int32_t vertexOffset = 0)
-    {
-        track_draw_();
-        commands_.push_back([indexCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext& frame)
-                            { frame.vk->vkCmdDrawIndexed(cmd, indexCount, 1, firstIndex, vertexOffset, 0); });
-        return *this;
-    }
-
-    CommandBuffer& draw_indexed_instanced(
+    CommandBuffer& draw_indexed(
         uint32_t indexCount,
-        uint32_t instanceCount,
         uint32_t firstIndex = 0,
-        int32_t vertexOffset = 0)
+        int32_t vertexOffset = 0,
+        uint32_t instances = 1)
     {
         track_draw_();
         commands_.push_back(
-            [indexCount, instanceCount, firstIndex, vertexOffset](VkCommandBuffer cmd, const FrameContext& frame)
-            { frame.vk->vkCmdDrawIndexed(cmd, indexCount, instanceCount, firstIndex, vertexOffset, 0); });
+            [indexCount, firstIndex, vertexOffset, instances](VkCommandBuffer cmd, const FrameContext& frame)
+            { frame.vk->vkCmdDrawIndexed(cmd, indexCount, instances, firstIndex, vertexOffset, 0); });
         return *this;
     }
 
@@ -679,6 +699,123 @@ public:
             { image->record_generate_mipmaps(cmd, layout, s.stages, s.access); });
         // The image now rests in SHADER_READ_ONLY across every level; keep the
         // tracker in sync so a later automatic sample emits no extra transition.
+        if (auto_barriers_)
+        {
+            tracker_.note_image_layout(
+                img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+        }
+        return {};
+    }
+
+    // Copy one image into another of the same size and format. The history
+    // buffer every temporal effect needs: keep last frame's result to blend
+    // against this one (motion blur, TAA, a feedback trail), or ping-pong two
+    // storage images across dispatches.
+    //
+    // Both images are left in SHADER_READ_ONLY, because reading the copy is the
+    // only reason to make one. `src` names the source's CURRENT layout in
+    // cmd.barrier's vocabulary, exactly as generate_mipmaps does: SHADER_READ for
+    // an image that is sampled (the default) or SHADER_WRITE for one a compute
+    // dispatch just wrote. The destination is discarded, since the copy
+    // overwrites all of it.
+    //
+    // Refused inside a rendering scope, like every other transfer verb.
+    std::expected<void, Error> copy_image(
+        std::shared_ptr<Image> src,
+        std::shared_ptr<Image> dst,
+        Access src_access = Access::SHADER_READ)
+    {
+        if (!src || !dst)
+        {
+            return std::unexpected(err_resource("copy_image: image is null"));
+        }
+        if (in_rendering_)
+        {
+            return std::unexpected(err_resource(
+                "cmd.copy_image() is not allowed inside a rendering scope; "
+                "record it before begin_rendering"));
+        }
+        if (src->width() != dst->width() || src->height() != dst->height() || src->format() != dst->format() ||
+            src->array_layers() != dst->array_layers())
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "copy_image: source and destination must match in size, format and layer "
+                    "count; got {}x{} {} ({} layers) into {}x{} {} ({} layers). A resize or a "
+                    "format change is a render pass, not a copy.",
+                    src->width(),
+                    src->height(),
+                    format_name(src->format()),
+                    src->array_layers(),
+                    dst->width(),
+                    dst->height(),
+                    format_name(dst->format()),
+                    dst->array_layers())));
+        }
+        if (src->samples() != 1 || dst->samples() != 1)
+        {
+            return std::unexpected(err_resource(
+                "copy_image: a multisampled image cannot be copied; render into it and "
+                "read the resolved attachment"));
+        }
+        const auto src_layout = image_layout_for(src_access);
+        if (!src_layout)
+        {
+            return std::unexpected(err_resource(
+                "copy_image: src must be Access.SHADER_READ (the source is sampled, "
+                "SHADER_READ_ONLY) or Access.SHADER_WRITE (a compute shader just wrote "
+                "it, GENERAL)"));
+        }
+        Image* src_ptr = src.get();
+        Image* dst_ptr = dst.get();
+        commands_.push_back([src = std::move(src), dst = std::move(dst), layout = *src_layout](
+                                VkCommandBuffer cmd, const FrameContext& frame)
+                            { record_image_copy(*frame.vk, cmd, *src, *dst, layout); });
+        // BOTH ends, not just the destination: the copy leaves the source
+        // sampleable too, and an Image that still believed it was in GENERAL
+        // would hand a stale oldLayout to the next read() — a validation error
+        // with no obvious author.
+        src_ptr->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        dst_ptr->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (auto_barriers_)
+        {
+            // Both ends leave the copy sampleable, and the tracker has to learn
+            // it or the next automatic use transitions from a stale layout — the
+            // same rule the manual image barrier follows.
+            tracker_.note_image_layout(
+                src_ptr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+            tracker_.note_image_layout(
+                dst_ptr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+        }
+        return {};
+    }
+
+    // Fill an image with one colour, with no pipeline and no pass. Resetting an
+    // accumulation or history buffer, or clearing a storage image a compute
+    // shader only writes part of. A depth image is refused: clearing depth is
+    // what a rendering pass does, and it needs the depth clear value.
+    std::expected<void, Error> clear_image(std::shared_ptr<Image> image, std::array<float, 4> color)
+    {
+        if (!image)
+        {
+            return std::unexpected(err_resource("clear_image: image is null"));
+        }
+        if (in_rendering_)
+        {
+            return std::unexpected(err_resource(
+                "cmd.clear_image() is not allowed inside a rendering scope; "
+                "record it before begin_rendering"));
+        }
+        if (format_info(image->format()).depth)
+        {
+            return std::unexpected(err_resource(
+                "clear_image: a depth image is cleared by the pass that renders into it "
+                "(cmd.rendering(target, clear_depth=...))"));
+        }
+        Image* img = image.get();
+        commands_.push_back([image = std::move(image), color](VkCommandBuffer cmd, const FrameContext& frame)
+                            { record_image_clear(*frame.vk, cmd, *image, color); });
+        img->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         if (auto_barriers_)
         {
             tracker_.note_image_layout(

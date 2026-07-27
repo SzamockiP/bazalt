@@ -2,6 +2,7 @@
 #include <volk.h>
 
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <string>
 
@@ -19,6 +20,21 @@ enum class AddressMode
     REPEAT,
     CLAMP,
     MIRROR,
+    // Everything outside 0..1 reads the border colour instead of the edge texel.
+    // What a shadow map needs: with CLAMP, geometry past the edge of the map
+    // takes the depth of whatever happened to be on that edge, so the shadow
+    // smears across the whole scene. A white border means "nothing occludes
+    // here" and the smear disappears.
+    CLAMP_TO_BORDER,
+};
+
+// The texel read outside a CLAMP_TO_BORDER sampler's range. Two values, because
+// the third Vulkan option (transparent black) differs from opaque black only in
+// alpha, and the shadow-map case is exactly the white/black question.
+enum class BorderColor
+{
+    OPAQUE_BLACK,
+    OPAQUE_WHITE,
 };
 
 // 1:1 with VkCompareOp. Used by compare samplers (sampler2DShadow); a full
@@ -69,6 +85,11 @@ struct SamplerDesc
     // Engaged = compare sampler (sampler2DShadow in GLSL): reads return the
     // comparison result, and LINEAR filtering becomes hardware PCF.
     std::optional<CompareOp> compare = std::nullopt;
+    BorderColor border_color = BorderColor::OPAQUE_BLACK;
+    // Added to the computed mip level: negative sharpens, positive blurs. A
+    // cheap blur for a reflection or a downsample chain, and the fix for a
+    // texture that samples one mip too soft under anisotropy.
+    float mip_lod_bias = 0.0f;
 
     bool operator==(const SamplerDesc&) const = default;
 };
@@ -78,10 +99,22 @@ struct SamplerDesc
 // fresh sampler per texture — pure waste of a pooled driver object.
 // Compare bits (4-7) are strictly additive: every pre-compare desc keeps the
 // exact key it had before.
-constexpr std::uint32_t sampler_cache_key(const SamplerDesc& d)
+//
+// The bias is a float and cannot be packed into bits, so the key became a hash
+// of the whole description rather than a bit field pretending to be one. The
+// cache is a handful of entries either way, and a collision here would hand back
+// a sampler with the wrong filtering — so the description is compared too, which
+// is why the map now stores the desc beside the handle.
+inline std::uint32_t sampler_cache_key(const SamplerDesc& d)
 {
-    return static_cast<std::uint32_t>(d.filter) | (static_cast<std::uint32_t>(d.address_mode) << 1) |
-           (d.anisotropy ? 1u << 3 : 0u) | (d.compare ? (1u << 4) | (static_cast<std::uint32_t>(*d.compare) << 5) : 0u);
+    const std::uint32_t bits = static_cast<std::uint32_t>(d.filter) |
+                               (static_cast<std::uint32_t>(d.address_mode) << 1) | (d.anisotropy ? 1u << 4 : 0u) |
+                               (d.compare ? (1u << 5) | (static_cast<std::uint32_t>(*d.compare) << 6) : 0u) |
+                               (static_cast<std::uint32_t>(d.border_color) << 10);
+    std::uint32_t bias_bits = 0;
+    static_assert(sizeof(bias_bits) == sizeof(d.mip_lod_bias));
+    std::memcpy(&bias_bits, &d.mip_lod_bias, sizeof(bias_bits));
+    return bits ^ (bias_bits * 2654435761u);
 }
 
 // A non-owning view of a cached VkSampler. The Context owns the handle and

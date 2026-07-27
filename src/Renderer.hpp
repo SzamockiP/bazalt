@@ -119,7 +119,8 @@ public:
         std::shared_ptr<Context> context,
         SurfaceProvider surface_provider,
         PresentMode present_mode = PresentMode::MAILBOX,
-        std::uint32_t samples = 1)
+        std::uint32_t samples = 1,
+        bool stencil = false)
     {
         if (!context->swapchain_supported())
         {
@@ -211,8 +212,14 @@ public:
             }
         }
 
-        // Depth Image
-        renderer->depth_format_ = VK_FORMAT_D32_SFLOAT;
+        // Depth Image. The window's depth buffer is scratch either way; asking
+        // for a stencil aspect is what makes a masked pass (an outline, a
+        // portal) possible on screen rather than only offscreen.
+        renderer->depth_format_ = stencil ? context->depth_stencil_format() : VK_FORMAT_D32_SFLOAT;
+        if (renderer->depth_format_ == VK_FORMAT_UNDEFINED)
+        {
+            return std::unexpected(err_init("This device supports no depth/stencil format"));
+        }
         if (auto r = renderer->create_depth_resources(); !r)
         {
             return std::unexpected(r.error());
@@ -1007,12 +1014,13 @@ private:
                  VK_COMPONENT_SWIZZLE_IDENTITY,
                  VK_COMPONENT_SWIZZLE_IDENTITY,
                  VK_COMPONENT_SWIZZLE_IDENTITY},
-            .subresourceRange = {
-                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1}};
+            .subresourceRange = {// Both aspects when the format has both: the view is used for
+                                 // the depth AND the stencil attachment of the same pass.
+                                 .aspectMask = aspect_mask_for(depth_format_),
+                                 .baseMipLevel = 0,
+                                 .levelCount = 1,
+                                 .baseArrayLayer = 0,
+                                 .layerCount = 1}};
 
         if (auto e = check(
                 context_->vk().vkCreateImageView(context_->device(), &viewInfo, nullptr, &depth_image_view_),
