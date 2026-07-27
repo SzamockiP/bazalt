@@ -13,50 +13,48 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CIBW_SKIP: "*-musllinux* *-win32 *-manylinux_i686"
+
+  # Smoke test on every built wheel: the module imports and the .pyi stub
+  # matches __all__. The GPU test suite can't run here (no Vulkan driver
+  # in the containers) and stays a local concern.
+  CIBW_TEST_REQUIRES: pytest
+  CIBW_TEST_COMMAND: python -c "import bazalt" && python -m pytest {project}/tests/test_stubs.py -q
+
 jobs:
-  build_wheels:
-    name: Wheels · ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+  # ── Linux wheels ──────────────────────────────────────────────
+  # A job of its own, not a leg of a shared matrix, because test_lavapipe needs
+  # only this wheel. Both platforms in one job made the tests wait for Windows
+  # too, which finishes about four minutes later and has nothing they use.
+  #
+  # One job per interpreter, not one job building four wheels in a row. The
+  # extension is a single large translation unit and takes about the same time
+  # for every interpreter, so four in sequence is four times the wall clock for
+  # no reason. In parallel the pipeline costs what one wheel costs. The runners
+  # are free on a public repo, so this only spends minutes, not money.
+  #
+  # A branch push builds the one interpreter the lavapipe legs install. Every
+  # event that gates something — a pull request before merge, a release before
+  # publish, a manual run — builds all four.
+  wheels_linux:
+    name: Wheels · linux ${{ matrix.python }}
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-22.04]
-
+        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313"]') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      # ── Vulkan SDK (Windows — installed on the host) ──────────
-      - name: Install Vulkan SDK (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $VERSION = "1.4.309.0"
-          $INSTALLER = "VulkanSDK-$VERSION-Installer.exe"
-          Invoke-WebRequest `
-            -Uri "https://sdk.lunarg.com/sdk/download/$VERSION/windows/$INSTALLER" `
-            -OutFile $INSTALLER
-          Start-Process -FilePath ".\$INSTALLER" `
-            -ArgumentList "--accept-licenses --default-answer --confirm-command install" `
-            -Wait
-          echo "VULKAN_SDK=C:\VulkanSDK\$VERSION" >> $env:GITHUB_ENV
-
-      # ── Build ───────────────────────────────────────────────────
-      - uses: pypa/cibuildwheel@v2.23
+      - uses: pypa/cibuildwheel@v4.1
         env:
-          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
-          CIBW_SKIP: "*-musllinux* *-win32 *-manylinux_i686"
-          CIBW_ARCHS_WINDOWS: AMD64
+          CIBW_BUILD: "${{ matrix.python }}-*"
           CIBW_ARCHS_LINUX: x86_64
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
 
-          # Smoke test on every built wheel: the module imports and the .pyi stub
-          # matches __all__. The GPU test suite can't run here (no Vulkan driver
-          # in the containers) and stays a local concern.
-          CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: python -c "import bazalt" && python -m pytest {project}/tests/test_stubs.py -q
-
-          # Linux: install Vulkan SDK tarball + X11/Wayland deps
-          # inside the manylinux Docker container (not the host).
+          # Install the Vulkan SDK tarball + X11/Wayland deps inside the
+          # manylinux Docker container (not the host).
           CIBW_BEFORE_ALL_LINUX: |
             set -e
             VULKAN_VERSION=1.4.309.0
@@ -76,10 +74,50 @@ jobs:
             LD_LIBRARY_PATH=/opt/vulkan-sdk/x86_64/lib:${LD_LIBRARY_PATH:-}
             CMAKE_PREFIX_PATH=/opt/vulkan-sdk/x86_64
 
-      # ── Upload ──────────────────────────────────────────────────
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: wheels-${{ matrix.os }}
+          name: wheels-linux-${{ matrix.python }}
+          path: ./wheelhouse/*.whl
+
+  # ── Windows wheels ────────────────────────────────────────────
+  wheels_windows:
+    name: Wheels · windows ${{ matrix.python }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313"]') }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          $VERSION = "1.4.309.0"
+          $INSTALLER = "VulkanSDK-$VERSION-Installer.exe"
+          Invoke-WebRequest `
+            -Uri "https://sdk.lunarg.com/sdk/download/$VERSION/windows/$INSTALLER" `
+            -OutFile $INSTALLER
+          Start-Process -FilePath ".\$INSTALLER" `
+            -ArgumentList "--accept-licenses --default-answer --confirm-command install" `
+            -Wait
+          echo "VULKAN_SDK=C:\VulkanSDK\$VERSION" >> $env:GITHUB_ENV
+
+      - uses: pypa/cibuildwheel@v4.1
+        env:
+          CIBW_BUILD: "${{ matrix.python }}-*"
+          CIBW_ARCHS_WINDOWS: AMD64
+
+          # cibuildwheel 4 runs delvewheel by default. bazalt must NOT ship a
+          # copy of vulkan-1.dll: volk loads the loader the user's driver
+          # installed, and a bundled one would shadow it. Nothing else the
+          # extension links is dynamic — shaderc, glfw, volk and vk-bootstrap
+          # are all static — so there is no repair left to do.
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: ""
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-windows-${{ matrix.python }}
           path: ./wheelhouse/*.whl
 
   # ── Full GPU suite on lavapipe (Mesa software rasterizer) ─────
@@ -93,22 +131,23 @@ jobs:
   # version negotiation a leap of faith.
   test_lavapipe:
     name: Tests · lavapipe (api ${{ matrix.api }})
-    needs: build_wheels
+    needs: wheels_linux
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         api: ["1.3", "1.2"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
-      - uses: actions/download-artifact@v4
+      # cp312 is built on every event, so this name always exists.
+      - uses: actions/download-artifact@v8
         with:
-          name: wheels-ubuntu-22.04
+          name: wheels-linux-cp312
           path: wheelhouse
 
       # libvulkan1 is the Vulkan LOADER — mesa-vulkan-drivers ships only the
@@ -178,13 +217,13 @@ jobs:
 
   # ── Publish to PyPI on release ────────────────────────────────
   publish:
-    needs: build_wheels
+    needs: [wheels_linux, wheels_windows]
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
