@@ -4,6 +4,7 @@
 #include <pybind11/numpy.h>
 #include <atomic>
 #include <cstddef>
+#include <cstring>
 #include <expected>
 #include <filesystem>
 #include <format>
@@ -519,6 +520,41 @@ std::expected<void, Error> present_command_buffer(SwapchainRenderer& renderer, s
     return {};
 }
 
+// A specialization constant's four bytes, from whichever Python number was
+// given. bool is tested FIRST because a Python bool is an int: `True` would
+// otherwise arrive as the integer 1, and a shader that declares the constant as
+// `bool` reads a different thing from that.
+//
+// Everything is four bytes, which is what SPIR-V specialization constants of
+// scalar type are. A double or an int64 would need a wider block and a second
+// map entry size, and no shader here declares one.
+static std::uint32_t spec_constant_bytes(const py::object& value)
+{
+    std::uint32_t bytes = 0;
+    if (py::isinstance<py::bool_>(value))
+    {
+        // A SPIR-V bool constant is a 32-bit 0 or 1.
+        bytes = py::cast<bool>(value) ? 1u : 0u;
+    }
+    else if (py::isinstance<py::int_>(value))
+    {
+        const std::int32_t i = py::cast<std::int32_t>(value);
+        std::memcpy(&bytes, &i, sizeof(bytes));
+    }
+    else if (py::isinstance<py::float_>(value))
+    {
+        const float f = py::cast<float>(value);
+        std::memcpy(&bytes, &f, sizeof(bytes));
+    }
+    else
+    {
+        raise_error(err_resource(
+            "A specialization constant must be a bool, an int or a float; those are the "
+            "scalar types SPIR-V can specialize"));
+    }
+    return bytes;
+}
+
 // The state behind `with cmd.rendering(target, ...):` — carries what
 // __enter__/__exit__ need to record the begin/end pair. Deliberately a plain
 // struct bound only for its dunder methods; begin_rendering/end_rendering
@@ -529,6 +565,7 @@ struct RenderingScope
     std::shared_ptr<RenderTarget> target;
     std::optional<std::vector<std::array<float, 4>>> clear_color;
     float clear_depth = 1.0f;
+    std::uint32_t clear_stencil = 0;
 };
 
 // Normalise a Python clear_color into one RGBA per attachment. Accepts both the
@@ -815,6 +852,7 @@ PYBIND11_MODULE(_core, m)
         .value("SAMPLE_RATE_SHADING", Feature::SAMPLE_RATE_SHADING)
         .value("MULTI_DRAW_INDIRECT", Feature::MULTI_DRAW_INDIRECT)
         .value("SHADER_FLOAT64", Feature::SHADER_FLOAT64)
+        .value("INDEPENDENT_BLEND", Feature::INDEPENDENT_BLEND)
         .export_values();
 
     py::enum_<BufferType>(m, "BufferType")
@@ -841,12 +879,17 @@ PYBIND11_MODULE(_core, m)
         .value("FLOAT2", VertexFormat::FLOAT2)
         .value("FLOAT3", VertexFormat::FLOAT3)
         .value("FLOAT4", VertexFormat::FLOAT4)
+        .value("FLOAT", VertexFormat::FLOAT)
+        .value("UBYTE4_NORM", VertexFormat::UBYTE4_NORM)
+        .value("UINT", VertexFormat::UINT)
         .export_values();
 
     py::enum_<Topology>(m, "Topology")
         .value("TRIANGLE_LIST", Topology::TRIANGLE_LIST)
         .value("POINT_LIST", Topology::POINT_LIST)
         .value("LINE_LIST", Topology::LINE_LIST)
+        .value("TRIANGLE_STRIP", Topology::TRIANGLE_STRIP)
+        .value("LINE_STRIP", Topology::LINE_STRIP)
         .export_values();
 
     // The vocabulary of cmd.barrier() in manual mode (auto_barriers=False).
@@ -869,14 +912,22 @@ PYBIND11_MODULE(_core, m)
         .value("RGBA16F", Format::RGBA16F)
         .value("R32F", Format::R32F)
         .value("RGBA32F", Format::RGBA32F)
-        .value("D32F", Format::D32F);
+        .value("D32F", Format::D32F)
+        .value("R32_UINT", Format::R32_UINT)
+        .value("R11G11B10F", Format::R11G11B10F)
+        .value("DEPTH_STENCIL", Format::DEPTH_STENCIL);
 
     py::enum_<Filter>(m, "Filter").value("LINEAR", Filter::LINEAR).value("NEAREST", Filter::NEAREST);
 
     py::enum_<AddressMode>(m, "AddressMode")
         .value("REPEAT", AddressMode::REPEAT)
         .value("CLAMP", AddressMode::CLAMP)
-        .value("MIRROR", AddressMode::MIRROR);
+        .value("MIRROR", AddressMode::MIRROR)
+        .value("CLAMP_TO_BORDER", AddressMode::CLAMP_TO_BORDER);
+
+    py::enum_<BorderColor>(m, "BorderColor")
+        .value("OPAQUE_BLACK", BorderColor::OPAQUE_BLACK)
+        .value("OPAQUE_WHITE", BorderColor::OPAQUE_WHITE);
 
     py::enum_<CompareOp>(m, "CompareOp")
         .value("NEVER", CompareOp::NEVER)
@@ -887,6 +938,16 @@ PYBIND11_MODULE(_core, m)
         .value("NOT_EQUAL", CompareOp::NOT_EQUAL)
         .value("GREATER_OR_EQUAL", CompareOp::GREATER_OR_EQUAL)
         .value("ALWAYS", CompareOp::ALWAYS);
+
+    py::enum_<StencilOp>(m, "StencilOp")
+        .value("KEEP", StencilOp::KEEP)
+        .value("ZERO", StencilOp::ZERO)
+        .value("REPLACE", StencilOp::REPLACE)
+        .value("INCREMENT_CLAMP", StencilOp::INCREMENT_CLAMP)
+        .value("DECREMENT_CLAMP", StencilOp::DECREMENT_CLAMP)
+        .value("INVERT", StencilOp::INVERT)
+        .value("INCREMENT_WRAP", StencilOp::INCREMENT_WRAP)
+        .value("DECREMENT_WRAP", StencilOp::DECREMENT_WRAP);
 
     py::enum_<BlendMode>(m, "BlendMode")
         .value("ALPHA", BlendMode::ALPHA)
@@ -1038,6 +1099,11 @@ PYBIND11_MODULE(_core, m)
             [](GraphicsPipelineBuilder& self, const std::vector<VertexFormat>& formats) -> GraphicsPipelineBuilder&
             { return self.vertex_format(formats); })
         .def(
+            "instance_format",
+            [](GraphicsPipelineBuilder& self, const std::vector<VertexFormat>& formats) -> GraphicsPipelineBuilder&
+            { return self.instance_format(formats); },
+            py::arg("formats"))
+        .def(
             "depth_test",
             [](GraphicsPipelineBuilder& self, bool enable, bool write, CompareOp compare) -> GraphicsPipelineBuilder&
             { return self.depth_test(enable, write, compare); },
@@ -1066,10 +1132,66 @@ PYBIND11_MODULE(_core, m)
             py::arg("slope") = 0.0f)
         .def(
             "blend",
-            [](GraphicsPipelineBuilder& self, bool enable, BlendMode mode) -> GraphicsPipelineBuilder&
-            { return self.blend(enable, mode); },
+            [](GraphicsPipelineBuilder& self, bool enable, BlendMode mode, std::optional<std::uint32_t> attachment)
+                -> GraphicsPipelineBuilder&
+            { return self.blend(enable, mode, attachment ? static_cast<int>(*attachment) : -1); },
             py::arg("enable"),
-            py::arg("mode") = BlendMode::ALPHA)
+            py::arg("mode") = BlendMode::ALPHA,
+            py::arg("attachment") = py::none())
+        .def(
+            "color_mask",
+            [](GraphicsPipelineBuilder& self,
+               bool red,
+               bool green,
+               bool blue,
+               bool alpha,
+               std::optional<std::uint32_t> attachment) -> GraphicsPipelineBuilder&
+            { return self.color_mask(red, green, blue, alpha, attachment ? static_cast<int>(*attachment) : -1); },
+            py::arg("red") = true,
+            py::arg("green") = true,
+            py::arg("blue") = true,
+            py::arg("alpha") = true,
+            py::arg("attachment") = py::none())
+        .def(
+            "stencil_test",
+            [](GraphicsPipelineBuilder& self,
+               bool enable,
+               CompareOp compare,
+               std::uint32_t ref,
+               StencilOp pass_op,
+               StencilOp fail_op,
+               StencilOp depth_fail_op,
+               std::uint32_t read_mask,
+               std::uint32_t write_mask) -> GraphicsPipelineBuilder&
+            { return self.stencil_test(enable, compare, ref, pass_op, fail_op, depth_fail_op, read_mask, write_mask); },
+            py::arg("enable"),
+            py::arg("compare") = CompareOp::ALWAYS,
+            py::arg("ref") = 0,
+            py::arg("pass_op") = StencilOp::KEEP,
+            py::arg("fail_op") = StencilOp::KEEP,
+            py::arg("depth_fail_op") = StencilOp::KEEP,
+            py::arg("read_mask") = 0xFFu,
+            py::arg("write_mask") = 0xFFu)
+        .def(
+            "depth_clamp",
+            [](GraphicsPipelineBuilder& self, bool enable) -> GraphicsPipelineBuilder&
+            { return self.depth_clamp(enable); },
+            py::arg("enable") = true)
+        .def(
+            "alpha_to_coverage",
+            [](GraphicsPipelineBuilder& self, bool enable) -> GraphicsPipelineBuilder&
+            { return self.alpha_to_coverage(enable); },
+            py::arg("enable") = true)
+        // A bool IS an int in Python, so it has to be tested first or True would
+        // be baked in as the integer 1 and a `bool` constant in the shader would
+        // read whatever that bit pattern means.
+        .def(
+            "constant",
+            [](GraphicsPipelineBuilder& self, std::uint32_t id, const py::object& value, ShaderStage stage)
+                -> GraphicsPipelineBuilder& { return self.constant(id, spec_constant_bytes(value), stage); },
+            py::arg("id"),
+            py::arg("value"),
+            py::arg("stage"))
         .def(
             "topology",
             [](GraphicsPipelineBuilder& self, Topology topology) -> GraphicsPipelineBuilder&
@@ -1102,6 +1224,13 @@ PYBIND11_MODULE(_core, m)
             "texture",
             [](GraphicsPipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set)
                 -> GraphicsPipelineBuilder& { return self.texture(binding, stage, set); },
+            py::arg("binding"),
+            py::arg("stage"),
+            py::arg("set"))
+        .def(
+            "storage_image",
+            [](GraphicsPipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set)
+                -> GraphicsPipelineBuilder& { return self.storage_image(binding, stage, set); },
             py::arg("binding"),
             py::arg("stage"),
             py::arg("set"))
@@ -1158,6 +1287,12 @@ PYBIND11_MODULE(_core, m)
             [](ComputePipelineBuilder& self, uint32_t size) -> ComputePipelineBuilder&
             { return self.push_constant(size); },
             py::arg("size"))
+        .def(
+            "constant",
+            [](ComputePipelineBuilder& self, std::uint32_t id, const py::object& value) -> ComputePipelineBuilder&
+            { return self.constant(id, spec_constant_bytes(value)); },
+            py::arg("id"),
+            py::arg("value"))
         .def(
             "name",
             [](ComputePipelineBuilder& self, std::string name) -> ComputePipelineBuilder&
@@ -1244,17 +1379,19 @@ PYBIND11_MODULE(_core, m)
             [](std::shared_ptr<CommandBuffer> self,
                std::shared_ptr<RenderTarget> target,
                const py::object& clear_color,
-               float clear_depth)
+               float clear_depth,
+               std::uint32_t clear_stencil)
             {
                 require_same_context(self->owner(), target->owner(), "begin_rendering");
                 auto clears = parse_clear_colors(clear_color);
                 require_preservable(*target, !clears.has_value(), "begin_rendering");
-                self->begin_rendering(std::move(target), clears, clear_depth);
+                self->begin_rendering(std::move(target), clears, clear_depth, clear_stencil);
                 return self;
             },
             py::arg("target"),
             py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f),
-            py::arg("clear_depth") = 1.0f)
+            py::arg("clear_depth") = 1.0f,
+            py::arg("clear_stencil") = 0)
         .def(
             "end_rendering",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target)
@@ -1271,16 +1408,19 @@ PYBIND11_MODULE(_core, m)
             [](std::shared_ptr<CommandBuffer> self,
                std::shared_ptr<RenderTarget> target,
                const py::object& clear_color,
-               float clear_depth)
+               float clear_depth,
+               std::uint32_t clear_stencil)
             {
                 require_same_context(self->owner(), target->owner(), "rendering");
                 auto clears = parse_clear_colors(clear_color);
                 require_preservable(*target, !clears.has_value(), "rendering");
-                return RenderingScope{std::move(self), std::move(target), std::move(clears), clear_depth};
+                return RenderingScope{
+                    std::move(self), std::move(target), std::move(clears), clear_depth, clear_stencil};
             },
             py::arg("target"),
             py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f),
-            py::arg("clear_depth") = 1.0f)
+            py::arg("clear_depth") = 1.0f,
+            py::arg("clear_stencil") = 0)
         // GPU timer: records the opening timestamp and returns a Timer handle.
         // Stop it with t.stop() or a `with` block; read it back with t.ms.
         .def(
@@ -1330,13 +1470,14 @@ PYBIND11_MODULE(_core, m)
             py::arg("pipeline"))
         .def(
             "bind_vertex_buffer",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer)
+            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, std::uint32_t binding)
             {
                 require_same_context(self->owner(), buffer->owner(), "bind_vertex_buffer");
-                self->bind_vertex_buffer(std::move(buffer));
+                self->bind_vertex_buffer(std::move(buffer), binding);
                 return self;
             },
-            py::arg("buffer"))
+            py::arg("buffer"),
+            py::arg("binding") = 0)
         .def(
             "bind_index_buffer",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer)
@@ -1348,37 +1489,28 @@ PYBIND11_MODULE(_core, m)
             py::arg("buffer"))
         .def(
             "draw",
-            [](std::shared_ptr<CommandBuffer> self, uint32_t vertex_count)
+            [](std::shared_ptr<CommandBuffer> self, uint32_t vertex_count, uint32_t instances)
             {
-                self->draw(vertex_count);
+                self->draw(vertex_count, instances);
                 return self;
             },
-            py::arg("vertex_count"))
+            py::arg("vertex_count"),
+            py::arg("instances") = 1)
         .def(
             "draw_indexed",
-            [](std::shared_ptr<CommandBuffer> self, uint32_t index_count, uint32_t first_index, int32_t vertex_offset)
-            {
-                self->draw_indexed(index_count, first_index, vertex_offset);
-                return self;
-            },
-            py::arg("index_count"),
-            py::arg("first_index") = 0,
-            py::arg("vertex_offset") = 0)
-        .def(
-            "draw_indexed_instanced",
             [](std::shared_ptr<CommandBuffer> self,
                uint32_t index_count,
-               uint32_t instance_count,
                uint32_t first_index,
-               int32_t vertex_offset)
+               int32_t vertex_offset,
+               uint32_t instances)
             {
-                self->draw_indexed_instanced(index_count, instance_count, first_index, vertex_offset);
+                self->draw_indexed(index_count, first_index, vertex_offset, instances);
                 return self;
             },
             py::arg("index_count"),
-            py::arg("instance_count"),
             py::arg("first_index") = 0,
-            py::arg("vertex_offset") = 0)
+            py::arg("vertex_offset") = 0,
+            py::arg("instances") = 1)
         .def(
             "dispatch",
             [](std::shared_ptr<CommandBuffer> self,
@@ -1428,6 +1560,38 @@ PYBIND11_MODULE(_core, m)
             py::arg("image"),
             py::kw_only(),
             py::arg("src") = Access::SHADER_READ)
+        .def(
+            "copy_image",
+            [](std::shared_ptr<CommandBuffer> self,
+               std::shared_ptr<Image> src,
+               std::shared_ptr<Image> dst,
+               Access src_access)
+            {
+                require_same_context(self->owner(), src->owner(), "copy_image");
+                require_same_context(self->owner(), dst->owner(), "copy_image");
+                unwrap(self->copy_image(std::move(src), std::move(dst), src_access), nullptr);
+                return self;
+            },
+            py::arg("src"),
+            py::arg("dst"),
+            py::kw_only(),
+            py::arg("src_access") = Access::SHADER_READ)
+        .def(
+            "clear_image",
+            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Image> image, const py::object& color)
+            {
+                require_same_context(self->owner(), image->owner(), "clear_image");
+                std::array<float, 4> rgba{0.0f, 0.0f, 0.0f, 1.0f};
+                py::sequence seq = py::cast<py::sequence>(color);
+                for (std::size_t i = 0; i < 4 && i < py::len(seq); ++i)
+                {
+                    rgba[i] = py::cast<float>(seq[i]);
+                }
+                unwrap(self->clear_image(std::move(image), rgba), nullptr);
+                return self;
+            },
+            py::arg("image"),
+            py::arg("color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f))
         // No stage argument: the Pipeline already records which stages its push
         // constant range covers, so repeating it could only ever be wrong.
         .def(
@@ -1465,7 +1629,7 @@ PYBIND11_MODULE(_core, m)
             "__enter__",
             [](RenderingScope& self)
             {
-                self.cmd->begin_rendering(self.target, self.clear_color, self.clear_depth);
+                self.cmd->begin_rendering(self.target, self.clear_color, self.clear_depth, self.clear_stencil);
                 return self.cmd;
             })
         .def(
@@ -1685,6 +1849,25 @@ PYBIND11_MODULE(_core, m)
         .def("supports", &Context::supports, py::arg("feature"))
         .def("supports_multiview", &Context::supports_multiview)
         .def("max_samples", &Context::max_samples)
+        // Blocking, so the GIL goes: another thread must be able to keep running
+        // Python while this one waits on the device.
+        .def(
+            "wait_idle",
+            [](Context& self)
+            {
+                {
+                    py::gil_scoped_release release;
+                    auto r = self.wait_idle();
+                    if (!r)
+                    {
+                        // Back under the GIL before raising — raise_error builds a
+                        // Python object, and doing that with the GIL released is an
+                        // access violation rather than an exception.
+                        py::gil_scoped_acquire acquire;
+                        raise_error(r.error());
+                    }
+                }
+            })
         .def_property_readonly("device_name", &Context::device_name)
         .def_property_readonly(
             "api_version", [](const Context& self) { return api_version_string(self.api_version()); })
@@ -2087,19 +2270,24 @@ PYBIND11_MODULE(_core, m)
                AddressMode address_mode,
                bool anisotropy,
                std::optional<CompareOp> compare,
+               BorderColor border_color,
+               float mip_lod_bias,
                const std::string& name) -> py::object
             {
                 // Cached: identical descriptions return the identical object.
                 // Which is why name= accumulates rather than replacing — see
                 // Sampler::add_debug_name.
                 return py::cast(unwrap(
-                    self.get_sampler(SamplerDesc{filter, address_mode, anisotropy, compare}, name),
+                    self.get_sampler(
+                        SamplerDesc{filter, address_mode, anisotropy, compare, border_color, mip_lod_bias}, name),
                     self.logger().get()));
             },
             py::arg("filter") = Filter::LINEAR,
             py::arg("address_mode") = AddressMode::REPEAT,
             py::arg("anisotropy") = true,
             py::arg("compare") = py::none(),
+            py::arg("border_color") = BorderColor::OPAQUE_BLACK,
+            py::arg("mip_lod_bias") = 0.0f,
             py::arg("name") = "")
         .def(
             "create_descriptor_pool",
@@ -2276,21 +2464,29 @@ PYBIND11_MODULE(_core, m)
     py::class_<SwapchainRenderer, RenderTarget, std::shared_ptr<SwapchainRenderer>>(m, "SwapchainRenderer")
         .def(
             py::init(
-                [](Window& window, std::shared_ptr<Context> context, PresentMode present_mode, std::uint32_t samples)
+                [](Window& window,
+                   std::shared_ptr<Context> context,
+                   PresentMode present_mode,
+                   std::uint32_t samples,
+                   bool stencil)
                 {
                     auto sp = window.get_surface_provider();
                     return std::shared_ptr<SwapchainRenderer>(unwrap(
-                        SwapchainRenderer::create(context, std::move(sp), present_mode, samples),
+                        SwapchainRenderer::create(context, std::move(sp), present_mode, samples, stencil),
                         context->logger().get()));
                 }),
             py::arg("window"),
             py::arg("context"),
             py::arg("present_mode") = PresentMode::MAILBOX,
-            py::arg("samples") = 1)
+            py::arg("samples") = 1,
+            py::arg("stencil") = false)
         .def(
             py::init(
-                [](uint64_t hwnd, std::shared_ptr<Context> context, PresentMode present_mode, std::uint32_t samples)
-                    -> std::shared_ptr<SwapchainRenderer>
+                [](uint64_t hwnd,
+                   std::shared_ptr<Context> context,
+                   PresentMode present_mode,
+                   std::uint32_t samples,
+                   bool stencil) -> std::shared_ptr<SwapchainRenderer>
                 {
 #ifdef _WIN32
                     SurfaceProvider sp;
@@ -2349,7 +2545,7 @@ PYBIND11_MODULE(_core, m)
                     };
 
                     return std::shared_ptr<SwapchainRenderer>(unwrap(
-                        SwapchainRenderer::create(context, std::move(sp), present_mode, samples),
+                        SwapchainRenderer::create(context, std::move(sp), present_mode, samples, stencil),
                         context->logger().get()));
 #else
             raise_error(err_window("win32_hwnd constructor is only supported on Windows"));
@@ -2358,7 +2554,8 @@ PYBIND11_MODULE(_core, m)
             py::arg("win32_hwnd"),
             py::arg("context"),
             py::arg("present_mode") = PresentMode::MAILBOX,
-            py::arg("samples") = 1)
+            py::arg("samples") = 1,
+            py::arg("stencil") = false)
         .def_property_readonly("present_mode", &SwapchainRenderer::present_mode)
         // A verb, not a settable property, because the request is a preference:
         // read present_mode back to see what the driver actually gave you.

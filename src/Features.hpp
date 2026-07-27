@@ -28,6 +28,7 @@ enum class Feature
     SAMPLE_RATE_SHADING,   // sampleRateShading
     MULTI_DRAW_INDIRECT,   // multiDrawIndirect
     SHADER_FLOAT64,        // shaderFloat64
+    INDEPENDENT_BLEND,     // independentBlend — a different blend state per MRT attachment
 };
 
 // Every Feature above maps to a plain VkPhysicalDeviceFeatures boolean, so the
@@ -42,7 +43,7 @@ struct FeatureInfo
     VkBool32 VkPhysicalDeviceFeatures::* bit;
 };
 
-inline constexpr std::array<FeatureInfo, 7> kFeatureTable{{
+inline constexpr std::array<FeatureInfo, 8> kFeatureTable{{
     {Feature::ANISOTROPIC_FILTERING, "ANISOTROPIC_FILTERING", &VkPhysicalDeviceFeatures::samplerAnisotropy},
     {Feature::WIREFRAME, "WIREFRAME", &VkPhysicalDeviceFeatures::fillModeNonSolid},
     {Feature::WIDE_LINES, "WIDE_LINES", &VkPhysicalDeviceFeatures::wideLines},
@@ -50,6 +51,7 @@ inline constexpr std::array<FeatureInfo, 7> kFeatureTable{{
     {Feature::SAMPLE_RATE_SHADING, "SAMPLE_RATE_SHADING", &VkPhysicalDeviceFeatures::sampleRateShading},
     {Feature::MULTI_DRAW_INDIRECT, "MULTI_DRAW_INDIRECT", &VkPhysicalDeviceFeatures::multiDrawIndirect},
     {Feature::SHADER_FLOAT64, "SHADER_FLOAT64", &VkPhysicalDeviceFeatures::shaderFloat64},
+    {Feature::INDEPENDENT_BLEND, "INDEPENDENT_BLEND", &VkPhysicalDeviceFeatures::independentBlend},
 }};
 
 inline constexpr const FeatureInfo& feature_info(Feature feature)

@@ -2,6 +2,7 @@
 #include <volk.h>
 #include <vk_mem_alloc.h>
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -18,6 +19,7 @@
 #include "Error.hpp"
 #include "Format.hpp"
 #include "ImmediateSubmit.hpp"
+#include "ResourceTracker.hpp"
 
 // Layout transition helper shared by uploads, mip generation and readback.
 // Formerly a private of Texture; RenderTarget grew its own copy, which is
@@ -55,6 +57,17 @@ inline void record_image_transition(
             .layerCount = layerCount}};
     vk.vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
+
+// Forward declaration: the copy/clear recorders below take Images, and they live
+// here so that cmd.copy_image() records one call instead of thirty lines.
+class Image;
+void record_image_copy(
+    const VolkDeviceTable& vk,
+    VkCommandBuffer cmd,
+    Image& src,
+    Image& dst,
+    VkImageLayout src_layout);
+void record_image_clear(const VolkDeviceTable& vk, VkCommandBuffer cmd, Image& image, std::array<float, 4> color);
 
 // A GPU image: VkImage + view + format. Nothing else — the sampler it used to
 // be fused with lives in the Context's cache, and how the image is *used*
@@ -140,6 +153,20 @@ public:
     Format format() const
     {
         return format_;
+    }
+    // The VkFormat this image was actually created with. Equal to
+    // format_info(format()).vk for every format except DEPTH_STENCIL, which the
+    // device resolves — so attachment infos, views and pipeline formats read it
+    // from the image rather than re-deriving it and disagreeing.
+    VkFormat vk_format() const
+    {
+        return context_ ? context_->vk_format(format_) : format_info(format_).vk;
+    }
+    // Colour, depth, or depth+stencil. One source for the views, the barriers
+    // and the copies.
+    VkImageAspectFlags aspect() const
+    {
+        return aspect_mask_for(vk_format());
     }
     std::uint32_t width() const
     {
@@ -300,7 +327,7 @@ public:
     static VkImageUsageFlags usage_for(Context& context, Format format)
     {
         VkFormatProperties props{};
-        vkGetPhysicalDeviceFormatProperties(context.physical_device(), format_info(format).vk, &props);
+        vkGetPhysicalDeviceFormatProperties(context.physical_device(), context.vk_format(format), &props);
         const VkFormatFeatureFlags feat = props.optimalTilingFeatures;
 
         VkImageUsageFlags usage = 0;
@@ -319,6 +346,32 @@ public:
         return usage;
     }
 
+    // The usage an image of this format and sample count actually gets.
+    //
+    // Two narrowings on top of "everything the device supports". A multisampled
+    // attachment is only rendered into and resolved out, so it keeps just the
+    // attachment usage: STORAGE on a multisample image needs a feature we do not
+    // enable, and SAMPLED/TRANSFER are dead weight (you sample the resolve).
+    //
+    // A combined depth/stencil image drops SAMPLED and STORAGE for a harder
+    // reason: its view carries both aspects, and Vulkan forbids sampling
+    // through such a view. Keeping the usage would make every DEPTH_STENCIL
+    // view illegal at creation, which is a validation error at the target's
+    // constructor rather than at the sample that was never going to work.
+    static VkImageUsageFlags usage_for_image(Context& context, Format format, VkSampleCountFlagBits samples)
+    {
+        VkImageUsageFlags usage = usage_for(context, format);
+        if (samples != VK_SAMPLE_COUNT_1_BIT)
+        {
+            return usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+        }
+        if (has_stencil(context.vk_format(format)))
+        {
+            usage &= ~static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+        }
+        return usage;
+    }
+
     // Mip generation needs to blit and to linearly filter the format.
     static bool can_generate_mips(Context& context, Format format)
     {
@@ -327,7 +380,7 @@ public:
             return false;
         }
         VkFormatProperties props{};
-        vkGetPhysicalDeviceFormatProperties(context.physical_device(), format_info(format).vk, &props);
+        vkGetPhysicalDeviceFormatProperties(context.physical_device(), context.vk_format(format), &props);
         constexpr VkFormatFeatureFlags needed = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
                                                 VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
         return (props.optimalTilingFeatures & needed) == needed;
@@ -376,7 +429,12 @@ public:
                 "it cannot have mipmaps or be a cubemap"));
         }
         const FormatInfo info = format_info(format);
-        const VkImageAspectFlags aspect = info.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+        const VkFormat vk_fmt = context.vk_format(format);
+        if (vk_fmt == VK_FORMAT_UNDEFINED)
+        {
+            return std::unexpected(err_resource(std::format("This device supports no {} format", format_name(format))));
+        }
+        const VkImageAspectFlags aspect = aspect_mask_for(vk_fmt);
         const VkImageViewType view_type =
             cube ? VK_IMAGE_VIEW_TYPE_CUBE : (array_layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D);
 
@@ -385,7 +443,7 @@ public:
             .pNext = nullptr,
             .flags = static_cast<VkImageCreateFlags>(cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0),
             .imageType = VK_IMAGE_TYPE_2D,
-            .format = info.vk,
+            .format = vk_fmt,
             .extent = {width, height, 1},
             .mipLevels = mip_levels,
             .arrayLayers = array_layers,
@@ -395,10 +453,7 @@ public:
             // it keeps just the attachment usage: STORAGE on a multisample image
             // needs a feature we don't enable, and SAMPLED/TRANSFER are dead weight
             // (you sample the single-sample resolve, never this).
-            .usage = samples == VK_SAMPLE_COUNT_1_BIT
-                         ? usage_for(context, format)
-                         : (usage_for(context, format) &
-                            (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)),
+            .usage = usage_for_image(context, format, samples),
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = nullptr,
@@ -423,7 +478,7 @@ public:
             .flags = 0,
             .image = image,
             .viewType = view_type,
-            .format = info.vk,
+            .format = vk_fmt,
             .components = {},
             .subresourceRange = {aspect, 0, mip_levels, 0, array_layers}};
 
@@ -558,8 +613,21 @@ public:
         }
 
         const FormatInfo info = format_info(format_);
+        // A packed or combined format has no single numpy dtype: one pixel of
+        // DEPTH_STENCIL is depth AND stencil, one pixel of R11G11B10F is three
+        // channels sharing 32 bits. Refuse here with the reason rather than hand
+        // back bytes that mean nothing.
+        if (info.numpy_dtype[0] == '\0')
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "read() is not available for {}: the format packs several values into one "
+                    "texel, so there is no array shape that describes it. Render it into an "
+                    "RGBA target, or use a shader to unpack it.",
+                    format_name(format_))));
+        }
         const VkDeviceSize size = static_cast<VkDeviceSize>(width_) * height_ * info.bytes_per_pixel * layers;
-        const VkImageAspectFlags aspect = info.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+        const VkImageAspectFlags aspect = aspect_mask_for(vk_format());
 
         VkBufferCreateInfo bufferInfo{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -1085,3 +1153,130 @@ private:
     std::condition_variable upload_cv_;
     std::string upload_error_;
 };
+
+// Copy the whole of `src` into `dst` — same size, same format, every layer of
+// mip 0. Both ends are transitioned around the transfer and left in
+// SHADER_READ_ONLY, which is the layout a copy exists to produce. `src_layout`
+// is where the source currently is (see cmd.copy_image).
+//
+// Only mip 0 is copied: the destination's other levels, if it has any, are
+// regenerated with cmd.generate_mipmaps. Copying a chain would be N regions for
+// a case that has not come up.
+inline void record_image_copy(
+    const VolkDeviceTable& vk,
+    VkCommandBuffer cmd,
+    Image& src,
+    Image& dst,
+    VkImageLayout src_layout)
+{
+    const std::uint32_t layers = src.array_layers();
+    record_image_transition(
+        vk,
+        cmd,
+        src.vk_image(),
+        src_layout,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT,
+        kAllShaderStages,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        src.aspect(),
+        0,
+        1,
+        layers);
+    // The destination is overwritten in full, so its old contents are discarded
+    // rather than waited for — UNDEFINED is legal from any layout.
+    record_image_transition(
+        vk,
+        cmd,
+        dst.vk_image(),
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        0,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        kAllShaderStages,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst.aspect(),
+        0,
+        1,
+        layers);
+
+    VkImageCopy region{
+        .srcSubresource = {.aspectMask = src.aspect(), .mipLevel = 0, .baseArrayLayer = 0, .layerCount = layers},
+        .srcOffset = {0, 0, 0},
+        .dstSubresource = {.aspectMask = dst.aspect(), .mipLevel = 0, .baseArrayLayer = 0, .layerCount = layers},
+        .dstOffset = {0, 0, 0},
+        .extent = {src.width(), src.height(), 1}};
+    vk.vkCmdCopyImage(
+        cmd,
+        src.vk_image(),
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        dst.vk_image(),
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &region);
+
+    for (Image* image : {&src, &dst})
+    {
+        record_image_transition(
+            vk,
+            cmd,
+            image->vk_image(),
+            image == &src ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            image == &src ? VK_ACCESS_TRANSFER_READ_BIT : VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            kAllShaderStages,
+            image->aspect(),
+            0,
+            1,
+            layers);
+    }
+}
+
+// Fill every layer of mip 0 with one colour and leave the image sampleable.
+// The contents are discarded on entry for the same reason a copy's destination
+// is: the clear covers all of them.
+inline void record_image_clear(const VolkDeviceTable& vk, VkCommandBuffer cmd, Image& image, std::array<float, 4> color)
+{
+    const std::uint32_t layers = image.array_layers();
+    record_image_transition(
+        vk,
+        cmd,
+        image.vk_image(),
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        0,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        kAllShaderStages,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        image.aspect(),
+        0,
+        image.mip_levels(),
+        layers);
+
+    const VkClearColorValue value{{color[0], color[1], color[2], color[3]}};
+    VkImageSubresourceRange range{
+        .aspectMask = image.aspect(),
+        .baseMipLevel = 0,
+        .levelCount = image.mip_levels(),
+        .baseArrayLayer = 0,
+        .layerCount = layers};
+    vk.vkCmdClearColorImage(cmd, image.vk_image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &value, 1, &range);
+
+    record_image_transition(
+        vk,
+        cmd,
+        image.vk_image(),
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        kAllShaderStages,
+        image.aspect(),
+        0,
+        image.mip_levels(),
+        layers);
+}

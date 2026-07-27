@@ -103,6 +103,8 @@ class Feature(IntEnum):
     SAMPLE_RATE_SHADING = 4
     MULTI_DRAW_INDIRECT = 5
     SHADER_FLOAT64 = 6
+    #: A different blend state or colour mask per MRT attachment.
+    INDEPENDENT_BLEND = 7
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -129,12 +131,23 @@ class VertexFormat(IntEnum):
     FLOAT2 = 0
     FLOAT3 = 1
     FLOAT4 = 2
+    FLOAT = 3
+    #: Four bytes read as 0..1 floats — vertex colours, skin weights.
+    UBYTE4_NORM = 4
+    #: An unsigned integer attribute (`in uint`), e.g. a material index.
+    UINT = 5
 
 class Topology(IntEnum):
-    """Primitive topology for graphics pipelines. TRIANGLE_LIST is the default."""
+    """Primitive topology for graphics pipelines. TRIANGLE_LIST is the default.
+
+    The strips extend the previous primitive with each new vertex. There is no
+    restart index: one strip per draw.
+    """
     TRIANGLE_LIST = 0
     POINT_LIST = 1
     LINE_LIST = 2
+    TRIANGLE_STRIP = 3
+    LINE_STRIP = 4
 
 class BlendMode(IntEnum):
     """How a fragment combines with what the attachment already holds.
@@ -153,6 +166,19 @@ class PolygonMode(IntEnum):
     FILL = 0
     LINE = 1
     POINT = 2
+
+class StencilOp(IntEnum):
+    """What happens to a stencil value when a fragment arrives, 1:1 with
+    VkStencilOp. REPLACE writes the reference value, which is how a mask is
+    painted."""
+    KEEP = 0
+    ZERO = 1
+    REPLACE = 2
+    INCREMENT_CLAMP = 3
+    DECREMENT_CLAMP = 4
+    INVERT = 5
+    INCREMENT_WRAP = 6
+    DECREMENT_WRAP = 7
 
 class Access(IntEnum):
     """What a command does to a buffer — the vocabulary of cmd.barrier()
@@ -179,6 +205,14 @@ class Format(IntEnum):
     R32F = 7
     RGBA32F = 8
     D32F = 9
+    #: An integer target: an id buffer for picking. No filtering, no conversion.
+    R32_UINT = 10
+    #: Packed HDR colour in 4 bytes. A cheap bloom / light-accumulation target.
+    #: Not readable with Image.read() — three channels share 32 bits.
+    R11G11B10F = 11
+    #: Depth AND stencil. The exact VkFormat is chosen per device. Attachment
+    #: only: it cannot be sampled or read back.
+    DEPTH_STENCIL = 12
 
 class Filter(IntEnum):
     LINEAR = 0
@@ -188,6 +222,14 @@ class AddressMode(IntEnum):
     REPEAT = 0
     CLAMP = 1
     MIRROR = 2
+    #: Reads the border colour outside 0..1 — the shadow-map fix, where CLAMP
+    #: smears the edge texel across everything past the map.
+    CLAMP_TO_BORDER = 3
+
+class BorderColor(IntEnum):
+    """The texel a CLAMP_TO_BORDER sampler reads outside its range."""
+    OPAQUE_BLACK = 0
+    OPAQUE_WHITE = 1
 
 class CompareOp(IntEnum):
     """Comparison for compare samplers (sampler2DShadow), 1:1 with VkCompareOp.
@@ -476,6 +518,15 @@ class GraphicsPipelineBuilder:
     def vertex_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder: ...
     def fragment_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder: ...
     def vertex_format(self, formats: list[VertexFormat]) -> GraphicsPipelineBuilder: ...
+    def instance_format(self, formats: list[VertexFormat]) -> GraphicsPipelineBuilder:
+        """The attributes of a second vertex buffer, advanced once per instance.
+
+        Feed it with cmd.bind_vertex_buffer(buf, binding=1) and draw with
+        draw(n, instances=k). Locations continue after the vertex attributes: a
+        vertex_format of 3 puts the first instance attribute at location 3, and
+        a mat4 is four FLOAT4s taking four locations.
+        """
+        ...
     def depth_test(self, enable: bool, write: bool = True,
                    compare: CompareOp = CompareOp.LESS_OR_EQUAL) -> GraphicsPipelineBuilder:
         """Depth test, depth write and the compare op.
@@ -502,7 +553,54 @@ class GraphicsPipelineBuilder:
         no call at all.
         """
         ...
-    def blend(self, enable: bool, mode: BlendMode = BlendMode.ALPHA) -> GraphicsPipelineBuilder: ...
+    def blend(self, enable: bool, mode: BlendMode = BlendMode.ALPHA,
+              attachment: Optional[int] = None) -> GraphicsPipelineBuilder:
+        """How a fragment combines with the attachment it lands on.
+
+        attachment= narrows the setting to one colour attachment of an MRT
+        target; None (the default) sets it for all of them. Per-attachment
+        blend() and color_mask() calls merge, in either order.
+        """
+        ...
+    def color_mask(self, red: bool = True, green: bool = True, blue: bool = True,
+                   alpha: bool = True, attachment: Optional[int] = None) -> GraphicsPipelineBuilder:
+        """Which channels the pipeline writes. All four False writes no colour."""
+        ...
+    def stencil_test(self, enable: bool, compare: CompareOp = CompareOp.ALWAYS, ref: int = 0,
+                     pass_op: StencilOp = StencilOp.KEEP, fail_op: StencilOp = StencilOp.KEEP,
+                     depth_fail_op: StencilOp = StencilOp.KEEP, read_mask: int = 0xFF,
+                     write_mask: int = 0xFF) -> GraphicsPipelineBuilder:
+        """The stencil test. Needs a target with depth=Format.DEPTH_STENCIL.
+
+        An outline is two passes: the first writes the silhouette with
+        compare=ALWAYS, ref=1, pass_op=REPLACE; the second draws a scaled copy
+        with compare=NOT_EQUAL, ref=1 and depth_test(False), so only the pixels
+        around the object survive.
+
+        Front and back faces share the state.
+        """
+        ...
+    def depth_clamp(self, enable: bool = True) -> GraphicsPipelineBuilder:
+        """Clamp depth to the view volume instead of clipping the primitive —
+        a shadow caster between the light and the near plane still casts.
+        Needs Feature.DEPTH_CLAMP."""
+        ...
+    def alpha_to_coverage(self, enable: bool = True) -> GraphicsPipelineBuilder:
+        """Turn a fragment's alpha into an MSAA coverage mask: antialiased
+        cutout foliage and hair with no sorting. No effect on a target with
+        samples=1."""
+        ...
+    def constant(self, id: int, value: bool | int | float,
+                 stage: ShaderStage) -> GraphicsPipelineBuilder:
+        """A specialization constant, baked into the SPIR-V at build time.
+
+        The driver folds it, so a constant loop count unrolls and a constant
+        False deletes its branch. One compiled shader can therefore serve
+        several pipelines that differ by a number — quality levels, a kernel
+        radius. `id` is the constant_id in the shader. The stage is needed
+        because the two stages are separate modules.
+        """
+        ...
     def topology(self, topology: Topology) -> GraphicsPipelineBuilder: ...
     def sample_shading(self, enable: bool = True, min_fraction: float = 1.0) -> GraphicsPipelineBuilder:
         """Per-sample fragment shading on an MSAA target: the fragment shader runs
@@ -516,6 +614,16 @@ class GraphicsPipelineBuilder:
     def uniform_buffer(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
     def storage_buffer(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
     def texture(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
+    def storage_image(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder:
+        """A read/write image addressed by coordinate (imageLoad/imageStore) in a
+        graphics shader.
+
+        The automatic tracker does NOT see writes through it — that needs shader
+        reflection — so a storage image written by a fragment shader and read
+        later needs cmd.barrier(image, Access.SHADER_WRITE, Access.SHADER_READ),
+        exactly like an SSBO written from graphics.
+        """
+        ...
     def name(self, name: str) -> GraphicsPipelineBuilder:
         """Debug name for the VkPipeline (validation diagnostics). No-op without
         VK_EXT_debug_utils, i.e. when validation is off."""
@@ -541,6 +649,14 @@ class ComputePipelineBuilder:
         and to SHADER_READ_ONLY before a later graphics sample."""
         ...
     def push_constant(self, size: int) -> ComputePipelineBuilder: ...
+    def constant(self, id: int, value: bool | int | float) -> ComputePipelineBuilder:
+        """A specialization constant. No stage argument — compute has one stage.
+
+        The classic use is the workgroup size: declare it with
+        `layout(local_size_x_id = 0)` and pick the number when the pipeline is
+        built.
+        """
+        ...
     def name(self, name: str) -> ComputePipelineBuilder:
         """Debug name for the VkPipeline; no-op without VK_EXT_debug_utils."""
         ...
@@ -564,7 +680,7 @@ class CommandBuffer:
 
     def begin_rendering(self, target: RenderTargetBase,
                         clear_color: Sequence[float] | Sequence[Sequence[float]] | None = (0.0, 0.0, 0.0, 1.0),
-                        clear_depth: float = 1.0) -> CommandBuffer:
+                        clear_depth: float = 1.0, clear_stencil: int = 0) -> CommandBuffer:
         """Start rendering into `target`.
 
         clear_color is either a single [r, g, b, a] applied to every attachment
@@ -581,6 +697,10 @@ class CommandBuffer:
         far plane, and 0.0 is where a reversed-depth buffer starts (the only way
         depth_test(compare=GREATER) can pass). Ignored when the pass preserves.
 
+        clear_stencil is the same for the stencil half of a Format.DEPTH_STENCIL
+        attachment, and does nothing without one. Depth and stencil load
+        together: a pass cannot preserve one and clear the other.
+
         Also emits a viewport and scissor covering the whole target, so the
         common case needs no further calls.
         """
@@ -590,7 +710,7 @@ class CommandBuffer:
 
     def rendering(self, target: RenderTargetBase,
                   clear_color: Sequence[float] | Sequence[Sequence[float]] | None = (0.0, 0.0, 0.0, 1.0),
-                  clear_depth: float = 1.0) -> RenderingScope:
+                  clear_depth: float = 1.0, clear_stencil: int = 0) -> RenderingScope:
         """The begin/end pair as a context manager:
 
             with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
@@ -609,13 +729,17 @@ class CommandBuffer:
     def set_scissor(self, x: int, y: int, width: int, height: int) -> CommandBuffer: ...
 
     def bind_pipeline(self, pipeline: Pipeline) -> CommandBuffer: ...
-    def bind_vertex_buffer(self, buffer: Buffer) -> CommandBuffer: ...
+    def bind_vertex_buffer(self, buffer: Buffer, binding: int = 0) -> CommandBuffer:
+        """Bind a vertex buffer. binding=0 feeds vertex_format (per vertex),
+        binding=1 feeds instance_format (per instance)."""
+        ...
     def bind_index_buffer(self, buffer: Buffer) -> CommandBuffer: ...
-    def draw(self, vertex_count: int) -> CommandBuffer: ...
+    def draw(self, vertex_count: int, instances: int = 1) -> CommandBuffer: ...
     def draw_indexed(self, index_count: int, first_index: int = 0,
-                     vertex_offset: int = 0) -> CommandBuffer: ...
-    def draw_indexed_instanced(self, index_count: int, instance_count: int,
-                               first_index: int = 0, vertex_offset: int = 0) -> CommandBuffer: ...
+                     vertex_offset: int = 0, instances: int = 1) -> CommandBuffer:
+        """instances= replaces draw_indexed_instanced, which was a second name
+        for one extra argument."""
+        ...
     def dispatch(self, group_count_x: int, group_count_y: int = 1,
                  group_count_z: int = 1) -> CommandBuffer: ...
 
@@ -637,6 +761,30 @@ class CommandBuffer:
         dispatch, and sample it every frame without regenerating. In auto mode
         this also updates the tracker, so mixing it with automatic uses of the
         same image in one recording is safe. Refused inside a rendering scope."""
+        ...
+
+    def copy_image(self, src: Image, dst: Image, *,
+                   src_access: Access = Access.SHADER_READ) -> CommandBuffer:
+        """Copy one image into another of the same size, format and layer count.
+
+        The history buffer a temporal effect needs: keep the last frame's result
+        to blend against this one (motion blur, a feedback trail), or ping-pong
+        two storage images. Only mip 0 is copied — call generate_mipmaps for the
+        rest.
+
+        src_access names where the SOURCE currently is: SHADER_READ for an image
+        that is sampled (the default), SHADER_WRITE for one a compute dispatch
+        just wrote. Both images end sampleable. Refused inside a rendering scope.
+        """
+        ...
+
+    def clear_image(self, image: Image,
+                    color: Sequence[float] = (0.0, 0.0, 0.0, 1.0)) -> CommandBuffer:
+        """Fill a colour image with one value, with no pipeline and no pass.
+
+        Resets an accumulation or history buffer. A depth image is refused: its
+        clear belongs to the pass that renders into it (clear_depth=).
+        """
         ...
 
     def generate_mipmaps(self, image: Image, *,
@@ -1089,10 +1237,21 @@ class Context:
         hand-authored chain (rendered per level) becomes a generated one.
         ResourceError if the source is multisampled or still has no contents."""
         ...
+    def wait_idle(self) -> None:
+        """Block until the device has finished every submit.
+
+        The frame path already waits where it must, so this is for the cases
+        outside one: timing a batch of work, or making sure nothing is in flight
+        before a measurement. Releases the GIL while it waits.
+        """
+        ...
+
     def create_sampler(self, filter: Filter = Filter.LINEAR,
                        address_mode: AddressMode = AddressMode.REPEAT,
                        anisotropy: bool = True,
                        compare: Optional[CompareOp] = None,
+                       border_color: BorderColor = BorderColor.OPAQUE_BLACK,
+                       mip_lod_bias: float = 0.0,
                        name: str = "") -> Sampler:
         """Cached: identical descriptions return the identical object.
 
@@ -1100,6 +1259,14 @@ class Context:
         return the comparison result instead of the texel, and LINEAR filtering
         becomes hardware PCF. (Linear filtering of depth formats is a format
         feature — universal on desktop GPUs, not spec-guaranteed.)
+
+        `border_color=` is read outside 0..1 with
+        `address_mode=AddressMode.CLAMP_TO_BORDER`. OPAQUE_WHITE is the
+        shadow-map answer: "nothing occludes here", instead of CLAMP smearing
+        the edge texel of the map across the rest of the scene.
+
+        `mip_lod_bias=` shifts the mip level a sample reads: negative sharpens,
+        positive blurs.
 
         `name=` labels the sampler for validation messages. Because the cache
         shares one sampler between identical descriptions, names accumulate: two
@@ -1130,13 +1297,20 @@ class SwapchainRenderer(RenderTargetBase):
     """Presents to a window. One implementation of a render target."""
 
     def __init__(self, window: Window, context: Context,
-                 present_mode: PresentMode = PresentMode.MAILBOX, samples: int = 1) -> None:
+                 present_mode: PresentMode = PresentMode.MAILBOX, samples: int = 1,
+                 stencil: bool = False) -> None:
         """samples>1 turns on windowed MSAA: rendering goes into a multisampled
         colour+depth image that resolves into the swapchain image on present.
-        Must be a power of two <= ctx.max_samples()."""
+        Must be a power of two <= ctx.max_samples().
+
+        stencil=True gives the window's depth buffer a stencil aspect, which is
+        what a masked pass (an outline, a portal) needs on screen. Without it a
+        stencil_test() pipeline can only be built against an offscreen
+        RenderTarget with depth=Format.DEPTH_STENCIL."""
         ...
     def __init__(self, win32_hwnd: int, context: Context,
-                 present_mode: PresentMode = PresentMode.MAILBOX, samples: int = 1) -> None:
+                 present_mode: PresentMode = PresentMode.MAILBOX, samples: int = 1,
+                 stencil: bool = False) -> None:
         """Attach to an existing native window (Windows only)."""
         ...
 

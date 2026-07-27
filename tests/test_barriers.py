@@ -270,13 +270,17 @@ def run_sync_case(mode):
 @pytest.mark.skipif(
     os.environ.get("BAZALT_SYNCVAL_UNSUPPORTED") == "1",
     reason="this environment's validation layer cannot report shader-access "
-           "sync hazards (verified: 1.4.313, the newest packaged for Ubuntu "
-           "noble, stays silent even with the settings file forcing "
-           "validate_sync + syncval_shader_accesses_heuristic; 1.4.350 "
-           "reports them — the messenger itself was proven alive)")
+           "sync hazards (verified: 1.4.313, still the newest LunarG packages "
+           "for Ubuntu noble, stays silent even with the settings file forcing "
+           "validate_sync + syncval_shader_accesses_heuristic; 1.4.350 reports "
+           "them — the messenger itself was proven alive)")
 def test_missing_barrier_in_manual_mode_trips_sync_validation(ctx):
     """If this test fails, manual mode is not really manual (or sync validation
-    is not really on) — either way the mode would be a lie."""
+    is not really on) — either way the mode would be a lie.
+
+    CI computes the skip from the installed layer version rather than declaring
+    one, so this starts running there by itself when a new enough package
+    appears (tech debt #4)."""
     hazards = run_sync_case("nobarrier")
     assert hazards
 

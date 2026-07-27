@@ -7,6 +7,7 @@
 #include <expected>
 #include <array>
 #include <map>
+#include <optional>
 #include <ranges>
 #include <unordered_map>
 #include <utility>
@@ -20,12 +21,52 @@
 
 // Renamed from Format: this describes a vertex attribute, and `Format` is needed
 // for pixel formats in 0.5.
+// New entries are APPENDED: a pybind enum's underlying values are part of the
+// API the moment somebody pickles or stores one.
 enum class VertexFormat
 {
     FLOAT2,
     FLOAT3,
-    FLOAT4
+    FLOAT4,
+    FLOAT,
+    // Four bytes read as 0..1 floats — vertex colours and skin weights, which
+    // are a quarter of the size of the FLOAT4 they used to need.
+    UBYTE4_NORM,
+    // An unsigned integer attribute (`in uint` in GLSL, no conversion). A
+    // material index or an object id carried per instance.
+    UINT,
 };
+
+// The Vulkan format and the byte size of one attribute. One table instead of a
+// switch per consumer: the offsets, the stride and the attribute description all
+// have to agree, and they used to be derived in one place by accident rather
+// than by construction.
+struct VertexFormatInfo
+{
+    VkFormat vk;
+    std::uint32_t size;
+};
+
+inline constexpr VertexFormatInfo vertex_format_info(VertexFormat format)
+{
+    switch (format)
+    {
+        case VertexFormat::FLOAT2:
+            return {VK_FORMAT_R32G32_SFLOAT, 8};
+        case VertexFormat::FLOAT3:
+            return {VK_FORMAT_R32G32B32_SFLOAT, 12};
+        case VertexFormat::FLOAT4:
+            return {VK_FORMAT_R32G32B32A32_SFLOAT, 16};
+        case VertexFormat::FLOAT:
+            return {VK_FORMAT_R32_SFLOAT, 4};
+        case VertexFormat::UBYTE4_NORM:
+            return {VK_FORMAT_R8G8B8A8_UNORM, 4};
+        case VertexFormat::UINT:
+            return {VK_FORMAT_R32_UINT, 4};
+    }
+    // Not std::unreachable(): pybind enums accept arbitrary ints.
+    return {VK_FORMAT_R32G32B32_SFLOAT, 12};
+}
 
 enum class CullMode
 {
@@ -45,7 +86,13 @@ enum class Topology
 {
     TRIANGLE_LIST,
     POINT_LIST,
-    LINE_LIST
+    LINE_LIST,
+    // Strips: each new vertex extends the primitive instead of starting one, so
+    // a quad is 4 vertices instead of 6. primitiveRestartEnable stays FALSE —
+    // one strip per draw. A restart index is a separate decision, and it would
+    // change what an index buffer's largest value means.
+    TRIANGLE_STRIP,
+    LINE_STRIP,
 };
 
 // How a fragment's colour combines with what the attachment already holds.
@@ -62,6 +109,46 @@ enum class BlendMode
     // what a composited texture or a text atlas wants.
     PREMULTIPLIED
 };
+
+// What happens to a stencil value when a fragment arrives. 1:1 with VkStencilOp.
+// The compare op is CompareOp, shared with the depth test and the compare
+// samplers rather than declared a third time.
+enum class StencilOp
+{
+    KEEP,
+    ZERO,
+    REPLACE, // write the reference value — how a mask is painted
+    INCREMENT_CLAMP,
+    DECREMENT_CLAMP,
+    INVERT,
+    INCREMENT_WRAP,
+    DECREMENT_WRAP,
+};
+
+inline constexpr VkStencilOp to_vk(StencilOp op)
+{
+    switch (op)
+    {
+        case StencilOp::KEEP:
+            return VK_STENCIL_OP_KEEP;
+        case StencilOp::ZERO:
+            return VK_STENCIL_OP_ZERO;
+        case StencilOp::REPLACE:
+            return VK_STENCIL_OP_REPLACE;
+        case StencilOp::INCREMENT_CLAMP:
+            return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+        case StencilOp::DECREMENT_CLAMP:
+            return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+        case StencilOp::INVERT:
+            return VK_STENCIL_OP_INVERT;
+        case StencilOp::INCREMENT_WRAP:
+            return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+        case StencilOp::DECREMENT_WRAP:
+            return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+    }
+    // Not std::unreachable(): pybind enums accept arbitrary ints.
+    return VK_STENCIL_OP_KEEP;
+}
 
 // Fill triangles, or draw only their edges/vertices. LINE is the wireframe debug
 // view. All three are core Vulkan with no feature bit; only a lineWidth other
@@ -97,10 +184,124 @@ inline constexpr VkPrimitiveTopology to_vk(Topology topology)
             return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
         case Topology::LINE_LIST:
             return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+        case Topology::TRIANGLE_STRIP:
+            return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+        case Topology::LINE_STRIP:
+            return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
     }
     // Not std::unreachable(): pybind enums accept arbitrary ints.
     return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 }
+
+// The stencil test as one value, because it is one question with several parts:
+// eight separate builder fields would let half of them be set and the rest not.
+struct StencilState
+{
+    bool enable = false;
+    CompareOp compare = CompareOp::ALWAYS;
+    std::uint32_t reference = 0;
+    StencilOp pass_op = StencilOp::KEEP;
+    StencilOp fail_op = StencilOp::KEEP;
+    StencilOp depth_fail_op = StencilOp::KEEP;
+    std::uint32_t read_mask = 0xFF;
+    std::uint32_t write_mask = 0xFF;
+
+    VkStencilOpState to_vk_state() const
+    {
+        return {
+            .failOp = to_vk(fail_op),
+            .passOp = to_vk(pass_op),
+            .depthFailOp = to_vk(depth_fail_op),
+            .compareOp = to_vk(compare),
+            .compareMask = read_mask,
+            .writeMask = write_mask,
+            .reference = reference};
+    }
+};
+
+// The colour-attachment state: how a fragment combines with what is already
+// there, and which channels it may touch at all.
+struct BlendState
+{
+    bool enable = false;
+    BlendMode mode = BlendMode::ALPHA;
+    VkColorComponentFlags write_mask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                                       VK_COLOR_COMPONENT_A_BIT;
+
+    bool operator==(const BlendState&) const = default;
+};
+
+// One attachment's deviation from the pipeline-wide BlendState. Every field is
+// optional so that two calls naming the same attachment merge instead of
+// overwriting each other.
+struct BlendOverride
+{
+    std::optional<bool> enable;
+    std::optional<BlendMode> mode;
+    std::optional<VkColorComponentFlags> write_mask;
+
+    BlendState applied_to(BlendState base) const
+    {
+        base.enable = enable.value_or(base.enable);
+        base.mode = mode.value_or(base.mode);
+        base.write_mask = write_mask.value_or(base.write_mask);
+        return base;
+    }
+};
+
+// A specialization constant: a value baked into the SPIR-V at pipeline creation
+// instead of read from a buffer at draw time. The driver folds it, so a
+// constant loop count unrolls and a constant `false` deletes the branch behind
+// it. One shader therefore serves several pipelines that differ by a number —
+// quality levels, a workgroup size, a kernel radius.
+//
+// int/float/bool in one variant rather than three overloads, because SPIR-V
+// stores all three as four bytes and only the interpretation differs. bool must
+// be checked before int in the binding: Python's bool IS an int.
+struct SpecConstant
+{
+    std::uint32_t id = 0;
+    // The four bytes handed to Vulkan. Kept pre-encoded so the value's type is
+    // resolved once, at the call, and never re-guessed at pipeline creation.
+    std::uint32_t bytes = 0;
+};
+
+// Builds the VkSpecializationInfo for one stage. The data block and the map
+// entries must outlive vkCreate*Pipelines, so this returns them together and the
+// caller keeps the whole thing alive across the call — the classic trap here is
+// returning a VkSpecializationInfo whose pointers dangle immediately.
+struct SpecializationBlock
+{
+    std::vector<VkSpecializationMapEntry> entries;
+    std::vector<std::uint32_t> data;
+    VkSpecializationInfo info{};
+
+    explicit SpecializationBlock(const std::vector<SpecConstant>& constants)
+    {
+        entries.reserve(constants.size());
+        data.reserve(constants.size());
+        for (const SpecConstant& c : constants)
+        {
+            entries.push_back(
+                {.constantID = c.id,
+                 .offset = static_cast<std::uint32_t>(data.size() * sizeof(std::uint32_t)),
+                 .size = sizeof(std::uint32_t)});
+            data.push_back(c.bytes);
+        }
+        info = {
+            .mapEntryCount = static_cast<std::uint32_t>(entries.size()),
+            .pMapEntries = entries.data(),
+            .dataSize = data.size() * sizeof(std::uint32_t),
+            .pData = data.data()};
+    }
+
+    // Null when nothing was specialized, which is what pSpecializationInfo
+    // wants — an empty-but-present block is legal and pointless.
+    const VkSpecializationInfo* get() const
+    {
+        return entries.empty() ? nullptr : &info;
+    }
+};
 
 // Everything needed to rebuild a Pipeline's VkPipeline handle in place — the
 // hot-reload mechanism. `shaders` are the modules it was built from (the
@@ -493,6 +694,25 @@ public:
         return std::forward<Self>(self);
     }
 
+    // The attributes of a SECOND vertex buffer, advanced once per instance
+    // instead of once per vertex. `cmd.bind_vertex_buffer(instances, binding=1)`
+    // feeds it, and `draw(n, instances=k)` runs the geometry k times with a
+    // different slice of it each time — the mesh stays in one buffer and only
+    // the per-object data repeats.
+    //
+    // A separate verb rather than a kwarg on vertex_format: this declares a
+    // different binding, not a variant of the same one. Locations continue after
+    // the vertex attributes (vertex_format of 3 puts the first instance
+    // attribute at location 3), which is the same "location is the index in the
+    // list" rule the vertex side already follows. A mat4 is four FLOAT4s and so
+    // takes four locations.
+    template <typename Self>
+    Self&& instance_format(this Self&& self, const std::vector<VertexFormat>& formats)
+    {
+        self.instance_formats_ = formats;
+        return std::forward<Self>(self);
+    }
+
     // write=False keeps the test but stops the pass from updating the depth
     // buffer, which is the condition for a correct transparency pass: sorted
     // transparent geometry must test against the opaque depth without occluding
@@ -507,6 +727,41 @@ public:
         return std::forward<Self>(self);
     }
 
+    // The stencil test, in one verb. Two passes make an outline: the first
+    // writes the object's silhouette with
+    // `stencil_test(True, compare=ALWAYS, ref=1, pass_op=REPLACE)`, the second
+    // draws a scaled copy with `stencil_test(True, compare=NOT_EQUAL, ref=1)`
+    // and `depth_test(False)`, so only the pixels around the object survive.
+    //
+    // Needs a target whose depth attachment has a stencil aspect
+    // (`depth=bz.Format.DEPTH_STENCIL`).
+    //
+    // Front and back faces get the same state. Separate states are a rare case
+    // and would double eight parameters on one verb, which is worse than the
+    // ceiling; the upgrade path is a face= kwarg, and it is additive.
+    template <typename Self>
+    Self&& stencil_test(
+        this Self&& self,
+        bool enable,
+        CompareOp compare = CompareOp::ALWAYS,
+        std::uint32_t ref = 0,
+        StencilOp pass_op = StencilOp::KEEP,
+        StencilOp fail_op = StencilOp::KEEP,
+        StencilOp depth_fail_op = StencilOp::KEEP,
+        std::uint32_t read_mask = 0xFF,
+        std::uint32_t write_mask = 0xFF)
+    {
+        self.stencil_.enable = enable;
+        self.stencil_.compare = compare;
+        self.stencil_.reference = ref;
+        self.stencil_.pass_op = pass_op;
+        self.stencil_.fail_op = fail_op;
+        self.stencil_.depth_fail_op = depth_fail_op;
+        self.stencil_.read_mask = read_mask;
+        self.stencil_.write_mask = write_mask;
+        return std::forward<Self>(self);
+    }
+
     template <typename Self>
     Self&& cull_mode(this Self&& self, CullMode mode, FrontFace frontFace)
     {
@@ -517,11 +772,77 @@ public:
 
     // mode= is a kwarg on the existing verb, not a second method: the question
     // "how does this blend" has one answer per pipeline.
+    //
+    // attachment= narrows the answer to one colour attachment of an MRT target,
+    // and everything without an override keeps what the plain call set. The
+    // overrides are per FIELD (optional each), so blend(attachment=1) and
+    // color_mask(attachment=1) compose in either order — a resolution that read
+    // the default at call time would make the result depend on which line came
+    // first, which is exactly the kind of rule nobody remembers at 3am.
     template <typename Self>
-    Self&& blend(this Self&& self, bool enable, BlendMode mode = BlendMode::ALPHA)
+    Self&& blend(this Self&& self, bool enable, BlendMode mode = BlendMode::ALPHA, int attachment = -1)
     {
-        self.blend_enable_ = enable;
-        self.blend_mode_ = mode;
+        if (attachment < 0)
+        {
+            self.blend_.enable = enable;
+            self.blend_.mode = mode;
+        }
+        else
+        {
+            auto& o = self.blend_overrides_[static_cast<std::uint32_t>(attachment)];
+            o.enable = enable;
+            o.mode = mode;
+        }
+        return std::forward<Self>(self);
+    }
+
+    // Which channels this pipeline writes. A g-buffer pass that must not touch
+    // the alpha of an attachment it shares, or a depth-prepass-style colour
+    // write of nothing at all (all four false).
+    template <typename Self>
+    Self&& color_mask(this Self&& self, bool red, bool green, bool blue, bool alpha, int attachment = -1)
+    {
+        VkColorComponentFlags mask = 0;
+        if (red)
+            mask |= VK_COLOR_COMPONENT_R_BIT;
+        if (green)
+            mask |= VK_COLOR_COMPONENT_G_BIT;
+        if (blue)
+            mask |= VK_COLOR_COMPONENT_B_BIT;
+        if (alpha)
+            mask |= VK_COLOR_COMPONENT_A_BIT;
+
+        if (attachment < 0)
+        {
+            self.blend_.write_mask = mask;
+        }
+        else
+        {
+            self.blend_overrides_[static_cast<std::uint32_t>(attachment)].write_mask = mask;
+        }
+        return std::forward<Self>(self);
+    }
+
+    // Clamp depth to the view volume instead of clipping the primitive. What a
+    // shadow-map pass wants: geometry between the light and the near plane still
+    // has to cast, and clipping it away is a hole in the shadow. Needs the
+    // DEPTH_CLAMP feature, which is why the Feature existed with nothing using
+    // it until now.
+    template <typename Self>
+    Self&& depth_clamp(this Self&& self, bool enable)
+    {
+        self.depth_clamp_ = enable;
+        return std::forward<Self>(self);
+    }
+
+    // Turn a fragment's alpha into a coverage mask on an MSAA target: cutout
+    // foliage and hair get antialiased edges from the same `discard`-free
+    // shader, without sorting. Does nothing on a single-sample target, which is
+    // Vulkan's rule and not ours.
+    template <typename Self>
+    Self&& alpha_to_coverage(this Self&& self, bool enable)
+    {
+        self.alpha_to_coverage_ = enable;
         return std::forward<Self>(self);
     }
 
@@ -596,6 +917,24 @@ public:
         return std::forward<Self>(self);
     }
 
+    // A specialization constant for one stage. It takes a stage for the same
+    // reason every other graphics declarator does: the two stages are separate
+    // SPIR-V modules and a constant id means whatever that module says it means.
+    // The same id may legitimately carry a different value in each stage.
+    template <typename Self>
+    Self&& constant(this Self&& self, std::uint32_t id, std::uint32_t bytes, ShaderStage stage)
+    {
+        if (stage == ShaderStage::FRAGMENT)
+        {
+            self.fragment_constants_.push_back({id, bytes});
+        }
+        else
+        {
+            self.vertex_constants_.push_back({id, bytes});
+        }
+        return std::forward<Self>(self);
+    }
+
     template <typename Self>
     Self&& uniform_buffer(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set)
     {
@@ -617,6 +956,21 @@ public:
     {
         self.layout_.add_binding(
             binding, static_cast<VkShaderStageFlags>(to_vk(stage)), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, set);
+        return std::forward<Self>(self);
+    }
+
+    // A read/write image addressed by coordinate — the graphics counterpart of
+    // the compute declarator that has existed since 0.9. A fragment shader that
+    // does imageStore was unreachable without it, which is a different thing
+    // from the automatic barriers it still does not get: the tracker cannot see
+    // writes it has no reflection for, so a storage image written by a graphics
+    // pipeline needs `cmd.barrier(image, ...)` exactly like an SSBO written the
+    // same way (tech debt #3).
+    template <typename Self>
+    Self&& storage_image(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set)
+    {
+        self.layout_.add_binding(
+            binding, static_cast<VkShaderStageFlags>(to_vk(stage)), VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, set);
         return std::forward<Self>(self);
     }
 
@@ -650,6 +1004,40 @@ public:
             return std::unexpected(err_shader(
                 "polygon_mode requires the WIREFRAME feature; create the Context with "
                 "features=[bz.Feature.WIREFRAME] (or optional=[...])"));
+        }
+        // Attachments that blend differently need independentBlend. It is one
+        // more case of "core Vulkan" and "no feature bit" being different
+        // claims: without it every element of pAttachments must be identical,
+        // and the driver is entitled to reject the pipeline.
+        if (!blend_overrides_.empty() && !context_.supports(Feature::INDEPENDENT_BLEND))
+        {
+            for (std::uint32_t i = 0; i < colorFormats.size(); ++i)
+            {
+                const auto it = blend_overrides_.find(i);
+                if (it != blend_overrides_.end() && it->second.applied_to(blend_) != blend_)
+                {
+                    return std::unexpected(err_shader(
+                        "blend(attachment=) / color_mask(attachment=) that differs from the "
+                        "pipeline-wide setting requires the INDEPENDENT_BLEND feature; create "
+                        "the Context with features=[bz.Feature.INDEPENDENT_BLEND] (or "
+                        "optional=[...])"));
+                }
+            }
+        }
+        // The pipeline reads the stencil's existence off its target, so asking
+        // for the test against a target that has no stencil aspect is caught
+        // here instead of at the first draw that quietly does nothing.
+        if (stencil_.enable && !has_stencil(depthFormat))
+        {
+            return std::unexpected(err_shader(
+                "stencil_test needs a target with a stencil attachment; build the "
+                "RenderTarget with depth=bz.Format.DEPTH_STENCIL"));
+        }
+        if (depth_clamp_ && !context_.supports(Feature::DEPTH_CLAMP))
+        {
+            return std::unexpected(err_shader(
+                "depth_clamp requires the DEPTH_CLAMP feature; create the Context with "
+                "features=[bz.Feature.DEPTH_CLAMP] (or optional=[...])"));
         }
         if (line_width_ != 1.0f && !context_.supports(Feature::WIDE_LINES))
         {
@@ -702,17 +1090,23 @@ public:
             .vertex = vertex_shader_,
             .fragment = fragment_shader_,
             .formats = formats_,
+            .instance_formats = instance_formats_,
+            .vertex_constants = vertex_constants_,
+            .fragment_constants = fragment_constants_,
             .depth_test = depth_test_,
             .depth_write = depth_write_,
             .depth_compare = depth_compare_,
+            .stencil = stencil_,
             .cull_mode = cull_mode_,
             .front_face = front_face_,
             .polygon_mode = polygon_mode_,
+            .depth_clamp = depth_clamp_,
             .line_width = line_width_,
             .depth_bias_constant = depth_bias_constant_,
             .depth_bias_slope = depth_bias_slope_,
-            .blend_enable = blend_enable_,
-            .blend_mode = blend_mode_,
+            .blend = blend_,
+            .blend_overrides = blend_overrides_,
+            .alpha_to_coverage = alpha_to_coverage_,
             .topology = topology_,
             .color_formats = std::move(colorFormats),
             .depth_format = depthFormat,
@@ -783,17 +1177,26 @@ private:
         std::shared_ptr<ShaderModule> vertex;
         std::shared_ptr<ShaderModule> fragment;
         std::vector<VertexFormat> formats;
+        std::vector<VertexFormat> instance_formats;
+        // Part of the rebuildable state, not of the ShaderModule: a hot reload
+        // recompiles the source and must re-apply the same values, or the
+        // reloaded pipeline would quietly differ from the one it replaces.
+        std::vector<SpecConstant> vertex_constants;
+        std::vector<SpecConstant> fragment_constants;
         bool depth_test = false;
         bool depth_write = true;
         CompareOp depth_compare = CompareOp::LESS_OR_EQUAL;
+        StencilState stencil;
         CullMode cull_mode = CullMode::BACK;
         FrontFace front_face = FrontFace::COUNTER_CLOCKWISE;
         PolygonMode polygon_mode = PolygonMode::FILL;
+        bool depth_clamp = false;
         float line_width = 1.0f;
         float depth_bias_constant = 0.0f;
         float depth_bias_slope = 0.0f;
-        bool blend_enable = false;
-        BlendMode blend_mode = BlendMode::ALPHA;
+        BlendState blend;
+        std::map<std::uint32_t, BlendOverride> blend_overrides;
+        bool alpha_to_coverage = false;
         Topology topology = Topology::TRIANGLE_LIST;
         std::vector<VkFormat> color_formats;
         VkFormat depth_format = VK_FORMAT_UNDEFINED;
@@ -805,7 +1208,10 @@ private:
 
     struct VertexInput
     {
-        VkVertexInputBindingDescription binding{};
+        // Binding 0 is the per-vertex buffer, binding 1 the per-instance one.
+        // Either may be absent (a shader that builds its geometry from
+        // gl_VertexIndex declares no vertex attributes at all).
+        std::vector<VkVertexInputBindingDescription> bindings;
         std::vector<VkVertexInputAttributeDescription> attributes;
     };
 
@@ -818,7 +1224,9 @@ private:
         const GraphicsState& s,
         VkPipelineLayout pipelineLayout)
     {
-        const std::vector<VkPipelineShaderStageCreateInfo> shaderStages = shader_stages_(s);
+        const SpecializationBlock vertexSpec(s.vertex_constants);
+        const SpecializationBlock fragmentSpec(s.fragment_constants);
+        const std::vector<VkPipelineShaderStageCreateInfo> shaderStages = shader_stages_(s, vertexSpec, fragmentSpec);
 
         // Vertex input — the CreateInfo points into vertexInput, so it lives here.
         const VertexInput vertexInput = vertex_input_(s);
@@ -826,8 +1234,8 @@ private:
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
         if (!vertexInput.attributes.empty())
         {
-            vertexInputInfo.vertexBindingDescriptionCount = 1;
-            vertexInputInfo.pVertexBindingDescriptions = &vertexInput.binding;
+            vertexInputInfo.vertexBindingDescriptionCount = static_cast<uint32_t>(vertexInput.bindings.size());
+            vertexInputInfo.pVertexBindingDescriptions = vertexInput.bindings.data();
             vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(vertexInput.attributes.size());
             vertexInputInfo.pVertexAttributeDescriptions = vertexInput.attributes.data();
         }
@@ -871,13 +1279,19 @@ private:
             .sampleShadingEnable = s.sample_shading ? VK_TRUE : VK_FALSE,
             .minSampleShading = s.min_sample_shading,
             .pSampleMask = nullptr,
-            .alphaToCoverageEnable = VK_FALSE,
+            .alphaToCoverageEnable = s.alpha_to_coverage ? VK_TRUE : VK_FALSE,
             .alphaToOneEnable = VK_FALSE};
 
-        // One blend state per colour attachment (identical for now; per-target
-        // blend control can arrive additively).
-        const std::vector<VkPipelineColorBlendAttachmentState> blendAttachments(
-            s.color_formats.size(), color_blend_attachment_(s));
+        // One blend state per colour attachment: the pipeline-wide one, with any
+        // per-attachment override folded in.
+        std::vector<VkPipelineColorBlendAttachmentState> blendAttachments;
+        blendAttachments.reserve(s.color_formats.size());
+        for (std::uint32_t i = 0; i < s.color_formats.size(); ++i)
+        {
+            const auto it = s.blend_overrides.find(i);
+            blendAttachments.push_back(
+                color_blend_attachment_(it == s.blend_overrides.end() ? s.blend : it->second.applied_to(s.blend)));
+        }
 
         VkPipelineColorBlendStateCreateInfo colorBlending{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -901,8 +1315,11 @@ private:
             .viewMask = s.view_mask,
             .colorAttachmentCount = static_cast<uint32_t>(s.color_formats.size()),
             .pColorAttachmentFormats = s.color_formats.empty() ? nullptr : s.color_formats.data(),
-            .depthAttachmentFormat = s.depth_format != VK_FORMAT_UNDEFINED ? s.depth_format : VK_FORMAT_UNDEFINED,
-            .stencilAttachmentFormat = VK_FORMAT_UNDEFINED};
+            .depthAttachmentFormat = s.depth_format,
+            // Derived from the depth format, never asked for: a target either has
+            // a stencil aspect or it does not, and a pipeline that disagreed with
+            // its target here would fail to render with no useful message.
+            .stencilAttachmentFormat = has_stencil(s.depth_format) ? s.depth_format : VK_FORMAT_UNDEFINED};
 
         VkGraphicsPipelineCreateInfo pipelineInfo{
             .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -931,7 +1348,7 @@ private:
         // hot reload (0.8) depends on catching exactly this as recoverable.
         if (auto e = check(
                 context.vk().vkCreateGraphicsPipelines(
-                    context.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline),
+                    context.device(), context.pipeline_cache(), 1, &pipelineInfo, nullptr, &graphicsPipeline),
                 "create graphics pipeline",
                 ErrorCode::Shader))
         {
@@ -942,7 +1359,14 @@ private:
 
     // 1 stage (depth-only) or 2. The fragment stage is optional exactly when
     // the target has no colour attachments — build() enforces that pairing.
-    static std::vector<VkPipelineShaderStageCreateInfo> shader_stages_(const GraphicsState& s)
+    //
+    // The specialization blocks are the caller's, not ours: their data has to
+    // stay alive until vkCreateGraphicsPipelines has read it, and a local here
+    // would dangle the moment this function returns.
+    static std::vector<VkPipelineShaderStageCreateInfo> shader_stages_(
+        const GraphicsState& s,
+        const SpecializationBlock& vertexSpec,
+        const SpecializationBlock& fragmentSpec)
     {
         std::vector<VkPipelineShaderStageCreateInfo> stages;
         stages.push_back(
@@ -952,7 +1376,7 @@ private:
              .stage = VK_SHADER_STAGE_VERTEX_BIT,
              .module = s.vertex->get(),
              .pName = entry_name_(*s.vertex),
-             .pSpecializationInfo = nullptr});
+             .pSpecializationInfo = vertexSpec.get()});
         if (s.fragment)
         {
             stages.push_back(
@@ -962,7 +1386,7 @@ private:
                  .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
                  .module = s.fragment->get(),
                  .pName = entry_name_(*s.fragment),
-                 .pSpecializationInfo = nullptr});
+                 .pSpecializationInfo = fragmentSpec.get()});
         }
         return stages;
     }
@@ -979,41 +1403,36 @@ private:
         return module.entry_point().empty() ? "main" : module.entry_point().c_str();
     }
 
-    // Translates the VertexFormat list into a binding + attribute descriptions
-    // with packed offsets.
+    // Translates the two VertexFormat lists into binding + attribute
+    // descriptions with packed offsets. Both bindings are built by the same
+    // loop: per-vertex and per-instance data differ by the input rate and by
+    // nothing else, so a second copy of this would only be a second place for
+    // the stride to be wrong.
     static VertexInput vertex_input_(const GraphicsState& s)
     {
         VertexInput result;
-        result.binding = {
-            .binding = 0,
-            .stride = 0, // accumulated below
-            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX};
+        std::uint32_t location = 0;
 
-        result.attributes.resize(s.formats.size());
-        uint32_t offset = 0;
-        for (size_t i = 0; i < s.formats.size(); i++)
+        const auto add_binding =
+            [&](std::uint32_t binding, const std::vector<VertexFormat>& formats, VkVertexInputRate rate)
         {
-            result.attributes[i].binding = 0;
-            result.attributes[i].location = static_cast<uint32_t>(i);
-            result.attributes[i].offset = offset;
-
-            switch (s.formats[i])
+            if (formats.empty())
             {
-                case VertexFormat::FLOAT2:
-                    result.attributes[i].format = VK_FORMAT_R32G32_SFLOAT;
-                    offset += 8;
-                    break;
-                case VertexFormat::FLOAT3:
-                    result.attributes[i].format = VK_FORMAT_R32G32B32_SFLOAT;
-                    offset += 12;
-                    break;
-                case VertexFormat::FLOAT4:
-                    result.attributes[i].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-                    offset += 16;
-                    break;
+                return;
             }
-        }
-        result.binding.stride = offset;
+            std::uint32_t offset = 0;
+            for (const VertexFormat format : formats)
+            {
+                const VertexFormatInfo info = vertex_format_info(format);
+                result.attributes.push_back(
+                    {.location = location++, .binding = binding, .format = info.vk, .offset = offset});
+                offset += info.size;
+            }
+            result.bindings.push_back({.binding = binding, .stride = offset, .inputRate = rate});
+        };
+
+        add_binding(0, s.formats, VK_VERTEX_INPUT_RATE_VERTEX);
+        add_binding(1, s.instance_formats, VK_VERTEX_INPUT_RATE_INSTANCE);
         return result;
     }
 
@@ -1031,7 +1450,7 @@ private:
             .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
-            .depthClampEnable = VK_FALSE,
+            .depthClampEnable = s.depth_clamp ? VK_TRUE : VK_FALSE,
             .rasterizerDiscardEnable = VK_FALSE,
             .polygonMode = to_vk(s.polygon_mode),
             .cullMode = vkCullMode,
@@ -1046,7 +1465,7 @@ private:
             .lineWidth = s.line_width};
     }
 
-    static VkPipelineColorBlendAttachmentState color_blend_attachment_(const GraphicsState& s)
+    static VkPipelineColorBlendAttachmentState color_blend_attachment_(const BlendState& s)
     {
         // Blending off is ONE/ZERO — the source replaces the destination — so the
         // mode is read only when it is on.
@@ -1055,9 +1474,9 @@ private:
         VkBlendFactor src_alpha = VK_BLEND_FACTOR_ONE;
         VkBlendFactor dst_alpha = VK_BLEND_FACTOR_ZERO;
 
-        if (s.blend_enable)
+        if (s.enable)
         {
-            switch (s.blend_mode)
+            switch (s.mode)
             {
                 case BlendMode::ALPHA:
                     src_color = VK_BLEND_FACTOR_SRC_ALPHA;
@@ -1082,15 +1501,14 @@ private:
         }
 
         return {
-            .blendEnable = s.blend_enable ? VK_TRUE : VK_FALSE,
+            .blendEnable = s.enable ? VK_TRUE : VK_FALSE,
             .srcColorBlendFactor = src_color,
             .dstColorBlendFactor = dst_color,
             .colorBlendOp = VK_BLEND_OP_ADD,
             .srcAlphaBlendFactor = src_alpha,
             .dstAlphaBlendFactor = dst_alpha,
             .alphaBlendOp = VK_BLEND_OP_ADD,
-            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
-                              VK_COLOR_COMPONENT_A_BIT};
+            .colorWriteMask = s.write_mask};
     }
 
     static VkPipelineDepthStencilStateCreateInfo depth_stencil_state_(const GraphicsState& s)
@@ -1106,9 +1524,10 @@ private:
             .depthWriteEnable = (s.depth_test && s.depth_write) ? VK_TRUE : VK_FALSE,
             .depthCompareOp = to_vk(s.depth_compare),
             .depthBoundsTestEnable = VK_FALSE,
-            .stencilTestEnable = VK_FALSE,
-            .front = {},
-            .back = {},
+            .stencilTestEnable = s.stencil.enable ? VK_TRUE : VK_FALSE,
+            // Front and back carry the same state — see stencil_test().
+            .front = s.stencil.to_vk_state(),
+            .back = s.stencil.to_vk_state(),
             .minDepthBounds = 0.0f,
             .maxDepthBounds = 1.0f};
     }
@@ -1117,17 +1536,23 @@ private:
     std::shared_ptr<ShaderModule> vertex_shader_;
     std::shared_ptr<ShaderModule> fragment_shader_;
     std::vector<VertexFormat> formats_;
+    std::vector<VertexFormat> instance_formats_;
+    std::vector<SpecConstant> vertex_constants_;
+    std::vector<SpecConstant> fragment_constants_;
     bool depth_test_ = false;
     bool depth_write_ = true;
     CompareOp depth_compare_ = CompareOp::LESS_OR_EQUAL;
+    StencilState stencil_;
     CullMode cull_mode_ = CullMode::BACK;
     FrontFace front_face_ = FrontFace::COUNTER_CLOCKWISE;
     PolygonMode polygon_mode_ = PolygonMode::FILL;
+    bool depth_clamp_ = false;
     float line_width_ = 1.0f;
     float depth_bias_constant_ = 0.0f;
     float depth_bias_slope_ = 0.0f;
-    bool blend_enable_ = false;
-    BlendMode blend_mode_ = BlendMode::ALPHA;
+    BlendState blend_;
+    std::map<std::uint32_t, BlendOverride> blend_overrides_;
+    bool alpha_to_coverage_ = false;
     Topology topology_ = Topology::TRIANGLE_LIST;
     bool sample_shading_ = false;
     float min_sample_shading_ = 1.0f;
@@ -1174,9 +1599,6 @@ public:
     }
 
     // A read/write image the shader accesses by coordinate (imageLoad/imageStore).
-    // Compute-only for now: fragment-shader storage images would need the tracker
-    // to see writes it can't (no reflection), so they wait for a manual image
-    // barrier — see the ResourceTracker ceiling note.
     template <typename Self>
     Self&& storage_image(this Self&& self, uint32_t binding, uint32_t set)
     {
@@ -1188,6 +1610,14 @@ public:
     Self&& push_constant(this Self&& self, uint32_t size)
     {
         self.layout_.add_push_constant(size, VK_SHADER_STAGE_COMPUTE_BIT);
+        return std::forward<Self>(self);
+    }
+
+    // No stage argument, for the same reason nothing else here has one.
+    template <typename Self>
+    Self&& constant(this Self&& self, std::uint32_t id, std::uint32_t bytes)
+    {
+        self.constants_.push_back({id, bytes});
         return std::forward<Self>(self);
     }
 
@@ -1231,7 +1661,7 @@ public:
         ScopeGuard cleanup_pipeline_layout(
             [&] { context_.vk().vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr); });
 
-        auto pipeline = create_pipeline_(context_, shader_, pipelineLayout);
+        auto pipeline = create_pipeline_(context_, shader_, pipelineLayout, constants_);
         if (!pipeline)
         {
             return std::unexpected(pipeline.error());
@@ -1246,8 +1676,8 @@ public:
 
         PipelineDesc desc;
         desc.shaders.push_back(shader_);
-        desc.recreate = [shader = shader_, pipelineLayout](Context& c)
-        { return create_pipeline_(c, shader, pipelineLayout); };
+        desc.recreate = [shader = shader_, pipelineLayout, constants = constants_](Context& c)
+        { return create_pipeline_(c, shader, pipelineLayout, constants); };
 
         return std::make_shared<Pipeline>(
             context_.shared_from_this(),
@@ -1266,8 +1696,10 @@ private:
     static std::expected<VkPipeline, Error> create_pipeline_(
         Context& context,
         const std::shared_ptr<ShaderModule>& shader,
-        VkPipelineLayout pipelineLayout)
+        VkPipelineLayout pipelineLayout,
+        const std::vector<SpecConstant>& constants)
     {
+        const SpecializationBlock spec(constants);
         VkComputePipelineCreateInfo pipelineInfo{
             .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
             .pNext = nullptr,
@@ -1281,7 +1713,7 @@ private:
                  // Same rule as the graphics stages: the name the module was
                  // compiled with, so an HLSL CSMain works here too.
                  .pName = shader->entry_point().empty() ? "main" : shader->entry_point().c_str(),
-                 .pSpecializationInfo = nullptr},
+                 .pSpecializationInfo = spec.get()},
             .layout = pipelineLayout,
             .basePipelineHandle = VK_NULL_HANDLE,
             .basePipelineIndex = -1};
@@ -1292,7 +1724,7 @@ private:
         // retry, and hot reload (0.8) depends on catching exactly that.
         if (auto e = check(
                 context.vk().vkCreateComputePipelines(
-                    context.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline),
+                    context.device(), context.pipeline_cache(), 1, &pipelineInfo, nullptr, &computePipeline),
                 "create compute pipeline",
                 ErrorCode::Shader))
         {
@@ -1303,6 +1735,7 @@ private:
 
     Context& context_;
     std::shared_ptr<ShaderModule> shader_;
+    std::vector<SpecConstant> constants_;
     std::string name_;
     PipelineLayoutBuilder layout_;
 };

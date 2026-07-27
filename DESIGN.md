@@ -251,6 +251,87 @@ entry. The release is a label, not the organizing axis.
 - **The pipeline infers sample count and formats from its target** (0.12). No parallel knobs
   on the builder. The target is the single source, so the two cannot disagree.
 
+- **Per-instance data is a second BINDING, so it is a second verb** (0.17).
+  `instance_format([...])` sits beside `vertex_format([...])` rather than becoming a kwarg on
+  it, because rule 1 is about variants of one thing and these are two different vertex
+  bindings. Locations continue across the two (a `vertex_format` of three puts the first
+  instance attribute at location 3), which is the same "location is the index in the list"
+  rule the vertex side already had — a `mat4` is four `FLOAT4`s and takes four locations.
+
+  The draw verbs went the other way: `draw_indexed_instanced` **disappeared** into
+  `draw_indexed(..., instances=)`. A separate method name for one extra argument is exactly
+  what rule 1 rejects, `draw` needed the same argument and had none, and pre-1.0 breaks are
+  batched (rule 6). This is the release's only break, and it is one line per call site.
+
+- **`Format.DEPTH_STENCIL` is one name resolved per device** (0.17). The spec guarantees only
+  that ONE of `D24_UNORM_S8_UINT` / `D32_SFLOAT_S8_UINT` supports a depth-stencil attachment,
+  so exposing both would make the caller guess which one their driver has — precisely the
+  Vulkan trivia `Features.hpp` exists to hide (rule 3). The Context picks once, preferring the
+  float variant where it exists: bazalt's plain depth format is `D32F`, and a `depth_bias`
+  tuned against a float buffer means something else entirely on a 24-bit integer one, because
+  the bias is scaled in units of the format.
+
+  `format_info()` is `constexpr`, so the entry carries `VK_FORMAT_UNDEFINED` and every call
+  site asks `ctx.vk_format(format)`. An `Image` reports its resolved `vk_format()` and its
+  `aspect()`, and the RenderTarget, the views and the barriers all read those — the 0.13 rule
+  that the view and the barrier come from one source, applied to the aspect.
+
+- **A combined depth/stencil attachment is attachment-only, on purpose** (0.17). Its view
+  carries two aspects, and Vulkan forbids sampling through such a view, so the image is
+  created without `SAMPLED`/`STORAGE` usage and `read()` refuses with the reason. Keeping the
+  usage would make every `DEPTH_STENCIL` view illegal at creation, which is a validation error
+  at the target's constructor rather than at the sample that was never going to work. A
+  sampleable depth buffer stays `D32F`.
+
+- **The depth layout is derived from the depth format, never named** (0.17).
+  `DEPTH_ATTACHMENT_OPTIMAL` covers the depth aspect alone and is illegal for an image that
+  also carries stencil, so `depth_final_layout()` and every barrier read
+  `has_stencil(depth_format())`. The default lives on the base `RenderTarget`, which is why a
+  window with `stencil=True` needs no override — and the bug that made this necessary (a
+  windowed stencil target transitioning to a depth-only layout) was caught by RUNNING example
+  23, not by a headless test. The window path has no other referee.
+
+- **The stencil test is one verb with eight kwargs, and front == back** (0.17). It is one
+  question with several parts: eight separate builder calls would let half of them be set.
+  `CompareOp` is reused for the third time (compare samplers, depth test, stencil), so only
+  `StencilOp` is new. Separate front and back states are a rare case that would double eight
+  parameters on one verb, so they share; the upgrade path is a `face=` kwarg, and it is
+  additive.
+
+- **`clear_stencil` is the clear VALUE**, like `clear_depth` before it (0.17). Depth and
+  stencil load together — one image, one layout, one load-op — so a pass cannot preserve the
+  depth and clear the stencil. `clear_color=None` still answers "what happens to the old
+  contents" for all of them at once.
+
+- **A per-attachment blend override is per FIELD, not per attachment** (0.17).
+  `blend(attachment=1)` and `color_mask(attachment=1)` each set their own optional fields of
+  one `BlendOverride`, so the two compose in either order. Resolving against the
+  pipeline-wide state at call time would make the result depend on which line came first,
+  which is a rule nobody remembers at 3am. Attachments that actually differ need
+  `INDEPENDENT_BLEND`: "core Vulkan" and "needs no feature bit" are different claims, and
+  this is the third time that has bitten (after `WIREFRAME` and `WIDE_LINES`).
+
+- **A specialization constant belongs to the pipeline, not to the shader** (0.17). That is
+  the point of it — one compiled module, several pipelines that differ by a number — so the
+  values live in `GraphicsState` and every hot-reload rebuild re-applies them, following the
+  0.16 rule that anything a build depends on and cannot re-derive has to be stored with the
+  result. The binding tests `bool` BEFORE `int`, because a Python `bool` IS an `int` and
+  `True` would otherwise be baked in as the integer 1 — the same shape as the `str`/`bytes`
+  ordering in `compile_shader(source=)`.
+
+- **The pipeline cache is invisible** (0.17). One `VkPipelineCache` per Context, passed to
+  every `vkCreate*Pipelines`, with no parameter and no observable difference. A failure to
+  create it is not an error: `VK_NULL_HANDLE` means "no cache", which is what the code did
+  before. Writing it to disk needs a stable format to be worth anything, so that waits for
+  1.0.
+
+- **`copy_image` names where the source is, exactly as `generate_mipmaps` does** (0.17). The
+  tracker treats an image's layout at the start of each replay as UNDEFINED (a discard), which
+  is right for an image the recording overwrites and wrong for one it reads, so the caller
+  says `Access.SHADER_READ` or `Access.SHADER_WRITE`. Both ends finish in `SHADER_READ_ONLY`
+  and BOTH are marked on the `Image`, not just the destination: a source that still believed
+  it was in `GENERAL` hands a stale `oldLayout` to the next `read()`.
+
 - **Cross-Context image transfer is the fourth overload of `create_image`** (0.15).
   `create_image` already had three overloads that differ by the type of the first argument
   (a size, a numpy array, a list of numpy arrays), so a fourth joins the existing pattern.
@@ -331,11 +412,24 @@ permanent ceiling.
 3. **ResourceTracker: no SPIR-V reflection** — the tracker does not read the bindings from
    SPIR-V, so SSBO and `imageStore` writes from **graphics** shaders stay untracked. The
    ceiling is a manual `cmd.barrier()`, which exists for buffers and images since 0.10.
-   Auto-tracking arrives with reflection, and a storage image on the graphics builder
-   arrives with it. Target: before 1.0.
-4. **The sync-validation test is skipped in CI** — the LunarG layer for noble (1.4.313) does
-   not report shader hazards. Version 1.4.350 does. Remove the skip after a newer package
-   arrives. Target: 1.0, and it depends on the environment.
+   The graphics `storage_image()` declarator arrived in 0.17 WITHOUT waiting for reflection:
+   the declarator and the tracking are separate questions, and until then a fragment
+   `imageStore` was not merely untracked but unreachable — this file said otherwise, which is
+   what a claim with no test behind it does. What reflection still buys is the automatic
+   barrier, optional binding declarators, and a real diagnostic for the empty-HLSL-entry-point
+   ceiling. Target: before 1.0.
+4. **The sync-validation test is skipped in CI** — the LunarG layer for noble is still
+   1.4.313 and does not report shader hazards. Version 1.4.350 does, but SDK 1.4.350 being
+   *released* is not the same thing as a package for noble existing, which is what 0.17 got
+   wrong: the workflow was changed to assert the version and the job failed on the assert.
+   It now COMPUTES `BAZALT_SYNCVAL_UNSUPPORTED` from `dpkg-query` instead, so the test starts
+   running by itself the day the package appears and nobody has to notice. Target: 1.0, and
+   it depends on the environment.
+
+   The lesson generalizes past this entry: **a CI gate on someone else's release schedule
+   should compute a knob, not assert a version.** An assert turns their timetable into your
+   red build, and the thing being gated (one skipped test) is strictly less bad than a job
+   that refuses to run at all.
 
 ### Ceilings accepted on purpose
 
@@ -375,6 +469,22 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
 - **Per-subresource layout tracking does not exist in `Image`** (debt #3 territory). It
   touches the core and the gain is small, because it only removes the loud edge of a partial
   render.
+- **A `DEPTH_STENCIL` attachment cannot be sampled or read back** (0.17). Its view carries
+  both aspects. Upgrade path: a second, depth-only view beside the attachment one, the same
+  shape as the cubemap's parallel `2D_ARRAY` storage view.
+- **The stencil state is the same for front and back faces** (0.17). Upgrade path: a `face=`
+  kwarg on `stencil_test`, additive.
+- **`primitiveRestartEnable` is always FALSE** (0.17), so a strip is one primitive per draw.
+  A restart index would change what the largest index value in an index buffer means, which
+  is a decision, not a flag.
+- **A specialized compute workgroup size needs Vulkan 1.3** (0.17).
+  `layout(local_size_x_id = 0)` compiles to `OpExecutionMode LocalSizeId`, which requires
+  `maintenance4`, and the baseline is 1.2. Specialize the numbers the shader reads instead.
+  Upgrade path: none needed — it becomes available by itself as the baseline moves.
+- **`copy_image` copies mip 0 only** (0.17), across every layer. A full chain is N regions
+  for a case that has not come up; `generate_mipmaps` fills the rest.
+- **A pipeline cache lives and dies with its Context** (0.17). See the decision above: on
+  disk it needs a frozen API to be worth writing.
 
 ---
 
@@ -392,28 +502,39 @@ Additive work with no assigned release. Pull each one in when it really hurts.
 ## Proposed features
 
 All of them are **additive**, so they break no API and can enter as small additions beside a
-big feature. Each one needs a decision.
+big feature. Each one needs a decision. The estimates are whole-feature: C++, the binding
+layer, the stub, tests, an example and the docs.
 
 **Ranked first by rule 4, because they make effects:**
 
 - ✅ **Blend modes** — DONE in 0.16 (`blend(enable, mode=)`).
 - ✅ **`depth_write` / `depth_compare`** — DONE in 0.16 (`depth_test(enable, write=, compare=)`).
-- **Fragment-shader storage images.** Reachable today with a manual image barrier
-  (`cmd.barrier`, since 0.10). Auto-tracking needs SPIR-V reflection, so this arrives with
-  debt #3.
-
-**Shader compilation:** all three DONE in 0.16 — `include_dirs=`, HLSL `entry_point=`, and
-SPIR-V bytes through `source=`.
+- ✅ **Fragment-shader storage images** — DONE in 0.17. The declarator was the whole gap; the
+  automatic barrier still waits for reflection (debt #3), and until 0.17 this file wrongly
+  called the feature "reachable today".
+- ✅ **Instancing (`VERTEX_INPUT_RATE_INSTANCE`)** — DONE in 0.17.
+- ✅ **Stencil** — DONE in 0.17.
+- **CPU image streaming: `image.update(array)`** (~470 lines). Changing the pixels of an
+  existing image from Python has no spelling at all: a video frame, a camera feed, a
+  matplotlib figure, a procedural texture computed in numpy, or painting all mean creating a
+  new `Image` per frame. The machinery exists — `UploadManager::reload` does exactly this for
+  a file the hot-reload watcher saw — so the work is a job variant that takes pixels, plus
+  `layer=`/`mip=`/`region=`. The strongest candidate for the next release.
 
 **Performance:**
 
-- **Pipeline cache**, in memory first. It goes to disk only at 1.0, when the frozen API
-  gives a stable format.
-- **Specialization constants.**
-- **`VERTEX_INPUT_RATE_INSTANCE`** (instancing).
-
-These three are small and independent, and they optimize a complete surface now that every
-resource type and pipeline type exists.
+- ✅ **Pipeline cache**, in memory — DONE in 0.17. On disk at 1.0, when the frozen API gives
+  a stable format.
+- ✅ **Specialization constants** — DONE in 0.17.
+- **Indirect draw and dispatch** (~250 lines). `draw_indexed_indirect(buffer, offset=,
+  count=)` and `dispatch_indirect(buffer)`, plus an `Access.INDIRECT_READ` for the tracker.
+  Compute writes the draw arguments, so culling happens on the GPU. It would also make
+  `Feature::MULTI_DRAW_INDIRECT` reachable, which is advertised today with no API behind it.
+  `What 1.0 means` says to decide this deliberately rather than let it drift.
+- **Bindless / descriptor arrays** (~630 lines). `texture(binding, stage, set, count=N)` and
+  `set_image(binding, image, index=)`: one pipeline and one draw for many materials. Needs
+  `FeatureInfo` to grow a column first — it maps only plain `VkPhysicalDeviceFeatures`
+  members, and descriptor indexing lives in a pNext struct. Already named in the 1.0 list.
 
 **Escape hatches and integration:**
 
@@ -424,7 +545,20 @@ resource type and pipeline type exists.
 - **ImGui integration** — a companion package or an example on the public primitives, not
   core. See the rejection below for why.
 
----
+**Small, additive, and waiting for the release that needs them:**
+
+- **`renderer.read_pixels()`** (~200 lines) — a screenshot of a window frame. Only offscreen
+  targets can be read back today, so a windowed prototype cannot save the picture it draws.
+  Cheap, but its test needs a display and CI would skip it.
+- **Async headless submit** (`ctx.submit(cmd, wait=False)` plus `ctx.wait()`, ~180 lines) —
+  deferred since 0.5. It matters for compute prototypes that submit in a loop.
+- **Window extras** (~120 lines) — dropped files (drag a texture onto the window and reload
+  it), a window icon, setting the cursor position, the clipboard.
+- **`buffer.update(data, offset=)`** (~40 lines) — a partial buffer update.
+- **Gamepad** (~90 lines) — axes and buttons from GLFW. The weakest ratio of value to API
+  surface on this list.
+- **An async `StaticBuffer`** and **a per-level mip copy on a cross-Context transfer** — see
+  "Deferred until needed" above.
 
 ## Rejected, and why
 
@@ -487,6 +621,14 @@ says what we did instead.
   and read the result off it (the 0.9 timers).
 - **A separate "debt release"** — rule 5. A debt gets paid by the feature that really needs
   it.
+- **Exposing both combined depth/stencil formats** (0.17). `D24S8` and `D32F_S8` differ by
+  which driver has them, which is the one thing the caller cannot know and the library can.
+  We took one `DEPTH_STENCIL` name and picked per device.
+- **A `stencil=` kwarg on `RenderTarget`** (0.17). The stencil is part of the depth
+  attachment's format in Vulkan, so a second bool beside `depth=` would let a caller ask for
+  a stencil with no depth attachment at all. `depth=bz.Format.DEPTH_STENCIL` says it once.
+  `SwapchainRenderer(stencil=True)` is the exception and earns it: a window has no `depth=`
+  parameter to carry the answer, because its depth buffer is scratch the renderer owns.
 
 ---
 
@@ -545,6 +687,22 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   `depth_test(False)` write depth with the test off, which is legal Vulkan and nobody's
   intent. The new state is gated on the old one (`depth_test && depth_write`). Check what
   an added parameter's default does to every call that predates it.
+
+- **A capability that looks like fixed-function state usually has a feature bit.** Three
+  releases in a row found one: `fillModeNonSolid` (wireframe), `wideLines`, and now
+  `independentBlend` for a per-attachment blend state. Before adding a knob that "just fills
+  in a struct field", read the VU for the field.
+
+- **When one name has two spellings per device, expose the name and pick the spelling.**
+  `Format.DEPTH_STENCIL` resolves to `D24_UNORM_S8_UINT` or `D32_SFLOAT_S8_UINT`. The general
+  form is the `Features.hpp` argument: the caller decides WHAT they need, the library decides
+  which Vulkan word says it here. The cost is that a `constexpr` table can no longer answer
+  everything, so the resolved value has to live on the object (`Image::vk_format()`).
+
+- **A verb that removes a method is worth more than a verb that adds one.**
+  `draw_indexed(instances=)` made `draw_indexed_instanced` disappear and gave `draw` the same
+  argument it never had. Adding a parameter to an existing verb is nearly always smaller than
+  the new name it replaces.
 
 ### Mechanical refactors
 
@@ -709,3 +867,8 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
 - **Remove the sync-validation skip** when LunarG packages a newer layer for noble (debt #4).
 - **The headless fallback** (no windowing extensions) still has no coverage. It is a separate
   path from the API version, which CI does cover since 0.15.
+- **The windowed path is verified by running the examples, and that is load-bearing.** The
+  0.17 depth/stencil layout bug existed only for a target whose depth is scratch — a window —
+  and every headless test passed with it in place. Run the new example before calling a
+  release done; "the suite is green" does not cover the half of the library that needs a
+  surface.
