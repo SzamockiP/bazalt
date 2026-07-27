@@ -857,6 +857,42 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   passes: `polygon_mode(LINE)` is checked against the FILL pixel count, and
   `depth_test(write=False)` against the same pair with `write=True`.
 
+- **CI wall clock is one wheel, not four.** The extension is one enormous translation unit
+  and compiles in about the same time for every interpreter, so a job that builds cp310
+  through cp313 in sequence costs four times the wall clock of one that builds them in
+  parallel. One job per interpreter per platform. The runners are free on a public repo, so
+  the extra minutes cost nothing and the pipeline went from 12 minutes to about 5. The same
+  reasoning splits Linux and Windows into separate jobs: `test_lavapipe` needs only the
+  Linux wheel, and as one matrix job it also waited for Windows, which finishes four
+  minutes later.
+
+- **The full interpreter matrix runs where it gates something**, not on every push. A pull
+  request, a release and a manual run build cp310–cp313. A plain branch push builds only the
+  cp312 the lavapipe legs install. Nothing reaches master without the full matrix having
+  passed on the pull request first, so the push-time saving costs no coverage.
+
+- **MSBuild stays the Windows generator.** Ninja is genuinely faster — 45s against 63s for
+  one wheel, measured — but CMake's Ninja generator needs `cl.exe` on PATH, and neither the
+  runner nor scikit-build-core sets up the MSVC environment (scikit-build-core only does it
+  for the Visual Studio generator). Buying that 30% costs a `vcvars` step in CI and a
+  Developer Command Prompt for every local build. Parallel jobs bought more, for free.
+  `/MP` was measured too and is noise (60s against 63s): MSBuild's cost here is per-project
+  overhead, not serialized compiles, and one huge translation unit has nothing to
+  parallelize.
+
+- **`cmake.args = ["-A", "x64"]` was redundant** and is gone. scikit-build-core already sets
+  `CMAKE_GENERATOR_PLATFORM` from the interpreter's own architecture for Visual Studio
+  generators, which is more correct than hard-coding x64. Beware the argument *form* if this
+  ever comes back: scikit-build-core reads the generator off arguments that start with `-G`,
+  so `["-G", "Ninja"]` as two list entries is invisible to it. It then treats the build as
+  multi-config, never passes `CMAKE_BUILD_TYPE`, and the debug CRT link-fails against the
+  SDK's release `shaderc_combined`. `["-GNinja"]` works.
+
+- **cibuildwheel 4 repairs Windows wheels with delvewheel by default**, which would bundle
+  `vulkan-1.dll` into the wheel and shadow the loader the user's driver installed.
+  `CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: ""` turns it off. Everything else bazalt links —
+  shaderc, glfw, volk, vk-bootstrap — is static, so there is no repair left to do.
+
 ---
 
 ## Verification — open items

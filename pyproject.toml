@@ -33,7 +33,3 @@ testpaths = ["tests"]
 
 [tool.scikit-build]
 wheel.packages = ["bazalt"]
-
-[[tool.scikit-build.overrides]]
-if.platform-system = "win32"
-cmake.args = ["-A", "x64"]
