@@ -450,7 +450,14 @@ private:
                                               ? shaderc_env_version_vulkan_1_3
                                               : shaderc_env_version_vulkan_1_2;
         options.SetTargetEnvironment(shaderc_target_env_vulkan, env_version);
-        options.SetOptimizationLevel(shaderc_optimization_level_performance);
+        // debugPrintfEXT() compiles to OpExtInst against a NON-SEMANTIC instruction
+        // set, and non-semantic means exactly "an optimizer may delete this": at
+        // -O the print has no observable result, so dead-code elimination removes
+        // it and the shader silently stops printing. So printf costs the
+        // optimizer, for every shader in the Context, and that is one of the two
+        // reasons shader_printf is opt-in rather than always on.
+        options.SetOptimizationLevel(
+            context.shader_printf() ? shaderc_optimization_level_zero : shaderc_optimization_level_performance);
 
         // Language is an attribute of the file name, not a second API path.
         const bool hlsl = lowercase_extension(path) == ".hlsl";

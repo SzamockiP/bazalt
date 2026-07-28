@@ -46,7 +46,7 @@ def render_flat(context, color):
     cmd.begin_rendering(target, clear_color=color)
     cmd.end_rendering(target)
     context.submit(cmd)
-    return target.read_pixels()
+    return target.color[0].read()
 
 
 def test_two_contexts_are_alive_at_once(pair):
@@ -208,3 +208,38 @@ def test_transfer_of_an_empty_image_is_refused(pair):
     empty = a.create_image(4, 4)
     with pytest.raises(bz.ResourceError):
         b.create_image(empty)
+
+
+# ── 0.18: the mip chain crosses too ──
+
+
+def test_a_transferred_image_carries_its_own_mip_levels(extra_context):
+    """0.15 regenerated levels 1..N on the far side and recorded the loss as a
+    ceiling: "a hand-authored mip chain flattens into a generated one". That is
+    a silent wrong answer for anyone who rendered their own levels — a
+    roughness-prefiltered environment map is exactly that.
+
+    Written so the generated chain and the authored one cannot agree: mip 0 is
+    red and mip 1 is green, which no filter of red produces.
+    """
+    a = extra_context()
+    b = extra_context()
+
+    red = np.zeros((16, 16, 4), dtype=np.uint8)
+    red[:, :, 0] = 255
+    red[:, :, 3] = 255
+    green = np.zeros((8, 8, 4), dtype=np.uint8)
+    green[:, :, 1] = 255
+    green[:, :, 3] = 255
+
+    source = a.create_image(red, mipmaps=True)
+    source.update(green, mip=1)
+    source.wait()
+    assert source.read(mip=1)[0, 0].tolist() == [0, 255, 0, 255]
+
+    copy = b.create_image(source)
+    copy.wait()
+
+    assert copy.read(mip=0)[0, 0].tolist() == [255, 0, 0, 255]
+    assert copy.read(mip=1)[0, 0].tolist() == [0, 255, 0, 255], \
+        "mip 1 was regenerated from mip 0 instead of copied"

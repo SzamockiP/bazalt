@@ -37,7 +37,7 @@ def test_readme_headless_quickstart(ctx):
 
     ctx.submit(cmd)
 
-    pixels = target.read_pixels()
+    pixels = target.color[0].read()
     assert pixels.shape == (600, 800, 4)
     assert pixels.dtype == np.uint8
     # Something was actually drawn, not just cleared.

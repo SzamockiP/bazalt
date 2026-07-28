@@ -112,16 +112,20 @@ def test_depth_only_pass_writes_sampleable_depth(ctx, triangle_shaders, triangle
     cmd2.end_rendering(screen)
     ctx.submit(cmd2)
 
-    pixels = screen.read_pixels()
+    pixels = screen.color[0].read()
     assert pixels[2, 2, 0] == 255, "far depth should view as white"
     assert pixels[40, 32, 0] == 0, "triangle depth should view as black"
 
 
-def test_read_pixels_on_depth_only_target_points_to_depth(ctx):
+def test_depth_only_target_has_no_colour_to_read(ctx):
+    """A depth-only target exposes an empty color tuple, so the mistake is an
+    IndexError at the subscript rather than a read of the wrong attachment.
+    target.depth is the one to read."""
     target = bz.RenderTarget(ctx, 16, 16, color=None, depth=bz.Format.D32F)
-    with pytest.raises(bz.ResourceError) as info:
-        target.read_pixels()
-    assert "depth" in str(info.value)
+    assert target.color == ()
+    with pytest.raises(IndexError):
+        target.color[0].read()
+    assert target.depth is not None
 
 
 # ── MRT ───────────────────────────────────────────────────────────────────
@@ -216,4 +220,4 @@ def test_color_attachment_samples_as_a_texture(ctx, triangle_shaders, triangle_b
     cmd2.end_rendering(second)
     ctx.submit(cmd2)
 
-    np.testing.assert_array_equal(second.read_pixels(), first.read_pixels())
+    np.testing.assert_array_equal(second.color[0].read(), first.color[0].read())

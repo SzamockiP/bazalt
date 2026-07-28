@@ -52,6 +52,50 @@ inline std::expected<VkSampleCountFlagBits, Error> validate_sample_count(std::ui
     return static_cast<VkSampleCountFlagBits>(samples);
 }
 
+// Transition every subresource of `image` that is not already in `layout` up to
+// it, then collapse the layout state. A no-op — no barrier recorded at all —
+// when the image is already uniform, which is every image that was written
+// whole. See RenderTarget::record_even_out for why this exists.
+inline void even_out_image(
+    const VolkDeviceTable& vk,
+    VkCommandBuffer cmd,
+    Image& image,
+    VkImageLayout layout,
+    VkImageAspectFlags aspect)
+{
+    if (image.uniform_layout().has_value())
+    {
+        return;
+    }
+    for (std::uint32_t layer = 0; layer < image.array_layers(); ++layer)
+    {
+        for (std::uint32_t mip = 0; mip < image.mip_levels(); ++mip)
+        {
+            const VkImageLayout from = image.layout_of(layer, mip);
+            if (from == layout)
+            {
+                continue;
+            }
+            record_image_transition(
+                vk,
+                cmd,
+                image.vk_image(),
+                from,
+                layout,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                aspect,
+                mip,
+                1,
+                1,
+                layer);
+        }
+    }
+    image.mark_has_contents(layout);
+}
+
 class RenderTarget
 {
 public:
@@ -170,6 +214,28 @@ public:
     // recorded lambdas), so the notification has to come from the recording
     // itself. No-op for targets that don't care.
     virtual void on_rendering_recorded()
+    {
+    }
+
+    // Bring the subresources this pass did NOT write up to the final layout too,
+    // so the whole image ends where the RenderTarget contract promises.
+    //
+    // "The layout the result must end in" has always been a promise about the
+    // IMAGE, and until 0.18 a subresource pass honoured it for the part it drew
+    // and left the rest wherever it was. `target.mip(1)` therefore produced an
+    // image that was SHADER_READ_ONLY at level 1 and UNDEFINED at level 0, and
+    // the sampler saw one view over both — a validation error at the sample,
+    // a long way from the pass that caused it. The old note called this "render
+    // every layer and every mip before you sample", which reads as advice and
+    // was really a missing barrier.
+    //
+    // Costs nothing on a whole-image pass: the layout state is uniform there, so
+    // there is nothing to even out and this records no barrier at all. Runs
+    // AFTER on_rendering_recorded, which is what makes the state true.
+    //
+    // Transitioning an untouched subresource out of UNDEFINED discards contents
+    // that were undefined anyway, so it loses nothing that existed.
+    virtual void record_even_out(const VolkDeviceTable& /*vk*/, VkCommandBuffer /*cmd*/)
     {
     }
 };
@@ -474,13 +540,41 @@ public:
     // readable and sampleable.
     void on_rendering_recorded() override
     {
+        mark_rendered(color_subresource(), depth_subresource());
+    }
+
+    // What a pass actually wrote, named by the target that ran it.
+    //
+    // Until 0.18 this marked the WHOLE image whatever the pass covered, so
+    // `target.mip(1)` claimed mip 0 was in the final layout too — and the next
+    // barrier over the whole image handed the driver an oldLayout that was true
+    // of one level and a lie about the rest. That is why the old note said to
+    // render every layer and every mip before sampling. A SubresourceTarget and
+    // a MultiviewTarget call this with THEIR subresource, so the statement is
+    // always made by whoever knows what was drawn.
+    void record_even_out(const VolkDeviceTable& vk, VkCommandBuffer cmd) override
+    {
         for (auto& image : colors_)
         {
-            image->mark_has_contents(final_layout());
+            even_out_image(vk, cmd, *image, final_layout(), VK_IMAGE_ASPECT_COLOR_BIT);
         }
         if (depth_)
         {
-            depth_->mark_has_contents(depth_final_layout());
+            even_out_image(vk, cmd, *depth_, depth_final_layout(), aspect_mask_for(depth_->vk_format()));
+        }
+    }
+
+    void mark_rendered(const Subresource& color_sr, const Subresource& depth_sr)
+    {
+        for (auto& image : colors_)
+        {
+            image->mark_subresource_contents(
+                final_layout(), color_sr.base_layer, color_sr.layer_count, color_sr.base_mip, color_sr.mip_count);
+        }
+        if (depth_)
+        {
+            depth_->mark_subresource_contents(
+                depth_final_layout(), depth_sr.base_layer, depth_sr.layer_count, depth_sr.base_mip, depth_sr.mip_count);
         }
     }
 
@@ -592,7 +686,6 @@ public:
     // AND mipped target (e.g. a mipped cube for prefiltered reflections) needs the
     // combined form.
     std::expected<std::shared_ptr<RenderTarget>, Error> layer(std::uint32_t i, std::uint32_t mip = 0);
-    std::expected<std::shared_ptr<RenderTarget>, Error> mip(std::uint32_t m);
 
     // Multiview: render into EVERY layer in one pass (the shader keys per-view work
     // off gl_ViewIndex) instead of a pass per layer. Needs a layered target and the
@@ -775,13 +868,19 @@ public:
         return {layer_, 1, mip_, 1};
     }
 
-    // Forwards to the parent, which marks the whole attachment Image sampleable.
-    // Correct once every layer/mip a caller intends to sample has been rendered
-    // (Image holds one layout for the whole image — sampling a partially rendered
-    // layered target is undefined and validation will flag it).
+    // Tells the parent that exactly THIS layer and mip are now in the final
+    // layout — not the whole image, which is what it used to say and what made
+    // "render every layer before you sample" a rule rather than an optimization.
+    // The Image collapses back to one layout as soon as the last subresource
+    // catches up, so a fully rendered target still costs one barrier.
     void on_rendering_recorded() override
     {
-        parent_->on_rendering_recorded();
+        parent_->mark_rendered(color_subresource(), depth_subresource());
+    }
+
+    void record_even_out(const VolkDeviceTable& vk, VkCommandBuffer cmd) override
+    {
+        parent_->record_even_out(vk, cmd);
     }
 
 private:
@@ -891,9 +990,16 @@ public:
         return parent_->depth_final_layout();
     }
 
+    // Multiview writes every layer in one pass, so its subresource already spans
+    // the whole array and the parent marks all of it.
     void on_rendering_recorded() override
     {
-        parent_->on_rendering_recorded();
+        parent_->mark_rendered(color_subresource(), depth_subresource());
+    }
+
+    void record_even_out(const VolkDeviceTable& vk, VkCommandBuffer cmd) override
+    {
+        parent_->record_even_out(vk, cmd);
     }
 
 private:
@@ -913,16 +1019,6 @@ inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::laye
             err_resource(std::format("mip {} is out of range; this target has {} mip level(s)", mip, mip_levels_)));
     }
     return std::make_shared<SubresourceTarget>(shared_from_this(), i, mip);
-}
-
-inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::mip(std::uint32_t m)
-{
-    if (m >= mip_levels_)
-    {
-        return std::unexpected(
-            err_resource(std::format("mip {} is out of range; this target has {} mip level(s)", m, mip_levels_)));
-    }
-    return std::make_shared<SubresourceTarget>(shared_from_this(), 0, m);
 }
 
 inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::all_layers()

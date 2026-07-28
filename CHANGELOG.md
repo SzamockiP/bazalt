@@ -5,6 +5,183 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.18.0] — 2026-07-28
+
+"Data, copies and tools". The boundary between your program and the GPU was
+one-way and one-shot: pixels went in when an image was created, and came out
+only from mip 0 of layer 0 of an offscreen target. A video frame, a camera
+feed, a plot, a texture computed in NumPy and painting all meant one thing —
+build a new `Image` every frame.
+
+Around that sit two smaller gaps that the same work reaches. Copying was half
+done: `copy_image` copied one mip level, a cross-Context transfer regenerated
+the others, there was no scaled copy and no buffer copy at all. And an `Image`
+held ONE layout for the whole thing, so a pass into `target.layer(0, 1)` claimed
+mip 0 had reached the final layout too — the reason the notes used to say "render
+every layer and every mip before you sample", which rules out the two things a
+mip chain is for.
+
+Third theme: debugging a prototype. A shader was debugged by rendering a value
+as a colour and reading the pixel back.
+
+Fourth theme, and the one that closes the release: which calls block.
+`load_image(path)` returned at once, `create_image(array)` beside it waited for
+the GPU, and no part of either name said so. Now every write is asynchronous
+and every read blocks. That is one rule for the whole library.
+
+Fifth theme, from an audit before the release: one path to one effect. Four
+releases of additions had left several effects reachable two ways — five verbs
+that waited, two names for reading a target back, two spellings of one render
+target view. Each duplicate is now one verb. This is where the breaking changes
+come from, and they are the last batch before 1.0 that touches these names.
+
+`cmd.begin_rendering`/`end_rendering` and `cmd.begin_label`/`end_label` both
+stay. They look like the same duplication and are not: a `with` block cannot
+span a function boundary, so a recording assembled from helpers needs the
+explicit pair. The block is still the form to reach for.
+
+### Added
+- **`img.update(array, layer=, mip=, region=)`.** Writes new pixels into an
+  image that already exists. `region=(x, y, w, h)` writes one rectangle and
+  keeps the rest, which is what painting and a sprite atlas need. The update
+  runs on the same worker as `load_image`, so the call returns at once and the
+  frame that samples the image waits for it on the GPU. Two updates of one
+  image arrive in the order you made them — one worker, one queue, and that is
+  a promise, not an accident. The array must match the format and be
+  C-contiguous: a strided array would upload other bytes, so bazalt refuses it
+  and names the fix.
+- **`img.read(layer=, mip=)`.** Reads any face or level back, shaped to that
+  level: mip 2 of a 64x64 texture returns 16x16. This is also the test
+  `generate_mipmaps` never had — reading only mip 0 meant a mip generator that
+  did nothing at all passed everything.
+- **`ctx.load_image(bytes)`.** Decodes an image from memory, for a picture with
+  no file behind it: one you downloaded, unpacked from a zip, or made with PIL.
+  Everything after the decode matches the file path. There is no hot reload,
+  because there is no file to watch.
+- **`buffer.update(data, offset=)`.** Writes part of a buffer. Changing one
+  matrix of an instance array used to rewrite the whole array.
+- **`renderer.present(cmd, capture=True)` and `renderer.read_pixels()`.** A
+  screenshot of a window. Two calls, and that is the design: Vulkan lets you
+  touch a window image only between `acquire()` and `present()`, so reading the
+  last frame is not legal and the copy travels with the frame instead. Bazalt
+  asks for the copy capability only where the compositor allows it, and says so
+  when it does not.
+- **`cmd.blit_image(src, dst, filter=)`.** Copies between two images of
+  DIFFERENT sizes and scales the pixels. `copy_image` needs a match, and
+  `generate_mipmaps` scales only inside one image, so a bloom downsample, an
+  upscale of a compute result and a thumbnail each used to need a full pass
+  with a fullscreen shader.
+- **`cmd.copy_buffer(src, dst)` and `cmd.fill_buffer(buffer, value)`.** Buffer
+  copies on the GPU. Zeroing is the reason: a counter an atomic increments has
+  to start each frame at a known value, and saying so used to take a dispatch
+  whose whole body was an assignment. DYNAMIC buffers work here too.
+- **`Context(shader_printf=True)`.** `debugPrintfEXT()` from your shaders
+  arrives at the logger as `Severity.INFO` from `Source.SHADER`. Write
+  `#extension GL_EXT_debug_printf : enable` and print the value you want. See
+  **Notes** for the two costs.
+- **`with cmd.label("shadow pass"):`.** Names a scope, so a RenderDoc capture
+  reads as a frame and not as a list of draws. Bazalt has named objects since
+  0.8; this names passes. Costs nothing when validation is off.
+- **`cmd.occlusion_query()`.** Counts the fragments of the draws inside it that
+  passed the depth and stencil tests. The handle is the identity, exactly like
+  `cmd.timer()`. It must sit inside a rendering scope, because Vulkan requires
+  the query to begin and end in one render pass.
+- **`ctx.memory_stats()`.** The memory this Context holds, what it reserved and
+  what the driver says is left, in bytes. "Am I leaking" used to need an
+  external tool.
+- **`ctx.subgroup_size`.** The width this GPU runs shader subgroups at. A
+  compute reduction that uses `subgroupAdd` needs it to size its workgroup.
+- **`ctx.submit(cmd, wait=False)` and `ctx.wait()`.** A headless submit that
+  returns at once. With the wait, a compute prototype that submits in a loop
+  leaves the GPU idle between iterations, so the loop runs at the speed of the
+  round trip and not of the work. Reusing one command buffer is safe: the frame
+  ring paces it.
+- **`buffer.ready` and `buffer.wait()`.** The same pair an `Image` carries, for
+  the same reason: a STATIC buffer fills itself in the background now. You do
+  not have to ask. A submit that binds the buffer waits for it on the GPU, and
+  `read()` waits for it on the CPU. These are for a loading screen and for
+  timing a setup step.
+- **Example `24_video_texture`.** A texture rewritten from NumPy every frame,
+  painting into a region with the mouse, a labelled pass, and a screenshot.
+
+### Changed
+- **An image tracks its layout for each layer and level, not as a whole.** A
+  pass now records only the part it drew, and `end_rendering` brings the rest of
+  the image to the same final layout. So you can render into one mip or one cube
+  face and then sample or read the image, which used to be a validation error
+  some distance from the pass that caused it. Nothing changes for an image
+  written whole: the layouts agree, bazalt stores one, and it records the same
+  single barrier it always did.
+- **`cmd.copy_image` copies every mip level the two images share.** It copied
+  mip 0 and left the rest holding the destination's old pixels, which is a copy
+  of the top level and not of the image.
+- **A cross-Context transfer carries the source's own mip levels.** It used to
+  regenerate them, so a chain you rendered per level arrived as a generated one.
+  A prefiltered environment map is exactly that case.
+- **DYNAMIC buffers carry the transfer usage flags**, so `copy_buffer` and
+  `fill_buffer` work on them. The flags cost nothing on memory that the host can
+  already see.
+- **`ctx.create_buffer(...)` with STATIC memory no longer waits for the GPU.**
+  It still submits the copy at the call, so a failure is still raised at the
+  call. Only the wait is gone. That wait was a full drain of the graphics queue,
+  so a program that made 30 meshes at startup drained the queue 30 times.
+- **`ctx.create_image(array)` and `ctx.create_image([arrays])` no longer wait
+  for the GPU**, for the same reason and with the same rule. `img.ready` is
+  therefore `False` on the line after the call. That is not a problem to fix: a
+  submit that samples the image waits for it, and `read()` waits for it.
+- **`ctx.wait()` and `ctx.upload_progress` cover these new uploads too.** A
+  copy with no file to decode joins the same batch as a `load_image`, already
+  submitted, so one counter answers for both kinds.
+
+### Changed (breaking)
+- **`ctx.wait()` is the only wait verb.** It waits for everything this Context
+  started, uploads and submits together. `ctx.wait_for_uploads()`,
+  `ctx.wait_idle()` and `ctx.uploads_done` are removed: all three ended at the
+  same timeline semaphore and answered the same question at a slightly
+  different width. Replace every one of them with `ctx.wait()`. To wait for
+  less, wait on the resource — `buf.wait()` and `img.wait()` stay.
+  `ctx.upload_progress` stays and now counts every upload, so
+  `while ctx.upload_progress < 1.0:` replaces `while not ctx.uploads_done:`.
+- **`target.read_pixels()` is removed.** Use `target.color[0].read()`. It was
+  the same call with the layer and mip choice taken away, and `img.read()` is
+  the general reader. `renderer.read_pixels()` stays and keeps the name: a
+  screenshot is a different operation, with the capture protocol behind it.
+- **`target.mip(level)` is removed.** Use `target.layer(0, level)`, which is
+  what it called.
+- **`window.should_close()` is removed.** Use `not window.is_open()`.
+
+### Notes
+- **Shader printf has two costs, and that is why it is off by default.** The
+  validation layers implement it, so you need them: `validation="off"` with
+  `shader_printf=True` raises `InitializationError` instead of printing
+  nothing, and `validation="auto"` on a machine with no layers warns. The layer
+  also instruments every shader, and bazalt compiles that Context's shaders
+  without the optimizer, because a print is a non-semantic instruction that the
+  optimizer is allowed to delete.
+- **Printf output reaches your callback whatever `min_severity` says.** The
+  layer reports it at INFO and the default floor is Warning, so an obeyed
+  filter would make the feature look broken. Bazalt also removes the layer's
+  report text around your words, which for a print inside a loop is the
+  difference between a tool and a wall of text.
+- **An occlusion count is not exact.** A precise count needs the
+  `occlusionQueryPrecise` feature, and without it the specification allows any
+  value above zero. Read `q.samples > 0` as the reliable part.
+- **`img.update()` is asynchronous.** Use `img.wait()`, `img.ready` or
+  `ctx.wait()` when you need to know it has landed. A submit that
+  samples the image waits for it either way.
+- **A cross-Context transfer with a mip chain is slower now.** It reads and
+  writes each level instead of regenerating them. The whole operation is
+  already documented as a setup step that blocks the source queue, and correct
+  data beats fast wrong data at setup time.
+- **One rule for what blocks: every write is asynchronous, every read blocks.**
+  A write returns a handle, so it can hand you the resource before the GPU has
+  it, and the resource is its own future. A read returns an array, so it has
+  nothing to hand you until the bytes arrive. One verb waits: `ctx.wait()`,
+  for everything this Context started. `res.wait()` narrows it to one
+  resource.
+- **Tessellation, geometry shaders, indirect draw, a `RenderTarget` on images
+  you own, and the window extras move to 0.19.**
+
 ## [0.17.0] — 2026-07-27
 
 "What the pipeline still hard-codes". 0.16 removed the fixed blend mode, depth

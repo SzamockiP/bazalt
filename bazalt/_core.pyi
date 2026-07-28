@@ -307,16 +307,21 @@ class WindowMode(IntEnum):
 # ── Resources ──────────────────────────────────────────────────────────
 
 class Buffer:
-    def update(self, data: bytes) -> None: ...
-    def update(self, array: Any) -> None:
+    def update(self, data: bytes, *, offset: int = 0) -> None: ...
+    def update(self, array: Any, *, offset: int = 0) -> None:
         """Upload from any C-contiguous buffer-protocol object.
+
+        offset is a BYTE offset into the buffer. Without it, changing one matrix
+        of an instance array rewrites the whole array, and update() is already
+        the per-frame path, so the wasted copy is per frame too.
 
         Raises ResourceError for a strided view (`arr.T`, `arr[::2]`): copying
         silently would hide an allocation on every upload. Pass
         `numpy.ascontiguousarray(arr)` to be explicit.
         """
         ...
-    def update(self, list: list, data_type: Optional[DataType] = None) -> None: ...
+    def update(self, list: list, data_type: Optional[DataType] = None, *,
+               offset: int = 0) -> None: ...
 
     def read(self, dtype: Any) -> Any:
         """Copy the buffer back to host memory as a 1-D numpy array.
@@ -325,7 +330,26 @@ class Buffer:
         to interpret the bytes (e.g. `ssbo.read(np.float32)`). STATIC buffers
         take a blocking GPU round trip; DYNAMIC ones return what update()
         last wrote into the current frame's copy.
+
+        A pending upload is waited for first, so this is correct on the line
+        after create_buffer.
         """
+        ...
+
+    @property
+    def ready(self) -> bool:
+        """Non-blocking: is the data on the GPU?
+
+        False while a STATIC buffer's staging copy is still running. You never
+        have to poll this — a submit that binds the buffer waits automatically,
+        and read() waits too; it exists for loading screens and explicit
+        control. Always True for a DYNAMIC buffer, which is written by mapping
+        and has no copy to wait for.
+        """
+        ...
+
+    def wait(self) -> None:
+        """Block until this buffer's upload has finished."""
         ...
 
 class ShaderModule:
@@ -379,9 +403,10 @@ class Image:
     def ready(self) -> bool:
         """Non-blocking: is the pixel data on the GPU?
 
-        False while a load_image decode/copy is still in flight. You never
-        have to poll this — a submit that uses the image waits automatically;
-        it exists for loading screens and explicit control.
+        False while any upload is still in flight — a load_image decode/copy,
+        a create_image(array) copy or an update(). You never have to poll this
+        — a submit that uses the image waits automatically; it exists for
+        loading screens and explicit control.
         """
         ...
 
@@ -392,15 +417,48 @@ class Image:
         """
         ...
 
-    def read(self) -> Any:
-        """Copy mip 0 back to host memory as a numpy array (layer 0 for a
-        texture array / cubemap — sample the other layers to inspect them).
+    def read(self, *, layer: int = 0, mip: int = 0) -> Any:
+        """Copy one subresource back to host memory as a numpy array.
 
         Shape is (height, width, channels) — or (height, width) for
         single-channel formats — and the dtype follows the format (uint8,
         float16 or float32). Blocking; a debugging and test path.
 
-        Raises ResourceError if the image has no contents yet.
+        layer picks a cube face or array slice, mip picks a level, and the shape
+        follows the MIP: level 2 of a 64x64 texture reads back 16x16. Before
+        0.18 there was no choice — read() meant mip 0 of layer 0, so a cube face
+        could not be inspected and "did generate_mipmaps compute anything" was a
+        question with no way to ask it.
+
+        Raises ResourceError if the image has no contents yet, or if the layer
+        or mip does not exist.
+        """
+        ...
+
+    def update(self, array: Any, *, layer: int = 0, mip: int = 0,
+               region: Optional[Sequence[int]] = None) -> None:
+        """Change the pixels of an image that already exists.
+
+        A video frame, a camera feed, a matplotlib figure, a procedural texture
+        computed in numpy, painting — before 0.18 every one of them meant
+        creating a new Image per frame, because there was no way to write into
+        one.
+
+        The array's dtype and shape must match the image's format and the region
+        being written, and it must be C-contiguous: memcpy ignores strides, so a
+        transposed or sliced array would upload garbage rather than raise. Use
+        numpy.ascontiguousarray() if needed.
+
+        region=(x, y, width, height) writes a rectangle and leaves the rest
+        alone — what painting and a sprite atlas need. Omitted, the whole level
+        is replaced.
+
+        ASYNCHRONOUS, like load_image: it returns at once and the copy runs on
+        the upload worker, because the case this exists for is a video frame at
+        60 fps. Use img.wait(), img.ready or ctx.wait() to know when
+        it has landed; a submit that samples the image waits for it GPU-side
+        either way. Two updates of one image reach the GPU in the order they
+        were called — one FIFO worker, and that is a guarantee.
         """
         ...
 
@@ -466,9 +524,9 @@ class RenderTarget(RenderTargetBase):
         <= ctx.max_samples(). name labels the attachments in validation messages.
 
         layers>1 / cube=True / mip_levels>1 make the attachments layered / cube /
-        mipped so a scene can be rasterized into one subresource with .layer(i) /
-        .mip(m) (render-to-layer / render-to-mip: dynamic env capture, cascade
-        shadows). cube fixes 6 square layers and gives the colour attachment a
+        mipped so a scene can be rasterized into one subresource with
+        .layer(i, mip=m) (render-to-layer / render-to-mip: dynamic env capture,
+        cascade shadows). cube fixes 6 square layers and gives the colour attachment a
         CUBE view so target.color[0] samples as a cubemap. Single-sample only:
         samples>1 cannot combine with layers/cube/mip_levels this release.
         """
@@ -493,11 +551,6 @@ class RenderTarget(RenderTargetBase):
         target.depth."""
         ...
 
-    def mip(self, level: int) -> RenderTargetBase:
-        """A view of one mip level of this target, to render into with
-        cmd.rendering(target.mip(m)). The pass covers exactly that mip's size."""
-        ...
-
     def all_layers(self) -> RenderTargetBase:
         """A multiview view of the whole target: cmd.rendering(target.all_layers())
         renders into EVERY layer in ONE pass instead of a pass per layer. The
@@ -505,13 +558,6 @@ class RenderTarget(RenderTargetBase):
         for cube capture). Needs a layered target and ctx.supports_multiview();
         composes with MSAA (each view resolves into its own layer). Renders every
         layer, so the result is fully sampleable with no partial-render caveat."""
-        ...
-
-    def read_pixels(self) -> np.ndarray:
-        """Copy the colour attachment back to host memory as (height, width, 4) uint8.
-
-        Blocking, and it stalls the GPU — intended for tests and debugging.
-        """
         ...
 
 class GraphicsPipelineBuilder:
@@ -769,12 +815,66 @@ class CommandBuffer:
 
         The history buffer a temporal effect needs: keep the last frame's result
         to blend against this one (motion blur, a feedback trail), or ping-pong
-        two storage images. Only mip 0 is copied — call generate_mipmaps for the
-        rest.
+        two storage images.
+
+        Every mip level the two images share is copied. Until 0.18 this was mip
+        0 only, which left levels 1..N holding the destination's old pixels —
+        a copy of the image's top level rather than of the image, and the
+        difference showed up the moment anything sampled with a mip bias.
 
         src_access names where the SOURCE currently is: SHADER_READ for an image
         that is sampled (the default), SHADER_WRITE for one a compute dispatch
         just wrote. Both images end sampleable. Refused inside a rendering scope.
+        """
+        ...
+
+    def blit_image(self, src: Image, dst: Image, *,
+                   src_access: Access = Access.SHADER_READ,
+                   filter: Filter = Filter.LINEAR) -> CommandBuffer:
+        """Copy one image into another of a DIFFERENT size, scaling on the way.
+
+        copy_image needs the two to match; generate_mipmaps scales, but only
+        inside one image. Downsampling for bloom, upscaling a compute result and
+        making a thumbnail all sat in that gap, and each one used to be a full
+        graphics pass with a fullscreen shader.
+
+        Mip 0 of every shared layer. Call generate_mipmaps on the destination if
+        it needs a chain.
+
+        Raises ResourceError when this GPU cannot blit between the two formats —
+        BLIT_SRC/BLIT_DST are format features, not a given, and a linear filter
+        needs the source to be filterable on top.
+
+        src_access, and both images ending sampleable, work exactly as for
+        copy_image. Refused inside a rendering scope.
+        """
+        ...
+
+    def copy_buffer(self, src: Buffer, dst: Buffer, *,
+                    src_offset: int = 0, dst_offset: int = 0,
+                    size: int = 0) -> CommandBuffer:
+        """Copy bytes from one buffer into another, GPU-side.
+
+        size=0 means the rest of the source. A compute ping-pong and "keep last
+        frame's values" are both this one command; before it, moving buffer
+        contents meant a round trip through the host or a compute shader written
+        to do nothing but assign.
+
+        Refused inside a rendering scope.
+        """
+        ...
+
+    def fill_buffer(self, buffer: Buffer, value: int = 0, *,
+                    offset: int = 0, size: int = 0) -> CommandBuffer:
+        """Fill a buffer with a repeated 32-bit value, GPU-side.
+
+        Zeroing is the reason it exists: a counter an atomic increments has to
+        start each frame at a known value, and saying so used to take a dispatch
+        whose whole body was an assignment.
+
+        offset and size must be multiples of 4, and size=0 means the rest of the
+        buffer. 32-bit because the underlying command is: the value is one word
+        repeated. Refused inside a rendering scope.
         """
         ...
 
@@ -823,11 +923,81 @@ class CommandBuffer:
             print(t.ms)
 
         The handle is the identity — no names, no keys — so several, nested and
-        overlapping timers all work. Unlike frame.gpu_time_ms this needs no
-        window: the blocking headless submit means t.ms is ready as soon as
-        submit() returns. Self-gating: the query pool exists only once a timer is
+        overlapping timers all work. Unlike renderer.gpu_time_ms this needs no
+        window: t.ms is ready as soon as the submit you timed has finished. Self-gating: the query pool exists only once a timer is
         used, so apps that don't time pay nothing."""
         ...
+
+    def label(self, name: str) -> LabelScope:
+        """Name a scope so a capture reads as a frame instead of a list of draws:
+
+            with cmd.label("shadow pass"):
+                with cmd.rendering(shadow_target):
+                    ...
+
+        Labels nest. A no-op without VK_EXT_debug_utils — which bazalt requests
+        only when validation is on — so a release run pays nothing and simply
+        shows no labels. Object names (name= on create_buffer / create_image /
+        the pipeline builders) answer "which object"; this answers "which pass"."""
+        ...
+
+    def begin_label(self, name: str) -> CommandBuffer:
+        """The explicit half of label(), for a recording split across functions
+        — a helper that opens the scope and a matching one that closes it, where
+        no `with` block spans both. Same escape hatch as begin_rendering /
+        end_rendering. Prefer `with cmd.label(...)` whenever one block covers
+        the scope: it cannot leave a label open."""
+        ...
+
+    def end_label(self) -> CommandBuffer:
+        """Close the innermost open label. An unbalanced call is ignored rather
+        than recorded: ending a label that was never begun is undefined
+        behaviour in Vulkan."""
+        ...
+
+    def occlusion_query(self) -> OcclusionQuery:
+        """Count the fragments of the draws inside the scope that passed the
+        depth and stencil tests:
+
+            with cmd.rendering(target):
+                with cmd.occlusion_query() as q:
+                    cmd.bind_pipeline(bounding_box).draw(36)
+            ctx.submit(cmd)
+            visible = q.samples > 0
+
+        The handle is the identity, exactly as for timer(). Must sit inside a
+        rendering scope — Vulkan requires the query to begin and end within one
+        render pass — and raises ResourceError otherwise.
+
+        The count is not requested as precise, because precision needs the
+        occlusionQueryPrecise feature and without it the spec allows any non-zero
+        value. Treat `samples` as "how much, roughly", and `samples > 0` as the
+        reliable part."""
+        ...
+
+class LabelScope:
+    """Returned by CommandBuffer.label(); use it in a `with` statement."""
+
+    def __enter__(self) -> CommandBuffer: ...
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
+
+class OcclusionQuery:
+    """An occlusion query handle from CommandBuffer.occlusion_query(). Usable as
+    a context manager or stopped by hand (q.stop())."""
+
+    def stop(self) -> None:
+        """End the query. Idempotent; called for you on `with` exit."""
+        ...
+    @property
+    def samples(self) -> Optional[int]:
+        """Fragments that passed the depth and stencil tests, or None if the
+        command buffer was re-recorded since (the handle is stale) or the submit
+        has not completed. Read it after the submit you measured has finished —
+        the default submit(wait=True) is enough; submit(wait=False) needs a
+        ctx.wait() first."""
+        ...
+    def __enter__(self) -> OcclusionQuery: ...
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
 
 class RenderingScope:
     """Returned by CommandBuffer.rendering(); use it in a `with` statement."""
@@ -847,8 +1017,9 @@ class Timer:
     def ms(self) -> Optional[float]:
         """Measured GPU time in milliseconds, or None if timestamps are
         unsupported, the command buffer was re-recorded since (the handle is
-        stale), or the submit has not completed (a blocking headless submit
-        always has)."""
+        stale), or the submit has not completed. Read it after the submit you
+        timed has finished — the default submit(wait=True) is enough;
+        submit(wait=False) needs a ctx.wait() first."""
         ...
     def __enter__(self) -> Timer: ...
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
@@ -864,7 +1035,6 @@ class Window:
         """
         ...
     def is_open(self) -> bool: ...
-    def should_close(self) -> bool: ...
     def is_key_pressed(self, key: int) -> bool: ...
     def is_mouse_button_pressed(self, button: int) -> bool: ...
     def was_key_pressed(self, key: int) -> bool:
@@ -918,6 +1088,26 @@ class Window:
     def width(self) -> int: ...
     @property
     def height(self) -> int: ...
+
+class MemoryStats:
+    """GPU memory as VMA sees it, from Context.memory_stats(). Bytes, not
+    megabytes: a rounded number cannot be un-rounded."""
+
+    @property
+    def used(self) -> int:
+        """Bytes VMA has allocated for this Context's resources."""
+        ...
+    @property
+    def reserved(self) -> int:
+        """Bytes VMA has reserved from the driver. Always >= used: VMA
+        sub-allocates out of larger blocks, so a freed resource does not
+        immediately give memory back to the driver."""
+        ...
+    @property
+    def budget(self) -> int:
+        """Bytes the driver says this process may use. Not the same as the card's
+        capacity — it accounts for whatever else is running."""
+        ...
 
 class Device:
     """One GPU this machine can offer, as inert data — no live Vulkan handle.
@@ -1004,7 +1194,8 @@ class Context:
                  raw_extensions: Sequence[str] = (),
                  auto_barriers: bool = True,
                  hot_reload: bool = False,
-                 gpu_timing: bool = False) -> None:
+                 gpu_timing: bool = False,
+                 shader_printf: bool = False) -> None:
         """
         Args:
             logger: defaults to one printing warnings to stderr.
@@ -1037,6 +1228,22 @@ class Context:
                 diagnostic — the pool reset and two writes ride in every frame's
                 command buffer, and per-frame queries are not guaranteed free on
                 every GPU. Left off, renderer.gpu_time_ms is always None, no cost.
+            shader_printf: deliver debugPrintfEXT() output from your shaders to
+                the logger, as Severity.INFO from Source.SHADER. Write
+                `#extension GL_EXT_debug_printf : enable` in the shader and call
+                `debugPrintfEXT("value = %f", x)`. The prints arrive whatever the
+                logger's min_severity is.
+
+                The validation layers implement this, so it needs them: with
+                validation="off" the constructor raises InitializationError, and
+                with validation="auto" on a machine that has no layers installed
+                you get a warning and no prints.
+
+                Two costs, which is why it is off by default. The layer
+                instruments every shader, and bazalt compiles every shader in
+                this Context without optimization, because a print is a
+                non-semantic instruction that the optimizer is entitled to
+                delete.
         """
         ...
 
@@ -1050,6 +1257,22 @@ class Context:
         ...
     @property
     def auto_barriers(self) -> bool: ...
+    @property
+    def shader_printf(self) -> bool: ...
+    @property
+    def subgroup_size(self) -> int:
+        """The width this GPU runs shader subgroups at, or 0 where the driver
+        reports none. A compute reduction using subgroupAdd sizes its workgroup
+        against this."""
+        ...
+
+    def memory_stats(self) -> MemoryStats:
+        """How much GPU memory this Context holds, and how much room is left.
+
+        VMA already keeps the numbers, so this is a read, not new bookkeeping.
+        Summed across heaps — which heap an allocation lands in is a driver
+        decision, and "am I growing" is the question this answers."""
+        ...
 
     def begin_frame(self) -> None:
         """Open one logical frame — the frame verb of a windowed loop.
@@ -1095,7 +1318,20 @@ class Context:
     def create_buffer(self, array: Any, type: BufferType, usage: MemoryUsage,
                       *, name: str = "") -> Buffer: ...
     def create_buffer(self, size_in_bytes: int, type: BufferType,
-                      usage: MemoryUsage, *, name: str = "") -> Buffer: ...
+                      usage: MemoryUsage, *, name: str = "") -> Buffer:
+        """A GPU buffer from a list, any C-contiguous array, or a size in bytes.
+
+        A STATIC buffer is device-local and filled by a staging copy. That copy
+        is ASYNCHRONOUS since 0.18.0: it is submitted here — so a failure still
+        raises here — but not waited for, because 30 meshes used to mean 30 full
+        queue drains at startup. The buffer is usable at once; a submit that
+        binds it waits GPU-side, and read() waits CPU-side. `buf.ready`,
+        `buf.wait()` and `ctx.wait()` are the explicit-control verbs.
+
+        A DYNAMIC buffer is host-visible and written by update(), so it has no
+        copy and is never pending.
+        """
+        ...
 
     def graphics_pipeline(self) -> GraphicsPipelineBuilder: ...
     def compute_pipeline(self) -> ComputePipelineBuilder: ...
@@ -1139,6 +1375,18 @@ class Context:
         """
         ...
 
+    def load_image(self, data: bytes, *, mipmaps: bool = True, name: str = "") -> Image:
+        """Decode encoded image BYTES rather than a file: a PNG off the network,
+        out of a zip, or straight from PIL, none of which has a path on disk.
+
+        Everything after the decode is the file path's path — async, sRGB,
+        mipped by default. Never hot-reloaded, by construction: there is no file
+        for bazalt to watch.
+
+        Raises ResourceError when the bytes are not a decodable image.
+        """
+        ...
+
     def load_image(self, path: str, *, mipmaps: bool = True, name: str = "") -> Image:
         """Decode an image file into an sRGB GPU image, with a full mip chain by
         default (`mipmaps=False` for a single level — e.g. a UI sprite sampled
@@ -1148,7 +1396,7 @@ class Context:
         corrupt file raises ResourceError at this call), but the decode and
         GPU copy run on a background worker. The image is usable for
         recording right away — a submit that samples it waits for the upload
-        automatically. `img.ready`, `img.wait()` and `ctx.wait_for_uploads()`
+        automatically. `img.ready`, `img.wait()` and `ctx.wait()`
         are the explicit-control verbs.
 
         With hot_reload=True the file is watched: re-saving it re-uploads into
@@ -1170,25 +1418,22 @@ class Context:
         ...
 
     @property
-    def uploads_done(self) -> bool:
-        """Non-blocking: have all load_image uploads finished?"""
-        ...
-    @property
     def upload_progress(self) -> float:
-        """0.0 .. 1.0 for the current batch of load_image calls (1.0 when
-        idle) — a loading bar without user-side threads:
+        """0.0 .. 1.0 for the current batch of uploads (1.0 when idle) — a
+        loading bar without user-side threads:
 
-            while not ctx.uploads_done:
+            while ctx.upload_progress < 1.0:
                 draw_progress(ctx.upload_progress)
 
         "Batch" means everything queued since the last time uploads fully
         drained: once all in-flight uploads finish, progress resets to 1.0 and
         the next load_image starts a fresh batch from 0. This is the final
         semantics (settled in 0.9) — a second loading screen counts only its own
-        images, not the ones a previous screen already finished."""
-        ...
-    def wait_for_uploads(self) -> None:
-        """Block until every pending load_image upload has finished."""
+        images, not the ones a previous screen already finished.
+
+        Covers both kinds: the load_image decodes on the worker, and the
+        one-shot copies of create_buffer and create_image(array), which have
+        nothing to decode and join the batch already submitted."""
         ...
     def create_image(self, width: int, height: int,
                      format: Format = Format.RGBA8, *, layers: int = 1,
@@ -1210,7 +1455,13 @@ class Context:
         `mipmaps=True` generates the full chain (arrays stay 1-level unless asked,
         so a data texture gets no surprise filtering). (h, w, 3) has no portable
         GPU format and raises ResourceError with a padding hint. `cube=True` here
-        is a mistake — a cubemap needs 6 faces, so pass a list (below)."""
+        is a mistake — a cubemap needs 6 faces, so pass a list (below).
+
+        ASYNCHRONOUS since 0.18.0, like load_image: the copy is submitted here
+        (so every error still raises here) but not waited for. `img.ready` is
+        therefore False right after the call, and that is not a problem to solve
+        — a submit that samples the image waits for it GPU-side, and read()
+        waits CPU-side."""
         ...
     def create_image(self, images: Sequence[Any], *, mipmaps: bool = False,
                      cube: bool = False, name: str = "") -> Image:
@@ -1237,15 +1488,6 @@ class Context:
         hand-authored chain (rendered per level) becomes a generated one.
         ResourceError if the source is multisampled or still has no contents."""
         ...
-    def wait_idle(self) -> None:
-        """Block until the device has finished every submit.
-
-        The frame path already waits where it must, so this is for the cases
-        outside one: timing a batch of work, or making sure nothing is in flight
-        before a measurement. Releases the GIL while it waits.
-        """
-        ...
-
     def create_sampler(self, filter: Filter = Filter.LINEAR,
                        address_mode: AddressMode = AddressMode.REPEAT,
                        anisotropy: bool = True,
@@ -1286,10 +1528,34 @@ class Context:
         buffer; None inherits it."""
         ...
 
-    def submit(self, cmd: CommandBuffer) -> None:
+    def submit(self, cmd: CommandBuffer, *, wait: bool = True) -> None:
         """Execute a command buffer with no swapchain and no present.
 
-        Blocking. This is the headless path.
+        Blocking by default, which is right when the next line reads the result.
+
+        wait=False returns as soon as the work is queued. A compute prototype
+        that submits in a loop wants this: with the wait, the GPU idles between
+        iterations and the loop runs at the speed of the round trip rather than
+        of the work. Call ctx.wait() before reading anything back.
+
+        Reusing one CommandBuffer asynchronously is safe: the ring paces it, so
+        a submit into a slot whose previous submit is still running waits for
+        that one first. frames_in_flight is therefore how many submits can be in
+        flight at once.
+        """
+        ...
+
+    def wait(self) -> None:
+        """Block until everything this Context started has finished — every
+        upload and every submit.
+
+        The one wait verb, and the other half of submit(wait=False). This is
+        also where deferred destruction is reclaimed for that work. Waits on the
+        submission timeline rather than on the device, so the other Contexts
+        sharing the GPU are unaffected. Calling it with nothing outstanding does
+        nothing.
+
+        To wait for less, wait on the resource: buf.wait() / img.wait().
         """
         ...
 
@@ -1345,13 +1611,32 @@ class SwapchainRenderer(RenderTargetBase):
         """
         ...
 
-    def present(self, cmd: CommandBuffer) -> None:
+    def present(self, cmd: CommandBuffer, *, capture: bool = False) -> None:
         """Record the command buffer for this window, submit it and present.
 
         ResourceError when there is no acquired image — acquire() was not
         called, returned False, or its image was already presented. Each window
         needs its own CommandBuffer: one holds a single command buffer per frame
         slot, so replaying it in two windows would overwrite work in flight.
+
+        capture=True copies this frame's image into a staging buffer as part of
+        the same submit, for read_pixels() to collect. It costs a full-frame copy
+        on the frames that ask and nothing on the ones that do not.
+        """
+        ...
+
+    def read_pixels(self) -> Any:
+        """The frame captured by present(capture=True), as an (h, w, 4) uint8
+        array. Blocks until that frame's submit has finished.
+
+        It takes two calls, and that is not an oversight. A presentable image may
+        only be touched between acquire and present, so reading the LAST frame is
+        illegal by the spec and the validation layer reports it. The copy has to
+        ride the frame's own submit.
+
+        Raises ResourceError when nothing has been captured, or when the
+        compositor refused to let the swapchain images be copied from — render
+        into a bz.RenderTarget and read that instead.
         """
         ...
 

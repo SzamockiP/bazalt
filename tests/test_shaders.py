@@ -36,7 +36,7 @@ def render_fullscreen(ctx, vert, frag, size=64):
     cmd.draw(3)
     cmd.end_rendering(target)
     ctx.submit(cmd)
-    return target.read_pixels()
+    return target.color[0].read()
 
 
 # ── in-memory sources ─────────────────────────────────────────────────────
@@ -211,7 +211,7 @@ def test_spv_round_trip_produces_identical_image(ctx, tmp_path, triangle_shaders
         cmd.draw_indexed(3)
         cmd.end_rendering(target)
         ctx.submit(cmd)
-        return target.read_pixels()
+        return target.color[0].read()
 
     reference = render(vert, frag)
 
@@ -311,7 +311,7 @@ def test_spirv_bytes_render(ctx, triangle_shaders, triangle_buffers):
         cmd.draw_indexed(3)
         cmd.end_rendering(target)
         ctx.submit(cmd)
-        return target.read_pixels()
+        return target.color[0].read()
 
     reference = render(vert, frag)
     from_bytes = render(
@@ -471,7 +471,7 @@ def test_shadow_compare_matches_manual_compare(ctx, triangle_shaders, triangle_b
         cmd.draw(3)
         cmd.end_rendering(screen)
         ctx.submit(cmd)
-        return screen.read_pixels()
+        return screen.color[0].read()
 
     manual = compare_pass(MANUAL_COMPARE_FRAG, "manual_cmp.frag",
                           ctx.create_sampler(filter=bz.Filter.NEAREST))

@@ -70,11 +70,11 @@ def test_headless_submits_rotate_the_ring(ctx, fullscreen_vert):
 
     ubuf.update([0.0, 1.0, 0.0, 1.0])
     ctx.submit(cmd)
-    assert np.allclose(target.read_pixels()[32, 32, :3], [0, 255, 0], atol=2), \
+    assert np.allclose(target.color[0].read()[32, 32, :3], [0, 255, 0], atol=2), \
         "the submit did not read the slot update() wrote"
 
     ctx.submit(cmd)
-    assert np.allclose(target.read_pixels()[32, 32, :3], [255, 0, 0], atol=2), \
+    assert np.allclose(target.color[0].read()[32, 32, :3], [255, 0, 0], atol=2), \
         "the second submit reused the first submit's ring slot"
 
 
@@ -113,4 +113,4 @@ def test_update_before_each_submit_always_wins(ctx, fullscreen_vert):
     for value, expected in colours:
         ubuf.update(value)
         ctx.submit(cmd)
-        assert np.allclose(target.read_pixels()[32, 32, :3], expected, atol=2), value
+        assert np.allclose(target.color[0].read()[32, 32, :3], expected, atol=2), value

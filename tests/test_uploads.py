@@ -3,7 +3,7 @@
 The image IS the future — there is no Future[Image] wrapper. A submit that
 samples a pending image waits for exactly that upload (GPU-side, via the
 submission timeline); everything else never blocks. `ready`/`wait()`/
-`wait_for_uploads()` exist for explicit control, not correctness.
+`ctx.wait()` exist for explicit control, not correctness.
 """
 
 import pathlib
@@ -96,7 +96,7 @@ def test_sampling_without_wait_renders_correctly(ctx, fullscreen_and_textured, t
         c.bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).draw(3)
     ctx.submit(cmd)
 
-    pixels = target.read_pixels()
+    pixels = target.color[0].read()
     assert np.allclose(pixels[15, 15, :3], red[:3], atol=2), pixels[15, 15]
     assert np.allclose(pixels[46, 46, :3], white[:3], atol=2), pixels[46, 46]
 
@@ -122,25 +122,101 @@ def test_unrelated_submits_do_not_wait_for_uploads(ctx, triangle_shaders, triang
     with cmd.rendering(target, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
         c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
     ctx.submit(cmd)
-    assert target.read_pixels() is not None
+    assert target.color[0].read() is not None
 
-    ctx.wait_for_uploads()
+    ctx.wait()
     assert all(img.ready for img in pending)
 
 
-def test_wait_for_uploads_and_progress_endpoints(ctx, tmp_path):
-    assert ctx.uploads_done  # idle
-    assert ctx.upload_progress == 1.0
+def test_wait_and_progress_endpoints(ctx, tmp_path):
+    assert ctx.upload_progress == 1.0  # idle
 
     png_path = tmp_path / "img.png"
     write_png(png_path, [[(1, 2, 3, 255)] * 32] * 32)
     imgs = [ctx.load_image(str(png_path)) for _ in range(8)]
 
-    ctx.wait_for_uploads()
-    assert ctx.uploads_done
+    ctx.wait()
     assert ctx.upload_progress == 1.0
     assert all(img.ready for img in imgs)
     np.testing.assert_array_equal(imgs[-1].read()[0, 0], [1, 2, 3, 255])
+
+
+# ── one-shot uploads: no decode, no worker, no wait (0.18.0) ──────────────
+#
+# create_buffer and create_image(array) hand over bytes that are already
+# decoded, so there is nothing to move onto the upload worker. They submit the
+# staging copy on the calling thread and skip only the wait — which makes the
+# resource its own future exactly like a load_image one.
+
+
+def test_static_buffer_upload_is_async_and_wait_settles_it(ctx):
+    data = np.arange(1024, dtype=np.float32)
+    buf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf.wait()
+    assert buf.ready
+
+
+def test_dynamic_buffers_are_never_pending(ctx):
+    """Host-visible memory is written by mapping, so there is no copy to wait
+    for and `ready` is the honest constant it looks like."""
+    buf = ctx.create_buffer(np.zeros(16, dtype=np.float32), bz.BufferType.UNIFORM,
+                            bz.MemoryUsage.DYNAMIC)
+    assert buf.ready
+
+
+def test_reading_a_fresh_static_buffer_needs_no_wait(ctx):
+    """read() is a blocking round trip either way, so it waits for the fill
+    itself. Without that wait this is a race that returns uninitialized memory
+    on any driver that overlaps two submits."""
+    data = np.arange(256, dtype=np.float32)
+    buf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    np.testing.assert_array_equal(buf.read(np.float32), data)
+
+
+def test_drawing_from_a_fresh_buffer_needs_no_wait(ctx, triangle_shaders):
+    """The residency contract for buffers: created and bound with no wait
+    anywhere, and the draw still sees the vertices."""
+    vertices = np.array([
+        +0.0, -0.5, 0.0, 1.0, 0.0, 0.0,
+        -0.5, +0.5, 0.0, 1.0, 0.0, 0.0,
+        +0.5, +0.5, 0.0, 1.0, 0.0, 0.0,
+    ], dtype=np.float32)
+    vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+    ibuf = ctx.create_buffer(np.array([0, 1, 2], dtype=np.uint32), bz.BufferType.INDEX,
+                             bz.MemoryUsage.STATIC)
+
+    vert, frag = triangle_shaders
+    target = bz.RenderTarget(ctx, 64, 64)
+    pipeline = (ctx.graphics_pipeline()
+                .vertex_shader(vert)
+                .fragment_shader(frag)
+                .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+                .build(target))
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
+        c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
+    ctx.submit(cmd)
+
+    pixels = target.color[0].read()
+    assert pixels[32, 32, 0] > 200, pixels[32, 32]
+
+
+def test_wait_covers_one_shot_uploads(ctx):
+    """They have no decode stage, so they join the batch already submitted
+    rather than being tracked beside it. ctx.wait() and upload_progress would
+    both be a lie otherwise."""
+    ctx.wait()
+
+    buf = ctx.create_buffer(np.zeros(4096, dtype=np.float32), bz.BufferType.STORAGE,
+                            bz.MemoryUsage.STATIC)
+    img = ctx.create_image(np.zeros((256, 256, 4), dtype=np.uint8))
+
+    ctx.wait()
+    assert ctx.upload_progress == 1.0
+    assert buf.ready
+    assert img.ready
 
 
 @pytest.fixture

@@ -14,6 +14,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -45,14 +46,18 @@ enum class ValidationMode
 // The async upload machinery, seen from the Context's side. A tiny virtual
 // interface rather than the real class: UploadManager.hpp needs Context.hpp
 // (queues, timeline, deletion queue), so Context can only know it abstractly.
-// main.cpp creates the concrete UploadManager lazily on the first load_image.
+// main.cpp creates the concrete UploadManager right after Context::create, so
+// this is never null and there is one place that counts uploads.
 class UploadManagerBase
 {
 public:
     virtual ~UploadManagerBase() = default;
-    virtual bool uploads_done() = 0;
     virtual double upload_progress() = 0;
     virtual void wait_all() = 0;
+    // An upload that skipped the worker (create_buffer, create_image(array) —
+    // already-decoded bytes submitted on the calling thread) joins the same
+    // batch, so one counter answers "are the uploads done" for both kinds.
+    virtual void note_direct_upload(std::uint64_t serial) = 0;
 };
 
 // These live in headers that include Context.hpp, so Context can only name them.
@@ -100,6 +105,17 @@ struct ContextConfig
     // frame.gpu_time_ms: a timestamp pair recorded around every windowed submit.
     // Off by default because it is a profiling diagnostic
     bool gpu_timing = false;
+
+    // debugPrintfEXT() from a shader, delivered through the Logger.
+    //
+    // A separate switch rather than a fifth ValidationMode: the modes are
+    // exclusive states of "how hard do the layers check", and printf composes
+    // with any of them — you want it *together with* validation="sync", not
+    // instead of it. It is off by default because the layer instruments every
+    // shader to implement it, and because it forces unoptimized SPIR-V (see
+    // ShaderCompiler: spirv-opt eliminates the non-semantic instructions the
+    // printf is made of).
+    bool shader_printf = false;
 
     // Which GPU to run on, as the UUID of a Device from list_devices(). Empty
     // means the automatic choice (prefer discrete, must satisfy `required`) —
@@ -313,21 +329,6 @@ public:
         return depth_stencil_format_;
     }
 
-    // Block until the device has finished everything. The submit paths already
-    // wait on the timeline where they must, so this is for the cases outside a
-    // frame: timing a batch of work, or making sure nothing is in flight before
-    // a measurement. Takes the queue mutex because the upload worker submits
-    // from its own thread and every VkQueue must be externally synchronized.
-    std::expected<void, Error> wait_idle()
-    {
-        std::lock_guard lock(queue_mutex_);
-        if (auto e = check(vk_.vkDeviceWaitIdle(vkb_device_.device), "wait for device idle"))
-        {
-            return std::unexpected(*e);
-        }
-        return {};
-    }
-
     // Internal — for use by renderers and other subsystems
     const vkb::Instance& vkb_instance() const
     {
@@ -426,6 +427,12 @@ public:
     {
         return gpu_timing_;
     }
+    // Whether debugPrintfEXT() output is delivered. Read by ShaderCompiler, which
+    // must not optimize the SPIR-V when it is on.
+    bool shader_printf() const
+    {
+        return shader_printf_;
+    }
     std::uint64_t frame_serial() const
     {
         return frame_serial_;
@@ -502,6 +509,135 @@ public:
         return value;
     }
 
+    // ── Asynchronous headless submits ─────────────────────────────────────────
+    //
+    // A headless ctx.submit() blocks on the serial it just signalled, which is
+    // right when the next line reads the result and wrong when it does not: a
+    // compute prototype
+    // that submits in a loop leaves the GPU idle between iterations, and the
+    // whole loop runs at the speed of the round trip rather than of the work.
+    //
+    // submit(wait=False) skips the wait. What replaces it is per-slot pacing:
+    // the ring has frames_in_flight slots, and reusing one while its previous
+    // submit is still running would overwrite a command buffer in flight — the
+    // same hazard the windowed path solves with a fence per slot. Here the
+    // timeline already counts every submit, so remembering which serial last
+    // used a slot is enough.
+
+    // Records that `serial` is the newest submit occupying the current ring slot.
+    void note_slot_submit(std::uint64_t serial)
+    {
+        if (slot_serial_.size() != frames_in_flight_)
+        {
+            slot_serial_.assign(frames_in_flight_, 0);
+        }
+        slot_serial_[frame_serial_ % frames_in_flight_] = serial;
+    }
+
+    // Blocks until the submit that last used the current ring slot has finished.
+    // Cheap when the slot is free: a timeline wait on a value already reached
+    // returns immediately, and 0 is always reached.
+    void wait_for_slot()
+    {
+        if (slot_serial_.size() != frames_in_flight_)
+        {
+            return;
+        }
+        // Frame pacing: a failure here surfaces at the next submit, which is
+        // where a caller can be told about it.
+        static_cast<void>(wait_for_serial(slot_serial_[frame_serial_ % frames_in_flight_]));
+    }
+
+    // Blocks until everything this Context started has finished — the uploads
+    // still decoding on the worker as well as every submit — then reclaims what
+    // the deletion queue was holding for them.
+    //
+    // This is the one wait verb. A caller who wants less waits on the resource
+    // (Buffer::wait, Image::wait); there is nothing that wants more, because
+    // vkDeviceWaitIdle would also stall the other Contexts sharing the device.
+    std::expected<void, Error> wait_for_submits()
+    {
+        // Uploads first: a job still in the decode queue has no serial yet, so
+        // waiting the timeline before it submits would miss it.
+        if (upload_manager_)
+        {
+            upload_manager_->wait_all();
+        }
+        auto r = wait_for_serial(submit_serial_.load());
+        flush_deletion_queue();
+        return r;
+    }
+
+    // Submits one already-recorded command buffer on the graphics queue and
+    // signals the submission timeline with the serial it returns. Every
+    // one-shot submit goes through here — deferred_submit for the main thread,
+    // the upload worker for its own — so there is one description of what a
+    // submit signals. Takes the queue mutex: the worker is not the only thread
+    // that submits.
+    //
+    // Who frees the command buffer afterwards is the caller's business, and it
+    // differs: the main thread parks it in the deletion queue, while the worker
+    // must free it back into its own pool from its own thread.
+    std::expected<std::uint64_t, Error> submit_one_shot(VkCommandBuffer cmd)
+    {
+        std::lock_guard lock(queue_mutex_);
+        const std::uint64_t serial = advance_submit_serial();
+
+        VkSemaphore timeline = submit_timeline_;
+        VkTimelineSemaphoreSubmitInfo timelineInfo{
+            .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+            .pNext = nullptr,
+            .waitSemaphoreValueCount = 0,
+            .pWaitSemaphoreValues = nullptr,
+            .signalSemaphoreValueCount = 1,
+            .pSignalSemaphoreValues = &serial};
+        VkSubmitInfo submitInfo{
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .pNext = &timelineInfo,
+            .waitSemaphoreCount = 0,
+            .pWaitSemaphores = nullptr,
+            .pWaitDstStageMask = nullptr,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &cmd,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &timeline};
+        if (auto e = check(
+                vk_.vkQueueSubmit(graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
+                "submit one-shot command buffer",
+                ErrorCode::Resource))
+        {
+            return std::unexpected(*e);
+        }
+        return serial;
+    }
+
+    // The one place that blocks on the submission timeline. Everything that
+    // waits for GPU work — a frame's ring slot, an image upload, a readback —
+    // comes through here, so a wait is never wider than the work it waits for.
+    std::expected<void, Error> wait_for_serial(std::uint64_t serial)
+    {
+        if (serial == 0)
+        {
+            return {};
+        }
+        VkSemaphore timeline = submit_timeline_;
+        VkSemaphoreWaitInfo waitInfo{
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .semaphoreCount = 1,
+            .pSemaphores = &timeline,
+            .pValues = &serial};
+        if (auto e = check(
+                vk_.vkWaitSemaphores(vkb_device_.device, &waitInfo, UINT64_MAX),
+                "wait for submitted GPU work",
+                ErrorCode::Resource))
+        {
+            return std::unexpected(*e);
+        }
+        return {};
+    }
+
     // ── Deferred destruction ──────────────────────────────────────────────────
     //
     // A handle dropped on the CPU may still be referenced by work the GPU is
@@ -563,6 +699,19 @@ public:
         upload_manager_ = std::move(manager);
     }
 
+    // An upload that did NOT go through the worker: create_buffer and
+    // create_image(array) hand over bytes that are already decoded, so they
+    // submit on the calling thread and only skip the wait. It still counts as
+    // an upload, so it joins the worker's batch instead of being tracked
+    // beside it.
+    void note_upload_serial(std::uint64_t serial)
+    {
+        if (upload_manager_)
+        {
+            upload_manager_->note_direct_upload(serial);
+        }
+    }
+
     // ── Hot reload ────────────────────────────────────────────────────────────
     //
     // Null unless the Context was created with hot_reload=True. The frame path
@@ -603,7 +752,7 @@ public:
         }
 
         const bool anisotropy = desc.anisotropy && supports(Feature::ANISOTROPIC_FILTERING);
-        const VkFilter filter = desc.filter == Filter::NEAREST ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+        const VkFilter filter = to_vk_filter(desc.filter);
         VkSamplerAddressMode address = VK_SAMPLER_ADDRESS_MODE_REPEAT;
         switch (desc.address_mode)
         {
@@ -665,6 +814,57 @@ public:
         return sampler;
     }
 
+    // ── Memory and device introspection ───────────────────────────────────────
+
+    // How much GPU memory this Context has allocated, and how much the driver
+    // says is left, in bytes. "Am I leaking, and how much room is there" is a
+    // question a prototype asks constantly, and the answer used to need an
+    // external tool.
+    //
+    // VMA already keeps the numbers, so this is a read rather than new
+    // bookkeeping. Summed across heaps: per-heap detail is a different question
+    // (which heap is a driver decision), and a single pair is what the question
+    // above actually wants.
+    struct MemoryStats
+    {
+        std::uint64_t used = 0;     // bytes VMA has allocated for this Context
+        std::uint64_t reserved = 0; // bytes VMA has reserved from the driver
+        std::uint64_t budget = 0;   // bytes the driver says the process may use
+    };
+
+    MemoryStats memory_stats() const
+    {
+        VkPhysicalDeviceMemoryProperties memory_props{};
+        vkGetPhysicalDeviceMemoryProperties(vkb_physical_device_.physical_device, &memory_props);
+
+        std::vector<VmaBudget> budgets(memory_props.memoryHeapCount);
+        vmaGetHeapBudgets(allocator_, budgets.data());
+
+        MemoryStats stats;
+        for (std::uint32_t i = 0; i < memory_props.memoryHeapCount; ++i)
+        {
+            stats.used += budgets[i].statistics.allocationBytes;
+            stats.reserved += budgets[i].statistics.blockBytes;
+            stats.budget += budgets[i].budget;
+        }
+        return stats;
+    }
+
+    // The subgroup width this GPU runs shaders at, or 0 where the driver does not
+    // report one.
+    //
+    // A compute shader doing a subgroupAdd reduction has to size its workgroup
+    // against this number, and there was no way to ask. Vulkan 1.1 core, so no
+    // negotiation and no Feature: the property either has a value or it does not.
+    std::uint32_t subgroup_size() const
+    {
+        VkPhysicalDeviceSubgroupProperties subgroup{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES, .pNext = nullptr};
+        VkPhysicalDeviceProperties2 props{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &subgroup};
+        vkGetPhysicalDeviceProperties2(vkb_physical_device_.physical_device, &props);
+        return subgroup.subgroupSize;
+    }
+
     // ── Debug object names ────────────────────────────────────────────────────
     //
     // Attach `name` to a Vulkan handle so validation messages name the culprit
@@ -722,6 +922,17 @@ private:
         {
             return std::unexpected(*e);
         }
+
+        // printf is implemented by the validation layers, so the two settings
+        // contradict each other. Say so instead of building a Context whose
+        // shader_printf silently prints nothing.
+        if (config.shader_printf && config.validation == ValidationMode::Off)
+        {
+            return std::unexpected(err_init(
+                "shader_printf=True needs the validation layers, which validation=\"off\" turns off. "
+                "Use validation=\"on\" (or leave it at \"auto\")."));
+        }
+        ctx.shader_printf_ = config.shader_printf;
 
         auto system_info = vkb::SystemInfo::get_system_info();
         if (!system_info)
@@ -790,10 +1001,38 @@ private:
                 }
             }
 
+            // Shader printf is a validation-layer service, so it rides the same
+            // instance the layers are on. The layer reports the output at INFO
+            // severity, which is why the messenger mask has to open up for it —
+            // and why debug_callback drops every OTHER info message, so asking
+            // for printf does not also subscribe to loader chatter.
+            if (config.shader_printf)
+            {
+                inst_builder.add_validation_feature_enable(VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT);
+                // validation="auto" only *requests* the layers, so on a machine
+                // with no SDK installed printf has nothing behind it. That is not
+                // an error — auto exists precisely to keep running — but it must
+                // not look like a shader that never printed.
+                if (!system_info->validation_layers_available && logger)
+                {
+                    logger->log(
+                        Severity::Warning,
+                        Source::Shader,
+                        "shader_printf=True, but the Vulkan validation layers are not installed on this "
+                        "machine, so debugPrintfEXT() output cannot be delivered.");
+                }
+            }
+
+            VkDebugUtilsMessageSeverityFlagsEXT severities = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+                                                             VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
+            if (config.shader_printf)
+            {
+                severities |= VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT;
+            }
+
             inst_builder.set_debug_callback(debug_callback)
                 .set_debug_callback_user_data_pointer(logger.get())
-                .set_debug_messenger_severity(
-                    VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
+                .set_debug_messenger_severity(severities)
                 .set_debug_messenger_type(
                     VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
                     VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT);
@@ -963,6 +1202,19 @@ private:
         // SwapchainRenderer verifies present support at its own creation time.
         ctx.swapchain_supported_ =
             ctx.vkb_physical_device_.enable_extension_if_present(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
+        // debugPrintfEXT() compiles to OpExtInst against the NonSemantic.DebugPrintf
+        // instruction set, which the device must permit through
+        // VK_KHR_shader_non_semantic_info — core in 1.3, an extension on the 1.2
+        // path. Same "one capability, two spellings" shape as dynamic rendering
+        // above, so it is resolved here and nothing downstream asks the version.
+        if (ctx.shader_printf_ && ctx.negotiated_api_version_ < VK_API_VERSION_1_3 &&
+            !ctx.vkb_physical_device_.enable_extension_if_present(VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME))
+        {
+            return std::unexpected(err_init(
+                "shader_printf=True needs VK_KHR_shader_non_semantic_info (or Vulkan 1.3), which this "
+                "GPU/driver does not offer. Updating the graphics driver usually fixes this."));
+        }
 
         // Optional features: enable what this device happens to have, and record
         // what stuck so supports() can answer honestly.
@@ -1202,23 +1454,84 @@ private:
         void* user_data)
     {
         Logger* logger = static_cast<Logger*>(user_data);
-        if (logger)
+        if (!logger)
         {
-            // The severity travels as data. It used to be glued onto the front of
-            // the text as "ERROR: ", which is why the callback named on_error was
-            // receiving warnings and info messages indistinguishably.
-            Severity severity = Severity::Info;
-            if (message_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
-            {
-                severity = Severity::Error;
-            }
-            else if (message_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
-            {
-                severity = Severity::Warning;
-            }
-
-            logger->log(severity, Source::Validation, callback_data->pMessage);
+            return VK_FALSE;
         }
+
+        // Shader printf arrives on this same channel, and it is NOT a validation
+        // finding: it is the shader talking. Routing it as Source::Shader is what
+        // keeps the validation-as-assert test fixture (which fails a test on any
+        // Source::VALIDATION error) from treating a print as a bug.
+        //
+        // Matched on the message id rather than on the text, because the id is
+        // structured data and the text is not. The layer has spelled it
+        // UNASSIGNED-DEBUG-PRINTF and WARNING-DEBUG-PRINTF across versions, so the
+        // stable part is the suffix.
+        const std::string_view id_name{callback_data->pMessageIdName ? callback_data->pMessageIdName : ""};
+        if (id_name.find("DEBUG-PRINTF") != std::string_view::npos)
+        {
+            // The layer wraps the shader's own words in its report boilerplate:
+            // "Validation Information: [ WARNING-DEBUG-PRINTF ] | MessageID = 0x…
+            //  | vkQueueSubmit(): pSubmits[0] DebugPrintf:\n<the print>".
+            // Handing that whole blob back per print would bury the value the
+            // user asked for behind two hundred characters of object handles,
+            // once per print — for a print inside a loop, the difference between
+            // a tool and a wall of text.
+            //
+            // "DebugPrintf:" is the marker this layer puts immediately before the
+            // shader's own words, so it is tried first. The two generic
+            // separators stay as a fallback for versions that do not emit it, and
+            // a message matching none of them passes through whole: peeling is a
+            // convenience, and losing the text would be worse than an ugly line.
+            std::string_view text{callback_data->pMessage ? callback_data->pMessage : ""};
+            if (const auto marker = text.rfind("DebugPrintf:"); marker != std::string_view::npos)
+            {
+                text.remove_prefix(marker + std::string_view("DebugPrintf:").size());
+            }
+            else
+            {
+                if (const auto bar = text.rfind(" | "); bar != std::string_view::npos)
+                {
+                    text.remove_prefix(bar + 3);
+                }
+                if (const auto call = text.find("(): "); call != std::string_view::npos)
+                {
+                    text.remove_prefix(call + 4);
+                }
+            }
+            // The marker is followed by a newline, and the generic separators by
+            // padding spaces.
+            while (!text.empty() && (text.front() == ' ' || text.front() == '\n' || text.front() == '\t'))
+            {
+                text.remove_prefix(1);
+            }
+            while (!text.empty() && (text.back() == ' ' || text.back() == '\n' || text.back() == '\t'))
+            {
+                text.remove_suffix(1);
+            }
+            // log_always, not log: the layer reports printf at INFO and the default
+            // floor is Warning, so the filter would swallow the channel the user
+            // switched on by name.
+            logger->log_always(Severity::Info, Source::Shader, std::string(text));
+            return VK_FALSE;
+        }
+
+        // Everything else at INFO is loader and layer chatter. The messenger only
+        // subscribes to INFO when shader_printf is on, so dropping it here is what
+        // stops "I want prints" from also meaning "I want that".
+        if (!(message_severity &
+              (VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)))
+        {
+            return VK_FALSE;
+        }
+
+        // The severity travels as data. It used to be glued onto the front of
+        // the text as "ERROR: ", which is why the callback named on_error was
+        // receiving warnings and info messages indistinguishably.
+        const Severity severity =
+            (message_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? Severity::Error : Severity::Warning;
+        logger->log(severity, Source::Validation, callback_data->pMessage);
         return VK_FALSE;
     }
 
@@ -1253,10 +1566,15 @@ private:
     std::uint32_t frames_in_flight_ = 2;
     bool auto_barriers_ = true;
     bool gpu_timing_ = false;
+    bool shader_printf_ = false;
     std::uint64_t frame_serial_ = 0;
 
     VkSemaphore submit_timeline_ = VK_NULL_HANDLE;
     std::atomic<std::uint64_t> submit_serial_{0};
+
+    // Which submit serial last used each ring slot. Only an asynchronous
+    // headless submit fills it; a blocking one has already waited.
+    std::vector<std::uint64_t> slot_serial_;
 
     std::mutex deletion_mutex_;
     std::deque<std::pair<std::uint64_t, std::function<void()>>> deletion_queue_;

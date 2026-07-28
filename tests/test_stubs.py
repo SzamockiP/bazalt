@@ -58,7 +58,7 @@ def test_renamed_and_new_api_is_declared():
     text = stub_text()
     for expected in ("class VertexFormat(", "def on_message", "class LogMessage",
                      "class Severity(", "class Source(", "class Feature(",
-                     "class RenderTarget(", "def read_pixels", "class BazaltError",
+                     "class RenderTarget(", "class BazaltError",
                      "def flush",
                      # 0.5
                      "class Format(", "class Image", "class Sampler",
@@ -87,10 +87,42 @@ def test_renamed_and_new_api_is_declared():
                      "class StencilOp(", "def stencil_test", "DEPTH_STENCIL",
                      "clear_stencil", "def color_mask", "def depth_clamp",
                      "def alpha_to_coverage", "def constant", "def copy_image",
-                     "def clear_image", "def wait_idle", "R32_UINT",
+                     "def clear_image", "R32_UINT",
                      "class BorderColor(", "CLAMP_TO_BORDER", "mip_lod_bias",
-                     "stencil: bool = False", "INDEPENDENT_BLEND"):
+                     "stencil: bool = False", "INDEPENDENT_BLEND",
+                     # 0.18
+                     "def blit_image", "def copy_buffer", "def fill_buffer",
+                     "def occlusion_query", "class OcclusionQuery",
+                     "def label", "class LabelScope",
+                     "def memory_stats", "class MemoryStats",
+                     "def subgroup_size", "shader_printf",
+                     "def read_pixels", "capture: bool = False",
+                     "wait: bool = True", "def ready", "def upload_progress"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
+
+
+def test_the_verbs_0_18_removed_are_gone():
+    """0.18 collapsed several duplicate paths. Each name below had exactly one
+    replacement, and a stub that still declares one is a stub promising an
+    attribute the module does not have."""
+    text = stub_text()
+    for gone, replacement in (("def wait_idle", "ctx.wait()"),
+                              ("def wait_for_uploads", "ctx.wait()"),
+                              ("def uploads_done", "ctx.upload_progress"),
+                              ("def should_close", "not window.is_open()")):
+        assert gone not in text, f"{gone!r} is still in _core.pyi; use {replacement}"
+
+    for cls, attr in ((bz.Context, "wait_idle"), (bz.Context, "wait_for_uploads"),
+                      (bz.Context, "uploads_done"), (bz.Window, "should_close"),
+                      (bz.RenderTarget, "read_pixels"), (bz.RenderTarget, "mip")):
+        assert not hasattr(cls, attr), f"{cls.__name__}.{attr} is still bound"
+
+    # The survivors of the same audit. read_pixels stays on the renderer because
+    # a screenshot is different work; the two begin/end pairs stay because a
+    # recording can be split across functions, which no `with` block spans.
+    assert hasattr(bz.SwapchainRenderer, "read_pixels")
+    for pair in ("begin_rendering", "end_rendering", "begin_label", "end_label"):
+        assert hasattr(bz.CommandBuffer, pair)
 
 
 def test_stub_does_not_reference_an_undefined_buffer_type():

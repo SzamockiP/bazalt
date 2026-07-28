@@ -18,6 +18,7 @@
 #include "Error.hpp"
 #include "Format.hpp"
 #include "Image.hpp"
+#include "ImmediateSubmit.hpp"
 
 // The async transport behind ctx.load_image().
 //
@@ -107,12 +108,65 @@ public:
         {
             return image;
         }
+        // The layout the upload will leave it in, recorded on THIS thread:
+        // Image's layout state belongs to the main thread (see
+        // set_upload_submitted).
+        (*image)->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         (*image)->set_upload_pending();
 
         {
             std::lock_guard lock(mutex_);
             ++batch_started_;
             jobs_.push_back({*image, path, mips});
+        }
+        cv_.notify_all();
+        return image;
+    }
+
+    // Main thread: the same load, from encoded bytes instead of a path.
+    //
+    // A PNG downloaded over the network, unpacked from a zip or produced by PIL
+    // has no path on disk, so the only way to hand it to bazalt was to write a
+    // temporary file. The header is validated here for the same reason the file
+    // version validates it here: a mangled blob fails at the call site, with
+    // width and height correct immediately.
+    //
+    // Never hot-reloaded, by construction: bazalt has no path to watch.
+    std::expected<std::shared_ptr<Image>, Error> load_memory(std::vector<std::byte> blob, bool mipmaps = true)
+    {
+        int width = 0, height = 0, comp = 0;
+        if (!stbi_info_from_memory(
+                reinterpret_cast<const stbi_uc*>(blob.data()), static_cast<int>(blob.size()), &width, &height, &comp))
+        {
+            const char* reason = stbi_failure_reason();
+            return std::unexpected(err_resource(
+                reason ? std::format("load_image(bytes): not a decodable image ({})", reason)
+                       : "load_image(bytes): not a decodable image"));
+        }
+
+        const Format format = Format::RGBA8_SRGB;
+        const std::uint32_t mips =
+            mipmaps && Image::can_generate_mips(context_, format)
+                ? Image::full_mip_count(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height))
+                : 1;
+
+        auto image = Image::create_empty(
+            context_, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), format, mips);
+        if (!image)
+        {
+            return image;
+        }
+        (*image)->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        (*image)->set_upload_pending();
+
+        {
+            std::lock_guard lock(mutex_);
+            ++batch_started_;
+            Job job;
+            job.image = *image;
+            job.mips = mips;
+            job.encoded = std::move(blob);
+            jobs_.push_back(std::move(job));
         }
         cv_.notify_all();
         return image;
@@ -189,6 +243,10 @@ public:
         {
             return image;
         }
+        // The layout the upload will leave it in, recorded on THIS thread:
+        // Image's layout state belongs to the main thread (see
+        // set_upload_submitted).
+        (*image)->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         (*image)->set_upload_pending();
 
         {
@@ -220,12 +278,65 @@ public:
         cv_.notify_all();
     }
 
+    // Main thread: change the pixels of an existing image. `pixels` is a copy of
+    // the caller's rectangle, tightly packed, already validated against the
+    // format by the binding layer.
+    //
+    // Asynchronous, on the same worker as load_image, because the case this
+    // exists for is a video frame at 60 fps and a blocking update would spend
+    // the frame budget on a memcpy. The queue is FIFO on ONE worker, so two
+    // updates of the same image in one frame reach the GPU in call order — that
+    // is a guarantee, not an accident of the implementation.
+    //
+    // `from` is read here, on the main thread, because Image's layout state
+    // belongs to this thread and the worker must not touch it.
+    void update(
+        std::shared_ptr<Image> image,
+        std::vector<std::byte> pixels,
+        std::uint32_t layer,
+        std::uint32_t mip,
+        VkOffset2D offset,
+        VkExtent2D extent)
+    {
+        Job job;
+        job.from_layout = image->layout_of(layer, mip);
+        // The subresource ends sampleable, and saying so here (rather than from
+        // the worker) keeps every write to the layout state on the main thread.
+        image->mark_subresource_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, layer, 1, mip, 1);
+        // Pending BEFORE the job is queued, exactly as load() does. Without it
+        // an image created synchronously has upload state None, so img.wait()
+        // returns at once and a read() right after an update races the worker —
+        // it sees the previous contents, one update behind, every time.
+        image->set_upload_pending();
+        job.image = std::move(image);
+        job.pixels = std::move(pixels);
+        job.layer = layer;
+        job.mip = mip;
+        job.offset = offset;
+        job.extent = extent;
+        job.update = true;
+        {
+            std::lock_guard lock(mutex_);
+            ++batch_started_;
+            jobs_.push_back(std::move(job));
+        }
+        cv_.notify_all();
+    }
+
     // ── UploadManagerBase (the Python-visible aggregate state) ────────────────
 
-    bool uploads_done() override
+    // An upload that never entered the decode queue: already-decoded bytes that
+    // create_buffer / create_image(array) submitted on the calling thread. It is
+    // started and submitted in the same breath, so both counters move together
+    // and the CPU-side predicate in wait_all() stays balanced.
+    void note_direct_upload(std::uint64_t serial) override
     {
-        std::lock_guard lock(mutex_);
-        return done_count_() == batch_started_;
+        {
+            std::lock_guard lock(mutex_);
+            ++batch_started_;
+            submitted_serials_.push_back(serial);
+        }
+        cv_.notify_all();
     }
 
     // Progress of the current batch, 0.0 .. 1.0 (1.0 when idle). The batch
@@ -260,18 +371,9 @@ public:
             }
         }
         // … then the GPU side: the timeline reaching the last upload.
-        if (wait_serial > 0)
-        {
-            VkSemaphore timeline = context_.submit_timeline();
-            VkSemaphoreWaitInfo waitInfo{
-                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
-                .pNext = nullptr,
-                .flags = 0,
-                .semaphoreCount = 1,
-                .pSemaphores = &timeline,
-                .pValues = &wait_serial};
-            context_.vk().vkWaitSemaphores(context_.device(), &waitInfo, UINT64_MAX);
-        }
+        // A failed wait surfaces on the image itself (img.wait() reports it);
+        // the aggregate verb has no single resource to blame.
+        static_cast<void>(context_.wait_for_serial(wait_serial));
     }
 
 private:
@@ -288,6 +390,23 @@ private:
         // Non-empty → a layered load (texture array / cubemap): these paths, one
         // per layer, decode into one N-layer staging buffer and one submit.
         std::vector<std::string> layers;
+
+        // Non-empty → the encoded file contents, decoded from memory instead of
+        // read from `path`. Everything after the decode is identical.
+        std::vector<std::byte> encoded;
+
+        // A pixel update into an existing image (image.update). No decode: the
+        // bytes are already the caller's rectangle in the image's own format,
+        // so this path skips stbi entirely and copies one subresource.
+        bool update = false;
+        std::vector<std::byte> pixels;
+        std::uint32_t layer = 0;
+        // Which level, as opposed to `mips` above, which is how many a load
+        // generates. An update writes exactly one.
+        std::uint32_t mip = 0;
+        VkOffset2D offset{0, 0};
+        VkExtent2D extent{0, 0};
+        VkImageLayout from_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     };
 
     // Both counters below describe the current batch. A batch is every upload
@@ -337,14 +456,28 @@ private:
 
     void process_(Job& job)
     {
+        if (job.update)
+        {
+            process_update_(job);
+            return;
+        }
         if (!job.layers.empty())
         {
             process_layered_(job);
             return;
         }
-        // Decode. Forcing RGBA to match the RGBA8_SRGB image.
+        // Decode. Forcing RGBA to match the RGBA8_SRGB image. From memory when
+        // the job carries the bytes, from the path otherwise — the two differ by
+        // this call and nothing else.
         int width = 0, height = 0, channels = 0;
-        stbi_uc* pixels = stbi_load(job.path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
+        stbi_uc* pixels = job.encoded.empty() ? stbi_load(job.path.c_str(), &width, &height, &channels, STBI_rgb_alpha)
+                                              : stbi_load_from_memory(
+                                                    reinterpret_cast<const stbi_uc*>(job.encoded.data()),
+                                                    static_cast<int>(job.encoded.size()),
+                                                    &width,
+                                                    &height,
+                                                    &channels,
+                                                    STBI_rgb_alpha);
         if (!pixels)
         {
             // A load failure poisons the image (waiters get the error); a reload
@@ -480,6 +613,101 @@ private:
             std::lock_guard lock(mutex_);
             submitted_serials_.push_back(serial);
         }
+    }
+
+    // A pixel update: no decode at all, because the caller handed over bytes in
+    // the image's own format. Otherwise the same staging -> copy -> submit tail
+    // as every other job, so the frame that samples the image waits on the same
+    // Context timeline.
+    void process_update_(Job& job)
+    {
+        auto staging = create_staging_buffer(context_, job.pixels.size(), Staging::Upload, job.pixels.data());
+        if (!staging)
+        {
+            fail_update_(job, staging.error().message.c_str());
+            return;
+        }
+        auto [stagingBuffer, stagingAllocation] = *staging;
+
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        if (!allocate_cmd_(cmd))
+        {
+            vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
+            fail_update_(job, "failed to allocate an upload command buffer");
+            return;
+        }
+
+        VkCommandBufferBeginInfo beginInfo{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .pNext = nullptr,
+            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            .pInheritanceInfo = nullptr};
+        context_.vk().vkBeginCommandBuffer(cmd, &beginInfo);
+        job.image->record_update_commands(
+            cmd, stagingBuffer, job.layer, job.mip, job.offset, job.extent, job.from_layout);
+        context_.vk().vkEndCommandBuffer(cmd);
+
+        std::uint64_t serial = 0;
+        if (!submit_(cmd, serial))
+        {
+            vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
+            context_.vk().vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
+            fail_update_(job, "failed to submit the update command buffer");
+            return;
+        }
+
+        context_.defer_destroy([allocator = context_.allocator(), stagingBuffer, stagingAllocation]
+                               { vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation); });
+        retired_.emplace_back(serial, cmd);
+
+        job.image->set_upload_submitted(serial);
+        {
+            std::lock_guard lock(mutex_);
+            submitted_serials_.push_back(serial);
+        }
+    }
+
+    // An update cannot poison the image the way a failed load does: the pixels
+    // that are already there stay valid and keep rendering, exactly like a hot
+    // reload that could not complete. It still has to leave the batch counters
+    // balanced, or upload_progress would never reach 1.0 again.
+    void fail_update_(Job& job, const char* reason)
+    {
+        if (auto logger = context_.logger())
+        {
+            logger->log(
+                Severity::Error,
+                Source::Upload,
+                std::format("image.update failed ({}); the previous contents are unchanged", reason ? reason : "?"));
+        }
+        std::lock_guard lock(mutex_);
+        ++failed_count_;
+    }
+
+    // One-shot command buffer from the worker's own pool.
+    bool allocate_cmd_(VkCommandBuffer& cmd)
+    {
+        VkCommandBufferAllocateInfo allocInfo{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .commandPool = pool_,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1};
+        return context_.vk().vkAllocateCommandBuffers(context_.device(), &allocInfo, &cmd) == VK_SUCCESS;
+    }
+
+    // The worker's half of a one-shot submit. Context::submit_one_shot does the
+    // Vulkan part; the worker keeps only what is its own — freeing the command
+    // buffer back into pool_ from this thread (see retired_).
+    bool submit_(VkCommandBuffer cmd, std::uint64_t& serial)
+    {
+        auto submitted = context_.submit_one_shot(cmd);
+        if (!submitted)
+        {
+            return false;
+        }
+        serial = *submitted;
+        return true;
     }
 
     // A layered load: decode every face into one contiguous N-layer block, then

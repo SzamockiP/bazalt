@@ -71,7 +71,7 @@ The layering exists so nothing below `Renderer.hpp` knows swapchains exist.
   `FrameContext::vk`.
 - **`RenderTarget.hpp`** — abstract "anything drawable": which colour attachments, which
   depth attachment, extent, and the layout the result must end in. `OffscreenTarget`,
-  `SubresourceTarget` (`target.layer(i, mip=)` / `.mip()`), `MultiviewTarget`
+  `SubresourceTarget` (`target.layer(i, mip=)`), `MultiviewTarget`
   (`target.all_layers()`) and `SwapchainRenderer` all implement it, which is why the same
   pipeline and command buffer work against a window, an offscreen image, or one cube face.
   `begin_rendering` **infers** subresource/multiview/viewport from the target — no knobs on

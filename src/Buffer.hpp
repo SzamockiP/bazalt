@@ -53,7 +53,7 @@ public:
     // Fails through the unified Error channel, not a raw exception: at the
     // pybind boundary this surfaces as bz.ResourceError, so `except BazaltError`
     // actually catches it.
-    virtual std::expected<void, Error> update(std::span<const std::byte> /*data*/)
+    virtual std::expected<void, Error> update(std::span<const std::byte> /*data*/, size_t /*offset*/ = 0)
     {
         return std::unexpected(err_resource(
             "update() is only supported on DYNAMIC buffers; "
@@ -71,6 +71,29 @@ public:
     // without a check is a driver crash or a validation message from Vulkan
     // rather than from bazalt; the binding layer compares owners at record time.
     virtual const Context* owner() const = 0;
+
+    // ── The buffer IS its own upload future (0.18.0) ──────────────────────────
+    //
+    // A STATIC buffer is filled by a staging copy that is submitted at create
+    // time and NOT waited for. The serial that copy signals is the whole
+    // mechanism: a submit that reads the buffer waits on it GPU-side (the
+    // command buffer remembers which buffers a recording touches), read_bytes
+    // waits on it CPU-side, and ready/wait are the explicit-control verbs.
+    //
+    // 0 means "nothing pending", which is the honest answer for a DYNAMIC
+    // buffer (host-visible, written by mapping, never staged) and for a STATIC
+    // one whose copy is already complete.
+    virtual std::uint64_t upload_serial() const
+    {
+        return 0;
+    }
+    virtual bool ready() const
+    {
+        return true;
+    }
+    virtual void wait()
+    {
+    }
 
     // Remembered so bind_index_buffer doesn't have to assume. It used to hardcode
     // VK_INDEX_TYPE_UINT32 while create_buffer happily accepted UINT16 indices,
@@ -140,32 +163,39 @@ public:
         return size_;
     }
 
+    std::uint64_t upload_serial() const override
+    {
+        return upload_serial_;
+    }
+    bool ready() const override
+    {
+        return context_->completed_submit_serial() >= upload_serial_;
+    }
+    void wait() override
+    {
+        static_cast<void>(context_->wait_for_serial(upload_serial_));
+    }
+    void set_upload_serial(std::uint64_t serial)
+    {
+        upload_serial_ = serial;
+    }
+
     // Blocking round trip through a readback staging buffer — device-local
     // memory is not mappable. A debugging/test path (SSBO results, mostly).
     std::expected<std::vector<std::byte>, Error> read_bytes() override
     {
-        VkBufferCreateInfo stagingInfo{
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .size = size_,
-            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-            .queueFamilyIndexCount = 0,
-            .pQueueFamilyIndices = nullptr};
-        VmaAllocationCreateInfo allocInfo{};
-        allocInfo.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
-        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+        // The fill is a separate submit with no barrier against this one, and
+        // two submits on one queue are not ordered by anything but a semaphore.
+        // Without this the first read after create_buffer is a race that
+        // returns uninitialized memory on exactly the drivers that overlap.
+        wait();
 
-        VkBuffer staging = VK_NULL_HANDLE;
-        VmaAllocation staging_alloc = VK_NULL_HANDLE;
-        if (auto e = check(
-                vmaCreateBuffer(context_->allocator(), &stagingInfo, &allocInfo, &staging, &staging_alloc, nullptr),
-                "create buffer readback staging",
-                ErrorCode::Resource))
+        auto staging_pair = create_staging_buffer(*context_, size_, Staging::Readback);
+        if (!staging_pair)
         {
-            return std::unexpected(*e);
+            return std::unexpected(staging_pair.error());
         }
+        auto [staging, staging_alloc] = *staging_pair;
 
         auto submitted = immediate_submit(
             *context_,
@@ -228,52 +258,12 @@ public:
                 break;
         }
 
-        VkBufferCreateInfo stagingInfo{
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .size = data_size,
-            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-            .queueFamilyIndexCount = 0,
-            .pQueueFamilyIndices = nullptr};
-
-        VmaAllocationCreateInfo stagingAllocInfo{};
-        stagingAllocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
-        stagingAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
-
-        VkBuffer stagingBuffer;
-        VmaAllocation stagingAllocation;
-        VmaAllocationInfo stagingAllocInfoOut;
-
-        if (auto e = check(
-                vmaCreateBuffer(
-                    context.allocator(),
-                    &stagingInfo,
-                    &stagingAllocInfo,
-                    &stagingBuffer,
-                    &stagingAllocation,
-                    &stagingAllocInfoOut),
-                "create staging buffer",
-                ErrorCode::Resource))
+        auto staging_pair = create_staging_buffer(context, data_size, Staging::Upload, data);
+        if (!staging_pair)
         {
-            return std::unexpected(*e);
+            return std::unexpected(staging_pair.error());
         }
-
-        if (data != nullptr && data_size > 0)
-        {
-            void* mappedData;
-            if (auto e = check(
-                    vmaMapMemory(context.allocator(), stagingAllocation, &mappedData),
-                    "map staging buffer memory",
-                    ErrorCode::Resource))
-            {
-                vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
-                return std::unexpected(*e);
-            }
-            std::memcpy(mappedData, data, data_size);
-            vmaUnmapMemory(context.allocator(), stagingAllocation);
-        }
+        auto [stagingBuffer, stagingAllocation] = *staging_pair;
 
         VkBufferCreateInfo bufferInfo{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -299,7 +289,13 @@ public:
             return std::unexpected(*e);
         }
 
-        auto submitted = immediate_submit(
+        // Asynchronous since 0.18.0. The staging fill above already happened on
+        // this thread (the bytes come from Python, so they cannot be copied
+        // anywhere else), which leaves the queue drain as the only cost of
+        // the old blocking path — and 30 meshes meant 30 full queue drains at
+        // startup. The copy is submitted here, so every failure below is still
+        // raised at the create_buffer call; only the wait is gone.
+        auto serial = deferred_submit(
             context,
             [&](VkCommandBuffer cmd)
             {
@@ -307,14 +303,21 @@ public:
                 context.vk().vkCmdCopyBuffer(cmd, stagingBuffer, buffer, 1, &copyRegion);
             });
 
-        vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
-        if (!submitted)
+        if (!serial)
         {
+            vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
             vmaDestroyBuffer(context.allocator(), buffer, allocation);
-            return std::unexpected(submitted.error());
+            return std::unexpected(serial.error());
         }
+        // The GPU reads the staging buffer after this returns, so it retires on
+        // the serial rather than here.
+        context.defer_destroy([allocator = context.allocator(), stagingBuffer, stagingAllocation]
+                              { vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation); });
 
-        return std::make_shared<StaticBuffer>(context.shared_from_this(), buffer, allocation, data_size);
+        auto result = std::make_shared<StaticBuffer>(context.shared_from_this(), buffer, allocation, data_size);
+        result->set_upload_serial(*serial);
+        context.note_upload_serial(*serial);
+        return result;
     }
 
 private:
@@ -322,6 +325,9 @@ private:
     VkBuffer buffer_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
     size_t size_ = 0;
+    // Which submit fills this buffer. Plain, not atomic: it is written once by
+    // create() before the shared_ptr escapes, and only read afterwards.
+    std::uint64_t upload_serial_ = 0;
 };
 
 class DynamicBuffer : public Buffer
@@ -412,12 +418,16 @@ public:
         return out;
     }
 
-    std::expected<void, Error> update(std::span<const std::byte> data) override
+    std::expected<void, Error> update(std::span<const std::byte> data, size_t offset = 0) override
     {
-        if (data.size() > size_)
+        if (offset + data.size() > size_)
         {
             return std::unexpected(err_resource(
-                std::format("Update of {} bytes exceeds the buffer size of {} bytes", data.size(), size_)));
+                std::format(
+                    "Update of {} bytes at offset {} exceeds the buffer size of {} bytes",
+                    data.size(),
+                    offset,
+                    size_)));
         }
         uint32_t frame = context_->frame_index();
         void* mappedData;
@@ -428,7 +438,7 @@ public:
         {
             return std::unexpected(*e);
         }
-        std::memcpy(mappedData, data.data(), data.size());
+        std::memcpy(static_cast<std::byte*>(mappedData) + offset, data.data(), data.size());
         vmaUnmapMemory(context_->allocator(), allocations_[frame]);
         return {};
     }
@@ -439,8 +449,14 @@ public:
         size_t data_size,
         BufferType type)
     {
+        // The transfer bits ride along so cmd.copy_buffer / cmd.fill_buffer work
+        // on a DYNAMIC buffer too (0.18). A STATIC buffer has carried both since
+        // it was written, and refusing them here would make "which buffers can
+        // the GPU copy into" a second rule to remember for no gain: transfer
+        // usage costs nothing on memory that is already host-visible.
         VkBufferUsageFlags usage = (type == BufferType::STORAGE) ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                                  : VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
         VmaAllocationCreateInfo allocInfo{};
         allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;

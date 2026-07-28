@@ -68,7 +68,7 @@ def test_second_pass_keeps_what_the_first_one_drew(ctx, push_pipeline):
     cmd.end_rendering(target)
     ctx.submit(cmd)
 
-    pixels = target.read_pixels()
+    pixels = target.color[0].read()
     assert np.allclose(pixels[32, 8, :3], [0, 255, 0], atol=2), pixels[32, 8]
     assert np.allclose(pixels[32, 56, :3], [255, 0, 0], atol=2), pixels[32, 56]
 
@@ -95,9 +95,9 @@ def test_preserve_survives_a_replay(ctx, push_pipeline):
     cmd.end_rendering(target)
 
     ctx.submit(cmd)
-    first = target.read_pixels().copy()
+    first = target.color[0].read().copy()
     ctx.submit(cmd)
-    second = target.read_pixels()
+    second = target.color[0].read()
 
     assert np.array_equal(first, second)
 
@@ -129,7 +129,7 @@ def test_depth_survives_into_the_second_pass(ctx, push_pipeline):
     cmd.end_rendering(target)
     ctx.submit(cmd)
 
-    pixels = target.read_pixels()
+    pixels = target.color[0].read()
     assert np.allclose(pixels[32, 32, :3], [0, 255, 0], atol=2), \
         f"the far draw was not rejected, so the depth did not survive: {pixels[32, 32]}"
 
@@ -146,7 +146,7 @@ def test_an_empty_clear_list_still_means_black(ctx):
     cmd.end_rendering(target)
     ctx.submit(cmd)
 
-    assert np.allclose(target.read_pixels()[32, 32, :3], [0, 0, 0], atol=1)
+    assert np.allclose(target.color[0].read()[32, 32, :3], [0, 0, 0], atol=1)
 
 
 def test_multisampled_preserve_is_rejected(ctx):
@@ -180,4 +180,4 @@ def test_a_multisampled_target_still_clears(ctx):
     cmd.end_rendering(target)
     ctx.submit(cmd)
 
-    assert np.allclose(target.read_pixels()[32, 32, :3], [255, 0, 0], atol=2)
+    assert np.allclose(target.color[0].read()[32, 32, :3], [255, 0, 0], atol=2)
