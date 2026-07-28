@@ -2,10 +2,9 @@
 (array layer / cube face / mip level) of a render target.
 
 Compute already writes layers/faces/mips since 0.10 (see test_cubemaps). This
-covers the GRAPHICS path: a pass whose attachment is target.layer(i) / .mip(m).
+covers the GRAPHICS path: a pass whose attachment is target.layer(i, mip=m).
 The attachments stay ordinary bz.Image objects sampled the usual way — the only
-new API is the layers=/cube=/mip_levels= ctor kwargs and the .layer()/.mip()
-slice. Layered auto-barriers (per-subresource, and the whole-image final mark)
+new API is the layers=/cube=/mip_levels= ctor kwargs and the .layer() slice. Layered auto-barriers (per-subresource, and the whole-image final mark)
 are audited by the validation-as-assert `ctx` fixture, not just the numbers.
 """
 
@@ -120,9 +119,10 @@ def test_render_into_specific_layer(ctx, triangle_shaders, triangle_buffers):
 
 def test_render_into_mip(ctx):
     """A 3-mip colour target: clear each mip to a distinct colour via a pass
-    targeting .mip(m). Sampling each LOD back returns that mip's colour, proving
-    (a) .mip(m) selected the right level and (b) extent() shrank per mip — a
-    wrong renderArea for the half/quarter-size mip would trip validation."""
+    targeting .layer(0, m). Sampling each LOD back returns that mip's colour,
+    proving (a) the mip argument selected the right level and (b) extent()
+    shrank per mip — a wrong renderArea for the half/quarter-size mip would
+    trip validation."""
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     lod_frag = ctx.compile_shader(str(SHADER_DIR / "sample_lod.frag"), bz.ShaderStage.FRAGMENT)
 

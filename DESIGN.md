@@ -174,8 +174,9 @@ entry. The release is a label, not the organizing axis.
 
 - **Subresource rendering is kwargs plus a view handle, not a new verb** (0.13). `layers=` /
   `cube=` / `mip_levels=` on `RenderTarget` mirror `create_image` (rule 1).
-  `target.layer(i, mip=)`, `target.mip(m)` and `target.all_layers()` return a light view
-  object that goes straight into `cmd.rendering(...)`. The verb gets no knobs:
+  `target.layer(i, mip=)` and `target.all_layers()` return a light view object that goes
+  straight into `cmd.rendering(...)`. (0.13 also shipped `target.mip(m)`; the 0.18 audit
+  removed it as a second spelling of `target.layer(0, m)`.) The verb gets no knobs:
   `begin_rendering` **infers** the subresource, the multiview state and the viewport from
   the target.
 
@@ -348,8 +349,8 @@ entry. The release is a label, not the organizing axis.
   `context()` that returns a `shared_ptr`).
 
 - **`Image` is a future, not a `Future[Image]`** (0.5). The resource is ready to record with
-  at once, and only the submit needs residency. `.wait()` and `ctx.wait_for_uploads()` are a
-  separate verb, not a second version of `load_image`.
+  at once, and only the submit needs residency. `img.wait()` and `ctx.wait()` are a separate
+  verb, not a second version of `load_image`.
 
 - **The handle is the identity** (0.9). No string keys on an API whose primitive is an index
   or a handle: `cmd.timer()` returns a `Timer` and you read `t.ms`.
@@ -391,7 +392,7 @@ entry. The release is a label, not the organizing axis.
 
 - **An `Image` tracks its layout per `(layer, mip)`, with a collapse** (0.18). Until then
   it held ONE layout, which was right while every write covered the whole image and
-  stopped being right the moment `target.mip(m)` existed (0.13): the whole image was
+  stopped being right the moment rendering into a single mip existed (0.13): the whole image was
   marked as rendered, so the next barrier handed the driver an `oldLayout` that was true
   of one level and a lie about the rest. This file called that an accepted ceiling and
   told the caller to render every layer and every mip before sampling — which rules out
@@ -537,9 +538,10 @@ entry. The release is a label, not the organizing axis.
 - **`cmd.label` uses volk's globals, like `set_debug_name`** (0.18). Debug utils is an
   INSTANCE extension: `vkGetInstanceProcAddr` is the sanctioned route and
   `vkGetDeviceProcAddr` may legally return null. The entry points are loader trampolines
-  dispatching on the command buffer, so one pointer is right for every Context. An
-  unbalanced `end_label` is dropped rather than recorded, because recording one is
-  undefined behaviour and the `with` form cannot produce it.
+  dispatching on the command buffer, so one pointer is right for every Context. An unbalanced
+  end is dropped rather than recorded, because recording one is undefined behaviour —
+  and since 0.18 the `with` form is the only way to spell a label, so it cannot arise
+  from Python at all.
 
 ### What blocks and what does not
 

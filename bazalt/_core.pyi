@@ -455,7 +455,7 @@ class Image:
 
         ASYNCHRONOUS, like load_image: it returns at once and the copy runs on
         the upload worker, because the case this exists for is a video frame at
-        60 fps. Use img.wait(), img.ready or ctx.wait_for_uploads() to know when
+        60 fps. Use img.wait(), img.ready or ctx.wait() to know when
         it has landed; a submit that samples the image waits for it GPU-side
         either way. Two updates of one image reach the GPU in the order they
         were called — one FIFO worker, and that is a guarantee.
@@ -524,9 +524,9 @@ class RenderTarget(RenderTargetBase):
         <= ctx.max_samples(). name labels the attachments in validation messages.
 
         layers>1 / cube=True / mip_levels>1 make the attachments layered / cube /
-        mipped so a scene can be rasterized into one subresource with .layer(i) /
-        .mip(m) (render-to-layer / render-to-mip: dynamic env capture, cascade
-        shadows). cube fixes 6 square layers and gives the colour attachment a
+        mipped so a scene can be rasterized into one subresource with
+        .layer(i, mip=m) (render-to-layer / render-to-mip: dynamic env capture,
+        cascade shadows). cube fixes 6 square layers and gives the colour attachment a
         CUBE view so target.color[0] samples as a cubemap. Single-sample only:
         samples>1 cannot combine with layers/cube/mip_levels this release.
         """
@@ -1312,8 +1312,7 @@ class Context:
         raises here — but not waited for, because 30 meshes used to mean 30 full
         queue drains at startup. The buffer is usable at once; a submit that
         binds it waits GPU-side, and read() waits CPU-side. `buf.ready`,
-        `buf.wait()` and `ctx.wait_for_uploads()` are the explicit-control
-        verbs.
+        `buf.wait()` and `ctx.wait()` are the explicit-control verbs.
 
         A DYNAMIC buffer is host-visible and written by update(), so it has no
         copy and is never pending.
@@ -1383,7 +1382,7 @@ class Context:
         corrupt file raises ResourceError at this call), but the decode and
         GPU copy run on a background worker. The image is usable for
         recording right away — a submit that samples it waits for the upload
-        automatically. `img.ready`, `img.wait()` and `ctx.wait_for_uploads()`
+        automatically. `img.ready`, `img.wait()` and `ctx.wait()`
         are the explicit-control verbs.
 
         With hot_reload=True the file is watched: re-saving it re-uploads into
