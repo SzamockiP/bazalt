@@ -15,6 +15,13 @@ enum class Filter
     NEAREST,
 };
 
+// One place, because 0.18 gave a second caller (cmd.blit_image) the same
+// question the sampler cache had been answering inline.
+inline constexpr VkFilter to_vk_filter(Filter filter)
+{
+    return filter == Filter::NEAREST ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+}
+
 enum class AddressMode
 {
     REPEAT,

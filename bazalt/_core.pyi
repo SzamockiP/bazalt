@@ -769,12 +769,66 @@ class CommandBuffer:
 
         The history buffer a temporal effect needs: keep the last frame's result
         to blend against this one (motion blur, a feedback trail), or ping-pong
-        two storage images. Only mip 0 is copied — call generate_mipmaps for the
-        rest.
+        two storage images.
+
+        Every mip level the two images share is copied. Until 0.18 this was mip
+        0 only, which left levels 1..N holding the destination's old pixels —
+        a copy of the image's top level rather than of the image, and the
+        difference showed up the moment anything sampled with a mip bias.
 
         src_access names where the SOURCE currently is: SHADER_READ for an image
         that is sampled (the default), SHADER_WRITE for one a compute dispatch
         just wrote. Both images end sampleable. Refused inside a rendering scope.
+        """
+        ...
+
+    def blit_image(self, src: Image, dst: Image, *,
+                   src_access: Access = Access.SHADER_READ,
+                   filter: Filter = Filter.LINEAR) -> CommandBuffer:
+        """Copy one image into another of a DIFFERENT size, scaling on the way.
+
+        copy_image needs the two to match; generate_mipmaps scales, but only
+        inside one image. Downsampling for bloom, upscaling a compute result and
+        making a thumbnail all sat in that gap, and each one used to be a full
+        graphics pass with a fullscreen shader.
+
+        Mip 0 of every shared layer. Call generate_mipmaps on the destination if
+        it needs a chain.
+
+        Raises ResourceError when this GPU cannot blit between the two formats —
+        BLIT_SRC/BLIT_DST are format features, not a given, and a linear filter
+        needs the source to be filterable on top.
+
+        src_access, and both images ending sampleable, work exactly as for
+        copy_image. Refused inside a rendering scope.
+        """
+        ...
+
+    def copy_buffer(self, src: Buffer, dst: Buffer, *,
+                    src_offset: int = 0, dst_offset: int = 0,
+                    size: int = 0) -> CommandBuffer:
+        """Copy bytes from one buffer into another, GPU-side.
+
+        size=0 means the rest of the source. A compute ping-pong and "keep last
+        frame's values" are both this one command; before it, moving buffer
+        contents meant a round trip through the host or a compute shader written
+        to do nothing but assign.
+
+        Refused inside a rendering scope.
+        """
+        ...
+
+    def fill_buffer(self, buffer: Buffer, value: int = 0, *,
+                    offset: int = 0, size: int = 0) -> CommandBuffer:
+        """Fill a buffer with a repeated 32-bit value, GPU-side.
+
+        Zeroing is the reason it exists: a counter an atomic increments has to
+        start each frame at a known value, and saying so used to take a dispatch
+        whose whole body was an assignment.
+
+        offset and size must be multiples of 4, and size=0 means the rest of the
+        buffer. 32-bit because the underlying command is: the value is one word
+        repeated. Refused inside a rendering scope.
         """
         ...
 

@@ -1638,6 +1638,64 @@ PYBIND11_MODULE(_core, m)
             py::arg("dst"),
             py::kw_only(),
             py::arg("src_access") = Access::SHADER_READ)
+        // The resizing sibling of copy_image. `filter` reuses bz.Filter, which
+        // the sampler already introduced — the question "how do you sample when
+        // the sizes differ" has one answer in this library, not two enums.
+        .def(
+            "blit_image",
+            [](std::shared_ptr<CommandBuffer> self,
+               std::shared_ptr<Image> src,
+               std::shared_ptr<Image> dst,
+               Access src_access,
+               Filter filter)
+            {
+                require_same_context(self->owner(), src->owner(), "blit_image");
+                require_same_context(self->owner(), dst->owner(), "blit_image");
+                unwrap(self->blit_image(std::move(src), std::move(dst), src_access, to_vk_filter(filter)), nullptr);
+                return self;
+            },
+            py::arg("src"),
+            py::arg("dst"),
+            py::kw_only(),
+            py::arg("src_access") = Access::SHADER_READ,
+            py::arg("filter") = Filter::LINEAR)
+        .def(
+            "copy_buffer",
+            [](std::shared_ptr<CommandBuffer> self,
+               std::shared_ptr<Buffer> src,
+               std::shared_ptr<Buffer> dst,
+               VkDeviceSize src_offset,
+               VkDeviceSize dst_offset,
+               VkDeviceSize size)
+            {
+                require_same_context(self->owner(), src->owner(), "copy_buffer");
+                require_same_context(self->owner(), dst->owner(), "copy_buffer");
+                unwrap(self->copy_buffer(std::move(src), std::move(dst), src_offset, dst_offset, size), nullptr);
+                return self;
+            },
+            py::arg("src"),
+            py::arg("dst"),
+            py::kw_only(),
+            py::arg("src_offset") = 0,
+            py::arg("dst_offset") = 0,
+            py::arg("size") = 0)
+        .def(
+            "fill_buffer",
+            [](std::shared_ptr<CommandBuffer> self,
+               std::shared_ptr<Buffer> buffer,
+               std::uint32_t value,
+               VkDeviceSize offset,
+               VkDeviceSize size)
+            {
+                require_same_context(self->owner(), buffer->owner(), "fill_buffer");
+                unwrap(self->fill_buffer(std::move(buffer), value, offset, size), nullptr);
+                return self;
+            },
+            py::arg("buffer"),
+            py::arg("value") = 0,
+            py::kw_only(),
+            py::arg("offset") = 0,
+            py::arg("size") = 0)
         .def(
             "clear_image",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Image> image, const py::object& color)

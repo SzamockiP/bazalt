@@ -439,8 +439,14 @@ public:
         size_t data_size,
         BufferType type)
     {
+        // The transfer bits ride along so cmd.copy_buffer / cmd.fill_buffer work
+        // on a DYNAMIC buffer too (0.18). A STATIC buffer has carried both since
+        // it was written, and refusing them here would make "which buffers can
+        // the GPU copy into" a second rule to remember for no gain: transfer
+        // usage costs nothing on memory that is already host-visible.
         VkBufferUsageFlags usage = (type == BufferType::STORAGE) ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                                  : VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
         VmaAllocationCreateInfo allocInfo{};
         allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;

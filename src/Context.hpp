@@ -621,7 +621,7 @@ public:
         }
 
         const bool anisotropy = desc.anisotropy && supports(Feature::ANISOTROPIC_FILTERING);
-        const VkFilter filter = desc.filter == Filter::NEAREST ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+        const VkFilter filter = to_vk_filter(desc.filter);
         VkSamplerAddressMode address = VK_SAMPLER_ADDRESS_MODE_REPEAT;
         switch (desc.address_mode)
         {

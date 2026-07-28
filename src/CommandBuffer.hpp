@@ -806,6 +806,192 @@ public:
         return {};
     }
 
+    // A copy that RESIZES: the two images need not share an extent, and `filter`
+    // says how the pixels are sampled on the way.
+    //
+    // copy_image demands identical size and format; generate_mipmaps scales but
+    // only inside one image. Downsampling for bloom, upscaling a compute result
+    // and making a thumbnail all sat in that gap, and each one was a full
+    // graphics pass with a fullscreen shader to do what the transfer queue does
+    // in one command.
+    //
+    // Same `src_access` vocabulary as copy_image and generate_mipmaps: the
+    // tracker treats an image's layout at the start of a replay as UNDEFINED, so
+    // the caller names where the source actually is.
+    std::expected<void, Error> blit_image(
+        std::shared_ptr<Image> src,
+        std::shared_ptr<Image> dst,
+        Access src_access = Access::SHADER_READ,
+        VkFilter filter = VK_FILTER_LINEAR)
+    {
+        if (!src || !dst)
+        {
+            return std::unexpected(err_resource("blit_image: image is null"));
+        }
+        if (src.get() == dst.get())
+        {
+            return std::unexpected(err_resource(
+                "blit_image: source and destination are the same image; a blit within one "
+                "image is what generate_mipmaps does"));
+        }
+        if (in_rendering_)
+        {
+            return std::unexpected(err_resource(
+                "cmd.blit_image() is not allowed inside a rendering scope; "
+                "record it before begin_rendering"));
+        }
+        if (src->samples() != 1 || dst->samples() != 1)
+        {
+            return std::unexpected(err_resource(
+                "blit_image: a multisampled image cannot be blitted; render into it and "
+                "blit the resolved attachment"));
+        }
+        // A blit filters, and filtering is a format capability rather than a
+        // given. Checking here names the format; letting it through produces a
+        // validation error about VkFormatFeatureFlags instead.
+        if (!Image::can_blit(*context_, src->format(), dst->format()))
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "blit_image: this GPU cannot blit {} into {}. Both formats need "
+                    "BLIT_SRC/BLIT_DST support, and a linear filter needs the source to be "
+                    "filterable — use copy_image for a same-size copy, or a render pass.",
+                    format_name(src->format()),
+                    format_name(dst->format()))));
+        }
+        const auto src_layout = image_layout_for(src_access);
+        if (!src_layout)
+        {
+            return std::unexpected(err_resource(
+                "blit_image: src must be Access.SHADER_READ (the source is sampled, "
+                "SHADER_READ_ONLY) or Access.SHADER_WRITE (a compute shader just wrote "
+                "it, GENERAL)"));
+        }
+        Image* src_ptr = src.get();
+        Image* dst_ptr = dst.get();
+        commands_.push_back([src = std::move(src), dst = std::move(dst), layout = *src_layout, filter](
+                                VkCommandBuffer cmd, const FrameContext& frame)
+                            { record_image_blit(*frame.vk, cmd, *src, *dst, layout, filter); });
+        // Both ends, for the reason copy_image spells out above.
+        src_ptr->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        dst_ptr->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (auto_barriers_)
+        {
+            tracker_.note_image_layout(
+                src_ptr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+            tracker_.note_image_layout(
+                dst_ptr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+        }
+        return {};
+    }
+
+    // Copy bytes from one buffer into another, GPU-side.
+    //
+    // There was no way to move buffer contents without a round trip through the
+    // host or a compute shader written to do nothing but assign. A compute
+    // ping-pong and "keep last frame's values" are both this one command.
+    std::expected<void, Error> copy_buffer(
+        std::shared_ptr<Buffer> src,
+        std::shared_ptr<Buffer> dst,
+        VkDeviceSize src_offset = 0,
+        VkDeviceSize dst_offset = 0,
+        // 0 means "the rest of the source", which is the whole buffer by
+        // default. VK_WHOLE_SIZE is not legal in a copy region, so the real
+        // length is computed below rather than passed through.
+        VkDeviceSize size = 0)
+    {
+        if (!src || !dst)
+        {
+            return std::unexpected(err_resource("copy_buffer: buffer is null"));
+        }
+        if (in_rendering_)
+        {
+            return std::unexpected(err_resource(
+                "cmd.copy_buffer() is not allowed inside a rendering scope; "
+                "record it before begin_rendering"));
+        }
+        const VkDeviceSize length = size != 0 ? size : (src->size() > src_offset ? src->size() - src_offset : 0);
+        if (length == 0)
+        {
+            return std::unexpected(err_resource("copy_buffer: nothing to copy (size is 0)"));
+        }
+        if (src_offset + length > src->size() || dst_offset + length > dst->size())
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "copy_buffer: the region does not fit; {} bytes at offset {} of a {}-byte source "
+                    "into offset {} of a {}-byte destination",
+                    length,
+                    src_offset,
+                    src->size(),
+                    dst_offset,
+                    dst->size())));
+        }
+
+        track_use_(src, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, false);
+        track_use_(dst, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, true);
+        commands_.push_back(
+            [src = std::move(src), dst = std::move(dst), src_offset, dst_offset, length](
+                VkCommandBuffer cmd, const FrameContext& frame)
+            {
+                VkBufferCopy region{.srcOffset = src_offset, .dstOffset = dst_offset, .size = length};
+                // Resolved at execute, never captured: a DynamicBuffer has one
+                // handle per frame in flight.
+                frame.vk->vkCmdCopyBuffer(cmd, src->get(), dst->get(), 1, &region);
+            });
+        return {};
+    }
+
+    // Fill a buffer with a repeated 32-bit value, GPU-side. Zeroing is the
+    // reason it exists: a counter an atomic increments, or an accumulation
+    // buffer, has to start each frame at a known value, and the only way to say
+    // that was a dispatch whose whole body was an assignment.
+    //
+    // 32-bit because vkCmdFillBuffer is: the offset and the size must both be
+    // multiples of 4, and the value is one dword repeated.
+    std::expected<void, Error> fill_buffer(
+        std::shared_ptr<Buffer> buffer,
+        std::uint32_t value = 0,
+        VkDeviceSize offset = 0,
+        VkDeviceSize size = 0)
+    {
+        if (!buffer)
+        {
+            return std::unexpected(err_resource("fill_buffer: buffer is null"));
+        }
+        if (in_rendering_)
+        {
+            return std::unexpected(err_resource(
+                "cmd.fill_buffer() is not allowed inside a rendering scope; "
+                "record it before begin_rendering"));
+        }
+        if (offset % 4 != 0 || (size != 0 && size % 4 != 0))
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "fill_buffer: offset and size must be multiples of 4 (the value is one "
+                    "32-bit word repeated); got offset={}, size={}",
+                    offset,
+                    size)));
+        }
+        const VkDeviceSize length = size != 0 ? size : (buffer->size() > offset ? buffer->size() - offset : 0);
+        if (length == 0 || offset + length > buffer->size())
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "fill_buffer: the region does not fit; {} bytes at offset {} of a {}-byte buffer",
+                    length,
+                    offset,
+                    buffer->size())));
+        }
+
+        track_use_(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, true);
+        commands_.push_back(
+            [buffer = std::move(buffer), value, offset, length](VkCommandBuffer cmd, const FrameContext& frame)
+            { frame.vk->vkCmdFillBuffer(cmd, buffer->get(), offset, length, value); });
+        return {};
+    }
+
     // Fill an image with one colour, with no pipeline and no pass. Resetting an
     // accumulation or history buffer, or clearing a storage image a compute
     // shader only writes part of. A depth image is refused: clearing depth is

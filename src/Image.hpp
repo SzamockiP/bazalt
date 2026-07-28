@@ -70,6 +70,13 @@ void record_image_copy(
     Image& src,
     Image& dst,
     VkImageLayout src_layout);
+void record_image_blit(
+    const VolkDeviceTable& vk,
+    VkCommandBuffer cmd,
+    Image& src,
+    Image& dst,
+    VkImageLayout src_layout,
+    VkFilter filter);
 void record_image_clear(const VolkDeviceTable& vk, VkCommandBuffer cmd, Image& image, std::array<float, 4> color);
 
 // The layout of every (layer, mip) of one image, with a fast path for the case
@@ -544,6 +551,26 @@ public:
         constexpr VkFormatFeatureFlags needed = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
                                                 VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
         return (props.optimalTilingFeatures & needed) == needed;
+    }
+
+    // Whether this GPU can blit `from` into `to`. A blit is a transfer command
+    // and yet it is NOT universally available: BLIT_SRC and BLIT_DST are format
+    // features, and a linear filter needs the source to be filterable on top.
+    // Same shape as can_generate_mips, which asks the same question of one
+    // format — and the same reason for asking it here: the alternative is a
+    // validation message about VkFormatFeatureFlags instead of a sentence
+    // naming the two formats.
+    static bool can_blit(Context& context, Format from, Format to)
+    {
+        VkFormatProperties src_props{};
+        vkGetPhysicalDeviceFormatProperties(context.physical_device(), context.vk_format(from), &src_props);
+        VkFormatProperties dst_props{};
+        vkGetPhysicalDeviceFormatProperties(context.physical_device(), context.vk_format(to), &dst_props);
+
+        constexpr VkFormatFeatureFlags src_needed = VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+                                                    VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        return (src_props.optimalTilingFeatures & src_needed) == src_needed &&
+               (dst_props.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) != 0;
     }
 
     static std::uint32_t full_mip_count(std::uint32_t width, std::uint32_t height)
@@ -1427,6 +1454,14 @@ inline void record_image_copy(
     VkImageLayout src_layout)
 {
     const std::uint32_t layers = src.array_layers();
+    // Every level the two images share. 0.17 copied mip 0 only and called the
+    // rest a ceiling ("a full chain is N regions for a case that has not come
+    // up"). The case came up: a copy that leaves levels 1..N holding the
+    // destination's old pixels is not a copy of the image, it is a copy of its
+    // top level, and the difference shows up the moment anything samples with a
+    // mip bias. N regions in one vkCmdCopyImage is the same one call.
+    const std::uint32_t mips = (std::ranges::min)(src.mip_levels(), dst.mip_levels());
+
     record_image_transition(
         vk,
         cmd,
@@ -1439,7 +1474,7 @@ inline void record_image_copy(
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         src.aspect(),
         0,
-        1,
+        mips,
         layers);
     // The destination is overwritten in full, so its old contents are discarded
     // rather than waited for — UNDEFINED is legal from any layout.
@@ -1455,23 +1490,121 @@ inline void record_image_copy(
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst.aspect(),
         0,
-        1,
+        mips,
         layers);
 
-    VkImageCopy region{
-        .srcSubresource = {.aspectMask = src.aspect(), .mipLevel = 0, .baseArrayLayer = 0, .layerCount = layers},
-        .srcOffset = {0, 0, 0},
-        .dstSubresource = {.aspectMask = dst.aspect(), .mipLevel = 0, .baseArrayLayer = 0, .layerCount = layers},
-        .dstOffset = {0, 0, 0},
-        .extent = {src.width(), src.height(), 1}};
+    std::vector<VkImageCopy> regions;
+    regions.reserve(mips);
+    for (std::uint32_t mip = 0; mip < mips; ++mip)
+    {
+        // Level dimensions floor at 1, which is what the mip chain of a
+        // non-square image does on its short axis before the long one.
+        const std::uint32_t w = (std::ranges::max)(src.width() >> mip, 1u);
+        const std::uint32_t h = (std::ranges::max)(src.height() >> mip, 1u);
+        regions.push_back(
+            VkImageCopy{
+                .srcSubresource =
+                    {.aspectMask = src.aspect(), .mipLevel = mip, .baseArrayLayer = 0, .layerCount = layers},
+                .srcOffset = {0, 0, 0},
+                .dstSubresource =
+                    {.aspectMask = dst.aspect(), .mipLevel = mip, .baseArrayLayer = 0, .layerCount = layers},
+                .dstOffset = {0, 0, 0},
+                .extent = {w, h, 1}});
+    }
     vk.vkCmdCopyImage(
         cmd,
         src.vk_image(),
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         dst.vk_image(),
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        static_cast<std::uint32_t>(regions.size()),
+        regions.data());
+
+    for (Image* image : {&src, &dst})
+    {
+        record_image_transition(
+            vk,
+            cmd,
+            image->vk_image(),
+            image == &src ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            image == &src ? VK_ACCESS_TRANSFER_READ_BIT : VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            kAllShaderStages,
+            image->aspect(),
+            0,
+            mips,
+            layers);
+    }
+}
+
+// A copy that RESIZES. vkCmdBlitImage rather than vkCmdCopyImage, so the two
+// images need not share an extent, and the filter chooses how the sampling is
+// done on the way.
+//
+// copy_image (above) needs identical size and format; generate_mipmaps scales,
+// but only within one image. Downsampling for bloom, upscaling a compute result
+// and building a thumbnail all fell in the gap, and every one of them was a
+// full graphics pass with a fullscreen shader. This is the same blit cascade
+// generate_mipmaps already runs, generalized to two images.
+//
+// Mip 0 across every layer: a blit chain between two images is a different
+// question, and generate_mipmaps answers it on the destination.
+inline void record_image_blit(
+    const VolkDeviceTable& vk,
+    VkCommandBuffer cmd,
+    Image& src,
+    Image& dst,
+    VkImageLayout src_layout,
+    VkFilter filter)
+{
+    const std::uint32_t layers = (std::ranges::min)(src.array_layers(), dst.array_layers());
+
+    record_image_transition(
+        vk,
+        cmd,
+        src.vk_image(),
+        src_layout,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT,
+        kAllShaderStages,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        src.aspect(),
+        0,
         1,
-        &region);
+        layers);
+    record_image_transition(
+        vk,
+        cmd,
+        dst.vk_image(),
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        0,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        kAllShaderStages,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        dst.aspect(),
+        0,
+        1,
+        layers);
+
+    VkImageBlit region{
+        .srcSubresource = {.aspectMask = src.aspect(), .mipLevel = 0, .baseArrayLayer = 0, .layerCount = layers},
+        .srcOffsets = {{0, 0, 0}, {static_cast<std::int32_t>(src.width()), static_cast<std::int32_t>(src.height()), 1}},
+        .dstSubresource = {.aspectMask = dst.aspect(), .mipLevel = 0, .baseArrayLayer = 0, .layerCount = layers},
+        .dstOffsets = {
+            {0, 0, 0}, {static_cast<std::int32_t>(dst.width()), static_cast<std::int32_t>(dst.height()), 1}}};
+    vk.vkCmdBlitImage(
+        cmd,
+        src.vk_image(),
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        dst.vk_image(),
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &region,
+        filter);
 
     for (Image* image : {&src, &dst})
     {
