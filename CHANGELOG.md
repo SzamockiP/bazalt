@@ -5,6 +5,133 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.18.0] — 2026-07-28
+
+"Data, copies and tools". The boundary between your program and the GPU was
+one-way and one-shot: pixels went in when an image was created, and came out
+only from mip 0 of layer 0 of an offscreen target. A video frame, a camera
+feed, a plot, a texture computed in NumPy and painting all meant one thing —
+build a new `Image` every frame.
+
+Around that sit two smaller gaps that the same work reaches. Copying was half
+done: `copy_image` copied one mip level, a cross-Context transfer regenerated
+the others, there was no scaled copy and no buffer copy at all. And an `Image`
+held ONE layout for the whole thing, so a pass into `target.mip(1)` claimed mip
+0 had reached the final layout too — the reason the notes used to say "render
+every layer and every mip before you sample", which rules out the two things a
+mip chain is for.
+
+Third theme: debugging a prototype. A shader was debugged by rendering a value
+as a colour and reading the pixel back.
+
+No breaking changes.
+
+### Added
+- **`img.update(array, layer=, mip=, region=)`.** Writes new pixels into an
+  image that already exists. `region=(x, y, w, h)` writes one rectangle and
+  keeps the rest, which is what painting and a sprite atlas need. The update
+  runs on the same worker as `load_image`, so the call returns at once and the
+  frame that samples the image waits for it on the GPU. Two updates of one
+  image arrive in the order you made them — one worker, one queue, and that is
+  a promise, not an accident. The array must match the format and be
+  C-contiguous: a strided array would upload other bytes, so bazalt refuses it
+  and names the fix.
+- **`img.read(layer=, mip=)`.** Reads any face or level back, shaped to that
+  level: mip 2 of a 64x64 texture returns 16x16. This is also the test
+  `generate_mipmaps` never had — reading only mip 0 meant a mip generator that
+  did nothing at all passed everything.
+- **`ctx.load_image(bytes)`.** Decodes an image from memory, for a picture with
+  no file behind it: one you downloaded, unpacked from a zip, or made with PIL.
+  Everything after the decode matches the file path. There is no hot reload,
+  because there is no file to watch.
+- **`buffer.update(data, offset=)`.** Writes part of a buffer. Changing one
+  matrix of an instance array used to rewrite the whole array.
+- **`renderer.present(cmd, capture=True)` and `renderer.read_pixels()`.** A
+  screenshot of a window. Two calls, and that is the design: Vulkan lets you
+  touch a window image only between `acquire()` and `present()`, so reading the
+  last frame is not legal and the copy travels with the frame instead. Bazalt
+  asks for the copy capability only where the compositor allows it, and says so
+  when it does not.
+- **`cmd.blit_image(src, dst, filter=)`.** Copies between two images of
+  DIFFERENT sizes and scales the pixels. `copy_image` needs a match, and
+  `generate_mipmaps` scales only inside one image, so a bloom downsample, an
+  upscale of a compute result and a thumbnail each used to need a full pass
+  with a fullscreen shader.
+- **`cmd.copy_buffer(src, dst)` and `cmd.fill_buffer(buffer, value)`.** Buffer
+  copies on the GPU. Zeroing is the reason: a counter an atomic increments has
+  to start each frame at a known value, and saying so used to take a dispatch
+  whose whole body was an assignment. DYNAMIC buffers work here too.
+- **`Context(shader_printf=True)`.** `debugPrintfEXT()` from your shaders
+  arrives at the logger as `Severity.INFO` from `Source.SHADER`. Write
+  `#extension GL_EXT_debug_printf : enable` and print the value you want. See
+  **Notes** for the two costs.
+- **`with cmd.label("shadow pass"):`.** Names a scope, so a RenderDoc capture
+  reads as a frame and not as a list of draws. Bazalt has named objects since
+  0.8; this names passes. Costs nothing when validation is off.
+- **`cmd.occlusion_query()`.** Counts the fragments of the draws inside it that
+  passed the depth and stencil tests. The handle is the identity, exactly like
+  `cmd.timer()`. It must sit inside a rendering scope, because Vulkan requires
+  the query to begin and end in one render pass.
+- **`ctx.memory_stats()`.** The memory this Context holds, what it reserved and
+  what the driver says is left, in bytes. "Am I leaking" used to need an
+  external tool.
+- **`ctx.subgroup_size`.** The width this GPU runs shader subgroups at. A
+  compute reduction that uses `subgroupAdd` needs it to size its workgroup.
+- **`ctx.submit(cmd, wait=False)` and `ctx.wait()`.** A headless submit that
+  returns at once. With the wait, a compute prototype that submits in a loop
+  leaves the GPU idle between iterations, so the loop runs at the speed of the
+  round trip and not of the work. Reusing one command buffer is safe: the frame
+  ring paces it.
+- **Example `24_video_texture`.** A texture rewritten from NumPy every frame,
+  painting into a region with the mouse, a labelled pass, and a screenshot.
+
+### Changed
+- **An image tracks its layout for each layer and level, not as a whole.** A
+  pass now records only the part it drew, and `end_rendering` brings the rest of
+  the image to the same final layout. So you can render into one mip or one cube
+  face and then sample or read the image, which used to be a validation error
+  some distance from the pass that caused it. Nothing changes for an image
+  written whole: the layouts agree, bazalt stores one, and it records the same
+  single barrier it always did.
+- **`cmd.copy_image` copies every mip level the two images share.** It copied
+  mip 0 and left the rest holding the destination's old pixels, which is a copy
+  of the top level and not of the image.
+- **A cross-Context transfer carries the source's own mip levels.** It used to
+  regenerate them, so a chain you rendered per level arrived as a generated one.
+  A prefiltered environment map is exactly that case.
+- **DYNAMIC buffers carry the transfer usage flags**, so `copy_buffer` and
+  `fill_buffer` work on them. The flags cost nothing on memory that the host can
+  already see.
+
+### Notes
+- **Shader printf has two costs, and that is why it is off by default.** The
+  validation layers implement it, so you need them: `validation="off"` with
+  `shader_printf=True` raises `InitializationError` instead of printing
+  nothing, and `validation="auto"` on a machine with no layers warns. The layer
+  also instruments every shader, and bazalt compiles that Context's shaders
+  without the optimizer, because a print is a non-semantic instruction that the
+  optimizer is allowed to delete.
+- **Printf output reaches your callback whatever `min_severity` says.** The
+  layer reports it at INFO and the default floor is Warning, so an obeyed
+  filter would make the feature look broken. Bazalt also removes the layer's
+  report text around your words, which for a print inside a loop is the
+  difference between a tool and a wall of text.
+- **An occlusion count is not exact.** A precise count needs the
+  `occlusionQueryPrecise` feature, and without it the specification allows any
+  value above zero. Read `q.samples > 0` as the reliable part.
+- **`img.update()` is asynchronous.** Use `img.wait()`, `img.ready` or
+  `ctx.wait_for_uploads()` when you need to know it has landed. A submit that
+  samples the image waits for it either way.
+- **A cross-Context transfer with a mip chain is slower now.** It reads and
+  writes each level instead of regenerating them. The whole operation is
+  already documented as a setup step that blocks the source queue, and correct
+  data beats fast wrong data at setup time.
+- **An asynchronous `StaticBuffer` is still deferred.** It needs the submit
+  path to track buffer residency the way it tracks image residency, and its
+  blocking happens once at setup rather than every frame. See `DESIGN.md`.
+- **Tessellation, geometry shaders, indirect draw, a `RenderTarget` on images
+  you own, and the window extras move to 0.19.**
+
 ## [0.17.0] — 2026-07-27
 
 "What the pipeline still hard-codes". 0.16 removed the fixed blend mode, depth

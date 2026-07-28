@@ -387,6 +387,173 @@ entry. The release is a label, not the organizing axis.
   edit. General form: anything a compile depends on that is not in the file has to be stored
   with the result.
 
+### Streaming, copies and layouts
+
+- **An `Image` tracks its layout per `(layer, mip)`, with a collapse** (0.18). Until then
+  it held ONE layout, which was right while every write covered the whole image and
+  stopped being right the moment `target.mip(m)` existed (0.13): the whole image was
+  marked as rendered, so the next barrier handed the driver an `oldLayout` that was true
+  of one level and a lie about the rest. This file called that an accepted ceiling and
+  told the caller to render every layer and every mip before sampling — which rules out
+  the two things a mip chain is for, a render into one level and a read of another.
+
+  The collapse is what makes it free. Subresources that agree store one value, and a
+  split image collapses back the moment the last one catches up, so six cube faces
+  rendered one at a time end uniform and the sample that follows costs exactly what it
+  did before. Nothing is allocated until something writes a strict subset.
+
+  Three parts, and the third is the one that turns the state into a fix. A pass marks
+  only what it wrote (a `SubresourceTarget` and a `MultiviewTarget` name THEIR
+  subresource, so the statement is always made by whoever knows what was drawn), and
+  then `end_rendering` **evens the image out**: subresources the pass did not write are
+  brought to the same final layout. "The layout the result ends in" was always a promise
+  about the IMAGE, and a subresource pass used to honour it only for the part it drew.
+  Transitioning an untouched subresource out of `UNDEFINED` discards contents that were
+  undefined anyway, and a whole-image pass records no extra barrier at all.
+
+  Verified the other way round: four of the six new tests fail on the previous commit
+  with `expects VkImage (mipLevel = 2, arrayLayer = 0) to be in layout
+  SHADER_READ_ONLY_OPTIMAL -- instead, current layout is UNDEFINED`.
+
+- **`image.update` is asynchronous, and the FIFO order is a promise** (0.18). The case it
+  exists for is a video frame at 60 fps, where a blocking update spends the frame budget
+  on a memcpy. The cost of async is that "two updates of one image in one frame" needs an
+  answer, and the answer is the implementation made explicit: one worker, one queue, so
+  the call order IS the GPU order. Writing it down is what stops a future thread pool
+  from silently breaking a video decoder.
+
+- **Every user error in `update` is decided in the binding, on the main thread** (0.18).
+  The worker cannot raise — it holds no GIL, by the invariant `UploadManager` was built
+  on — so a bad dtype, a wrong shape or a strided array has to be caught before the job
+  is queued. This is the same rule `create_image` has followed since 0.4, applied to a
+  path that now has a thread in the middle of it.
+
+- **`Image`'s layout state belongs to the main thread** (0.18). `set_upload_submitted`
+  used to call `mark_has_contents` from the worker. That was a benign word write while
+  the layout was one `VkImageLayout`; with a vector behind it, it both races the reader
+  and is WRONG for a partial update, because it would claim every layer sampleable when
+  one was written. Whoever queues the job records the layout instead. General form: when
+  a field grows from a word into a container, re-read every thread that touches it.
+
+- **An update marks the image pending BEFORE queueing** (0.18). Without it, an image
+  created synchronously has upload state `None`, so `img.wait()` returns at once and a
+  `read()` straight after an update returns the PREVIOUS contents — one update behind,
+  every time. A wrong answer, not a slow one, and invisible in a test that only checks
+  the final frame.
+
+- **`copy_image` copies every shared mip level** (0.18, replacing the 0.17 ceiling). A
+  copy that leaves levels 1..N holding the destination's old pixels is a copy of the
+  image's top level, not of the image, and the difference appears the moment anything
+  samples with a mip bias. N regions in the same one call. The estimate that made it a
+  ceiling ("a case that has not come up") was right until `image.update(mip=)` made
+  per-level content ordinary.
+
+- **A cross-Context transfer carries the source's own levels** (0.18, replacing the 0.15
+  ceiling). Regenerating them is a silent, plausible wrong answer for anyone who rendered
+  their own — a roughness-prefiltered environment map is exactly that. It costs one
+  readback and one update per `(layer, mip)`, which is slow; the overload was already
+  documented as a setup step that blocks the source queue, and correct data beats fast
+  wrong data at setup time.
+
+- **`blit_image` is a second verb, not a kwarg on `copy_image`** (0.18). Rule 1 covers
+  variants of one thing, and these are two different Vulkan commands with two different
+  contracts: a copy moves texels and requires a match, a blit resamples and requires
+  format features. Folding them would make `copy_image(scale=True)` fail for reasons the
+  copy never had. `filter=` reuses `bz.Filter` for the third time rather than declaring a
+  second two-value enum.
+
+- **`fill_buffer` is 32-bit because `vkCmdFillBuffer` is** (0.18). The offset and the size
+  are multiples of 4 and the value is one word repeated. Exposing a byte-wise fill would
+  mean emulating it with a dispatch, which is the thing this exists to remove.
+
+- **DYNAMIC buffers carry the transfer usage bits** (0.18). The alternative — refusing
+  `copy_buffer`/`fill_buffer` on them — makes "which buffers can the GPU write into" a
+  second rule to remember, for no gain: transfer usage costs nothing on memory that is
+  already host-visible.
+
+- **A window screenshot takes TWO calls, and that is the design** (0.18). A presentable
+  image may only be touched between `vkAcquireNextImageKHR` and `vkQueuePresentKHR`, so
+  "read the last frame" is illegal by the spec — the first implementation did exactly
+  that and the validation-as-assert fixture caught it with `performs a layout transition
+  on presentable VkImage ... but the image has not been acquired`. So
+  `present(cmd, capture=True)` records the copy into the frame's OWN submit and
+  `read_pixels()` collects it. The frame that asks pays for a full-frame copy; every
+  other frame pays nothing.
+
+  `TRANSFER_SRC` is requested only where `supportedUsageFlags` allows it. A compositor
+  may refuse, and a swapchain that fails to create takes the window down with it, so the
+  capability is recorded and `read_pixels` reports it instead.
+
+- **The channel order is normalised, the extent is not** (0.18). Most compositors hand out
+  BGRA, and `out[y, x, 0]` must mean red on every machine, so the swap happens in bazalt.
+  The shape comes from the CAPTURE extent rather than the current one, because the window
+  may have been resized since.
+
+- **`load_image(bytes)` is an overload declared BEFORE the path one** (0.18). pybind
+  converts `str` AND `bytes` to `std::string`, so the path overload would take a PNG and
+  report it as a missing file. The same trap `compile_shader(source=)` hit in 0.16, and
+  the third time this codebase has had to order overloads by Python type.
+
+### Diagnostics
+
+- **`shader_printf` is a separate switch, not a fifth `ValidationMode`** (0.18). The modes
+  are exclusive states of "how hard do the layers check"; printf composes with all of
+  them, and you want it *together with* `validation="sync"`, not instead of it. It is off
+  by default for two costs: the layer instruments every shader, and every shader in that
+  Context is compiled unoptimized.
+
+- **A print is a non-semantic instruction, so the optimizer may delete it** (0.18).
+  `debugPrintfEXT` compiles to `OpExtInst` against `NonSemantic.DebugPrintf` and has no
+  observable result, so `-O` removes it and the shader silently stops printing. This is
+  the one place a debugging switch changes what is compiled, and it is unavoidable.
+
+- **`shader_printf=True` with `validation="off"` is an error, not a silent fix** (0.18).
+  The two contradict each other; turning validation on behind the caller's back would be
+  a Context that is not the one they asked for. `validation="auto"` on a machine with no
+  layers warns instead, because auto exists precisely to keep running.
+
+- **Printf output bypasses `min_severity`** (0.18). The layer reports it at INFO and the
+  default floor is Warning, so an obeyed filter makes the feature look broken. Asking for
+  the channel by name is the decision the filter would otherwise re-litigate. The layer's
+  report boilerplate is peeled off the message, because for a print inside a loop that is
+  the difference between a tool and a wall of text; a message matching none of the known
+  separators passes through whole, since losing the text is worse than an ugly line.
+
+- **Printf is routed as `Source::SHADER`, matched on the message ID** (0.18). It arrives
+  on the same debug-utils messenger as validation findings, so without the routing the
+  validation-as-assert fixture would fail any test whose shader says hello. The ID is
+  structured data and the text is not; the layer has spelled it `UNASSIGNED-DEBUG-PRINTF`
+  and `WARNING-DEBUG-PRINTF` across versions, so the stable part is the suffix. The
+  messenger subscribes to INFO only when printf is on, and every other INFO message is
+  dropped in the callback — asking for prints must not also subscribe to loader chatter.
+
+- **An occlusion query is not requested as precise** (0.18). Precision needs
+  `occlusionQueryPrecise`, and without it the spec allows any non-zero value, so
+  `samples` would mean two different things depending on the driver. `samples > 0` is the
+  part bazalt can promise everywhere. It refuses outside a rendering scope because Vulkan
+  requires the query to begin and end in one render pass, and the alternative is a
+  validation message at submit naming neither the call nor the reason.
+
+- **`cmd.label` uses volk's globals, like `set_debug_name`** (0.18). Debug utils is an
+  INSTANCE extension: `vkGetInstanceProcAddr` is the sanctioned route and
+  `vkGetDeviceProcAddr` may legally return null. The entry points are loader trampolines
+  dispatching on the command buffer, so one pointer is right for every Context. An
+  unbalanced `end_label` is dropped rather than recorded, because recording one is
+  undefined behaviour and the `with` form cannot produce it.
+
+### Asynchronous submits
+
+- **`submit(wait=False)` is paced by the ring, not by a fence per submit** (0.18). The
+  hazard is real — with N slots, submit N+2 reuses the command buffer submit N is still
+  running — and it is the one the windowed path solves with a fence per slot. Here the
+  submission timeline already counts every submit, so remembering which serial last
+  occupied a slot is the whole mechanism, and a timeline wait on a value already reached
+  costs nothing. A blocking submit pays for none of it: it has already waited.
+
+- **`ctx.wait()` waits on the timeline, not on the device** (0.18). `vkDeviceWaitIdle`
+  would stall the upload worker and any other Context sharing the device. The timeline is
+  per Context and counts exactly the submits this Context made.
+
 ### Errors and the pybind boundary
 
 - **The exception type is the recoverability contract.** `ErrorCode` maps 1:1 onto a Python
@@ -416,8 +583,9 @@ permanent ceiling.
    the declarator and the tracking are separate questions, and until then a fragment
    `imageStore` was not merely untracked but unreachable — this file said otherwise, which is
    what a claim with no test behind it does. What reflection still buys is the automatic
-   barrier, optional binding declarators, and a real diagnostic for the empty-HLSL-entry-point
-   ceiling. Target: before 1.0.
+   barrier, optional binding declarators, a real diagnostic for the empty-HLSL-entry-point
+   ceiling, and — since 0.18 — the ability to compile only the printing shaders
+   unoptimized instead of all of them. Target: before 1.0.
 4. **The sync-validation test is skipped in CI** — the LunarG layer for noble is still
    1.4.313 and does not report shader hazards. Version 1.4.350 does, but SDK 1.4.350 being
    *released* is not the same thing as a package for noble existing, which is what 0.17 got
@@ -438,9 +606,9 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
 - **`recreate_swapchain` takes `vkDeviceWaitIdle`** (0.14), so a resize of one window
   stutters the other for a moment. It is correct, it only stutters. Upgrade path: narrow it
   to one swapchain.
-- **A cross-Context transfer regenerates the mip levels above 0** instead of copying them
-  (0.15), so a hand-authored chain flattens into a generated one. Upgrade path: a per-mip
-  copy.
+- ✅ **A cross-Context transfer regenerates the mip levels above 0** (0.15) — CLOSED in
+  0.18. It copies the source's own levels now, one readback and one update per
+  (layer, mip). Slower, and deliberately so: the overload is a setup step already.
 - **A cross-Context transfer goes through host memory and blocks the source queue** (0.15).
   Without `external_memory` there is no portable alternative, so the documentation calls it
   a setup operation.
@@ -466,9 +634,10 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
   instead of staying in `COLOR_ATTACHMENT_OPTIMAL`. It reuses the existing RenderTarget
   contract rather than inventing a "this pass may continue" state. Upgrade path: a
   recording-wide look-ahead, which is the same machinery the depth store-op would want.
-- **Per-subresource layout tracking does not exist in `Image`** (debt #3 territory). It
-  touches the core and the gain is small, because it only removes the loud edge of a partial
-  render.
+- ✅ **Per-subresource layout tracking does not exist in `Image`** — CLOSED in 0.18. The
+  entry called the gain small ("it only removes the loud edge of a partial render"), and
+  that was the wrong reading: the loud edge WAS the feature, because it made rendering
+  into one mip and then sampling the image impossible. See the decision above.
 - **A `DEPTH_STENCIL` attachment cannot be sampled or read back** (0.17). Its view carries
   both aspects. Upgrade path: a second, depth-only view beside the attachment one, the same
   shape as the cubemap's parallel `2D_ARRAY` storage view.
@@ -481,10 +650,31 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
   `layout(local_size_x_id = 0)` compiles to `OpExecutionMode LocalSizeId`, which requires
   `maintenance4`, and the baseline is 1.2. Specialize the numbers the shader reads instead.
   Upgrade path: none needed — it becomes available by itself as the baseline moves.
-- **`copy_image` copies mip 0 only** (0.17), across every layer. A full chain is N regions
-  for a case that has not come up; `generate_mipmaps` fills the rest.
+- ✅ **`copy_image` copies mip 0 only** (0.17) — CLOSED in 0.18. The case came up:
+  `image.update(mip=)` makes per-level content ordinary, and a copy that leaves the other
+  levels stale is a copy of the top level rather than of the image.
 - **A pipeline cache lives and dies with its Context** (0.17). See the decision above: on
   disk it needs a frozen API to be worth writing.
+- **Shader printf needs the validation layers** (0.18). It is a layer service, not a
+  driver one, so it is unavailable in a release run by construction. Upgrade path: none —
+  this is what the feature IS.
+- **A printf Context compiles every shader unoptimized** (0.18), not only the ones that
+  print. Telling them apart needs SPIR-V reflection (debt #3), and the switch is a
+  debugging mode where the optimizer is the smaller loss.
+- **An occlusion count is not precise** (0.18). `occlusionQueryPrecise` is a feature bit,
+  and without it the spec allows any non-zero value. `samples > 0` is the promise.
+  Upgrade path: a `Feature`, additive.
+- **`blit_image` covers mip 0 of every shared layer** (0.18). A blit chain between two
+  images is a different question, and `generate_mipmaps` answers it on the destination.
+- **`image.update` writes one (layer, mip) per call** (0.18). A layered update is N calls;
+  they are queued on one worker and land in order, so the result is the same and the API
+  stays one verb.
+- **A screenshot needs `present(capture=True)` first** (0.18). Not an ergonomic choice: a
+  presentable image may only be touched between acquire and present. Upgrade path: none
+  that Vulkan permits.
+- **A cross-Context transfer of a mipped image is O(layers x mips) readbacks** (0.18).
+  Upgrade path: a single readback of every level, which needs a staging layout the host
+  side does not currently describe.
 
 ---
 
@@ -492,10 +682,14 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
 
 Additive work with no assigned release. Pull each one in when it really hurts.
 
-- Async headless submit.
-- An async `StaticBuffer`.
+- ✅ Async headless submit — DONE in 0.18 (`ctx.submit(wait=False)` plus `ctx.wait()`).
+- ✅ A per-level mip copy on a cross-Context transfer — DONE in 0.18.
+- **An async `StaticBuffer`.** Still deferred, and now with the reason written down: it
+  needs the submit path to track BUFFER residency the way it tracks image residency
+  (`require_uploads_resident` walks the images a recording references; there is no
+  equivalent list of buffers), and its blocking happens once at setup rather than every
+  frame. Rule 4 — plumbing waits until a real need forces it, and nothing has.
 - A narrower `recreate_swapchain` (see the accepted ceilings above).
-- A per-level mip copy on a cross-Context transfer.
 
 ---
 
@@ -514,12 +708,23 @@ layer, the stub, tests, an example and the docs.
   called the feature "reachable today".
 - ✅ **Instancing (`VERTEX_INPUT_RATE_INSTANCE`)** — DONE in 0.17.
 - ✅ **Stencil** — DONE in 0.17.
-- **CPU image streaming: `image.update(array)`** (~470 lines). Changing the pixels of an
-  existing image from Python has no spelling at all: a video frame, a camera feed, a
-  matplotlib figure, a procedural texture computed in numpy, or painting all mean creating a
-  new `Image` per frame. The machinery exists — `UploadManager::reload` does exactly this for
-  a file the hot-reload watcher saw — so the work is a job variant that takes pixels, plus
-  `layer=`/`mip=`/`region=`. The strongest candidate for the next release.
+- ✅ **CPU image streaming: `image.update(array)`** — DONE in 0.18, with `layer=`, `mip=`
+  and `region=`, plus `image.read(layer=, mip=)` as its readback half.
+- **Tessellation and geometry stages** (~330 lines). `ShaderStage` has three values, so
+  there is no displacement on terrain, no adaptive LOD, no normals drawn as lines, no
+  wireframe-on-shaded and no grass or fur grown from a point. Two entries in
+  `ShaderStage`, `tesc`/`tese`/`geom` in shaderc, `patch_control_points` and
+  `Topology.PATCH_LIST`, and two new `Feature`s — both plain `VkPhysicalDeviceFeatures`
+  members, so the table needs no new column. Geometry is slow on modern hardware and
+  absent on MoltenVK, which is exactly what rule 3 and `Feature` are for. Ranked first for
+  0.19: these make effects.
+- **A `RenderTarget` on images you already own** (~200 lines).
+  `bz.RenderTarget(ctx, color=[img])`, where the images come from `create_image`. A target
+  always allocates its own attachments today, so a graphics ping-pong, drawing into a
+  texture brought from another Context, and drawing over a compute-baked texture are all
+  unreachable. The usage bits are already there. Open question: it is a fifth way to build
+  a target, so check it against rule 1 first — the argument for is that it differs by the
+  type of the first argument, exactly like the fourth `create_image` overload.
 
 **Performance:**
 
@@ -530,7 +735,8 @@ layer, the stub, tests, an example and the docs.
   count=)` and `dispatch_indirect(buffer)`, plus an `Access.INDIRECT_READ` for the tracker.
   Compute writes the draw arguments, so culling happens on the GPU. It would also make
   `Feature::MULTI_DRAW_INDIRECT` reachable, which is advertised today with no API behind it.
-  `What 1.0 means` says to decide this deliberately rather than let it drift.
+  `What 1.0 means` says to decide this deliberately rather than let it drift. Its
+  prerequisite landed early: `cmd.fill_buffer` (0.18) is how the draw-count is zeroed.
 - **Bindless / descriptor arrays** (~630 lines). `texture(binding, stage, set, count=N)` and
   `set_image(binding, image, index=)`: one pipeline and one draw for many materials. Needs
   `FeatureInfo` to grow a column first — it maps only plain `VkPhysicalDeviceFeatures`
@@ -547,18 +753,15 @@ layer, the stub, tests, an example and the docs.
 
 **Small, additive, and waiting for the release that needs them:**
 
-- **`renderer.read_pixels()`** (~200 lines) — a screenshot of a window frame. Only offscreen
-  targets can be read back today, so a windowed prototype cannot save the picture it draws.
-  Cheap, but its test needs a display and CI would skip it.
-- **Async headless submit** (`ctx.submit(cmd, wait=False)` plus `ctx.wait()`, ~180 lines) —
-  deferred since 0.5. It matters for compute prototypes that submit in a loop.
+- ✅ **`renderer.read_pixels()`** — DONE in 0.18, as `present(capture=True)` plus
+  `read_pixels()`. The estimate assumed one verb; the spec required two.
+- ✅ **Async headless submit** — DONE in 0.18.
+- ✅ **`buffer.update(data, offset=)`** — DONE in 0.18.
 - **Window extras** (~120 lines) — dropped files (drag a texture onto the window and reload
-  it), a window icon, setting the cursor position, the clipboard.
-- **`buffer.update(data, offset=)`** (~40 lines) — a partial buffer update.
+  it), a window icon, setting the cursor position, the clipboard. Queued for 0.19.
 - **Gamepad** (~90 lines) — axes and buttons from GLFW. The weakest ratio of value to API
   surface on this list.
-- **An async `StaticBuffer`** and **a per-level mip copy on a cross-Context transfer** — see
-  "Deferred until needed" above.
+- **An async `StaticBuffer`** — see "Deferred until needed" above.
 
 ## Rejected, and why
 
@@ -579,6 +782,18 @@ says what we did instead.
   bazalt, not inside it.
 - **A 2.0 for new hardware capabilities.** Ray tracing and mesh shaders become new entries
   in `Feature` (rule 3). Nothing about them needs a major break.
+
+- **Text rendering and a debug overlay.** Font rasterization is the ecosystem's
+  (freetype, PIL), and the atlas-plus-quads layer is the same argument that kept ImGui out
+  of the core: about 90% glue over the public API. A companion package or an example.
+- **`image.save(path)`.** No Vulkan glue at all — `read()` returns a numpy array and
+  PIL/imageio write the file. It fails the scope test on the second question.
+- **Compressed texture loading (BC / KTX2).** Parsing the container is the ecosystem's
+  job; accepting already-compressed bytes is a variant of `load_image(bytes)`, not a
+  feature of its own.
+- **Dual-source blending, blend constants, unnormalized sampler coordinates.** Real Vulkan
+  state, but nothing on the proposal list needs them. They stay unlisted until something
+  asks.
 
 **Implementation alternatives:**
 
@@ -621,6 +836,19 @@ says what we did instead.
   and read the result off it (the 0.9 timers).
 - **A separate "debt release"** — rule 5. A debt gets paid by the feature that really needs
   it.
+- **A fifth `ValidationMode` for shader printf** (0.18). The modes are exclusive states of
+  how hard the layers check; printf composes with every one of them, and making it a mode
+  would mean choosing between prints and sync validation. We took a separate switch.
+- **Turning validation on implicitly for `shader_printf=True`** (0.18). It would build a
+  Context the caller did not ask for. We raise and name the contradiction.
+- **Reading the last presented frame in `read_pixels()`** (0.18). Written first, and
+  illegal: a presentable image may only be touched between acquire and present. The
+  validation-as-assert fixture caught it on the first run, which is the argument for the
+  fixture. The copy rides the frame's own submit instead.
+- **Coalescing the per-subresource barriers of a split image** (0.18). The callers are
+  blocking setup and readback paths, so a handful of extra barriers there is cheaper than
+  the bookkeeping to merge runs of equal layouts. The collapse already keeps the common
+  case at one barrier.
 - **Exposing both combined depth/stencil formats** (0.17). `D24S8` and `D32F_S8` differ by
   which driver has them, which is the one thing the caller cannot know and the library can.
   We took one `DEPTH_STENCIL` name and picked per device.
@@ -704,6 +932,25 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   argument it never had. Adding a parameter to an existing verb is nearly always smaller than
   the new name it replaces.
 
+- **A ceiling's stated reason can be wrong, and it gets copied forward every release.**
+  Per-subresource layout tracking was dismissed as "it only removes the loud edge of a
+  partial render". The loud edge WAS the feature: it is what made rendering into one mip
+  and then sampling the image impossible, so the ceiling was not a small missing polish
+  but the reason two whole workflows did not exist. Re-derive a ceiling's cost when the
+  release around it changes, instead of re-reading the sentence.
+
+- **When the spec forbids the one-call shape, take two calls and say why.** A screenshot
+  "should" be `renderer.read_pixels()`. A presentable image may only be touched between
+  acquire and present, so that shape cannot be correct, and the honest API is
+  `present(capture=True)` plus `read_pixels()`. Bending the API around a spec rule is
+  better than an API that reads well and is illegal.
+
+- **An asynchronous operation must mark its resource busy BEFORE queueing it.** An
+  `image.update` that queued first left an image created synchronously in upload state
+  None, so `wait()` returned immediately and the next `read()` gave the PREVIOUS
+  contents — one update behind, forever. A wrong answer, not a slow one, and invisible to
+  a test that only checks the final state.
+
 ### Mechanical refactors
 
 - **Make sure the old road STOPS working.** A compiler cannot check the replacement of 131
@@ -721,6 +968,16 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   settled. See the corollary under the design rules.
 
 ### Barriers, tracker and sync
+
+- **A presentable image belongs to the compositor outside acquire..present.** Touching it
+  after `vkQueuePresentKHR` — including a layout transition for a readback — is a
+  validation error naming the swapchain, not the code that did it. Anything that wants a
+  copy of a frame records it into that frame's own submit.
+
+- **A non-semantic SPIR-V instruction is one the optimizer is entitled to delete.**
+  `debugPrintfEXT` has no observable result, so `-O` removes it and the shader silently
+  stops printing. Any feature built on `NonSemantic.*` has to turn the optimizer off, and
+  that cost belongs in the decision, not in a bug report six months later.
 
 - **`vkCmdPipelineBarrier` is illegal inside dynamic rendering** — an auto-barrier
   discovered inside the scope must be HOISTED before the `begin_rendering` lambda
@@ -773,6 +1030,19 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
 - **`raise_error` under `py::gil_scoped_release` is an access violation, not an exception.**
   The bug sat in `require_uploads_resident` since 0.5 on a rare path, and the 0.14
   CommandBuffer guard put it on the path of an ordinary user mistake.
+- **Overload order by Python type is now a standing rule, not an incident.** pybind
+  converts `str` AND `bytes` to `std::string`, so the `bytes` overload must be DECLARED
+  first or the `str` one swallows it. Third occurrence: `compile_shader(source=)` (0.16),
+  the specialization-constant `bool` before `int` (0.17), and `load_image(bytes)` (0.18).
+  Whenever the Python type carries the meaning, write the narrow overload first and add a
+  test that proves the wrong one is not chosen.
+
+- **When a field grows from a word into a container, re-read every thread that touches
+  it.** `Image::layout_` was a `VkImageLayout` the upload worker wrote directly — racy by
+  the book, benign in practice. Turning it into a vector made the same line a real data
+  race AND semantically wrong (it claimed every layer sampleable when one was written).
+  The size of a field is part of its threading contract.
+
 - **`main.cpp` needs `/bigobj`** (MSVC). Since 0.14 it passes the limit of 65,536 COFF
   sections, and every pybind lambda is a template instantiation, so this only grows.
 - **Chaining bindings return a `shared_ptr` to self** — a `.def(&...)` returning
@@ -901,6 +1171,10 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   in every test. This is a permanent regression guard and it is still incomplete, because
   the tests assert pixel values directly instead of comparing reference images.
 - **Remove the sync-validation skip** when LunarG packages a newer layer for noble (debt #4).
+- **`examples/24_video_texture` is the windowed referee for streaming** (0.18). It ran
+  ~1900 frames on a real driver with no validation output and `ctx.memory_stats()` flat at
+  1.5 MB, which is the claim the feature makes: streaming into ONE image does not grow.
+  A version that built a new Image per frame would climb there.
 - **The headless fallback** (no windowing extensions) still has no coverage. It is a separate
   path from the API version, which CI does cover since 0.15.
 - **The windowed path is verified by running the examples, and that is load-bearing.** The
