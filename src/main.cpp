@@ -36,7 +36,7 @@ namespace py = pybind11;
 
 // Renders a command buffer into whatever targets it captured, with no swapchain
 // and no present. This is the headless path — and the one the test suite uses.
-std::expected<void, Error> context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd);
+std::expected<void, Error> context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd, bool wait);
 
 // ── Error boundary ────────────────────────────────────────────────────────────
 //
@@ -941,8 +941,13 @@ std::vector<std::byte> update_pixels_from_numpy(
     return out;
 }
 
-std::expected<void, Error> context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd)
+std::expected<void, Error> context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd, bool wait)
 {
+    // The ring slot this submit is about to record into may still be busy with
+    // an earlier asynchronous submit, whose command buffer is the SAME one.
+    // Blocking submits have already waited, so this is free for them.
+    context.wait_for_slot();
+
     // Drain hot reloads BEFORE recording, so an edit-then-submit picks up the new
     // pipeline in THIS submit. The headless path advances the ring only after
     // submitting, so hooking the drain there (as the windowed path does) would
@@ -1000,17 +1005,31 @@ std::expected<void, Error> context_submit(Context& context, std::shared_ptr<Comm
             return std::unexpected(*e);
         }
 
-        // Blocking. There is no swapchain to pace against here; the timeline
-        // exists for uploads and deferred destruction, not (yet) for making
-        // headless submits asynchronous.
-        if (auto e = check(context.vk().vkQueueWaitIdle(context.graphics_queue()), "wait for submitted command buffer"))
+        context.note_slot_submit(serial);
+
+        // wait=True is the default and the old behaviour: the next line reads
+        // the result, so the round trip is the point. wait=False hands the loop
+        // back at once and leaves the pacing to the ring — which is what a
+        // compute prototype submitting in a loop wants, because otherwise the
+        // GPU idles between iterations and the loop runs at the speed of the
+        // round trip rather than of the work.
+        if (wait)
         {
-            return std::unexpected(*e);
+            if (auto e =
+                    check(context.vk().vkQueueWaitIdle(context.graphics_queue()), "wait for submitted command buffer"))
+            {
+                return std::unexpected(*e);
+            }
         }
     }
 
-    // The wait-idle above proves everything through the current serial is done.
-    context.flush_deletion_queue();
+    // Only meaningful after a wait: the queue-idle above proves everything
+    // through the current serial is done. An async submit reclaims on the next
+    // ctx.wait() instead.
+    if (wait)
+    {
+        context.flush_deletion_queue();
+    }
 
     // A headless submit is a frame too: advance the ring so DynamicBuffer
     // slots and frame descriptor sets rotate (this path used to sit on slot 0
@@ -2877,17 +2896,30 @@ PYBIND11_MODULE(_core, m)
         // The headless counterpart of renderer.present(): no swapchain, no present.
         .def(
             "submit",
-            [](Context& self, std::shared_ptr<CommandBuffer> cmd)
+            [](Context& self, std::shared_ptr<CommandBuffer> cmd, bool wait)
             {
                 std::expected<void, Error> r;
                 {
-                    // Blocking (wait-idle inside) — release the GIL for the duration.
+                    // May block (wait-idle inside when wait=True, and the ring
+                    // slot wait either way) — release the GIL for the duration.
                     py::gil_scoped_release release;
-                    r = context_submit(self, std::move(cmd));
+                    r = context_submit(self, std::move(cmd), wait);
                 }
                 unwrap(std::move(r), self.logger().get());
             },
-            py::arg("cmd"));
+            py::arg("cmd"),
+            py::kw_only(),
+            py::arg("wait") = true)
+        // The other half of submit(wait=False). Waits on the submission timeline
+        // rather than the device, so uploads and other Contexts are unaffected,
+        // and reclaims what the deletion queue was holding for the finished work.
+        .def(
+            "wait",
+            [](Context& self)
+            {
+                py::gil_scoped_release release;
+                self.wait_for_submits();
+            });
 
     // ── RenderTarget ──
     py::class_<RenderTarget, std::shared_ptr<RenderTarget>>(m, "RenderTargetBase");

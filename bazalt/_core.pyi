@@ -1509,10 +1509,30 @@ class Context:
         buffer; None inherits it."""
         ...
 
-    def submit(self, cmd: CommandBuffer) -> None:
+    def submit(self, cmd: CommandBuffer, *, wait: bool = True) -> None:
         """Execute a command buffer with no swapchain and no present.
 
-        Blocking. This is the headless path.
+        Blocking by default, which is right when the next line reads the result.
+
+        wait=False returns as soon as the work is queued. A compute prototype
+        that submits in a loop wants this: with the wait, the GPU idles between
+        iterations and the loop runs at the speed of the round trip rather than
+        of the work. Call ctx.wait() before reading anything back.
+
+        Reusing one CommandBuffer asynchronously is safe: the ring paces it, so
+        a submit into a slot whose previous submit is still running waits for
+        that one first. frames_in_flight is therefore how many submits can be in
+        flight at once.
+        """
+        ...
+
+    def wait(self) -> None:
+        """Block until every submit made so far has finished.
+
+        The other half of submit(wait=False), and where deferred destruction is
+        reclaimed for that work. Waits on the submission timeline rather than on
+        the device, so uploads and other Contexts are unaffected. Calling it with
+        nothing outstanding does nothing.
         """
         ...
 

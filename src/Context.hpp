@@ -520,6 +520,67 @@ public:
         return value;
     }
 
+    // ── Asynchronous headless submits ─────────────────────────────────────────
+    //
+    // A headless ctx.submit() blocks on vkQueueWaitIdle, which is right when the
+    // next line reads the result and wrong when it does not: a compute prototype
+    // that submits in a loop leaves the GPU idle between iterations, and the
+    // whole loop runs at the speed of the round trip rather than of the work.
+    //
+    // submit(wait=False) skips the wait. What replaces it is per-slot pacing:
+    // the ring has frames_in_flight slots, and reusing one while its previous
+    // submit is still running would overwrite a command buffer in flight — the
+    // same hazard the windowed path solves with a fence per slot. Here the
+    // timeline already counts every submit, so remembering which serial last
+    // used a slot is enough.
+
+    // Records that `serial` is the newest submit occupying the current ring slot.
+    void note_slot_submit(std::uint64_t serial)
+    {
+        if (slot_serial_.size() != frames_in_flight_)
+        {
+            slot_serial_.assign(frames_in_flight_, 0);
+        }
+        slot_serial_[frame_serial_ % frames_in_flight_] = serial;
+    }
+
+    // Blocks until the submit that last used the current ring slot has finished.
+    // Cheap when the slot is free: a timeline wait on a value already reached
+    // returns immediately, and 0 is always reached.
+    void wait_for_slot()
+    {
+        if (slot_serial_.size() != frames_in_flight_)
+        {
+            return;
+        }
+        wait_for_serial(slot_serial_[frame_serial_ % frames_in_flight_]);
+    }
+
+    // Blocks until every submit made so far has finished, then reclaims what the
+    // deletion queue was holding for them.
+    void wait_for_submits()
+    {
+        wait_for_serial(submit_serial_.load());
+        flush_deletion_queue();
+    }
+
+    void wait_for_serial(std::uint64_t serial)
+    {
+        if (serial == 0)
+        {
+            return;
+        }
+        VkSemaphore timeline = submit_timeline_;
+        VkSemaphoreWaitInfo waitInfo{
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .semaphoreCount = 1,
+            .pSemaphores = &timeline,
+            .pValues = &serial};
+        vk_.vkWaitSemaphores(vkb_device_.device, &waitInfo, UINT64_MAX);
+    }
+
     // ── Deferred destruction ──────────────────────────────────────────────────
     //
     // A handle dropped on the CPU may still be referenced by work the GPU is
@@ -1440,6 +1501,10 @@ private:
 
     VkSemaphore submit_timeline_ = VK_NULL_HANDLE;
     std::atomic<std::uint64_t> submit_serial_{0};
+
+    // Which submit serial last used each ring slot. Only an asynchronous
+    // headless submit fills it; a blocking one has already waited.
+    std::vector<std::uint64_t> slot_serial_;
 
     std::mutex deletion_mutex_;
     std::deque<std::pair<std::uint64_t, std::function<void()>>> deletion_queue_;
