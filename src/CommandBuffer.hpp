@@ -493,6 +493,13 @@ public:
                 // its images have left UNDEFINED exactly when that becomes true, and a
                 // recorded-but-never-submitted command buffer marks nothing.
                 target->on_rendering_recorded();
+                // …then bring anything this pass did NOT write up to the same
+                // final layout, so the promise "the result ends in this layout"
+                // covers the whole image and not just the drawn part. Records
+                // nothing when the pass wrote the image whole, which is the
+                // usual case. Must follow on_rendering_recorded: that is what
+                // makes the per-subresource state true.
+                target->record_even_out(*frame.vk, cmd);
             });
         in_rendering_ = false;
         return *this;

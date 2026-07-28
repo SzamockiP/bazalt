@@ -37,7 +37,10 @@ inline void record_image_transition(
     VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT,
     std::uint32_t baseMip = 0,
     std::uint32_t mipCount = 1,
-    std::uint32_t layerCount = 1)
+    std::uint32_t layerCount = 1,
+    // Last and defaulted so every existing call site keeps its meaning. Only a
+    // per-subresource transition (a split image, 0.18) ever names it.
+    std::uint32_t baseLayer = 0)
 {
     VkImageMemoryBarrier barrier{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -53,7 +56,7 @@ inline void record_image_transition(
             .aspectMask = aspect,
             .baseMipLevel = baseMip,
             .levelCount = mipCount,
-            .baseArrayLayer = 0,
+            .baseArrayLayer = baseLayer,
             .layerCount = layerCount}};
     vk.vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
@@ -68,6 +71,123 @@ void record_image_copy(
     Image& dst,
     VkImageLayout src_layout);
 void record_image_clear(const VolkDeviceTable& vk, VkCommandBuffer cmd, Image& image, std::array<float, 4> color);
+
+// The layout of every (layer, mip) of one image, with a fast path for the case
+// where they all agree.
+//
+// Vulkan tracks layout per subresource, and until 0.18 bazalt held ONE layout
+// per Image. That was right while every write covered the whole image, and it
+// stopped being right the moment a pass could render into one mip
+// (`target.mip(m)`, 0.13): the whole image was then marked as rendered, so
+// sampling a partially rendered target handed a stale oldLayout to the next
+// barrier. The documented workaround was "render every layer and every mip
+// before you sample", which rules out exactly the two things that make a mip
+// chain worth having — a render into one level, and a copy into another.
+//
+// The collapse is what keeps this free for the 99% case. An image whose
+// subresources all share a layout stores one value and emits one barrier, and a
+// split image collapses back the moment the last odd subresource catches up. So
+// rendering six cube faces one at a time ends uniform again, and the sample
+// that follows costs exactly what it did before this existed.
+class SubresourceLayouts
+{
+public:
+    void configure(std::uint32_t layers, std::uint32_t mips)
+    {
+        layers_ = layers;
+        mips_ = mips;
+    }
+
+    VkImageLayout get(std::uint32_t layer, std::uint32_t mip) const
+    {
+        if (split_.empty())
+        {
+            return uniform_;
+        }
+        return split_[index_(layer, mip)];
+    }
+
+    // The one layout the whole image is in, or nullopt when the subresources
+    // disagree. A caller that can only emit one barrier asks this first.
+    std::optional<VkImageLayout> uniform() const
+    {
+        return split_.empty() ? std::optional<VkImageLayout>{uniform_} : std::nullopt;
+    }
+
+    void set_all(VkImageLayout layout)
+    {
+        split_.clear();
+        uniform_ = layout;
+    }
+
+    void set_range(
+        VkImageLayout layout,
+        std::uint32_t base_layer,
+        std::uint32_t layer_count,
+        std::uint32_t base_mip,
+        std::uint32_t mip_count)
+    {
+        // VK_REMAINING_* are what a caller passes for "the rest of them", and
+        // they arrive here as huge numbers rather than as a flag.
+        const std::uint32_t last_layer = (std::ranges::min)(base_layer + layer_count, layers_);
+        const std::uint32_t last_mip = (std::ranges::min)(base_mip + mip_count, mips_);
+
+        if (base_layer == 0 && last_layer >= layers_ && base_mip == 0 && last_mip >= mips_)
+        {
+            set_all(layout);
+            return;
+        }
+        if (split_.empty())
+        {
+            if (uniform_ == layout)
+            {
+                return; // nothing to split over
+            }
+            split_.assign(static_cast<std::size_t>(layers_) * mips_, uniform_);
+        }
+        for (std::uint32_t layer = base_layer; layer < last_layer; ++layer)
+        {
+            for (std::uint32_t mip = base_mip; mip < last_mip; ++mip)
+            {
+                split_[index_(layer, mip)] = layout;
+            }
+        }
+        // Collapse the moment the odd one out catches up, so a target rendered
+        // layer by layer is back to one barrier by the time it is sampled.
+        if (std::ranges::all_of(split_, [&](VkImageLayout l) { return l == split_.front(); }))
+        {
+            set_all(split_.front());
+        }
+    }
+
+    // Calls `fn(layout, layer, mip)` for each subresource whose layout differs
+    // from `uniform()`. Only reached on a split image: the uniform case has one
+    // barrier and never comes here.
+    template <typename Fn>
+    void for_each(Fn&& fn) const
+    {
+        for (std::uint32_t layer = 0; layer < layers_; ++layer)
+        {
+            for (std::uint32_t mip = 0; mip < mips_; ++mip)
+            {
+                fn(split_[index_(layer, mip)], layer, mip);
+            }
+        }
+    }
+
+private:
+    std::size_t index_(std::uint32_t layer, std::uint32_t mip) const
+    {
+        return static_cast<std::size_t>(layer) * mips_ + mip;
+    }
+
+    std::uint32_t layers_ = 1;
+    std::uint32_t mips_ = 1;
+    VkImageLayout uniform_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    // Empty means "uniform_ covers everything" — the state an image lives in
+    // unless something writes a strict subset of it.
+    std::vector<VkImageLayout> split_;
+};
 
 // A GPU image: VkImage + view + format. Nothing else — the sampler it used to
 // be fused with lives in the Context's cache, and how the image is *used*
@@ -102,6 +222,10 @@ public:
           cube_(cube),
           samples_(samples)
     {
+        // The layout state needs the geometry to index a split; it starts
+        // uniform-UNDEFINED, so nothing is allocated until something writes a
+        // strict subset.
+        layouts_.configure(array_layers, mip_levels);
     }
 
     // Deferred: an in-flight frame may still sample this image.
@@ -203,13 +327,49 @@ public:
     {
         return has_contents_.load();
     }
+
+    // The layout the whole image is in, or nullopt when its subresources
+    // disagree — which happens exactly when a pass, a copy or an update wrote a
+    // strict subset of it. A caller that emits ONE barrier must ask this and
+    // fall back to per-subresource barriers on nullopt; `current_layout()` is
+    // the convenience for the callers that only ever see whole images.
+    std::optional<VkImageLayout> uniform_layout() const
+    {
+        return layouts_.uniform();
+    }
+    VkImageLayout layout_of(std::uint32_t layer, std::uint32_t mip) const
+    {
+        return layouts_.get(layer, mip);
+    }
     VkImageLayout current_layout() const
     {
-        return layout_;
+        return layouts_.get(0, 0);
     }
+
     void mark_has_contents(VkImageLayout layout)
     {
-        layout_ = layout;
+        layouts_.set_all(layout);
+        has_contents_.store(true);
+    }
+
+    // The same statement about one part of the image. Used by a pass that
+    // rendered into a single layer or mip, and by a copy that filled one
+    // subresource: marking the whole image would be the 0.13 bug — a stale
+    // oldLayout on the next barrier, reported as a validation error a long way
+    // from its cause.
+    //
+    // has_contents stays whole-image on purpose. It answers "is reading this
+    // meaningful at all", which is a question about the image, and a per-part
+    // version would refuse a legitimate read of a fully written image whose
+    // parts were written separately.
+    void mark_subresource_contents(
+        VkImageLayout layout,
+        std::uint32_t base_layer,
+        std::uint32_t layer_count,
+        std::uint32_t base_mip,
+        std::uint32_t mip_count)
+    {
+        layouts_.set_range(layout, base_layer, layer_count, base_mip, mip_count);
         has_contents_.store(true);
     }
 
@@ -657,20 +817,19 @@ public:
             *context_,
             [&](VkCommandBuffer cmd)
             {
-                record_image_transition(
-                    context_->vk(),
+                // Whatever state the subresources are in: one barrier when they
+                // agree, one each when they do not. A single barrier can only
+                // name one oldLayout, and naming the wrong one is a validation
+                // error plus undefined contents — which is precisely what
+                // reading a partially rendered image used to do.
+                record_transition_into_(
                     cmd,
-                    image_,
-                    layout_,
                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                     VK_ACCESS_MEMORY_WRITE_BIT,
                     VK_ACCESS_TRANSFER_READ_BIT,
                     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    aspect,
-                    0,
-                    mip_levels_,
-                    array_layers_);
+                    aspect);
 
                 VkBufferImageCopy region{
                     .bufferOffset = 0,
@@ -682,20 +841,16 @@ public:
                 context_->vk().vkCmdCopyImageToBuffer(
                     cmd, image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
 
-                record_image_transition(
-                    context_->vk(),
+                // …and put every subresource back where it was, which is what
+                // makes read() non-destructive on a partially written image.
+                record_transition_out_of_(
                     cmd,
-                    image_,
                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    layout_,
                     VK_ACCESS_TRANSFER_READ_BIT,
                     VK_ACCESS_MEMORY_READ_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT,
                     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                    aspect,
-                    0,
-                    mip_levels_,
-                    array_layers_);
+                    aspect);
             });
         if (!submitted)
         {
@@ -948,6 +1103,108 @@ public:
         return std::pair{staging, staging_alloc};
     }
 
+    // Move the WHOLE image into `to`, whatever state its subresources are in.
+    // One barrier when they agree, one per subresource when they do not — a
+    // barrier names a single oldLayout, so a split image cannot be covered by
+    // one. The layout state is left alone: the caller is a scoped operation
+    // (readback, copy) that puts the image back with record_transition_out_of_.
+    void record_transition_into_(
+        VkCommandBuffer cmd,
+        VkImageLayout to,
+        VkAccessFlags src_access,
+        VkAccessFlags dst_access,
+        VkPipelineStageFlags src_stage,
+        VkPipelineStageFlags dst_stage,
+        VkImageAspectFlags aspect) const
+    {
+        if (const auto uniform = layouts_.uniform())
+        {
+            record_image_transition(
+                context_->vk(),
+                cmd,
+                image_,
+                *uniform,
+                to,
+                src_access,
+                dst_access,
+                src_stage,
+                dst_stage,
+                aspect,
+                0,
+                mip_levels_,
+                array_layers_);
+            return;
+        }
+        layouts_.for_each(
+            [&](VkImageLayout from, std::uint32_t layer, std::uint32_t mip)
+            {
+                record_image_transition(
+                    context_->vk(),
+                    cmd,
+                    image_,
+                    from,
+                    to,
+                    src_access,
+                    dst_access,
+                    src_stage,
+                    dst_stage,
+                    aspect,
+                    mip,
+                    1,
+                    1,
+                    layer);
+            });
+    }
+
+    // The same walk backwards: every subresource returns to the layout it held.
+    void record_transition_out_of_(
+        VkCommandBuffer cmd,
+        VkImageLayout from,
+        VkAccessFlags src_access,
+        VkAccessFlags dst_access,
+        VkPipelineStageFlags src_stage,
+        VkPipelineStageFlags dst_stage,
+        VkImageAspectFlags aspect) const
+    {
+        if (const auto uniform = layouts_.uniform())
+        {
+            record_image_transition(
+                context_->vk(),
+                cmd,
+                image_,
+                from,
+                *uniform,
+                src_access,
+                dst_access,
+                src_stage,
+                dst_stage,
+                aspect,
+                0,
+                mip_levels_,
+                array_layers_);
+            return;
+        }
+        layouts_.for_each(
+            [&](VkImageLayout to, std::uint32_t layer, std::uint32_t mip)
+            {
+                record_image_transition(
+                    context_->vk(),
+                    cmd,
+                    image_,
+                    from,
+                    to,
+                    src_access,
+                    dst_access,
+                    src_stage,
+                    dst_stage,
+                    aspect,
+                    mip,
+                    1,
+                    1,
+                    layer);
+            });
+    }
+
 private:
     // CPU-side half of a wait: block while the worker is still decoding, then
     // surface a failed decode as the error it is.
@@ -1142,7 +1399,7 @@ private:
     bool cube_ = false;
     VkSampleCountFlagBits samples_ = VK_SAMPLE_COUNT_1_BIT;
     std::atomic<bool> has_contents_{false};
-    VkImageLayout layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    SubresourceLayouts layouts_;
 
     // Async upload state, written by the upload worker, read by the main
     // thread. The cv/mutex pair backs the CPU-side waits; the timeline serial
