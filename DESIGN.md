@@ -541,6 +541,71 @@ entry. The release is a label, not the organizing axis.
   unbalanced `end_label` is dropped rather than recorded, because recording one is
   undefined behaviour and the `with` form cannot produce it.
 
+### What blocks and what does not
+
+- **The rule: every write is asynchronous, every read blocks** (0.18.0). This is the
+  answer to "which calls stall?", and before 0.18.0 there was none — `load_image(path)`
+  was asynchronous, `create_image(array)` right beside it was blocking, and nothing in
+  either name said so. Both make an Image out of pixels, so "one obvious way" was
+  already broken; the fix was to pick the side that can be one way.
+
+  Writes can, because **the resource is its own future**. `create_buffer` and
+  `create_image` return the handle either way, so making them asynchronous changes no
+  signature and adds no `Future[T]` type — 0.18's `image.update` proved it by flipping
+  from blocking to asynchronous without moving a parameter. Reads cannot: `buf.read(...)`
+  returns a numpy array, an asynchronous version has to return a future plus a
+  `.result()`, and that is a second shape, not one path. It would also buy nothing — you
+  ask for the bytes because the next line uses them.
+
+- **Two different things are called "asynchronous", and they are not one feature**
+  (0.18.0). *Async transport* is the upload worker: a thread that decodes a PNG off the
+  main thread, so the win is CPU-side and only exists where there is decoding to do.
+  *Async submit* is skipping the wait: no thread at all, and the win is that the GPU
+  stops idling between round trips. `load_image` needs both. `create_buffer` and
+  `create_image(array)` need only the second, because the caller already handed over
+  decoded bytes.
+
+  Which is why neither of them goes through `UploadManager`. Routing them there would
+  add a queue, a job variant and a failure that arrives on another thread, to move a
+  `memcpy` that has to stay on the main thread anyway (it reads a Python object under
+  the GIL). One-shot `deferred_submit` instead: the copy is submitted by the calling
+  thread — so **every error still raises at the `create_*` call**, which is the property
+  `load_image` has to work for with a synchronous header probe — and only the
+  `vkQueueWaitIdle` is gone. That wait-idle was the entire cost: 30 meshes meant 30 full
+  queue drains at startup.
+
+- **`deferred_submit` is `immediate_submit` minus the wait, and `immediate_submit` is
+  now written in terms of it** (0.18.0). Two copies of allocate → begin → record → end →
+  submit → signal would drift. What the split names is the real distinction: a readback
+  still blocks (see the rule above), an upload keeps its serial. The one-shot command
+  buffer retires through the deletion queue rather than being freed inline, because
+  without the wait the GPU still holds it — and the deletion queue is keyed on exactly
+  that serial already.
+
+- **Buffer residency is a list on the CommandBuffer, not a hook in `track_use_`**
+  (0.18.0). The submit path had `require_uploads_resident` walking the images a
+  recording references; buffers needed the same walk, and `track_use_` looks like the
+  place because every bind already calls it. It is not: it returns early with
+  `auto_barriers=False`, and residency is not a barrier the caller can take over —
+  turning off automatic barriers must not silently turn off waiting for uploads.
+  `record_buffer_use_` is separate and unconditional, and it skips buffers with serial
+  0, so a recording of DYNAMIC buffers stores nothing.
+
+  This is the plumbing that 0.18's "deferred until needed" entry said an async
+  `StaticBuffer` would need, and the estimate was right about the work — it was wrong
+  about the trigger. The trigger was not a mesh loader getting slow. It was the API
+  being unpredictable.
+
+- **Three wait verbs, three scopes, and the names have to be true** (0.18.0).
+  `res.wait()` is one resource, `ctx.wait_for_uploads()` is every upload, `ctx.wait()`
+  is every submit (`ctx.wait_idle()` is the device, and belongs to measurement, not to
+  this ladder). Making one-shot uploads asynchronous put `wait_for_uploads` at risk of
+  becoming a lie, since they never enter the worker's batch. Rather than over-wait —
+  draining the whole timeline would block on unrelated frames — the Context keeps the
+  highest one-shot upload serial and `wait_for_uploads` waits on that too. `uploads_done`
+  follows it; `upload_progress` deliberately does not, because a copy with no decode has
+  no progress between 0 and 1 to report.
+
 ### Asynchronous submits
 
 - **`submit(wait=False)` is paced by the ring, not by a fence per submit** (0.18). The
@@ -684,11 +749,11 @@ Additive work with no assigned release. Pull each one in when it really hurts.
 
 - ✅ Async headless submit — DONE in 0.18 (`ctx.submit(wait=False)` plus `ctx.wait()`).
 - ✅ A per-level mip copy on a cross-Context transfer — DONE in 0.18.
-- **An async `StaticBuffer`.** Still deferred, and now with the reason written down: it
-  needs the submit path to track BUFFER residency the way it tracks image residency
-  (`require_uploads_resident` walks the images a recording references; there is no
-  equivalent list of buffers), and its blocking happens once at setup rather than every
-  frame. Rule 4 — plumbing waits until a real need forces it, and nothing has.
+- ✅ An async `StaticBuffer` — DONE in 0.18.0, together with an async
+  `create_image(array)`. The entry here predicted the work correctly (the submit path
+  did need buffer residency) and the trigger wrongly: what forced it was not a slow mesh
+  loader but the API being unpredictable about which calls block. See "What blocks and
+  what does not".
 - A narrower `recreate_swapchain` (see the accepted ceilings above).
 
 ---
@@ -761,7 +826,7 @@ layer, the stub, tests, an example and the docs.
   it), a window icon, setting the cursor position, the clipboard. Queued for 0.19.
 - **Gamepad** (~90 lines) — axes and buttons from GLFW. The weakest ratio of value to API
   surface on this list.
-- **An async `StaticBuffer`** — see "Deferred until needed" above.
+- ✅ **An async `StaticBuffer`** — DONE in 0.18.0.
 
 ## Rejected, and why
 
@@ -950,6 +1015,15 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   None, so `wait()` returned immediately and the next `read()` gave the PREVIOUS
   contents — one update behind, forever. A wrong answer, not a slow one, and invisible to
   a test that only checks the final state.
+
+- **Dropping a wait means auditing every reader, not only the one in the ticket.** Making
+  `StaticBuffer` asynchronous is a two-line change at the create site and a race
+  everywhere else. Two submits on one queue are ordered by nothing but a semaphore or a
+  barrier, so `read_bytes` — whose own `vkQueueWaitIdle` looks like it covers everything
+  — could copy out a buffer the fill had not written yet, on exactly the drivers that
+  overlap submits. The recording path was already safe (the submit path waits on the
+  serial); the readback path had to be told. General form: when a resource stops being
+  ready on return, grep every function that reads it.
 
 ### Mechanical refactors
 

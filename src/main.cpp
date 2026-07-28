@@ -619,8 +619,13 @@ void SwapchainRenderer::present(std::shared_ptr<CommandBuffer> cmd, std::uint64_
 // must at least be *submitted* (CPU-wait while the worker is still decoding —
 // correctness first), and the frame's GPU work then waits on the submission
 // timeline for the highest upload it depends on (zero CPU stall in the steady
-// state). Images with no pending upload — RTT attachments, synchronous
-// uploads — short-circuit to 0.
+// state). Resources with no pending upload — RTT attachments, DYNAMIC
+// buffers — short-circuit to 0.
+//
+// Buffers joined images in 0.18.0, when create_buffer stopped waiting for its
+// own staging copy. A buffer has no decode, so it needs no CPU-side half: the
+// serial is known the moment create_buffer returns, and one timeline wait
+// covers both kinds of upload.
 std::expected<std::uint64_t, Error> require_uploads_resident(CommandBuffer& cmd)
 {
     std::uint64_t wait_serial = 0;
@@ -635,6 +640,15 @@ std::expected<std::uint64_t, Error> require_uploads_resident(CommandBuffer& cmd)
             }
             wait_serial = (std::max)(wait_serial, *serial);
         }
+        for (const auto& bb : set->buffers())
+        {
+            wait_serial = (std::max)(wait_serial, bb.buffer->upload_serial());
+        }
+    }
+    // Vertex, index and transfer uses: bound directly rather than through a set.
+    for (const auto& buffer : cmd.used_buffers())
+    {
+        wait_serial = (std::max)(wait_serial, buffer->upload_serial());
     }
     return wait_serial;
 }
@@ -1314,7 +1328,20 @@ PYBIND11_MODULE(_core, m)
                 std::memcpy(out.mutable_data(), bytes.data(), bytes.size());
                 return out;
             },
-            py::arg("dtype"));
+            py::arg("dtype"))
+        // The same pair Image carries, for the same reason: create_buffer does
+        // not wait for its staging copy, so the buffer is its own future. You
+        // never have to ask — a submit that binds it waits GPU-side and read()
+        // waits CPU-side — which leaves these for loading screens and for
+        // timing a setup phase.
+        .def_property_readonly("ready", &Buffer::ready)
+        .def(
+            "wait",
+            [](Buffer& self)
+            {
+                py::gil_scoped_release release;
+                self.wait();
+            });
 
     py::class_<ShaderModule, std::shared_ptr<ShaderModule>>(m, "ShaderModule")
         .def_property_readonly("path", &ShaderModule::path)
@@ -2566,26 +2593,39 @@ PYBIND11_MODULE(_core, m)
             py::arg("cube") = false,
             py::arg("mipmaps") = true,
             py::arg("name") = "")
+        // Both halves: the worker's decode batch, and the one-shot uploads that
+        // never enter it (create_buffer, create_image(array) — nothing to
+        // decode, so they submit on this thread and only skip the wait).
         .def_property_readonly(
             "uploads_done",
-            [](const Context& self) { return self.upload_manager() ? self.upload_manager()->uploads_done() : true; })
+            [](const Context& self)
+            {
+                if (self.completed_submit_serial() < self.last_upload_serial())
+                {
+                    return false;
+                }
+                return self.upload_manager() ? self.upload_manager()->uploads_done() : true;
+            })
         .def_property_readonly(
             "upload_progress",
             [](const Context& self)
             {
                 // Progress of the current batch of load_image calls, 0.0 .. 1.0
                 // (1.0 when idle) — a loading bar without user-side threads.
+                // Decodes only: a create_buffer is one submit with no worker
+                // stage, so it has no progress to report between 0 and 1.
                 return self.upload_manager() ? self.upload_manager()->upload_progress() : 1.0;
             })
         .def(
             "wait_for_uploads",
             [](Context& self)
             {
+                py::gil_scoped_release release;
                 if (self.upload_manager())
                 {
-                    py::gil_scoped_release release;
                     self.upload_manager()->wait_all();
                 }
+                self.wait_for_serial(self.last_upload_serial());
             })
         // Registered before the buffer/list overloads so two ints never reach
         // the buffer protocol. Empty image: 2D, a texture array (layers>1), or a

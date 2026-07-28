@@ -24,6 +24,11 @@ mip chain is for.
 Third theme: debugging a prototype. A shader was debugged by rendering a value
 as a colour and reading the pixel back.
 
+Fourth theme, and the one that closes the release: which calls block.
+`load_image(path)` returned at once, `create_image(array)` beside it waited for
+the GPU, and no part of either name said so. Now every write is asynchronous
+and every read blocks. That is one rule for the whole library.
+
 No breaking changes.
 
 ### Added
@@ -82,6 +87,11 @@ No breaking changes.
   leaves the GPU idle between iterations, so the loop runs at the speed of the
   round trip and not of the work. Reusing one command buffer is safe: the frame
   ring paces it.
+- **`buffer.ready` and `buffer.wait()`.** The same pair an `Image` carries, for
+  the same reason: a STATIC buffer fills itself in the background now. You do
+  not have to ask. A submit that binds the buffer waits for it on the GPU, and
+  `read()` waits for it on the CPU. These are for a loading screen and for
+  timing a setup step.
 - **Example `24_video_texture`.** A texture rewritten from NumPy every frame,
   painting into a region with the mouse, a labelled pass, and a screenshot.
 
@@ -102,6 +112,17 @@ No breaking changes.
 - **DYNAMIC buffers carry the transfer usage flags**, so `copy_buffer` and
   `fill_buffer` work on them. The flags cost nothing on memory that the host can
   already see.
+- **`ctx.create_buffer(...)` with STATIC memory no longer waits for the GPU.**
+  It still submits the copy at the call, so a failure is still raised at the
+  call. Only the wait is gone. That wait was a full drain of the graphics queue,
+  so a program that made 30 meshes at startup drained the queue 30 times.
+- **`ctx.create_image(array)` and `ctx.create_image([arrays])` no longer wait
+  for the GPU**, for the same reason and with the same rule. `img.ready` is
+  therefore `False` on the line after the call. That is not a problem to fix: a
+  submit that samples the image waits for it, and `read()` waits for it.
+- **`ctx.wait_for_uploads()` and `ctx.uploads_done` cover these new uploads
+  too.** `ctx.upload_progress` does not, because a copy with no file to decode
+  has no progress to report between 0 and 1.
 
 ### Notes
 - **Shader printf has two costs, and that is why it is off by default.** The
@@ -126,9 +147,12 @@ No breaking changes.
   writes each level instead of regenerating them. The whole operation is
   already documented as a setup step that blocks the source queue, and correct
   data beats fast wrong data at setup time.
-- **An asynchronous `StaticBuffer` is still deferred.** It needs the submit
-  path to track buffer residency the way it tracks image residency, and its
-  blocking happens once at setup rather than every frame. See `DESIGN.md`.
+- **One rule for what blocks: every write is asynchronous, every read blocks.**
+  A write returns a handle, so it can hand you the resource before the GPU has
+  it, and the resource is its own future. A read returns an array, so it has
+  nothing to hand you until the bytes arrive. Three verbs wait, at three
+  scopes: `res.wait()` for one resource, `ctx.wait_for_uploads()` for every
+  upload, `ctx.wait()` for every submit.
 - **Tessellation, geometry shaders, indirect draw, a `RenderTarget` on images
   you own, and the window extras move to 0.19.**
 

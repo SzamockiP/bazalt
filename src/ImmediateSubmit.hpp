@@ -1,6 +1,7 @@
 #pragma once
 #include <volk.h>
 
+#include <cstdint>
 #include <expected>
 #include <mutex>
 #include <utility>
@@ -8,19 +9,23 @@
 #include "Context.hpp"
 #include "Error.hpp"
 
-// Runs `record(VkCommandBuffer)` in a freshly allocated one-shot command
-// buffer, submits it to the graphics queue and blocks until it completes.
+// Records `record(VkCommandBuffer)` into a freshly allocated one-shot command
+// buffer and submits it to the graphics queue, signalling the Context's
+// submission timeline. Returns the serial that submit will signal, and does
+// NOT wait for it.
 //
-// This is THE way to do a synchronous GPU round trip (staging uploads,
-// readbacks). It used to be hand-rolled in three places, each ignoring the
-// VkResult of allocate/submit/wait — so a lost device during an upload
-// surfaced later as inexplicable garbage instead of a DeviceLostError here.
+// This is the transport under every "the resource is its own future" upload
+// (Image::upload_pixels, StaticBuffer::create). The caller keeps the serial:
+// a submit that reads the resource waits on it GPU-side, and `.wait()` waits
+// on it CPU-side. Nothing here needs the upload worker — a numpy array or a
+// Python list has no decode to move off the main thread, so the only cost an
+// upload used to pay was the vkQueueWaitIdle, and this is what removes it.
 //
-// Blocking by design: 0.5's UploadManager (transfer queue + timeline
-// semaphores) is what makes uploads asynchronous. Callers should treat this
-// as the slow, correct path.
+// The command buffer retires through the deletion queue, which is keyed on
+// exactly this serial. Whatever else the recording borrowed (a staging
+// buffer) is the caller's to defer the same way.
 template <typename F>
-std::expected<void, Error> immediate_submit(Context& context, F&& record)
+std::expected<std::uint64_t, Error> deferred_submit(Context& context, F&& record)
 {
     const VolkDeviceTable& vk = context.vk();
 
@@ -40,7 +45,9 @@ std::expected<void, Error> immediate_submit(Context& context, F&& record)
         return std::unexpected(*e);
     }
 
-    const auto fail = [&](Error error) -> std::expected<void, Error>
+    // Before the submit nothing references the command buffer, so a failure
+    // here frees it inline rather than through the deletion queue.
+    const auto fail = [&](Error error) -> std::expected<std::uint64_t, Error>
     {
         vk.vkFreeCommandBuffers(context.device(), context.command_pool(), 1, &cmd);
         return std::unexpected(std::move(error));
@@ -64,12 +71,13 @@ std::expected<void, Error> immediate_submit(Context& context, F&& record)
     }
 
     VkSemaphore timeline = context.submit_timeline();
+    std::uint64_t serial = 0;
     {
         std::lock_guard lock(context.queue_mutex());
 
         // One-shot submits count on the submission timeline too, so the
         // deletion queue keeps draining even on frame-less workloads.
-        const std::uint64_t serial = context.advance_submit_serial();
+        serial = context.advance_submit_serial();
         VkTimelineSemaphoreSubmitInfo timelineInfo{
             .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
             .pNext = nullptr,
@@ -95,17 +103,50 @@ std::expected<void, Error> immediate_submit(Context& context, F&& record)
         {
             return fail(std::move(*e));
         }
-        if (auto e =
-                check(vk.vkQueueWaitIdle(context.graphics_queue()), "wait for one-shot submit", ErrorCode::Resource))
+    }
+
+    // The GPU still holds it, so this cannot be an inline free. The deletion
+    // queue keys the entry on the serial above, which is exactly when the
+    // command buffer stops being referenced.
+    // Raw handles plus a pointer to the dispatch table, never a
+    // shared_ptr<Context> — the table lives in the Context, which outlives
+    // every drain of its own deletion queue.
+    context.defer_destroy([device = context.device(), pool = context.command_pool(), table = &vk, cmd]
+                          { table->vkFreeCommandBuffers(device, pool, 1, &cmd); });
+    return serial;
+}
+
+// The blocking half: one deferred_submit plus a wait for the queue to drain.
+//
+// This is THE way to do a synchronous GPU round trip. It used to be uploads as
+// well as readbacks, and the vkQueueWaitIdle per upload was the whole cost that
+// made a Context with many buffers or procedural textures slow to start; since
+// 0.18.0 an upload keeps its serial instead (see deferred_submit) and only a
+// readback, which has to hand bytes back to Python on the next line, still
+// stands still for the GPU.
+template <typename F>
+std::expected<void, Error> immediate_submit(Context& context, F&& record)
+{
+    auto serial = deferred_submit(context, std::forward<F>(record));
+    if (!serial)
+    {
+        return std::unexpected(serial.error());
+    }
+
+    {
+        std::lock_guard lock(context.queue_mutex());
+        if (auto e = check(
+                context.vk().vkQueueWaitIdle(context.graphics_queue()),
+                "wait for one-shot submit",
+                ErrorCode::Resource))
         {
-            return fail(std::move(*e));
+            return std::unexpected(*e);
         }
     }
 
-    vk.vkFreeCommandBuffers(context.device(), context.command_pool(), 1, &cmd);
-
     // The wait-idle above proves everything submitted so far has completed —
-    // a free chance to reclaim deferred handles.
+    // a free chance to reclaim deferred handles, this submit's own command
+    // buffer among them.
     context.flush_deletion_queue();
     return {};
 }

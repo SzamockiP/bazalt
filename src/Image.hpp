@@ -468,7 +468,9 @@ public:
         return upload_serial_.load();
     }
 
-    // Worker-side state transitions.
+    // Upload state transitions. Pending/Failed are worker-side; Submitted is
+    // whoever made the submit — the worker for a decode, the calling thread for
+    // create_image(array), which has nothing to decode (see upload_pixels).
     void set_upload_pending()
     {
         upload_state_.store(UploadState::Pending);
@@ -1443,8 +1445,14 @@ private:
     }
 
     // Staging upload of mip 0, then either the blit chain filling the rest of
-    // the levels or a single transition to SHADER_READ_ONLY. One synchronous
-    // submit; the async UploadManager replaces the transport, not the recording.
+    // the levels or a single transition to SHADER_READ_ONLY.
+    //
+    // Asynchronous since 0.18.0, and without the upload worker: the caller
+    // already handed over decoded bytes (a numpy array), so there is nothing to
+    // move off this thread. The submit happens here — which is why every error
+    // still surfaces at the create_image call — and only the wait is gone. The
+    // image carries the serial, so it is its own future exactly like a
+    // load_image one, with no second state machine and no second failure mode.
     std::expected<void, Error> upload_pixels(Context& context, const void* pixels, std::uint32_t mips)
     {
         auto staging = create_filled_staging(context, pixels);
@@ -1454,16 +1462,20 @@ private:
         }
         auto [buffer, allocation] = *staging;
 
-        auto submitted =
-            immediate_submit(context, [&](VkCommandBuffer cmd) { record_upload_commands(cmd, buffer, mips); });
-
-        vmaDestroyBuffer(context.allocator(), buffer, allocation);
-        if (!submitted)
+        auto serial = deferred_submit(context, [&](VkCommandBuffer cmd) { record_upload_commands(cmd, buffer, mips); });
+        if (!serial)
         {
-            return std::unexpected(submitted.error());
+            vmaDestroyBuffer(context.allocator(), buffer, allocation);
+            return std::unexpected(serial.error());
         }
+        // The GPU reads the staging buffer after this returns, so it retires on
+        // the serial rather than here.
+        context.defer_destroy([allocator = context.allocator(), buffer, allocation]
+                              { vmaDestroyBuffer(allocator, buffer, allocation); });
 
         mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        set_upload_submitted(*serial);
+        context.note_upload_serial(*serial);
         return {};
     }
 

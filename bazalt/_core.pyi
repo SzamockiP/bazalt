@@ -330,7 +330,26 @@ class Buffer:
         to interpret the bytes (e.g. `ssbo.read(np.float32)`). STATIC buffers
         take a blocking GPU round trip; DYNAMIC ones return what update()
         last wrote into the current frame's copy.
+
+        A pending upload is waited for first, so this is correct on the line
+        after create_buffer.
         """
+        ...
+
+    @property
+    def ready(self) -> bool:
+        """Non-blocking: is the data on the GPU?
+
+        False while a STATIC buffer's staging copy is still running. You never
+        have to poll this — a submit that binds the buffer waits automatically,
+        and read() waits too; it exists for loading screens and explicit
+        control. Always True for a DYNAMIC buffer, which is written by mapping
+        and has no copy to wait for.
+        """
+        ...
+
+    def wait(self) -> None:
+        """Block until this buffer's upload has finished."""
         ...
 
 class ShaderModule:
@@ -384,9 +403,10 @@ class Image:
     def ready(self) -> bool:
         """Non-blocking: is the pixel data on the GPU?
 
-        False while a load_image decode/copy is still in flight. You never
-        have to poll this — a submit that uses the image waits automatically;
-        it exists for loading screens and explicit control.
+        False while any upload is still in flight — a load_image decode/copy,
+        a create_image(array) copy or an update(). You never have to poll this
+        — a submit that uses the image waits automatically; it exists for
+        loading screens and explicit control.
         """
         ...
 
@@ -1306,7 +1326,21 @@ class Context:
     def create_buffer(self, array: Any, type: BufferType, usage: MemoryUsage,
                       *, name: str = "") -> Buffer: ...
     def create_buffer(self, size_in_bytes: int, type: BufferType,
-                      usage: MemoryUsage, *, name: str = "") -> Buffer: ...
+                      usage: MemoryUsage, *, name: str = "") -> Buffer:
+        """A GPU buffer from a list, any C-contiguous array, or a size in bytes.
+
+        A STATIC buffer is device-local and filled by a staging copy. That copy
+        is ASYNCHRONOUS since 0.18.0: it is submitted here — so a failure still
+        raises here — but not waited for, because 30 meshes used to mean 30 full
+        queue drains at startup. The buffer is usable at once; a submit that
+        binds it waits GPU-side, and read() waits CPU-side. `buf.ready`,
+        `buf.wait()` and `ctx.wait_for_uploads()` are the explicit-control
+        verbs.
+
+        A DYNAMIC buffer is host-visible and written by update(), so it has no
+        copy and is never pending.
+        """
+        ...
 
     def graphics_pipeline(self) -> GraphicsPipelineBuilder: ...
     def compute_pipeline(self) -> ComputePipelineBuilder: ...
@@ -1394,7 +1428,9 @@ class Context:
 
     @property
     def uploads_done(self) -> bool:
-        """Non-blocking: have all load_image uploads finished?"""
+        """Non-blocking: have all uploads finished? Covers the load_image
+        decodes and the one-shot copies of create_buffer and
+        create_image(array)."""
         ...
     @property
     def upload_progress(self) -> float:
@@ -1408,10 +1444,18 @@ class Context:
         drained: once all in-flight uploads finish, progress resets to 1.0 and
         the next load_image starts a fresh batch from 0. This is the final
         semantics (settled in 0.9) — a second loading screen counts only its own
-        images, not the ones a previous screen already finished."""
+        images, not the ones a previous screen already finished.
+
+        Decodes only: a create_buffer or a create_image(array) is one submit
+        with no worker stage, so it has no progress to report between 0 and 1.
+        `uploads_done` still covers them."""
         ...
     def wait_for_uploads(self) -> None:
-        """Block until every pending load_image upload has finished."""
+        """Block until every pending upload has finished.
+
+        Both kinds: the load_image decodes on the worker, and the one-shot
+        copies of create_buffer and create_image(array), which have nothing to
+        decode and so never enter a batch."""
         ...
     def create_image(self, width: int, height: int,
                      format: Format = Format.RGBA8, *, layers: int = 1,
@@ -1433,7 +1477,13 @@ class Context:
         `mipmaps=True` generates the full chain (arrays stay 1-level unless asked,
         so a data texture gets no surprise filtering). (h, w, 3) has no portable
         GPU format and raises ResourceError with a padding hint. `cube=True` here
-        is a mistake — a cubemap needs 6 faces, so pass a list (below)."""
+        is a mistake — a cubemap needs 6 faces, so pass a list (below).
+
+        ASYNCHRONOUS since 0.18.0, like load_image: the copy is submitted here
+        (so every error still raises here) but not waited for. `img.ready` is
+        therefore False right after the call, and that is not a problem to solve
+        — a submit that samples the image waits for it GPU-side, and read()
+        waits CPU-side."""
         ...
     def create_image(self, images: Sequence[Any], *, mipmaps: bool = False,
                      cube: bool = False, name: str = "") -> Image:

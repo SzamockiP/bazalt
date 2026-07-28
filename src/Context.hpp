@@ -642,6 +642,23 @@ public:
         upload_manager_ = std::move(manager);
     }
 
+    // The highest serial of an upload that did NOT go through the worker:
+    // create_buffer and create_image(array) hand over bytes that are already
+    // decoded, so they submit on the calling thread and only skip the wait.
+    // They are still uploads, so wait_for_uploads and uploads_done have to see
+    // them, and the batch counters inside UploadManager cannot.
+    void note_upload_serial(std::uint64_t serial)
+    {
+        std::uint64_t seen = upload_serial_.load();
+        while (serial > seen && !upload_serial_.compare_exchange_weak(seen, serial))
+        {
+        }
+    }
+    std::uint64_t last_upload_serial() const
+    {
+        return upload_serial_.load();
+    }
+
     // ── Hot reload ────────────────────────────────────────────────────────────
     //
     // Null unless the Context was created with hot_reload=True. The frame path
@@ -1511,5 +1528,6 @@ private:
 
     std::unordered_map<std::uint32_t, std::shared_ptr<Sampler>> sampler_cache_;
     std::unique_ptr<UploadManagerBase> upload_manager_;
+    std::atomic<std::uint64_t> upload_serial_{0};
     std::unique_ptr<HotReloadBase> hot_reload_;
 };

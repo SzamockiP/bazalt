@@ -143,6 +143,84 @@ def test_wait_for_uploads_and_progress_endpoints(ctx, tmp_path):
     np.testing.assert_array_equal(imgs[-1].read()[0, 0], [1, 2, 3, 255])
 
 
+# ── one-shot uploads: no decode, no worker, no wait (0.18.0) ──────────────
+#
+# create_buffer and create_image(array) hand over bytes that are already
+# decoded, so there is nothing to move onto the upload worker. They submit the
+# staging copy on the calling thread and skip only the wait — which makes the
+# resource its own future exactly like a load_image one.
+
+
+def test_static_buffer_upload_is_async_and_wait_settles_it(ctx):
+    data = np.arange(1024, dtype=np.float32)
+    buf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf.wait()
+    assert buf.ready
+
+
+def test_dynamic_buffers_are_never_pending(ctx):
+    """Host-visible memory is written by mapping, so there is no copy to wait
+    for and `ready` is the honest constant it looks like."""
+    buf = ctx.create_buffer(np.zeros(16, dtype=np.float32), bz.BufferType.UNIFORM,
+                            bz.MemoryUsage.DYNAMIC)
+    assert buf.ready
+
+
+def test_reading_a_fresh_static_buffer_needs_no_wait(ctx):
+    """read() is a blocking round trip either way, so it waits for the fill
+    itself. Without that wait this is a race that returns uninitialized memory
+    on any driver that overlaps two submits."""
+    data = np.arange(256, dtype=np.float32)
+    buf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    np.testing.assert_array_equal(buf.read(np.float32), data)
+
+
+def test_drawing_from_a_fresh_buffer_needs_no_wait(ctx, triangle_shaders):
+    """The residency contract for buffers: created and bound with no wait
+    anywhere, and the draw still sees the vertices."""
+    vertices = np.array([
+        +0.0, -0.5, 0.0, 1.0, 0.0, 0.0,
+        -0.5, +0.5, 0.0, 1.0, 0.0, 0.0,
+        +0.5, +0.5, 0.0, 1.0, 0.0, 0.0,
+    ], dtype=np.float32)
+    vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+    ibuf = ctx.create_buffer(np.array([0, 1, 2], dtype=np.uint32), bz.BufferType.INDEX,
+                             bz.MemoryUsage.STATIC)
+
+    vert, frag = triangle_shaders
+    target = bz.RenderTarget(ctx, 64, 64)
+    pipeline = (ctx.graphics_pipeline()
+                .vertex_shader(vert)
+                .fragment_shader(frag)
+                .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+                .build(target))
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
+        c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
+    ctx.submit(cmd)
+
+    pixels = target.read_pixels()
+    assert pixels[32, 32, 0] > 200, pixels[32, 32]
+
+
+def test_wait_for_uploads_covers_one_shot_uploads(ctx):
+    """They never enter the worker's batch, so uploads_done and
+    wait_for_uploads track them on the submission timeline instead. The verb
+    would be a lie otherwise."""
+    ctx.wait_for_uploads()
+
+    buf = ctx.create_buffer(np.zeros(4096, dtype=np.float32), bz.BufferType.STORAGE,
+                            bz.MemoryUsage.STATIC)
+    img = ctx.create_image(np.zeros((256, 256, 4), dtype=np.uint8))
+
+    ctx.wait_for_uploads()
+    assert ctx.uploads_done
+    assert buf.ready
+    assert img.ready
+
+
 @pytest.fixture
 def fullscreen_and_textured(ctx):
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)

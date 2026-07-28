@@ -94,6 +94,7 @@ public:
     {
         commands_.clear();
         used_sets_.clear();
+        used_buffers_.clear();
         // A reused command buffer must forget its previous recording entirely,
         // or it would emit barriers against uses that no longer exist.
         tracker_.reset();
@@ -546,6 +547,7 @@ public:
         // The read truly happens at draw, but a barrier placed before the bind
         // is still before the draw — sound, and simpler than deferring it.
         track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT, false);
+        record_buffer_use_(buffer);
         commands_.push_back(
             [buffer, binding](VkCommandBuffer cmd, const FrameContext& frame)
             {
@@ -559,6 +561,7 @@ public:
     CommandBuffer& bind_index_buffer(std::shared_ptr<Buffer> buffer)
     {
         track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_INDEX_READ_BIT, false);
+        record_buffer_use_(buffer);
         commands_.push_back(
             [buffer](VkCommandBuffer cmd, const FrameContext& frame)
             {
@@ -930,6 +933,8 @@ public:
 
         track_use_(src, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, false);
         track_use_(dst, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, true);
+        record_buffer_use_(src);
+        record_buffer_use_(dst);
         commands_.push_back(
             [src = std::move(src), dst = std::move(dst), src_offset, dst_offset, length](
                 VkCommandBuffer cmd, const FrameContext& frame)
@@ -986,6 +991,7 @@ public:
         }
 
         track_use_(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, true);
+        record_buffer_use_(buffer);
         commands_.push_back(
             [buffer = std::move(buffer), value, offset, length](VkCommandBuffer cmd, const FrameContext& frame)
             { frame.vk->vkCmdFillBuffer(cmd, buffer->get(), offset, length, value); });
@@ -1272,6 +1278,16 @@ public:
         return used_sets_;
     }
 
+    // The buffers this recording binds or copies, for the same reason
+    // used_sets exists: a STATIC buffer's fill is a submit of its own since
+    // 0.18.0, and the submit path waits on it. Recorded by record_buffer_use_,
+    // which is deliberately NOT part of track_use_ — that one returns early
+    // with auto_barriers=False, and residency is not a barrier question.
+    const std::vector<std::shared_ptr<Buffer>>& used_buffers() const
+    {
+        return used_buffers_;
+    }
+
     VkCommandBuffer get(std::uint32_t frame_index) const
     {
         return command_buffers_[frame_index];
@@ -1528,6 +1544,19 @@ private:
         occlusion_capacity_ = static_cast<std::uint32_t>(needed);
     }
 
+    // Residency bookkeeping, kept apart from track_use_ on purpose: that one
+    // returns early with auto_barriers=False, and waiting for a buffer's fill
+    // to land is not a barrier the caller can take over. Buffers with no
+    // pending upload are skipped, so a recording of DYNAMIC buffers stores
+    // nothing.
+    void record_buffer_use_(const std::shared_ptr<Buffer>& buffer)
+    {
+        if (buffer && buffer->upload_serial() != 0)
+        {
+            used_buffers_.push_back(buffer);
+        }
+    }
+
     void track_use_(
         const std::shared_ptr<Buffer>& buffer,
         VkPipelineStageFlags stages,
@@ -1669,6 +1698,7 @@ private:
     std::vector<VkCommandBuffer> command_buffers_;
     std::vector<std::function<void(VkCommandBuffer, const FrameContext&)>> commands_;
     std::vector<std::shared_ptr<DescriptorSet>> used_sets_;
+    std::vector<std::shared_ptr<Buffer>> used_buffers_;
 
     // Frame serial of the last replay; UINT64_MAX = never replayed. A sentinel
     // rather than 0, because the headless ctx.submit legitimately runs its first

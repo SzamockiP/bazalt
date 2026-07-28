@@ -166,8 +166,9 @@ def test_sampling_with_an_explicit_nearest_sampler(ctx, tmp_path):
 
 
 def test_uploaded_images_are_ready_and_wait_returns(ctx):
-    """Trivially true while uploads are synchronous; the async UploadManager
-    inherits this exact surface."""
+    """create_image(array) is asynchronous since 0.18.0, so `ready` is an honest
+    question rather than a constant. What has to hold is that wait() answers
+    it."""
     img = ctx.create_image(np.zeros((2, 2, 4), dtype=np.uint8))
-    assert img.ready
     img.wait()
+    assert img.ready

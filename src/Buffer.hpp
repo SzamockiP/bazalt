@@ -72,6 +72,29 @@ public:
     // rather than from bazalt; the binding layer compares owners at record time.
     virtual const Context* owner() const = 0;
 
+    // ── The buffer IS its own upload future (0.18.0) ──────────────────────────
+    //
+    // A STATIC buffer is filled by a staging copy that is submitted at create
+    // time and NOT waited for. The serial that copy signals is the whole
+    // mechanism: a submit that reads the buffer waits on it GPU-side (the
+    // command buffer remembers which buffers a recording touches), read_bytes
+    // waits on it CPU-side, and ready/wait are the explicit-control verbs.
+    //
+    // 0 means "nothing pending", which is the honest answer for a DYNAMIC
+    // buffer (host-visible, written by mapping, never staged) and for a STATIC
+    // one whose copy is already complete.
+    virtual std::uint64_t upload_serial() const
+    {
+        return 0;
+    }
+    virtual bool ready() const
+    {
+        return true;
+    }
+    virtual void wait()
+    {
+    }
+
     // Remembered so bind_index_buffer doesn't have to assume. It used to hardcode
     // VK_INDEX_TYPE_UINT32 while create_buffer happily accepted UINT16 indices,
     // which were then read back at half the count with no error.
@@ -140,10 +163,33 @@ public:
         return size_;
     }
 
+    std::uint64_t upload_serial() const override
+    {
+        return upload_serial_;
+    }
+    bool ready() const override
+    {
+        return context_->completed_submit_serial() >= upload_serial_;
+    }
+    void wait() override
+    {
+        context_->wait_for_serial(upload_serial_);
+    }
+    void set_upload_serial(std::uint64_t serial)
+    {
+        upload_serial_ = serial;
+    }
+
     // Blocking round trip through a readback staging buffer — device-local
     // memory is not mappable. A debugging/test path (SSBO results, mostly).
     std::expected<std::vector<std::byte>, Error> read_bytes() override
     {
+        // The fill is a separate submit with no barrier against this one, and
+        // two submits on one queue are not ordered by anything but a semaphore.
+        // Without this the first read after create_buffer is a race that
+        // returns uninitialized memory on exactly the drivers that overlap.
+        wait();
+
         VkBufferCreateInfo stagingInfo{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
             .pNext = nullptr,
@@ -299,7 +345,13 @@ public:
             return std::unexpected(*e);
         }
 
-        auto submitted = immediate_submit(
+        // Asynchronous since 0.18.0. The staging fill above already happened on
+        // this thread (the bytes come from Python, so they cannot be copied
+        // anywhere else), which leaves the vkQueueWaitIdle as the only cost of
+        // the old blocking path — and 30 meshes meant 30 full queue drains at
+        // startup. The copy is submitted here, so every failure below is still
+        // raised at the create_buffer call; only the wait is gone.
+        auto serial = deferred_submit(
             context,
             [&](VkCommandBuffer cmd)
             {
@@ -307,14 +359,21 @@ public:
                 context.vk().vkCmdCopyBuffer(cmd, stagingBuffer, buffer, 1, &copyRegion);
             });
 
-        vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
-        if (!submitted)
+        if (!serial)
         {
+            vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
             vmaDestroyBuffer(context.allocator(), buffer, allocation);
-            return std::unexpected(submitted.error());
+            return std::unexpected(serial.error());
         }
+        // The GPU reads the staging buffer after this returns, so it retires on
+        // the serial rather than here.
+        context.defer_destroy([allocator = context.allocator(), stagingBuffer, stagingAllocation]
+                              { vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation); });
 
-        return std::make_shared<StaticBuffer>(context.shared_from_this(), buffer, allocation, data_size);
+        auto result = std::make_shared<StaticBuffer>(context.shared_from_this(), buffer, allocation, data_size);
+        result->set_upload_serial(*serial);
+        context.note_upload_serial(*serial);
+        return result;
     }
 
 private:
@@ -322,6 +381,9 @@ private:
     VkBuffer buffer_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
     size_t size_ = 0;
+    // Which submit fills this buffer. Plain, not atomic: it is written once by
+    // create() before the shared_ptr escapes, and only read afterwards.
+    std::uint64_t upload_serial_ = 0;
 };
 
 class DynamicBuffer : public Buffer
