@@ -67,6 +67,11 @@ public:
                 context_->defer_destroy([vk = &context_->vk(), device = context_->device(), pool = timer_pool_]
                                         { vk->vkDestroyQueryPool(device, pool, nullptr); });
             }
+            if (occlusion_pool_ != VK_NULL_HANDLE)
+            {
+                context_->defer_destroy([vk = &context_->vk(), device = context_->device(), pool = occlusion_pool_]
+                                        { vk->vkDestroyQueryPool(device, pool, nullptr); });
+            }
             context_->defer_destroy(
                 [vk = &context_->vk(),
                  device = context_->device(),
@@ -101,6 +106,10 @@ public:
         // and reset (vkCmdResetQueryPool) at the top of every replay. Bumping
         // the generation invalidates handles from the previous recording.
         timer_count_ = 0;
+        // Same story for occlusion queries and for label nesting: both are
+        // properties of one recording.
+        occlusion_count_ = 0;
+        open_labels_ = 0;
         ++recording_generation_;
         return *this;
     }
@@ -892,6 +901,135 @@ public:
         return static_cast<double>(delta) * static_cast<double>(timer_period_) / 1.0e6;
     }
 
+    // ── Debug labels ────────────────────────────────────────────────────────
+    //
+    // A named scope in a capture. bazalt has named its OBJECTS since 0.8, which
+    // answers "which image is that", but a RenderDoc capture was still a flat
+    // list of draws with nothing saying where the shadow pass ended and the
+    // composite began.
+    //
+    // Silent no-op without VK_EXT_debug_utils, exactly like set_debug_name, and
+    // for the same reason: vk-bootstrap only requests the extension when a debug
+    // callback is set. So a release run pays nothing and simply shows no labels.
+    //
+    // The entry points stay on volk's globals rather than moving to ctx.vk(),
+    // which is the documented rule for debug utils: it is an INSTANCE extension,
+    // so vkGetInstanceProcAddr is the sanctioned route and vkGetDeviceProcAddr
+    // may legally return null. They are loader trampolines dispatching on the
+    // VkCommandBuffer, so one pointer is right for every Context.
+    CommandBuffer& begin_label(const std::string& name)
+    {
+        commands_.push_back(
+            [name](VkCommandBuffer cmd, const FrameContext&)
+            {
+                if (vkCmdBeginDebugUtilsLabelEXT == nullptr)
+                {
+                    return;
+                }
+                VkDebugUtilsLabelEXT label{
+                    .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
+                    .pNext = nullptr,
+                    .pLabelName = name.c_str(),
+                    .color = {0.0f, 0.0f, 0.0f, 0.0f}};
+                vkCmdBeginDebugUtilsLabelEXT(cmd, &label);
+            });
+        ++open_labels_;
+        return *this;
+    }
+
+    CommandBuffer& end_label()
+    {
+        // Unbalanced ends are dropped rather than recorded: ending a label that
+        // was never begun is undefined behaviour in Vulkan, and the `with` form
+        // that the binding exposes cannot produce one. This guards the explicit
+        // verbs only.
+        if (open_labels_ == 0)
+        {
+            return *this;
+        }
+        --open_labels_;
+        commands_.push_back(
+            [](VkCommandBuffer cmd, const FrameContext&)
+            {
+                if (vkCmdEndDebugUtilsLabelEXT != nullptr)
+                {
+                    vkCmdEndDebugUtilsLabelEXT(cmd);
+                }
+            });
+        return *this;
+    }
+
+    // ── Occlusion queries ───────────────────────────────────────────────────
+    //
+    // How many fragments of the draws inside the scope passed the depth and
+    // stencil tests. The handle IS the identity, exactly as for timers (0.9), so
+    // several queries in one recording need no names and no keys.
+    //
+    // Vulkan requires an occlusion query to begin and end inside the SAME render
+    // pass, which is why this refuses outside a rendering scope: the alternative
+    // is a validation error at submit naming neither the call nor the reason.
+    std::expected<std::size_t, Error> start_occlusion_query()
+    {
+        if (!in_rendering_)
+        {
+            return std::unexpected(err_resource(
+                "cmd.occlusion_query() must be used inside a rendering scope: Vulkan requires an occlusion "
+                "query to begin and end within one render pass. Move it inside `with cmd.rendering(target):`."));
+        }
+        const std::size_t index = occlusion_count_++;
+        commands_.push_back(
+            [this, index](VkCommandBuffer cmd, const FrameContext& frame)
+            {
+                if (occlusion_pool_ != VK_NULL_HANDLE)
+                {
+                    // Not PRECISE: the precise flag needs the occlusionQueryPrecise
+                    // feature, and without it the spec allows any non-zero value for
+                    // "something passed". Asking for a count bazalt cannot promise on
+                    // every device would make `samples` mean two different things
+                    // depending on the driver.
+                    frame.vk->vkCmdBeginQuery(cmd, occlusion_pool_, static_cast<std::uint32_t>(index), 0);
+                }
+            });
+        return index;
+    }
+
+    void stop_occlusion_query(std::size_t index)
+    {
+        commands_.push_back(
+            [this, index](VkCommandBuffer cmd, const FrameContext& frame)
+            {
+                if (occlusion_pool_ != VK_NULL_HANDLE)
+                {
+                    frame.vk->vkCmdEndQuery(cmd, occlusion_pool_, static_cast<std::uint32_t>(index));
+                }
+            });
+    }
+
+    // The sample count of one query, or nullopt when the handle is from a
+    // superseded recording or the results are not ready yet. Same three-way
+    // contract as read_timer, and the same stale-handle guard.
+    std::optional<std::uint64_t> read_occlusion_query(std::size_t index, std::uint64_t generation) const
+    {
+        if (occlusion_pool_ == VK_NULL_HANDLE || generation != recording_generation_ || index >= occlusion_count_)
+        {
+            return std::nullopt;
+        }
+        std::uint64_t samples = 0;
+        if (context_->vk().vkGetQueryPoolResults(
+                context_->device(),
+                occlusion_pool_,
+                static_cast<std::uint32_t>(index),
+                1,
+                sizeof(samples),
+                &samples,
+                sizeof(std::uint64_t),
+                VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
+        {
+            return std::nullopt; // VK_NOT_READY: submit not finished
+        }
+        return samples;
+    }
+
     // No stage argument: the Pipeline already knows which stages its push constant
     // range covers, so passing a mismatched one was a validation error for no gain.
     CommandBuffer& push_constants(std::shared_ptr<Pipeline> pipeline, uint32_t offset, uint32_t size, const void* data)
@@ -980,6 +1118,18 @@ public:
             if (timer_pool_ != VK_NULL_HANDLE)
             {
                 frame.vk->vkCmdResetQueryPool(vkCmd, timer_pool_, 0, timer_capacity_);
+            }
+        }
+        // Occlusion queries reset in the same place and for the same reason: the
+        // reset is illegal inside a render pass, and an occlusion query can only
+        // BEGIN inside one, so the top of execute is the only spot that serves
+        // both halves.
+        if (occlusion_count_ > 0)
+        {
+            ensure_occlusion_pool_(occlusion_count_);
+            if (occlusion_pool_ != VK_NULL_HANDLE)
+            {
+                frame.vk->vkCmdResetQueryPool(vkCmd, occlusion_pool_, 0, occlusion_capacity_);
             }
         }
 
@@ -1154,6 +1304,37 @@ private:
         timer_capacity_ = static_cast<std::uint32_t>(needed);
     }
 
+    // The occlusion counterpart. Simpler than the timer pool: occlusion queries
+    // are core Vulkan with no feature bit and no per-queue-family validity to
+    // check, so there is nothing to probe — only the allocation can fail, and a
+    // failure leaves the pool null and every query reporting None.
+    void ensure_occlusion_pool_(std::size_t needed)
+    {
+        if (occlusion_pool_ != VK_NULL_HANDLE && occlusion_capacity_ >= needed)
+        {
+            return;
+        }
+        if (occlusion_pool_ != VK_NULL_HANDLE)
+        {
+            context_->defer_destroy([vk = &context_->vk(), device = context_->device(), pool = occlusion_pool_]
+                                    { vk->vkDestroyQueryPool(device, pool, nullptr); });
+            occlusion_pool_ = VK_NULL_HANDLE;
+        }
+        VkQueryPoolCreateInfo poolInfo{
+            .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .queryType = VK_QUERY_TYPE_OCCLUSION,
+            .queryCount = static_cast<std::uint32_t>(needed),
+            .pipelineStatistics = 0};
+        if (context_->vk().vkCreateQueryPool(context_->device(), &poolInfo, nullptr, &occlusion_pool_) != VK_SUCCESS)
+        {
+            occlusion_pool_ = VK_NULL_HANDLE;
+            return;
+        }
+        occlusion_capacity_ = static_cast<std::uint32_t>(needed);
+    }
+
     void track_use_(
         const std::shared_ptr<Buffer>& buffer,
         VkPipelineStageFlags stages,
@@ -1318,4 +1499,13 @@ private:
     std::optional<bool> timer_supported_;    // queried once, lazily
     std::size_t timer_count_ = 0;            // timers declared this recording
     std::uint64_t recording_generation_ = 0; // bumped by begin(); stale-handle guard
+
+    // ── Occlusion queries (same lifetime rules as the timer pool above) ──
+    VkQueryPool occlusion_pool_ = VK_NULL_HANDLE;
+    std::uint32_t occlusion_capacity_ = 0;
+    std::size_t occlusion_count_ = 0;
+
+    // Depth of the label nesting declared this recording, so end_label() can
+    // refuse to close one that was never opened.
+    std::size_t open_labels_ = 0;
 };

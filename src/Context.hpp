@@ -683,6 +683,57 @@ public:
         return sampler;
     }
 
+    // ── Memory and device introspection ───────────────────────────────────────
+
+    // How much GPU memory this Context has allocated, and how much the driver
+    // says is left, in bytes. "Am I leaking, and how much room is there" is a
+    // question a prototype asks constantly, and the answer used to need an
+    // external tool.
+    //
+    // VMA already keeps the numbers, so this is a read rather than new
+    // bookkeeping. Summed across heaps: per-heap detail is a different question
+    // (which heap is a driver decision), and a single pair is what the question
+    // above actually wants.
+    struct MemoryStats
+    {
+        std::uint64_t used = 0;     // bytes VMA has allocated for this Context
+        std::uint64_t reserved = 0; // bytes VMA has reserved from the driver
+        std::uint64_t budget = 0;   // bytes the driver says the process may use
+    };
+
+    MemoryStats memory_stats() const
+    {
+        VkPhysicalDeviceMemoryProperties memory_props{};
+        vkGetPhysicalDeviceMemoryProperties(vkb_physical_device_.physical_device, &memory_props);
+
+        std::vector<VmaBudget> budgets(memory_props.memoryHeapCount);
+        vmaGetHeapBudgets(allocator_, budgets.data());
+
+        MemoryStats stats;
+        for (std::uint32_t i = 0; i < memory_props.memoryHeapCount; ++i)
+        {
+            stats.used += budgets[i].statistics.allocationBytes;
+            stats.reserved += budgets[i].statistics.blockBytes;
+            stats.budget += budgets[i].budget;
+        }
+        return stats;
+    }
+
+    // The subgroup width this GPU runs shaders at, or 0 where the driver does not
+    // report one.
+    //
+    // A compute shader doing a subgroupAdd reduction has to size its workgroup
+    // against this number, and there was no way to ask. Vulkan 1.1 core, so no
+    // negotiation and no Feature: the property either has a value or it does not.
+    std::uint32_t subgroup_size() const
+    {
+        VkPhysicalDeviceSubgroupProperties subgroup{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES, .pNext = nullptr};
+        VkPhysicalDeviceProperties2 props{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &subgroup};
+        vkGetPhysicalDeviceProperties2(vkb_physical_device_.physical_device, &props);
+        return subgroup.subgroupSize;
+    }
+
     // ── Debug object names ────────────────────────────────────────────────────
     //
     // Attach `name` to a Vulkan handle so validation messages name the culprit

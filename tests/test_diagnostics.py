@@ -178,3 +178,143 @@ def test_gpu_time_ms_is_reported_after_the_ring_cycles(ctx):
         renderer = None
         window = None
         gc.collect()
+
+
+# ── 0.18: labels, occlusion queries, memory and subgroup introspection ──
+
+
+def solid_pipeline(ctx, target, depth_test=False):
+    vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+    frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
+    builder = ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
+    if depth_test:
+        builder = builder.depth_test(True)
+    return builder.build(target)
+
+
+def test_debug_labels_render_cleanly(ctx):
+    """As with debug names, the referee is the ctx fixture: an unbalanced
+    begin/end pair is a validation error, and that is what could actually break.
+    Whether RenderDoc groups the draws is not observable from here."""
+    target = bz.RenderTarget(ctx, 8, 8)
+    pipeline = solid_pipeline(ctx, target)
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with cmd.label("outer"):
+        with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
+            with cmd.label("inner"):
+                cmd.bind_pipeline(pipeline).draw(3)
+    ctx.submit(cmd)
+
+    assert target.read_pixels()[0, 0, 0] > 200
+
+
+def test_end_label_without_a_begin_is_ignored(ctx):
+    """Recording the unbalanced end is undefined behaviour in Vulkan, so the
+    verb drops it. The `with` form cannot produce one; this covers the explicit
+    verbs, which someone will eventually mismatch."""
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.end_label()
+    cmd.begin_label("one").end_label().end_label()
+    ctx.submit(cmd)
+
+
+def test_occlusion_query_counts_fragments(ctx):
+    """A fullscreen triangle over an 8x8 target covers every pixel, so the
+    query has a known floor. Not an exact equality: without occlusionQueryPrecise
+    the spec only promises a non-zero value, and helper invocations can push a
+    precise count above the pixel count."""
+    target = bz.RenderTarget(ctx, 8, 8)
+    pipeline = solid_pipeline(ctx, target)
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
+        with cmd.occlusion_query() as q:
+            cmd.bind_pipeline(pipeline).draw(3)
+    ctx.submit(cmd)
+
+    assert q.samples is not None
+    assert q.samples > 0
+
+
+def test_occlusion_query_reports_zero_when_nothing_is_drawn(ctx):
+    """The two-sided half: a query that always answered "lots" would pass the
+    test above while measuring nothing."""
+    target = bz.RenderTarget(ctx, 8, 8)
+    solid_pipeline(ctx, target)
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
+        with cmd.occlusion_query() as q:
+            pass
+    ctx.submit(cmd)
+
+    assert q.samples == 0
+
+
+def test_occlusion_query_outside_a_rendering_scope_raises(ctx):
+    """Vulkan requires the query to begin and end in one render pass. Refusing
+    at the call site beats a validation message at submit that names neither."""
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with pytest.raises(bz.ResourceError):
+        cmd.occlusion_query()
+
+
+def test_stale_occlusion_handle_reads_none(ctx):
+    """Same stale-handle contract as a Timer: re-recording gives the slots to a
+    different query, so the old handle reports None instead of a wrong number."""
+    target = bz.RenderTarget(ctx, 8, 8)
+    pipeline = solid_pipeline(ctx, target)
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
+        with cmd.occlusion_query() as q:
+            cmd.bind_pipeline(pipeline).draw(3)
+    ctx.submit(cmd)
+    assert q.samples is not None
+
+    cmd.begin()
+    ctx.submit(cmd)
+    assert q.samples is None
+
+
+def test_memory_stats_grow_with_an_allocation(ctx):
+    """A number that never moves is indistinguishable from a stub."""
+    before = ctx.memory_stats()
+    assert before.budget > 0
+
+    big = ctx.create_image(512, 512, bz.Format.RGBA32F)
+    after = ctx.memory_stats()
+
+    assert after.used > before.used
+    assert after.reserved >= after.used
+    assert big.width == 512
+
+
+def test_memory_stats_shrink_again(ctx):
+    """Deferred destruction means the drop is not instant, so this flushes the
+    queue the way a real frame loop would."""
+    big = ctx.create_image(512, 512, bz.Format.RGBA32F)
+    peak = ctx.memory_stats().used
+
+    del big
+    gc.collect()
+    ctx.wait_idle()
+    for _ in range(ctx.frames_in_flight + 1):
+        ctx.begin_frame()
+
+    assert ctx.memory_stats().used < peak
+
+
+def test_subgroup_size_is_a_power_of_two(ctx):
+    """Zero is legal (a driver need not report one), so the assertion covers
+    both: either unreported, or a plausible width."""
+    size = ctx.subgroup_size
+    assert size == 0 or (size & (size - 1)) == 0
+    assert size <= 128

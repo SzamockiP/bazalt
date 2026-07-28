@@ -829,6 +829,72 @@ class CommandBuffer:
         used, so apps that don't time pay nothing."""
         ...
 
+    def label(self, name: str) -> LabelScope:
+        """Name a scope so a capture reads as a frame instead of a list of draws:
+
+            with cmd.label("shadow pass"):
+                with cmd.rendering(shadow_target):
+                    ...
+
+        Labels nest. A no-op without VK_EXT_debug_utils — which bazalt requests
+        only when validation is on — so a release run pays nothing and simply
+        shows no labels. Object names (name= on create_buffer / create_image /
+        the pipeline builders) answer "which object"; this answers "which pass"."""
+        ...
+
+    def begin_label(self, name: str) -> CommandBuffer:
+        """The explicit half of label(). Prefer the `with` form, which cannot
+        leave a label open."""
+        ...
+
+    def end_label(self) -> CommandBuffer:
+        """Close the innermost open label. An unbalanced call is ignored rather
+        than recorded: ending a label that was never begun is undefined
+        behaviour in Vulkan."""
+        ...
+
+    def occlusion_query(self) -> OcclusionQuery:
+        """Count the fragments of the draws inside the scope that passed the
+        depth and stencil tests:
+
+            with cmd.rendering(target):
+                with cmd.occlusion_query() as q:
+                    cmd.bind_pipeline(bounding_box).draw(36)
+            ctx.submit(cmd)
+            visible = q.samples > 0
+
+        The handle is the identity, exactly as for timer(). Must sit inside a
+        rendering scope — Vulkan requires the query to begin and end within one
+        render pass — and raises ResourceError otherwise.
+
+        The count is not requested as precise, because precision needs the
+        occlusionQueryPrecise feature and without it the spec allows any non-zero
+        value. Treat `samples` as "how much, roughly", and `samples > 0` as the
+        reliable part."""
+        ...
+
+class LabelScope:
+    """Returned by CommandBuffer.label(); use it in a `with` statement."""
+
+    def __enter__(self) -> CommandBuffer: ...
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
+
+class OcclusionQuery:
+    """An occlusion query handle from CommandBuffer.occlusion_query(). Usable as
+    a context manager or stopped by hand (q.stop())."""
+
+    def stop(self) -> None:
+        """End the query. Idempotent; called for you on `with` exit."""
+        ...
+    @property
+    def samples(self) -> Optional[int]:
+        """Fragments that passed the depth and stencil tests, or None if the
+        command buffer was re-recorded since (the handle is stale) or the submit
+        has not completed (a blocking headless submit always has)."""
+        ...
+    def __enter__(self) -> OcclusionQuery: ...
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
+
 class RenderingScope:
     """Returned by CommandBuffer.rendering(); use it in a `with` statement."""
 
@@ -918,6 +984,26 @@ class Window:
     def width(self) -> int: ...
     @property
     def height(self) -> int: ...
+
+class MemoryStats:
+    """GPU memory as VMA sees it, from Context.memory_stats(). Bytes, not
+    megabytes: a rounded number cannot be un-rounded."""
+
+    @property
+    def used(self) -> int:
+        """Bytes VMA has allocated for this Context's resources."""
+        ...
+    @property
+    def reserved(self) -> int:
+        """Bytes VMA has reserved from the driver. Always >= used: VMA
+        sub-allocates out of larger blocks, so a freed resource does not
+        immediately give memory back to the driver."""
+        ...
+    @property
+    def budget(self) -> int:
+        """Bytes the driver says this process may use. Not the same as the card's
+        capacity — it accounts for whatever else is running."""
+        ...
 
 class Device:
     """One GPU this machine can offer, as inert data — no live Vulkan handle.
@@ -1069,6 +1155,20 @@ class Context:
     def auto_barriers(self) -> bool: ...
     @property
     def shader_printf(self) -> bool: ...
+    @property
+    def subgroup_size(self) -> int:
+        """The width this GPU runs shader subgroups at, or 0 where the driver
+        reports none. A compute reduction using subgroupAdd sizes its workgroup
+        against this."""
+        ...
+
+    def memory_stats(self) -> MemoryStats:
+        """How much GPU memory this Context holds, and how much room is left.
+
+        VMA already keeps the numbers, so this is a read, not new bookkeeping.
+        Summed across heaps — which heap an allocation lands in is a driver
+        decision, and "am I growing" is the question this answers."""
+        ...
 
     def begin_frame(self) -> None:
         """Open one logical frame — the frame verb of a windowed loop.

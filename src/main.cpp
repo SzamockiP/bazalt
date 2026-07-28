@@ -667,6 +667,35 @@ struct Timer
     }
 };
 
+// The state behind `with cmd.label("shadow pass"):`. Same shape as
+// RenderingScope: a plain struct bound only for its dunders, over verbs that
+// stay public.
+struct LabelScope
+{
+    std::shared_ptr<CommandBuffer> cmd;
+    std::string name;
+};
+
+// An occlusion query handle. Same contract as Timer, deliberately: the handle IS
+// the identity, it is closed by stop() or by a `with`, and the result is read
+// off itself. Holds the command buffer alive so the query pool outlives it.
+struct OcclusionQuery
+{
+    std::shared_ptr<CommandBuffer> cmd;
+    std::size_t index = 0;
+    std::uint64_t generation = 0;
+    bool stopped = false;
+
+    void stop()
+    {
+        if (!stopped)
+        {
+            cmd->stop_occlusion_query(index); // idempotent: ending twice is UB
+            stopped = true;
+        }
+    }
+};
+
 // Readback shaped for numpy: (h, w, channels) — or (h, w) for single-channel
 // formats — with the dtype the format table dictates. Shared by Image.read and
 // RenderTarget.read_pixels.
@@ -1431,6 +1460,39 @@ PYBIND11_MODULE(_core, m)
                 const std::uint64_t generation = self->recording_generation();
                 return std::make_shared<Timer>(Timer{std::move(self), index, generation, false});
             })
+        // A named scope in a capture. `with cmd.label("shadow pass"):` is the
+        // form to use; begin_label/end_label stay public for the rare recording
+        // built without a with-block, and end_label ignores an unbalanced close.
+        .def(
+            "label",
+            [](std::shared_ptr<CommandBuffer> self, std::string name)
+            { return LabelScope{std::move(self), std::move(name)}; },
+            py::arg("name"))
+        .def(
+            "begin_label",
+            [](std::shared_ptr<CommandBuffer> self, const std::string& name)
+            {
+                self->begin_label(name);
+                return self;
+            },
+            py::arg("name"))
+        .def(
+            "end_label",
+            [](std::shared_ptr<CommandBuffer> self)
+            {
+                self->end_label();
+                return self;
+            })
+        // Occlusion query: counts the fragments of the draws inside it that
+        // passed the depth and stencil tests. Must sit inside a rendering scope.
+        .def(
+            "occlusion_query",
+            [](std::shared_ptr<CommandBuffer> self)
+            {
+                auto index = unwrap(self->start_occlusion_query(), nullptr);
+                const std::uint64_t generation = self->recording_generation();
+                return std::make_shared<OcclusionQuery>(OcclusionQuery{std::move(self), index, generation, false});
+            })
         // The no-argument versions are gone: begin_rendering emits a full-target
         // viewport and scissor itself. These remain for split-screen and similar.
         .def(
@@ -1640,6 +1702,36 @@ PYBIND11_MODULE(_core, m)
                 return false; // never swallow exceptions
             });
 
+    py::class_<LabelScope>(m, "LabelScope")
+        .def(
+            "__enter__",
+            [](LabelScope& self)
+            {
+                self.cmd->begin_label(self.name);
+                return self.cmd;
+            })
+        .def(
+            "__exit__",
+            [](LabelScope& self, py::object, py::object, py::object)
+            {
+                self.cmd->end_label();
+                return false; // never swallow exceptions
+            });
+
+    py::class_<OcclusionQuery, std::shared_ptr<OcclusionQuery>>(m, "OcclusionQuery")
+        .def("stop", [](OcclusionQuery& self) { self.stop(); })
+        .def("__enter__", [](std::shared_ptr<OcclusionQuery> self) { return self; })
+        .def(
+            "__exit__",
+            [](OcclusionQuery& self, py::object, py::object, py::object)
+            {
+                self.stop();
+                return false; // never swallow exceptions
+            })
+        .def_property_readonly(
+            "samples",
+            [](const OcclusionQuery& self) { return self.cmd->read_occlusion_query(self.index, self.generation); });
+
     py::class_<Timer, std::shared_ptr<Timer>>(m, "Timer")
         .def("stop", [](Timer& self) { self.stop(); })
         .def("__enter__", [](std::shared_ptr<Timer> self) { return self; })
@@ -1771,6 +1863,26 @@ PYBIND11_MODULE(_core, m)
         "Every GPU on this machine, without creating a Context. Pass one to\n"
         "Context(device=...) to run on it; the default picks automatically.");
 
+    // Read-only data, so plain attributes: nothing here is a handle and there is
+    // nothing to keep alive. Bytes rather than megabytes, because a rounded
+    // number cannot be un-rounded and "is it growing" is the question this
+    // answers.
+    py::class_<Context::MemoryStats>(m, "MemoryStats")
+        .def_readonly("used", &Context::MemoryStats::used)
+        .def_readonly("reserved", &Context::MemoryStats::reserved)
+        .def_readonly("budget", &Context::MemoryStats::budget)
+        .def(
+            "__repr__",
+            [](const Context::MemoryStats& self)
+            {
+                constexpr double mb = 1024.0 * 1024.0;
+                return std::format(
+                    "MemoryStats(used={:.1f} MB, reserved={:.1f} MB, budget={:.1f} MB)",
+                    static_cast<double>(self.used) / mb,
+                    static_cast<double>(self.reserved) / mb,
+                    static_cast<double>(self.budget) / mb);
+            });
+
     py::class_<Context, std::shared_ptr<Context>>(m, "Context")
         .def(
             py::init(
@@ -1841,6 +1953,8 @@ PYBIND11_MODULE(_core, m)
             py::arg("shader_printf") = false)
         .def_property_readonly("auto_barriers", &Context::auto_barriers)
         .def_property_readonly("shader_printf", &Context::shader_printf)
+        .def("memory_stats", &Context::memory_stats)
+        .def_property_readonly("subgroup_size", &Context::subgroup_size)
         .def_property_readonly("frames_in_flight", &Context::frames_in_flight)
         // The frame verb of a windowed loop: opens one logical frame for every
         // window on this Context. Advances the ring slot that CommandBuffer,
