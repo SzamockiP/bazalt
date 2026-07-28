@@ -318,3 +318,64 @@ def test_subgroup_size_is_a_power_of_two(ctx):
     size = ctx.subgroup_size
     assert size == 0 or (size & (size - 1)) == 0
     assert size <= 128
+
+
+def test_renderer_read_pixels_captures_the_frame(ctx):
+    """A screenshot of a window. Only offscreen targets could be read back
+    before 0.18, so a windowed prototype could not save the picture it drew —
+    the one thing a prototype exists to do.
+
+    Two calls on purpose. A presentable image may only be touched between
+    acquire and present, so "read the last frame" is illegal by the spec and the
+    validation layer says so. present(capture=True) records the copy into the
+    frame's own submit; read_pixels() collects it.
+
+    Needs a display, so CI skips it. The channel order is asserted because it is
+    the part that varies per machine: most compositors hand out BGRA, and
+    out[y, x, 0] has to mean red anyway.
+    """
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    try:
+        window = bz.Window(64, 64, "bazalt read_pixels")
+    except bz.WindowError:
+        pytest.skip("no display available")
+
+    renderer = None
+    try:
+        renderer = bz.SwapchainRenderer(window, ctx)
+        vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+        frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
+        pipeline = (ctx.graphics_pipeline()
+                    .vertex_shader(vert)
+                    .fragment_shader(frag)
+                    .build(renderer))
+
+        # Nothing captured yet, and saying so beats handing back an empty buffer.
+        with pytest.raises(bz.ResourceError):
+            renderer.read_pixels()
+
+        drawn = False
+        for _ in range(3):
+            bz.poll_events()
+            ctx.begin_frame()
+            if not renderer.acquire():
+                continue
+            cmd = ctx.create_command_buffer()
+            cmd.begin()
+            with cmd.rendering(renderer, clear_color=[0, 0, 0, 1]):
+                cmd.bind_pipeline(pipeline).draw(3)
+            renderer.present(cmd, capture=True)
+            drawn = True
+
+        if not drawn:
+            pytest.skip("the window never produced a frame")
+
+        shot = renderer.read_pixels()
+        assert shot.shape == (renderer.height, renderer.width, 4)
+        assert shot[shot.shape[0] // 2, shot.shape[1] // 2, 0] > 200, "expected red"
+        assert shot[shot.shape[0] // 2, shot.shape[1] // 2, 1] < 60
+    finally:
+        renderer = None
+        window = None
+        gc.collect()

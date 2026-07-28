@@ -415,7 +415,14 @@ namespace
     // Reset, begin, replay and end the per-frame VkCommandBuffer. Shared by the
     // swapchain and headless submit paths, which only differ in what happens to
     // the recorded buffer afterwards.
-    VkCommandBuffer record_frame(CommandBuffer& cmd, const Context& ctx, TimestampRange ts = {})
+    // `capture_into` is the renderer that wants a copy of its presentable image
+    // this frame, or null. It records inside this command buffer because that is
+    // the only place the image is legally ours (see SwapchainRenderer::read_pixels).
+    VkCommandBuffer record_frame(
+        CommandBuffer& cmd,
+        const Context& ctx,
+        TimestampRange ts = {},
+        SwapchainRenderer* capture_into = nullptr)
     {
         const VolkDeviceTable& vk = ctx.vk();
         const std::uint32_t frame_index = ctx.frame_index();
@@ -443,6 +450,13 @@ namespace
 
         cmd.execute(vkCmd, FrameContext{frame_index, &vk});
 
+        // After the recording, so the copy sees the finished frame; before the
+        // closing timestamp, so the capture's cost is visible in gpu_time_ms.
+        if (capture_into)
+        {
+            capture_into->record_capture(vkCmd);
+        }
+
         if (ts.pool != VK_NULL_HANDLE)
         {
             vk.vkCmdWriteTimestamp(vkCmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, ts.pool, ts.first + 1);
@@ -457,14 +471,143 @@ namespace
     }
 
 } // namespace
-void SwapchainRenderer::present(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial)
+// Records the frame's own copy of the presentable image into a host-visible
+// buffer. Runs inside record_frame, i.e. between acquire and present, which is
+// the only window in which touching a presentable image is legal at all.
+void SwapchainRenderer::record_capture(VkCommandBuffer cmd)
+{
+    if (!supports_readback_)
+    {
+        return;
+    }
+    const VkExtent2D extent = swapchain_extent_;
+    const VkDeviceSize needed = static_cast<VkDeviceSize>(extent.width) * extent.height * 4;
+    if (capture_buffer_ == VK_NULL_HANDLE || capture_size_ < needed)
+    {
+        if (capture_buffer_ != VK_NULL_HANDLE)
+        {
+            // Deferred: a previous frame's copy may still be in flight.
+            context_->defer_destroy(
+                [allocator = context_->allocator(), buffer = capture_buffer_, alloc = capture_alloc_]
+                { vmaDestroyBuffer(allocator, buffer, alloc); });
+            capture_buffer_ = VK_NULL_HANDLE;
+        }
+        VkBufferCreateInfo bufferInfo{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .size = needed,
+            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr};
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
+        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+        if (vmaCreateBuffer(
+                context_->allocator(), &bufferInfo, &allocInfo, &capture_buffer_, &capture_alloc_, nullptr) !=
+            VK_SUCCESS)
+        {
+            capture_buffer_ = VK_NULL_HANDLE;
+            return;
+        }
+        capture_size_ = needed;
+    }
+
+    VkImage source = swapchain_images_[image_index_];
+    // end_rendering has already retired it to PRESENT_SRC, and it goes back
+    // there: the compositor takes it from that layout a moment later.
+    record_image_transition(
+        context_->vk(),
+        cmd,
+        source,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+    VkBufferImageCopy region{
+        .bufferOffset = 0,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {extent.width, extent.height, 1}};
+    context_->vk().vkCmdCopyImageToBuffer(
+        cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, capture_buffer_, 1, &region);
+
+    record_image_transition(
+        context_->vk(),
+        cmd,
+        source,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        VK_ACCESS_TRANSFER_READ_BIT,
+        VK_ACCESS_MEMORY_READ_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+
+    capture_extent_ = extent;
+    capture_slot_ = current_frame();
+    captured_ = true;
+}
+
+std::expected<std::vector<std::byte>, Error> SwapchainRenderer::read_pixels()
+{
+    if (!supports_readback_)
+    {
+        return std::unexpected(err_resource(
+            "renderer.read_pixels(): this surface does not allow the swapchain images to be copied "
+            "from (the compositor refused VK_IMAGE_USAGE_TRANSFER_SRC_BIT). Render into a "
+            "bz.RenderTarget and read that instead."));
+    }
+    if (!captured_ || capture_buffer_ == VK_NULL_HANDLE)
+    {
+        return std::unexpected(err_resource(
+            "renderer.read_pixels(): no frame has been captured. Ask for one with "
+            "renderer.present(cmd, capture=True) — a presentable image may only be copied while it "
+            "is acquired, so the copy has to ride that frame's own submit."));
+    }
+
+    // The copy is part of that frame's submit, so this is where it is waited on.
+    context_->vk().vkWaitForFences(context_->device(), 1, &in_flight_fences_[capture_slot_], VK_TRUE, UINT64_MAX);
+
+    const std::size_t size = static_cast<std::size_t>(capture_extent_.width) * capture_extent_.height * 4;
+    std::vector<std::byte> out(size);
+    void* mapped = nullptr;
+    if (auto e = check(
+            vmaMapMemory(context_->allocator(), capture_alloc_, &mapped),
+            "map the swapchain capture buffer",
+            ErrorCode::Resource))
+    {
+        return std::unexpected(*e);
+    }
+    std::memcpy(out.data(), mapped, size);
+    vmaUnmapMemory(context_->allocator(), capture_alloc_);
+
+    // BGRA is what most compositors hand out. Swapping here keeps the channel
+    // order one thing rather than a property of the machine, so out[y, x, 0] is
+    // red everywhere.
+    if (swapchain_format_ == VK_FORMAT_B8G8R8A8_UNORM || swapchain_format_ == VK_FORMAT_B8G8R8A8_SRGB)
+    {
+        for (std::size_t i = 0; i + 2 < out.size(); i += 4)
+        {
+            std::swap(out[i], out[i + 2]);
+        }
+    }
+    return out;
+}
+
+void SwapchainRenderer::present(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial, bool capture)
 {
     TimestampRange ts{};
     if (timestamps_supported())
     {
         ts = {timestamp_pool(), 2 * current_frame()};
     }
-    end_frame(record_frame(*cmd, *context(), ts), upload_wait_serial);
+    end_frame(record_frame(*cmd, *context(), ts, capture ? this : nullptr), upload_wait_serial);
     if (timestamps_supported())
     {
         // The slot now holds results acquire() can read once its fence signals.
@@ -498,7 +641,10 @@ std::expected<std::uint64_t, Error> require_uploads_resident(CommandBuffer& cmd)
 
 // The Python-facing present(): everything acquire() promised must still hold,
 // and every image this recording samples has to be at least submitted.
-std::expected<void, Error> present_command_buffer(SwapchainRenderer& renderer, std::shared_ptr<CommandBuffer> cmd)
+std::expected<void, Error> present_command_buffer(
+    SwapchainRenderer& renderer,
+    std::shared_ptr<CommandBuffer> cmd,
+    bool capture)
 {
     if (auto r = renderer.check_presentable(); !r)
     {
@@ -516,7 +662,7 @@ std::expected<void, Error> present_command_buffer(SwapchainRenderer& renderer, s
     {
         return std::unexpected(upload_wait_serial.error());
     }
-    renderer.present(std::move(cmd), *upload_wait_serial);
+    renderer.present(std::move(cmd), *upload_wait_serial, capture);
     return {};
 }
 
@@ -699,26 +845,99 @@ struct OcclusionQuery
 // Readback shaped for numpy: (h, w, channels) — or (h, w) for single-channel
 // formats — with the dtype the format table dictates. Shared by Image.read and
 // RenderTarget.read_pixels.
-py::array image_to_numpy(Image& image)
+py::array image_to_numpy(Image& image, std::uint32_t layer = 0, std::uint32_t mip = 0)
 {
-    auto bytes = unwrap(image.read(), nullptr);
+    auto bytes = unwrap(image.read(/*all_layers=*/false, layer, mip), nullptr);
     const FormatInfo info = format_info(image.format());
+    // The shape follows the MIP, not the image: level 2 of a 64x64 texture is
+    // 16x16, and returning a 64x64 array with a quarter of it filled would be a
+    // shape the caller has to correct for.
+    const auto h = static_cast<py::ssize_t>(mip_extent(image.height(), mip));
+    const auto w = static_cast<py::ssize_t>(mip_extent(image.width(), mip));
 
     std::vector<py::ssize_t> shape;
     if (info.channels == 1)
     {
-        shape = {static_cast<py::ssize_t>(image.height()), static_cast<py::ssize_t>(image.width())};
+        shape = {h, w};
     }
     else
     {
-        shape = {
-            static_cast<py::ssize_t>(image.height()),
-            static_cast<py::ssize_t>(image.width()),
-            static_cast<py::ssize_t>(info.channels)};
+        shape = {h, w, static_cast<py::ssize_t>(info.channels)};
     }
 
     py::array out(py::dtype(info.numpy_dtype), shape);
     std::memcpy(out.mutable_data(), bytes.data(), bytes.size());
+    return out;
+}
+
+// The pixels of one update, validated against the image and packed tightly.
+//
+// Everything that can be wrong with the caller's array is decided HERE, on the
+// main thread with the GIL held, so the worker never has to report a user error
+// from a thread that cannot raise. `memcpy` ignores strides, so a non-contiguous
+// array is refused with the fix rather than uploaded as garbage — the same rule
+// create_image has followed since 0.4.
+std::vector<std::byte> update_pixels_from_numpy(
+    Image& image,
+    const py::array& array,
+    std::uint32_t width,
+    std::uint32_t height)
+{
+    const FormatInfo info = format_info(image.format());
+    if (info.numpy_dtype[0] == '\0')
+    {
+        throw py::value_error(
+            std::format(
+                "update() is not available for {}: the format packs several values into one texel, "
+                "so no array describes it",
+                format_name(image.format())));
+    }
+    if (!(array.flags() & py::array::c_style))
+    {
+        throw py::value_error(
+            "update(): the array must be C-contiguous (a copy is not made silently, because a "
+            "strided array would upload garbage). Use numpy.ascontiguousarray(a).");
+    }
+    if (!array.dtype().is(py::dtype(info.numpy_dtype)))
+    {
+        throw py::value_error(
+            std::format(
+                "update(): this image is {}, so the array must have dtype {}, not {}",
+                format_name(image.format()),
+                info.numpy_dtype,
+                py::str(array.dtype()).cast<std::string>()));
+    }
+
+    const py::ssize_t expected_h = static_cast<py::ssize_t>(height);
+    const py::ssize_t expected_w = static_cast<py::ssize_t>(width);
+    const py::ssize_t ndim = array.ndim();
+    const bool shape_ok =
+        info.channels == 1
+            ? ((ndim == 2 && array.shape(0) == expected_h && array.shape(1) == expected_w) ||
+               (ndim == 3 && array.shape(0) == expected_h && array.shape(1) == expected_w && array.shape(2) == 1))
+            : (ndim == 3 && array.shape(0) == expected_h && array.shape(1) == expected_w &&
+               array.shape(2) == static_cast<py::ssize_t>(info.channels));
+    if (!shape_ok)
+    {
+        std::string got;
+        for (py::ssize_t i = 0; i < ndim; ++i)
+        {
+            got += (i ? ", " : "") + std::to_string(array.shape(i));
+        }
+        throw py::value_error(
+            std::format(
+                "update(): expected an array of shape ({}, {}, {}) for a {} region of a {} image, got ({})",
+                height,
+                width,
+                info.channels,
+                format_name(image.format()),
+                format_name(image.format()),
+                got));
+    }
+
+    const std::size_t size = static_cast<std::size_t>(width) * height * info.bytes_per_pixel;
+    std::vector<std::byte> out(size);
+    std::memcpy(out.data(), array.data(), size);
     return out;
 }
 
@@ -1016,21 +1235,30 @@ PYBIND11_MODULE(_core, m)
         .def_readonly("scroll_dy", &MouseState::scroll_dy);
 
     py::class_<Buffer, std::shared_ptr<Buffer>>(m, "Buffer")
+        // offset= is a byte offset into the buffer. Without it, changing one
+        // matrix of an instance array rewrites the whole array — the update is
+        // already the per-frame path, so the wasted copy is per frame too.
         .def(
             "update",
-            [](Buffer& buffer, std::string_view data)
-            { unwrap(buffer.update(std::as_bytes(std::span(data.data(), data.size()))), nullptr); })
+            [](Buffer& buffer, std::string_view data, size_t offset)
+            { unwrap(buffer.update(std::as_bytes(std::span(data.data(), data.size())), offset), nullptr); },
+            py::arg("data"),
+            py::kw_only(),
+            py::arg("offset") = 0)
         .def(
             "update",
-            [](Buffer& buffer, py::buffer b)
+            [](Buffer& buffer, py::buffer b, size_t offset)
             {
                 py::buffer_info info = b.request();
                 const size_t nbytes = contiguous_nbytes(info, "Buffer.update");
-                unwrap(buffer.update({static_cast<const std::byte*>(info.ptr), nbytes}), nullptr);
-            })
+                unwrap(buffer.update({static_cast<const std::byte*>(info.ptr), nbytes}, offset), nullptr);
+            },
+            py::arg("data"),
+            py::kw_only(),
+            py::arg("offset") = 0)
         .def(
             "update",
-            [](Buffer& buffer, py::list list, std::optional<DataType> dataType)
+            [](Buffer& buffer, py::list list, std::optional<DataType> dataType, size_t offset)
             {
                 if (list.empty())
                     return;
@@ -1039,10 +1267,12 @@ PYBIND11_MODULE(_core, m)
                     list,
                     actualType,
                     [&](const void* data, size_t nbytes)
-                    { unwrap(buffer.update({static_cast<const std::byte*>(data), nbytes}), nullptr); });
+                    { unwrap(buffer.update({static_cast<const std::byte*>(data), nbytes}, offset), nullptr); });
             },
             py::arg("list"),
-            py::arg("data_type") = py::none())
+            py::arg("data_type") = py::none(),
+            py::kw_only(),
+            py::arg("offset") = 0)
         // dtype is mandatory: buffers carry no format (unlike Images), so the
         // caller has to say how to interpret the bytes.
         .def(
@@ -1101,7 +1331,95 @@ PYBIND11_MODULE(_core, m)
                 }
                 unwrap(std::move(r), nullptr);
             })
-        .def("read", [](Image& self) -> py::array { return image_to_numpy(self); });
+        .def(
+            "read",
+            [](Image& self, std::uint32_t layer, std::uint32_t mip) -> py::array
+            { return image_to_numpy(self, layer, mip); },
+            py::kw_only(),
+            py::arg("layer") = 0,
+            py::arg("mip") = 0)
+        // Change the pixels of an image that already exists. See the stub for
+        // the why; the work here is deciding every user error on the main
+        // thread, because the worker cannot raise.
+        .def(
+            "update",
+            [](std::shared_ptr<Image> self,
+               const py::array& array,
+               std::uint32_t layer,
+               std::uint32_t mip,
+               const py::object& region)
+            {
+                Context* context = const_cast<Context*>(self->owner());
+                if (!context)
+                {
+                    throw py::value_error("update(): this image has no Context");
+                }
+                if (self->samples() != 1)
+                {
+                    throw py::value_error(
+                        "update(): a multisampled image cannot be uploaded to; it is rendered "
+                        "into and resolved out");
+                }
+                if (layer >= self->array_layers())
+                {
+                    throw py::value_error(
+                        std::format("update(layer={}): this image has {} layer(s)", layer, self->array_layers()));
+                }
+                if (mip >= self->mip_levels())
+                {
+                    throw py::value_error(
+                        std::format("update(mip={}): this image has {} mip level(s)", mip, self->mip_levels()));
+                }
+
+                const std::uint32_t level_w = mip_extent(self->width(), mip);
+                const std::uint32_t level_h = mip_extent(self->height(), mip);
+                std::uint32_t x = 0, y = 0, w = level_w, h = level_h;
+                if (!region.is_none())
+                {
+                    py::sequence seq = py::cast<py::sequence>(region);
+                    if (py::len(seq) != 4)
+                    {
+                        throw py::value_error("update(region=): expected (x, y, width, height)");
+                    }
+                    x = py::cast<std::uint32_t>(seq[0]);
+                    y = py::cast<std::uint32_t>(seq[1]);
+                    w = py::cast<std::uint32_t>(seq[2]);
+                    h = py::cast<std::uint32_t>(seq[3]);
+                    if (w == 0 || h == 0 || x + w > level_w || y + h > level_h)
+                    {
+                        throw py::value_error(
+                            std::format(
+                                "update(region=({}, {}, {}, {})): does not fit in the {}x{} of mip {}",
+                                x,
+                                y,
+                                w,
+                                h,
+                                level_w,
+                                level_h,
+                                mip));
+                    }
+                }
+
+                std::vector<std::byte> pixels = update_pixels_from_numpy(*self, array, w, h);
+
+                if (!context->upload_manager())
+                {
+                    context->set_upload_manager(std::make_unique<UploadManager>(*context));
+                }
+                auto* manager = static_cast<UploadManager*>(context->upload_manager());
+                manager->update(
+                    std::move(self),
+                    std::move(pixels),
+                    layer,
+                    mip,
+                    VkOffset2D{static_cast<std::int32_t>(x), static_cast<std::int32_t>(y)},
+                    VkExtent2D{w, h});
+            },
+            py::arg("array"),
+            py::kw_only(),
+            py::arg("layer") = 0,
+            py::arg("mip") = 0,
+            py::arg("region") = py::none());
 
     // name is readable because it accumulates: the cache shares one sampler
     // between identical descriptions, so what the object is called is the list
@@ -2147,6 +2465,34 @@ PYBIND11_MODULE(_core, m)
             py::arg("source") = py::none(),
             py::arg("include_dirs") = py::tuple(),
             py::arg("entry_point") = "")
+        // Encoded bytes instead of a path: a PNG off the network, out of a zip,
+        // or straight from PIL. Everything after the decode is the file path's
+        // path, hot reload excepted — bazalt has nothing to watch.
+        //
+        // MUST be declared before the `str` overload would see it: pybind
+        // converts both str and bytes to std::string, so a py::bytes argument
+        // would otherwise arrive at the path overload and be reported as a
+        // missing file. Same ordering trap as compile_shader(source=) in 0.16.
+        .def(
+            "load_image",
+            [](Context& self, const py::bytes& blob, bool mipmaps, const std::string& name) -> py::object
+            {
+                if (!self.upload_manager())
+                {
+                    self.set_upload_manager(std::make_unique<UploadManager>(self));
+                }
+                auto* manager = static_cast<UploadManager*>(self.upload_manager());
+                const std::string_view view = blob;
+                std::vector<std::byte> bytes(view.size());
+                std::memcpy(bytes.data(), view.data(), view.size());
+                auto image = unwrap(manager->load_memory(std::move(bytes), mipmaps), self.logger().get());
+                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                return py::cast(image);
+            },
+            py::arg("data"),
+            py::kw_only(),
+            py::arg("mipmaps") = true,
+            py::arg("name") = "")
         .def(
             "load_image",
             [](Context& self, const std::string& path, bool mipmaps, const std::string& name) -> py::object
@@ -2400,9 +2746,6 @@ PYBIND11_MODULE(_core, m)
             "create_image",
             [](Context& self, std::shared_ptr<Image> source, std::string name) -> py::object
             {
-                // ponytail: mip >0 content is regenerated here, not copied — a
-                // hand-authored mip chain (rendered per level) flattens to
-                // generated ones. Per-mip readback if that ever matters.
                 const bool mipmaps = source->mip_levels() > 1;
                 const std::uint32_t layers = source->array_layers();
                 std::expected<std::vector<std::byte>, Error> bytes;
@@ -2433,6 +2776,47 @@ PYBIND11_MODULE(_core, m)
                               Image::create_from_pixels(
                                   self, pixels.data(), source->width(), source->height(), source->format(), mipmaps),
                               self.logger().get());
+
+                // Levels above 0 arrive from the SOURCE rather than being
+                // regenerated here. 0.15 shipped the regenerating version and
+                // recorded the loss as a ceiling: "a hand-authored mip chain
+                // flattens into a generated one", which is a silent, plausible
+                // wrong answer for anyone who rendered their own levels (a
+                // roughness-prefiltered environment map is exactly that).
+                //
+                // One readback per (layer, mip) and one update each. Slow, and
+                // deliberately so: the whole overload is already documented as a
+                // setup step that blocks the source queue, and correct data
+                // beats fast wrong data at setup time.
+                const std::uint32_t shared_mips = (std::ranges::min)(source->mip_levels(), image->mip_levels());
+                if (shared_mips > 1)
+                {
+                    if (!self.upload_manager())
+                    {
+                        self.set_upload_manager(std::make_unique<UploadManager>(self));
+                    }
+                    auto* manager = static_cast<UploadManager*>(self.upload_manager());
+                    for (std::uint32_t mip = 1; mip < shared_mips; ++mip)
+                    {
+                        const std::uint32_t w = mip_extent(source->width(), mip);
+                        const std::uint32_t h = mip_extent(source->height(), mip);
+                        for (std::uint32_t layer = 0; layer < layers; ++layer)
+                        {
+                            std::expected<std::vector<std::byte>, Error> level;
+                            {
+                                py::gil_scoped_release release;
+                                level = source->read(/*all_layers=*/false, layer, mip);
+                            }
+                            manager->update(
+                                image,
+                                unwrap(std::move(level), self.logger().get()),
+                                layer,
+                                mip,
+                                VkOffset2D{0, 0},
+                                VkExtent2D{w, h});
+                        }
+                    }
+                }
                 name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
                 return py::cast(image);
             },
@@ -2766,18 +3150,20 @@ PYBIND11_MODULE(_core, m)
             })
         .def(
             "present",
-            [](SwapchainRenderer& self, std::shared_ptr<CommandBuffer> cmd)
+            [](SwapchainRenderer& self, std::shared_ptr<CommandBuffer> cmd, bool capture)
             {
                 require_same_context(self.owner(), cmd->owner(), "present");
                 std::expected<void, Error> r;
                 {
                     // May CPU-wait for an upload still decoding — release the GIL.
                     py::gil_scoped_release release;
-                    r = present_command_buffer(self, std::move(cmd));
+                    r = present_command_buffer(self, std::move(cmd), capture);
                 }
                 unwrap(std::move(r), nullptr);
             },
-            py::arg("cmd"))
+            py::arg("cmd"),
+            py::kw_only(),
+            py::arg("capture") = false)
         // float milliseconds, or None until the ring has cycled once / on
         // devices without timestamp support. Per renderer, because the timestamp
         // pool is: two windows have two GPU frame times.
@@ -2787,6 +3173,29 @@ PYBIND11_MODULE(_core, m)
             {
                 auto ms = r.gpu_time_ms();
                 return ms ? py::cast(*ms) : py::none();
+            })
+        // The frame asked for with present(capture=True). RGBA8 whatever channel
+        // order the compositor picked, so out[y, x, 0] is red on every machine.
+        // Shaped from the CAPTURE extent, not the current one: the window may
+        // have been resized since.
+        .def(
+            "read_pixels",
+            [](SwapchainRenderer& self) -> py::array
+            {
+                std::expected<std::vector<std::byte>, Error> bytes;
+                {
+                    // Waits on the capturing frame's fence.
+                    py::gil_scoped_release release;
+                    bytes = self.read_pixels();
+                }
+                auto data = unwrap(std::move(bytes), nullptr);
+                const std::vector<py::ssize_t> shape{
+                    static_cast<py::ssize_t>(self.capture_extent().height),
+                    static_cast<py::ssize_t>(self.capture_extent().width),
+                    4};
+                py::array out(py::dtype("uint8"), shape);
+                std::memcpy(out.mutable_data(), data.data(), data.size());
+                return out;
             })
         .def_property_readonly("width", [](const SwapchainRenderer& r) { return r.extent().width; })
         .def_property_readonly("height", [](const SwapchainRenderer& r) { return r.extent().height; });

@@ -307,16 +307,21 @@ class WindowMode(IntEnum):
 # ── Resources ──────────────────────────────────────────────────────────
 
 class Buffer:
-    def update(self, data: bytes) -> None: ...
-    def update(self, array: Any) -> None:
+    def update(self, data: bytes, *, offset: int = 0) -> None: ...
+    def update(self, array: Any, *, offset: int = 0) -> None:
         """Upload from any C-contiguous buffer-protocol object.
+
+        offset is a BYTE offset into the buffer. Without it, changing one matrix
+        of an instance array rewrites the whole array, and update() is already
+        the per-frame path, so the wasted copy is per frame too.
 
         Raises ResourceError for a strided view (`arr.T`, `arr[::2]`): copying
         silently would hide an allocation on every upload. Pass
         `numpy.ascontiguousarray(arr)` to be explicit.
         """
         ...
-    def update(self, list: list, data_type: Optional[DataType] = None) -> None: ...
+    def update(self, list: list, data_type: Optional[DataType] = None, *,
+               offset: int = 0) -> None: ...
 
     def read(self, dtype: Any) -> Any:
         """Copy the buffer back to host memory as a 1-D numpy array.
@@ -392,15 +397,48 @@ class Image:
         """
         ...
 
-    def read(self) -> Any:
-        """Copy mip 0 back to host memory as a numpy array (layer 0 for a
-        texture array / cubemap — sample the other layers to inspect them).
+    def read(self, *, layer: int = 0, mip: int = 0) -> Any:
+        """Copy one subresource back to host memory as a numpy array.
 
         Shape is (height, width, channels) — or (height, width) for
         single-channel formats — and the dtype follows the format (uint8,
         float16 or float32). Blocking; a debugging and test path.
 
-        Raises ResourceError if the image has no contents yet.
+        layer picks a cube face or array slice, mip picks a level, and the shape
+        follows the MIP: level 2 of a 64x64 texture reads back 16x16. Before
+        0.18 there was no choice — read() meant mip 0 of layer 0, so a cube face
+        could not be inspected and "did generate_mipmaps compute anything" was a
+        question with no way to ask it.
+
+        Raises ResourceError if the image has no contents yet, or if the layer
+        or mip does not exist.
+        """
+        ...
+
+    def update(self, array: Any, *, layer: int = 0, mip: int = 0,
+               region: Optional[Sequence[int]] = None) -> None:
+        """Change the pixels of an image that already exists.
+
+        A video frame, a camera feed, a matplotlib figure, a procedural texture
+        computed in numpy, painting — before 0.18 every one of them meant
+        creating a new Image per frame, because there was no way to write into
+        one.
+
+        The array's dtype and shape must match the image's format and the region
+        being written, and it must be C-contiguous: memcpy ignores strides, so a
+        transposed or sliced array would upload garbage rather than raise. Use
+        numpy.ascontiguousarray() if needed.
+
+        region=(x, y, width, height) writes a rectangle and leaves the rest
+        alone — what painting and a sprite atlas need. Omitted, the whole level
+        is replaced.
+
+        ASYNCHRONOUS, like load_image: it returns at once and the copy runs on
+        the upload worker, because the case this exists for is a video frame at
+        60 fps. Use img.wait(), img.ready or ctx.wait_for_uploads() to know when
+        it has landed; a submit that samples the image waits for it GPU-side
+        either way. Two updates of one image reach the GPU in the order they
+        were called — one FIFO worker, and that is a guarantee.
         """
         ...
 
@@ -1312,6 +1350,18 @@ class Context:
         """
         ...
 
+    def load_image(self, data: bytes, *, mipmaps: bool = True, name: str = "") -> Image:
+        """Decode encoded image BYTES rather than a file: a PNG off the network,
+        out of a zip, or straight from PIL, none of which has a path on disk.
+
+        Everything after the decode is the file path's path — async, sRGB,
+        mipped by default. Never hot-reloaded, by construction: there is no file
+        for bazalt to watch.
+
+        Raises ResourceError when the bytes are not a decodable image.
+        """
+        ...
+
     def load_image(self, path: str, *, mipmaps: bool = True, name: str = "") -> Image:
         """Decode an image file into an sRGB GPU image, with a full mip chain by
         default (`mipmaps=False` for a single level — e.g. a UI sprite sampled
@@ -1518,13 +1568,32 @@ class SwapchainRenderer(RenderTargetBase):
         """
         ...
 
-    def present(self, cmd: CommandBuffer) -> None:
+    def present(self, cmd: CommandBuffer, *, capture: bool = False) -> None:
         """Record the command buffer for this window, submit it and present.
 
         ResourceError when there is no acquired image — acquire() was not
         called, returned False, or its image was already presented. Each window
         needs its own CommandBuffer: one holds a single command buffer per frame
         slot, so replaying it in two windows would overwrite work in flight.
+
+        capture=True copies this frame's image into a staging buffer as part of
+        the same submit, for read_pixels() to collect. It costs a full-frame copy
+        on the frames that ask and nothing on the ones that do not.
+        """
+        ...
+
+    def read_pixels(self) -> Any:
+        """The frame captured by present(capture=True), as an (h, w, 4) uint8
+        array. Blocks until that frame's submit has finished.
+
+        It takes two calls, and that is not an oversight. A presentable image may
+        only be touched between acquire and present, so reading the LAST frame is
+        illegal by the spec and the validation layer reports it. The copy has to
+        ride the frame's own submit.
+
+        Raises ResourceError when nothing has been captured, or when the
+        compositor refused to let the swapchain images be copied from — render
+        into a bz.RenderTarget and read that instead.
         """
         ...
 

@@ -264,6 +264,12 @@ public:
             context_->vk().vkDestroyQueryPool(context_->device(), timestamp_pool_, nullptr);
         }
 
+        // Direct, not deferred: the wait-idle above proves nothing is reading it.
+        if (capture_buffer_ != VK_NULL_HANDLE)
+        {
+            vmaDestroyBuffer(context_->allocator(), capture_buffer_, capture_alloc_);
+        }
+
         if (depth_image_view_)
         {
             context_->vk().vkDestroyImageView(context_->device(), depth_image_view_, nullptr);
@@ -322,6 +328,7 @@ public:
     {
         return swapchain_image_views_;
     }
+
     VkImage depth_image() const override
     {
         return depth_image_;
@@ -471,7 +478,35 @@ public:
         slot_written_[current_frame()] = true;
     }
 
-    void present(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial = 0);
+    void present(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial = 0, bool capture = false);
+
+    // ── Readback ─────────────────────────────────────────────────────────────
+    //
+    // A screenshot of a window. Only offscreen targets could be read back before
+    // 0.18, so a windowed prototype could not save the picture it was drawing —
+    // the one thing a prototype exists to do.
+    //
+    // It takes TWO calls, and that is not an oversight. A presentable image may
+    // only be touched between vkAcquireNextImageKHR and vkQueuePresentKHR, so
+    // "read the last frame" is illegal by the spec: after present the
+    // compositor owns the image, and the validation layer says so. The copy
+    // therefore rides the frame's OWN submit — present(capture=True) records it
+    // while the image is still ours — and read_pixels() collects the result
+    // afterwards. The frame that captures pays for a copy; every other frame
+    // pays nothing.
+
+    // Records the capture copy into the frame's command buffer. Called by
+    // present() only, and only while the swapchain image is acquired.
+    void record_capture(VkCommandBuffer cmd);
+
+    // The captured frame as RGBA8 bytes. Blocks until that frame's submit has
+    // completed, because the copy is part of it.
+    std::expected<std::vector<std::byte>, Error> read_pixels();
+
+    VkExtent2D capture_extent() const
+    {
+        return capture_extent_;
+    }
 
     // Take the next swapchain image for THIS window, within the frame the
     // Context already opened. True when an image is ready to render into;
@@ -644,6 +679,19 @@ private:
     std::uint64_t acquired_serial_ = 0;
     bool image_acquired_ = false;
 
+    // The capture staging buffer and which frame slot filled it. Allocated on
+    // the first present(capture=True) and reallocated when the window resizes.
+    VkBuffer capture_buffer_ = VK_NULL_HANDLE;
+    VmaAllocation capture_alloc_ = VK_NULL_HANDLE;
+    VkDeviceSize capture_size_ = 0;
+    VkExtent2D capture_extent_{};
+    std::uint32_t capture_slot_ = 0;
+    bool captured_ = false;
+    // Whether the surface let the swapchain carry TRANSFER_SRC. A compositor may
+    // refuse, and a swapchain that fails to create would take the window down,
+    // so the capability is recorded and read_pixels reports it.
+    bool supports_readback_ = false;
+
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
     VkFormat swapchain_format_ = VK_FORMAT_UNDEFINED;
     VkExtent2D swapchain_extent_{};
@@ -789,6 +837,17 @@ private:
             image_count = details.capabilities.maxImageCount;
         }
 
+        // TRANSFER_SRC is what renderer.read_pixels() copies out of, and it is
+        // asked for only where the surface allows it: a compositor is entitled
+        // to refuse, and a swapchain that fails to create takes the window with
+        // it. So the capability is recorded and read_pixels says so instead.
+        supports_readback_ = (details.capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+        VkImageUsageFlags image_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if (supports_readback_)
+        {
+            image_usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        }
+
         VkSwapchainCreateInfoKHR createInfo{
             .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
             .pNext = nullptr,
@@ -799,7 +858,7 @@ private:
             .imageColorSpace = surface_format.colorSpace,
             .imageExtent = extent,
             .imageArrayLayers = 1,
-            .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            .imageUsage = image_usage,
             .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = nullptr,

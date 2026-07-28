@@ -53,7 +53,7 @@ public:
     // Fails through the unified Error channel, not a raw exception: at the
     // pybind boundary this surfaces as bz.ResourceError, so `except BazaltError`
     // actually catches it.
-    virtual std::expected<void, Error> update(std::span<const std::byte> /*data*/)
+    virtual std::expected<void, Error> update(std::span<const std::byte> /*data*/, size_t /*offset*/ = 0)
     {
         return std::unexpected(err_resource(
             "update() is only supported on DYNAMIC buffers; "
@@ -412,12 +412,16 @@ public:
         return out;
     }
 
-    std::expected<void, Error> update(std::span<const std::byte> data) override
+    std::expected<void, Error> update(std::span<const std::byte> data, size_t offset = 0) override
     {
-        if (data.size() > size_)
+        if (offset + data.size() > size_)
         {
             return std::unexpected(err_resource(
-                std::format("Update of {} bytes exceeds the buffer size of {} bytes", data.size(), size_)));
+                std::format(
+                    "Update of {} bytes at offset {} exceeds the buffer size of {} bytes",
+                    data.size(),
+                    offset,
+                    size_)));
         }
         uint32_t frame = context_->frame_index();
         void* mappedData;
@@ -428,7 +432,7 @@ public:
         {
             return std::unexpected(*e);
         }
-        std::memcpy(mappedData, data.data(), data.size());
+        std::memcpy(static_cast<std::byte*>(mappedData) + offset, data.data(), data.size());
         vmaUnmapMemory(context_->allocator(), allocations_[frame]);
         return {};
     }

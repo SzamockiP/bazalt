@@ -61,6 +61,14 @@ inline void record_image_transition(
     vk.vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
+// The size of one mip level along one axis. Floors at 1, which is what the
+// chain of a non-square image does on its short axis before the long one.
+inline constexpr std::uint32_t mip_extent(std::uint32_t base, std::uint32_t mip)
+{
+    const std::uint32_t v = base >> mip;
+    return v > 0 ? v : 1;
+}
+
 // Forward declaration: the copy/clear recorders below take Images, and they live
 // here so that cmd.copy_image() records one call instead of thirty lines.
 class Image;
@@ -465,12 +473,18 @@ public:
     {
         upload_state_.store(UploadState::Pending);
     }
+    // Worker thread. It sets has_contents_ (an atomic) but NOT the layout state:
+    // that is a vector the main thread reads without a lock, and since 0.18 it
+    // is per-subresource, so a worker-side set_all would both race the reader
+    // and be wrong for a partial update — claiming every layer sampleable when
+    // one was written. Whoever queues the job records the layout instead, on the
+    // main thread, where the rest of that state already lives.
     void set_upload_submitted(std::uint64_t serial)
     {
         {
             std::lock_guard lock(upload_mutex_);
             upload_serial_.store(serial);
-            mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            has_contents_.store(true);
             upload_state_.store(UploadState::Submitted);
         }
         upload_cv_.notify_all();
@@ -775,12 +789,23 @@ public:
     // `all_layers` reads every array layer back to back (layer 0, layer 1, …),
     // which is exactly the layout create_layered_from_pixels expects — that is
     // what makes ctx_b.create_image(image_from_ctx_a) a cubemap on the other
-    // side too. Python's image.read() keeps layer 0 only: a numpy array has no
+    // side too. Python's image.read() keeps one layer: a numpy array has no
     // place to put the cube-ness, so returning six faces stacked would be a
     // shape the caller has to guess at.
-    std::expected<std::vector<std::byte>, Error> read(bool all_layers = false)
+    //
+    // `layer` and `mip` pick WHICH subresource. Until 0.18 there was no choice:
+    // read() meant mip 0 of layer 0, so a cube face could not be inspected and
+    // "did generate_mipmaps actually compute anything" was a question with no
+    // way to ask it. The transition covers exactly the subresource being read
+    // and takes its oldLayout from the per-subresource state, so reading one
+    // level of a partially written image is legal and leaves the rest alone.
+    std::expected<std::vector<std::byte>, Error> read(
+        bool all_layers = false,
+        std::uint32_t layer = 0,
+        std::uint32_t mip = 0)
     {
         const std::uint32_t layers = all_layers ? array_layers_ : 1;
+        const std::uint32_t base_layer = all_layers ? 0 : layer;
         // A pending async upload is finished first — read() is blocking anyway.
         if (auto w = wait(); !w)
         {
@@ -798,6 +823,16 @@ public:
                 "read() called on a multisampled image; read the target's resolved "
                 "single-sample attachment (target.color[i] / target.depth) instead"));
         }
+        if (base_layer + layers > array_layers_)
+        {
+            return std::unexpected(
+                err_resource(std::format("read(layer={}): this image has {} layer(s)", base_layer, array_layers_)));
+        }
+        if (mip >= mip_levels_)
+        {
+            return std::unexpected(
+                err_resource(std::format("read(mip={}): this image has {} mip level(s)", mip, mip_levels_)));
+        }
 
         const FormatInfo info = format_info(format_);
         // A packed or combined format has no single numpy dtype: one pixel of
@@ -813,7 +848,9 @@ public:
                     "RGBA target, or use a shader to unpack it.",
                     format_name(format_))));
         }
-        const VkDeviceSize size = static_cast<VkDeviceSize>(width_) * height_ * info.bytes_per_pixel * layers;
+        const std::uint32_t mip_width = mip_extent(width_, mip);
+        const std::uint32_t mip_height = mip_extent(height_, mip);
+        const VkDeviceSize size = static_cast<VkDeviceSize>(mip_width) * mip_height * info.bytes_per_pixel * layers;
         const VkImageAspectFlags aspect = aspect_mask_for(vk_format());
 
         VkBufferCreateInfo bufferInfo{
@@ -844,40 +881,68 @@ public:
             *context_,
             [&](VkCommandBuffer cmd)
             {
-                // Whatever state the subresources are in: one barrier when they
-                // agree, one each when they do not. A single barrier can only
+                // Exactly the subresources being read, each from the layout it
+                // is actually in. A single barrier over the whole image can only
                 // name one oldLayout, and naming the wrong one is a validation
                 // error plus undefined contents — which is precisely what
                 // reading a partially rendered image used to do.
-                record_transition_into_(
-                    cmd,
-                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    VK_ACCESS_MEMORY_WRITE_BIT,
-                    VK_ACCESS_TRANSFER_READ_BIT,
-                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    aspect);
+                for_each_subresource_(
+                    base_layer,
+                    layers,
+                    mip,
+                    [&](std::uint32_t l, std::uint32_t m)
+                    {
+                        record_image_transition(
+                            context_->vk(),
+                            cmd,
+                            image_,
+                            layouts_.get(l, m),
+                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            VK_ACCESS_MEMORY_WRITE_BIT,
+                            VK_ACCESS_TRANSFER_READ_BIT,
+                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            aspect,
+                            m,
+                            1,
+                            1,
+                            l);
+                    });
 
                 VkBufferImageCopy region{
                     .bufferOffset = 0,
                     .bufferRowLength = 0,
                     .bufferImageHeight = 0,
-                    .imageSubresource = {aspect, 0, 0, layers},
+                    .imageSubresource = {aspect, mip, base_layer, layers},
                     .imageOffset = {0, 0, 0},
-                    .imageExtent = {width_, height_, 1}};
+                    .imageExtent = {mip_width, mip_height, 1}};
                 context_->vk().vkCmdCopyImageToBuffer(
                     cmd, image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
 
-                // …and put every subresource back where it was, which is what
-                // makes read() non-destructive on a partially written image.
-                record_transition_out_of_(
-                    cmd,
-                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    VK_ACCESS_TRANSFER_READ_BIT,
-                    VK_ACCESS_MEMORY_READ_BIT,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                    aspect);
+                // …and put each one back where it was, which is what makes
+                // read() non-destructive on a partially written image.
+                for_each_subresource_(
+                    base_layer,
+                    layers,
+                    mip,
+                    [&](std::uint32_t l, std::uint32_t m)
+                    {
+                        record_image_transition(
+                            context_->vk(),
+                            cmd,
+                            image_,
+                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            layouts_.get(l, m),
+                            VK_ACCESS_TRANSFER_READ_BIT,
+                            VK_ACCESS_MEMORY_READ_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                            aspect,
+                            m,
+                            1,
+                            1,
+                            l);
+                    });
             });
         if (!submitted)
         {
@@ -951,6 +1016,121 @@ public:
             array_layers_);
 
         record_copy_and_finalize_(cmd, staging, mips);
+    }
+
+    // A partial upload into an existing image: `extent` pixels at `offset` of
+    // one (layer, mip), from a staging buffer holding exactly that rectangle.
+    //
+    // The whole point of image.update(): changing the pixels of an image that
+    // already exists had no spelling at all, so a video frame, a camera feed, a
+    // matplotlib figure or a painted texture meant a new Image every frame.
+    //
+    // `from` is the subresource's layout, read on the MAIN thread when the job
+    // was queued — the worker must not touch the layout state, and hard-coding
+    // SHADER_READ_ONLY the way record_reload_commands does would be wrong for an
+    // image that has never been written.
+    //
+    // Only the named subresource is transitioned, so an update to one cube face
+    // leaves the other five alone.
+    void record_update_commands(
+        VkCommandBuffer cmd,
+        VkBuffer staging,
+        std::uint32_t layer,
+        std::uint32_t mip,
+        VkOffset2D offset,
+        VkExtent2D extent,
+        VkImageLayout from)
+    {
+        const VkImageAspectFlags aspect = aspect_mask_for(vk_format());
+        record_image_transition(
+            context_->vk(),
+            cmd,
+            image_,
+            from,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            kAllShaderStages,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            aspect,
+            mip,
+            1,
+            1,
+            layer);
+
+        VkBufferImageCopy region{
+            .bufferOffset = 0,
+            // Zero means "tightly packed to imageExtent", which is what the
+            // staging buffer is: the binding copies the caller's rectangle into
+            // it row by row, so there is no source padding to describe.
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource = {aspect, mip, layer, 1},
+            .imageOffset = {offset.x, offset.y, 0},
+            .imageExtent = {extent.width, extent.height, 1}};
+        context_->vk().vkCmdCopyBufferToImage(cmd, staging, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+        record_image_transition(
+            context_->vk(),
+            cmd,
+            image_,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            kAllShaderStages,
+            aspect,
+            mip,
+            1,
+            1,
+            layer);
+    }
+
+    // Staging for an arbitrary byte count. create_filled_staging computes its
+    // size from the whole image, which a partial update cannot use.
+    static std::expected<std::pair<VkBuffer, VmaAllocation>, Error> create_staging_bytes(
+        Context& context,
+        const void* data,
+        VkDeviceSize size)
+    {
+        VkBufferCreateInfo stagingInfo{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .size = size,
+            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr};
+        VmaAllocationCreateInfo stagingAllocInfo{};
+        stagingAllocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
+        stagingAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+
+        VkBuffer staging = VK_NULL_HANDLE;
+        VmaAllocation staging_alloc = VK_NULL_HANDLE;
+        if (auto e = check(
+                vmaCreateBuffer(
+                    context.allocator(), &stagingInfo, &stagingAllocInfo, &staging, &staging_alloc, nullptr),
+                "create staging buffer for image update",
+                ErrorCode::Resource))
+        {
+            return std::unexpected(*e);
+        }
+
+        void* mapped = nullptr;
+        if (auto e = check(
+                vmaMapMemory(context.allocator(), staging_alloc, &mapped),
+                "map image staging buffer",
+                ErrorCode::Resource))
+        {
+            vmaDestroyBuffer(context.allocator(), staging, staging_alloc);
+            return std::unexpected(*e);
+        }
+        std::memcpy(mapped, data, static_cast<std::size_t>(size));
+        vmaUnmapMemory(context.allocator(), staging_alloc);
+
+        return std::pair{staging, staging_alloc};
     }
 
     // Standalone mip generation for cmd.generate_mipmaps(): mip 0 already holds
@@ -1128,6 +1308,19 @@ public:
         vmaUnmapMemory(context.allocator(), staging_alloc);
 
         return std::pair{staging, staging_alloc};
+    }
+
+    // Calls fn(layer, mip) for every subresource of one mip across a layer
+    // range. One barrier each rather than one coalesced barrier per run of equal
+    // layouts: the callers are blocking setup and readback paths, and a handful
+    // of extra barriers there is cheaper than the bookkeeping to merge them.
+    template <typename Fn>
+    void for_each_subresource_(std::uint32_t base_layer, std::uint32_t layer_count, std::uint32_t mip, Fn&& fn) const
+    {
+        for (std::uint32_t layer = base_layer; layer < base_layer + layer_count; ++layer)
+        {
+            fn(layer, mip);
+        }
     }
 
     // Move the WHOLE image into `to`, whatever state its subresources are in.
