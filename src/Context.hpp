@@ -14,6 +14,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -100,6 +101,17 @@ struct ContextConfig
     // frame.gpu_time_ms: a timestamp pair recorded around every windowed submit.
     // Off by default because it is a profiling diagnostic
     bool gpu_timing = false;
+
+    // debugPrintfEXT() from a shader, delivered through the Logger.
+    //
+    // A separate switch rather than a fifth ValidationMode: the modes are
+    // exclusive states of "how hard do the layers check", and printf composes
+    // with any of them — you want it *together with* validation="sync", not
+    // instead of it. It is off by default because the layer instruments every
+    // shader to implement it, and because it forces unoptimized SPIR-V (see
+    // ShaderCompiler: spirv-opt eliminates the non-semantic instructions the
+    // printf is made of).
+    bool shader_printf = false;
 
     // Which GPU to run on, as the UUID of a Device from list_devices(). Empty
     // means the automatic choice (prefer discrete, must satisfy `required`) —
@@ -426,6 +438,12 @@ public:
     {
         return gpu_timing_;
     }
+    // Whether debugPrintfEXT() output is delivered. Read by ShaderCompiler, which
+    // must not optimize the SPIR-V when it is on.
+    bool shader_printf() const
+    {
+        return shader_printf_;
+    }
     std::uint64_t frame_serial() const
     {
         return frame_serial_;
@@ -723,6 +741,17 @@ private:
             return std::unexpected(*e);
         }
 
+        // printf is implemented by the validation layers, so the two settings
+        // contradict each other. Say so instead of building a Context whose
+        // shader_printf silently prints nothing.
+        if (config.shader_printf && config.validation == ValidationMode::Off)
+        {
+            return std::unexpected(err_init(
+                "shader_printf=True needs the validation layers, which validation=\"off\" turns off. "
+                "Use validation=\"on\" (or leave it at \"auto\")."));
+        }
+        ctx.shader_printf_ = config.shader_printf;
+
         auto system_info = vkb::SystemInfo::get_system_info();
         if (!system_info)
         {
@@ -790,10 +819,38 @@ private:
                 }
             }
 
+            // Shader printf is a validation-layer service, so it rides the same
+            // instance the layers are on. The layer reports the output at INFO
+            // severity, which is why the messenger mask has to open up for it —
+            // and why debug_callback drops every OTHER info message, so asking
+            // for printf does not also subscribe to loader chatter.
+            if (config.shader_printf)
+            {
+                inst_builder.add_validation_feature_enable(VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT);
+                // validation="auto" only *requests* the layers, so on a machine
+                // with no SDK installed printf has nothing behind it. That is not
+                // an error — auto exists precisely to keep running — but it must
+                // not look like a shader that never printed.
+                if (!system_info->validation_layers_available && logger)
+                {
+                    logger->log(
+                        Severity::Warning,
+                        Source::Shader,
+                        "shader_printf=True, but the Vulkan validation layers are not installed on this "
+                        "machine, so debugPrintfEXT() output cannot be delivered.");
+                }
+            }
+
+            VkDebugUtilsMessageSeverityFlagsEXT severities = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+                                                             VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
+            if (config.shader_printf)
+            {
+                severities |= VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT;
+            }
+
             inst_builder.set_debug_callback(debug_callback)
                 .set_debug_callback_user_data_pointer(logger.get())
-                .set_debug_messenger_severity(
-                    VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
+                .set_debug_messenger_severity(severities)
                 .set_debug_messenger_type(
                     VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
                     VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT);
@@ -963,6 +1020,19 @@ private:
         // SwapchainRenderer verifies present support at its own creation time.
         ctx.swapchain_supported_ =
             ctx.vkb_physical_device_.enable_extension_if_present(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
+        // debugPrintfEXT() compiles to OpExtInst against the NonSemantic.DebugPrintf
+        // instruction set, which the device must permit through
+        // VK_KHR_shader_non_semantic_info — core in 1.3, an extension on the 1.2
+        // path. Same "one capability, two spellings" shape as dynamic rendering
+        // above, so it is resolved here and nothing downstream asks the version.
+        if (ctx.shader_printf_ && ctx.negotiated_api_version_ < VK_API_VERSION_1_3 &&
+            !ctx.vkb_physical_device_.enable_extension_if_present(VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME))
+        {
+            return std::unexpected(err_init(
+                "shader_printf=True needs VK_KHR_shader_non_semantic_info (or Vulkan 1.3), which this "
+                "GPU/driver does not offer. Updating the graphics driver usually fixes this."));
+        }
 
         // Optional features: enable what this device happens to have, and record
         // what stuck so supports() can answer honestly.
@@ -1202,23 +1272,84 @@ private:
         void* user_data)
     {
         Logger* logger = static_cast<Logger*>(user_data);
-        if (logger)
+        if (!logger)
         {
-            // The severity travels as data. It used to be glued onto the front of
-            // the text as "ERROR: ", which is why the callback named on_error was
-            // receiving warnings and info messages indistinguishably.
-            Severity severity = Severity::Info;
-            if (message_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
-            {
-                severity = Severity::Error;
-            }
-            else if (message_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
-            {
-                severity = Severity::Warning;
-            }
-
-            logger->log(severity, Source::Validation, callback_data->pMessage);
+            return VK_FALSE;
         }
+
+        // Shader printf arrives on this same channel, and it is NOT a validation
+        // finding: it is the shader talking. Routing it as Source::Shader is what
+        // keeps the validation-as-assert test fixture (which fails a test on any
+        // Source::VALIDATION error) from treating a print as a bug.
+        //
+        // Matched on the message id rather than on the text, because the id is
+        // structured data and the text is not. The layer has spelled it
+        // UNASSIGNED-DEBUG-PRINTF and WARNING-DEBUG-PRINTF across versions, so the
+        // stable part is the suffix.
+        const std::string_view id_name{callback_data->pMessageIdName ? callback_data->pMessageIdName : ""};
+        if (id_name.find("DEBUG-PRINTF") != std::string_view::npos)
+        {
+            // The layer wraps the shader's own words in its report boilerplate:
+            // "Validation Information: [ WARNING-DEBUG-PRINTF ] | MessageID = 0x…
+            //  | vkQueueSubmit(): pSubmits[0] DebugPrintf:\n<the print>".
+            // Handing that whole blob back per print would bury the value the
+            // user asked for behind two hundred characters of object handles,
+            // once per print — for a print inside a loop, the difference between
+            // a tool and a wall of text.
+            //
+            // "DebugPrintf:" is the marker this layer puts immediately before the
+            // shader's own words, so it is tried first. The two generic
+            // separators stay as a fallback for versions that do not emit it, and
+            // a message matching none of them passes through whole: peeling is a
+            // convenience, and losing the text would be worse than an ugly line.
+            std::string_view text{callback_data->pMessage ? callback_data->pMessage : ""};
+            if (const auto marker = text.rfind("DebugPrintf:"); marker != std::string_view::npos)
+            {
+                text.remove_prefix(marker + std::string_view("DebugPrintf:").size());
+            }
+            else
+            {
+                if (const auto bar = text.rfind(" | "); bar != std::string_view::npos)
+                {
+                    text.remove_prefix(bar + 3);
+                }
+                if (const auto call = text.find("(): "); call != std::string_view::npos)
+                {
+                    text.remove_prefix(call + 4);
+                }
+            }
+            // The marker is followed by a newline, and the generic separators by
+            // padding spaces.
+            while (!text.empty() && (text.front() == ' ' || text.front() == '\n' || text.front() == '\t'))
+            {
+                text.remove_prefix(1);
+            }
+            while (!text.empty() && (text.back() == ' ' || text.back() == '\n' || text.back() == '\t'))
+            {
+                text.remove_suffix(1);
+            }
+            // log_always, not log: the layer reports printf at INFO and the default
+            // floor is Warning, so the filter would swallow the channel the user
+            // switched on by name.
+            logger->log_always(Severity::Info, Source::Shader, std::string(text));
+            return VK_FALSE;
+        }
+
+        // Everything else at INFO is loader and layer chatter. The messenger only
+        // subscribes to INFO when shader_printf is on, so dropping it here is what
+        // stops "I want prints" from also meaning "I want that".
+        if (!(message_severity &
+              (VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)))
+        {
+            return VK_FALSE;
+        }
+
+        // The severity travels as data. It used to be glued onto the front of
+        // the text as "ERROR: ", which is why the callback named on_error was
+        // receiving warnings and info messages indistinguishably.
+        const Severity severity =
+            (message_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? Severity::Error : Severity::Warning;
+        logger->log(severity, Source::Validation, callback_data->pMessage);
         return VK_FALSE;
     }
 
@@ -1253,6 +1384,7 @@ private:
     std::uint32_t frames_in_flight_ = 2;
     bool auto_barriers_ = true;
     bool gpu_timing_ = false;
+    bool shader_printf_ = false;
     std::uint64_t frame_serial_ = 0;
 
     VkSemaphore submit_timeline_ = VK_NULL_HANDLE;

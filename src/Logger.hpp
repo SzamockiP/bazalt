@@ -169,6 +169,19 @@ public:
         message_semaphore_.release();
     }
 
+    // Delivers regardless of min_severity.
+    //
+    // For a channel the user switched on by name: shader printf output is
+    // informational, and the default floor is Warning, so an obeyed filter would
+    // make Context(shader_printf=True) look broken. Asking for the channel is the
+    // decision the filter would otherwise re-litigate.
+    void log_always(Severity severity, Source source, std::string text)
+    {
+        pending_.fetch_add(1);
+        messages_.push(LogMessage{severity, source, std::move(text)});
+        message_semaphore_.release();
+    }
+
     // Blocks until every queued message has reached its callbacks.
     //
     // Delivery is asynchronous, so without this a test asserting "no validation

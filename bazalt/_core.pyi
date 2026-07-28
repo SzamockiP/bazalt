@@ -1004,7 +1004,8 @@ class Context:
                  raw_extensions: Sequence[str] = (),
                  auto_barriers: bool = True,
                  hot_reload: bool = False,
-                 gpu_timing: bool = False) -> None:
+                 gpu_timing: bool = False,
+                 shader_printf: bool = False) -> None:
         """
         Args:
             logger: defaults to one printing warnings to stderr.
@@ -1037,6 +1038,22 @@ class Context:
                 diagnostic — the pool reset and two writes ride in every frame's
                 command buffer, and per-frame queries are not guaranteed free on
                 every GPU. Left off, renderer.gpu_time_ms is always None, no cost.
+            shader_printf: deliver debugPrintfEXT() output from your shaders to
+                the logger, as Severity.INFO from Source.SHADER. Write
+                `#extension GL_EXT_debug_printf : enable` in the shader and call
+                `debugPrintfEXT("value = %f", x)`. The prints arrive whatever the
+                logger's min_severity is.
+
+                The validation layers implement this, so it needs them: with
+                validation="off" the constructor raises InitializationError, and
+                with validation="auto" on a machine that has no layers installed
+                you get a warning and no prints.
+
+                Two costs, which is why it is off by default. The layer
+                instruments every shader, and bazalt compiles every shader in
+                this Context without optimization, because a print is a
+                non-semantic instruction that the optimizer is entitled to
+                delete.
         """
         ...
 
@@ -1050,6 +1067,8 @@ class Context:
         ...
     @property
     def auto_barriers(self) -> bool: ...
+    @property
+    def shader_printf(self) -> bool: ...
 
     def begin_frame(self) -> None:
         """Open one logical frame — the frame verb of a windowed loop.

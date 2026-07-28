@@ -1783,7 +1783,8 @@ PYBIND11_MODULE(_core, m)
                    std::vector<std::string> raw_extensions,
                    bool auto_barriers,
                    bool hot_reload,
-                   bool gpu_timing)
+                   bool gpu_timing,
+                   bool shader_printf)
                 {
                     // An argument-validity error, so ValueError — matching what
                     // validation="nonsense" raises, not the BazaltError hierarchy.
@@ -1805,6 +1806,7 @@ PYBIND11_MODULE(_core, m)
                     config.raw_extensions = std::move(raw_extensions);
                     config.auto_barriers = auto_barriers;
                     config.gpu_timing = gpu_timing;
+                    config.shader_printf = shader_printf;
 
                     if (!logger)
                     {
@@ -1835,8 +1837,10 @@ PYBIND11_MODULE(_core, m)
             py::arg("raw_extensions") = std::vector<std::string>{},
             py::arg("auto_barriers") = true,
             py::arg("hot_reload") = false,
-            py::arg("gpu_timing") = false)
+            py::arg("gpu_timing") = false,
+            py::arg("shader_printf") = false)
         .def_property_readonly("auto_barriers", &Context::auto_barriers)
+        .def_property_readonly("shader_printf", &Context::shader_printf)
         .def_property_readonly("frames_in_flight", &Context::frames_in_flight)
         // The frame verb of a windowed loop: opens one logical frame for every
         // window on this Context. Advances the ring slot that CommandBuffer,
