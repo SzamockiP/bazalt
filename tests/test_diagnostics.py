@@ -211,13 +211,23 @@ def test_debug_labels_render_cleanly(ctx):
 
 
 def test_labels_nest(ctx):
-    """The scope is the whole verb, so an unbalanced close is unspellable.
-    Nesting is the part that still has to work."""
     cmd = ctx.create_command_buffer()
     cmd.begin()
     with cmd.label("outer"):
         with cmd.label("inner"):
             pass
+    ctx.submit(cmd)
+
+
+def test_end_label_without_a_begin_is_ignored(ctx):
+    """Recording the unbalanced end is undefined behaviour in Vulkan, so the
+    verb drops it. The `with` form cannot produce one; this covers the explicit
+    pair, which is there for a recording split across functions and which
+    someone will eventually mismatch."""
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.end_label()
+    cmd.begin_label("one").end_label().end_label()
     ctx.submit(cmd)
 
 

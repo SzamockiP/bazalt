@@ -1810,15 +1810,30 @@ PYBIND11_MODULE(_core, m)
                 const std::uint64_t generation = self->recording_generation();
                 return std::make_shared<Timer>(Timer{std::move(self), index, generation, false});
             })
-        // A named scope in a capture: `with cmd.label("shadow pass"):`. The
-        // scope is the whole verb — a label always opens and closes inside one
-        // recording, so there is nothing for an explicit begin/end pair to
-        // express that the with-block cannot.
+        // A named scope in a capture. `with cmd.label("shadow pass"):` is the
+        // form to use; begin_label/end_label are the escape hatch for a
+        // recording split across functions, exactly as begin_rendering/
+        // end_rendering are. end_label ignores an unbalanced close.
         .def(
             "label",
             [](std::shared_ptr<CommandBuffer> self, std::string name)
             { return LabelScope{std::move(self), std::move(name)}; },
             py::arg("name"))
+        .def(
+            "begin_label",
+            [](std::shared_ptr<CommandBuffer> self, const std::string& name)
+            {
+                self->begin_label(name);
+                return self;
+            },
+            py::arg("name"))
+        .def(
+            "end_label",
+            [](std::shared_ptr<CommandBuffer> self)
+            {
+                self->end_label();
+                return self;
+            })
         // Occlusion query: counts the fragments of the draws inside it that
         // passed the depth and stencil tests. Must sit inside a rendering scope.
         .def(

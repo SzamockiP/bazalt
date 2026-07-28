@@ -540,8 +540,7 @@ entry. The release is a label, not the organizing axis.
   `vkGetDeviceProcAddr` may legally return null. The entry points are loader trampolines
   dispatching on the command buffer, so one pointer is right for every Context. An unbalanced
   end is dropped rather than recorded, because recording one is undefined behaviour —
-  and since 0.18 the `with` form is the only way to spell a label, so it cannot arise
-  from Python at all.
+  and `with cmd.label(...)`, the form to reach for, cannot produce one.
 
 ### What blocks and what does not
 
@@ -1027,16 +1026,24 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   picked. Different work, so a different verb — and once `target.read_pixels` was gone,
   the shared name stopped being ambiguous too.
 
-- **A `with` block and an explicit begin/end pair are two paths unless the pair can
-  express something the block cannot** (0.18). `cmd.begin_label`/`end_label` could not:
-  a label always opens and closes inside one recording, so `with cmd.label(...)` covers
-  every use, and the pair's only distinguishing behaviour was tolerating an unbalanced
-  close — a failure mode the block makes unspellable. Removed.
+- **A `with` block and an explicit begin/end pair are two paths unless the pair reaches
+  somewhere the block cannot** (0.18). Both surviving pairs do, and for one reason: a
+  `with` block cannot span a function boundary. A recording assembled from helpers —
+  `begin_scene(cmd)` opening a target and a matching `end_scene(cmd)` closing it — has no
+  block to put around it, and that shape is ordinary in prototyping code. Rule 2: the
+  block is the path, the pair is the escape hatch.
 
-  `cmd.begin_rendering`/`end_rendering` stays for the opposite reason. A pass can
-  legitimately begin in one Python function and end in another (a helper that opens a
-  target, a branch that picks what to draw), which no `with` block spans. That is rule 2:
-  the block is the path, the pair is the escape hatch.
+  The audit first removed `cmd.begin_label`/`end_label` and kept
+  `cmd.begin_rendering`/`end_rendering`, on the reasoning that "a label always opens and
+  closes inside one recording". That reasoning was wrong, and instructively so: it is
+  equally true of a render pass, so it did not separate the two cases at all. The real
+  criterion was always the function boundary, and it applies to both. The labels came
+  back the same day.
+
+  **The lesson: a justification that would equally justify the opposite decision is not a
+  justification.** Before cutting one of two things that look alike, state the rule and
+  check it against the one you are keeping. If the rule convicts both, either cut both or
+  cut neither.
 
 - **When one API concept glues two Vulkan concepts together, split the API. Do not wrap it
   in a clever rule.** `renderer.begin_frame()` did the frame (the Context) and the acquire

@@ -941,6 +941,20 @@ class CommandBuffer:
         the pipeline builders) answer "which object"; this answers "which pass"."""
         ...
 
+    def begin_label(self, name: str) -> CommandBuffer:
+        """The explicit half of label(), for a recording split across functions
+        — a helper that opens the scope and a matching one that closes it, where
+        no `with` block spans both. Same escape hatch as begin_rendering /
+        end_rendering. Prefer `with cmd.label(...)` whenever one block covers
+        the scope: it cannot leave a label open."""
+        ...
+
+    def end_label(self) -> CommandBuffer:
+        """Close the innermost open label. An unbalanced call is ignored rather
+        than recorded: ending a label that was never begun is undefined
+        behaviour in Vulkan."""
+        ...
+
     def occlusion_query(self) -> OcclusionQuery:
         """Count the fragments of the draws inside the scope that passed the
         depth and stencil tests:

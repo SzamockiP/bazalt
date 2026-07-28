@@ -31,10 +31,14 @@ and every read blocks. That is one rule for the whole library.
 
 Fifth theme, from an audit before the release: one path to one effect. Four
 releases of additions had left several effects reachable two ways — five verbs
-that waited, two names for reading a target back, an explicit begin/end pair
-beside the `with` block that replaced it. Each duplicate is now one verb. This
-is where the breaking changes come from, and they are the last batch before
-1.0 that touches these names.
+that waited, two names for reading a target back, two spellings of one render
+target view. Each duplicate is now one verb. This is where the breaking changes
+come from, and they are the last batch before 1.0 that touches these names.
+
+`cmd.begin_rendering`/`end_rendering` and `cmd.begin_label`/`end_label` both
+stay. They look like the same duplication and are not: a `with` block cannot
+span a function boundary, so a recording assembled from helpers needs the
+explicit pair. The block is still the form to reach for.
 
 ### Added
 - **`img.update(array, layer=, mip=, region=)`.** Writes new pixels into an
@@ -142,9 +146,6 @@ is where the breaking changes come from, and they are the last batch before
   the same call with the layer and mip choice taken away, and `img.read()` is
   the general reader. `renderer.read_pixels()` stays and keeps the name: a
   screenshot is a different operation, with the capture protocol behind it.
-- **`cmd.begin_label()` and `cmd.end_label()` are removed.** Use
-  `with cmd.label("name"):`. A label always opens and closes inside one
-  recording, so the block can express everything the pair could.
 - **`target.mip(level)` is removed.** Use `target.layer(0, level)`, which is
   what it called.
 - **`window.should_close()` is removed.** Use `not window.is_open()`.

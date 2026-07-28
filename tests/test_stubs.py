@@ -109,20 +109,20 @@ def test_the_verbs_0_18_removed_are_gone():
     for gone, replacement in (("def wait_idle", "ctx.wait()"),
                               ("def wait_for_uploads", "ctx.wait()"),
                               ("def uploads_done", "ctx.upload_progress"),
-                              ("def should_close", "not window.is_open()"),
-                              ("def begin_label", "with cmd.label(...)"),
-                              ("def end_label", "with cmd.label(...)")):
+                              ("def should_close", "not window.is_open()")):
         assert gone not in text, f"{gone!r} is still in _core.pyi; use {replacement}"
 
     for cls, attr in ((bz.Context, "wait_idle"), (bz.Context, "wait_for_uploads"),
                       (bz.Context, "uploads_done"), (bz.Window, "should_close"),
-                      (bz.CommandBuffer, "begin_label"), (bz.CommandBuffer, "end_label"),
                       (bz.RenderTarget, "read_pixels"), (bz.RenderTarget, "mip")):
         assert not hasattr(cls, attr), f"{cls.__name__}.{attr} is still bound"
 
-    # The survivors of the same audit, kept because they are not duplicates.
+    # The survivors of the same audit. read_pixels stays on the renderer because
+    # a screenshot is different work; the two begin/end pairs stay because a
+    # recording can be split across functions, which no `with` block spans.
     assert hasattr(bz.SwapchainRenderer, "read_pixels")
-    assert hasattr(bz.CommandBuffer, "begin_rendering")
+    for pair in ("begin_rendering", "end_rendering", "begin_label", "end_label"):
+        assert hasattr(bz.CommandBuffer, pair)
 
 
 def test_stub_does_not_reference_an_undefined_buffer_type():
