@@ -173,7 +173,7 @@ public:
     }
     void wait() override
     {
-        context_->wait_for_serial(upload_serial_);
+        static_cast<void>(context_->wait_for_serial(upload_serial_));
     }
     void set_upload_serial(std::uint64_t serial)
     {
@@ -190,28 +190,12 @@ public:
         // returns uninitialized memory on exactly the drivers that overlap.
         wait();
 
-        VkBufferCreateInfo stagingInfo{
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .size = size_,
-            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-            .queueFamilyIndexCount = 0,
-            .pQueueFamilyIndices = nullptr};
-        VmaAllocationCreateInfo allocInfo{};
-        allocInfo.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
-        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
-
-        VkBuffer staging = VK_NULL_HANDLE;
-        VmaAllocation staging_alloc = VK_NULL_HANDLE;
-        if (auto e = check(
-                vmaCreateBuffer(context_->allocator(), &stagingInfo, &allocInfo, &staging, &staging_alloc, nullptr),
-                "create buffer readback staging",
-                ErrorCode::Resource))
+        auto staging_pair = create_staging_buffer(*context_, size_, Staging::Readback);
+        if (!staging_pair)
         {
-            return std::unexpected(*e);
+            return std::unexpected(staging_pair.error());
         }
+        auto [staging, staging_alloc] = *staging_pair;
 
         auto submitted = immediate_submit(
             *context_,
@@ -274,52 +258,12 @@ public:
                 break;
         }
 
-        VkBufferCreateInfo stagingInfo{
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .size = data_size,
-            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-            .queueFamilyIndexCount = 0,
-            .pQueueFamilyIndices = nullptr};
-
-        VmaAllocationCreateInfo stagingAllocInfo{};
-        stagingAllocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
-        stagingAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
-
-        VkBuffer stagingBuffer;
-        VmaAllocation stagingAllocation;
-        VmaAllocationInfo stagingAllocInfoOut;
-
-        if (auto e = check(
-                vmaCreateBuffer(
-                    context.allocator(),
-                    &stagingInfo,
-                    &stagingAllocInfo,
-                    &stagingBuffer,
-                    &stagingAllocation,
-                    &stagingAllocInfoOut),
-                "create staging buffer",
-                ErrorCode::Resource))
+        auto staging_pair = create_staging_buffer(context, data_size, Staging::Upload, data);
+        if (!staging_pair)
         {
-            return std::unexpected(*e);
+            return std::unexpected(staging_pair.error());
         }
-
-        if (data != nullptr && data_size > 0)
-        {
-            void* mappedData;
-            if (auto e = check(
-                    vmaMapMemory(context.allocator(), stagingAllocation, &mappedData),
-                    "map staging buffer memory",
-                    ErrorCode::Resource))
-            {
-                vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
-                return std::unexpected(*e);
-            }
-            std::memcpy(mappedData, data, data_size);
-            vmaUnmapMemory(context.allocator(), stagingAllocation);
-        }
+        auto [stagingBuffer, stagingAllocation] = *staging_pair;
 
         VkBufferCreateInfo bufferInfo{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -347,7 +291,7 @@ public:
 
         // Asynchronous since 0.18.0. The staging fill above already happened on
         // this thread (the bytes come from Python, so they cannot be copied
-        // anywhere else), which leaves the vkQueueWaitIdle as the only cost of
+        // anywhere else), which leaves the queue drain as the only cost of
         // the old blocking path — and 30 meshes meant 30 full queue drains at
         // startup. The copy is submitted here, so every failure below is still
         // raised at the create_buffer call; only the wait is gone.

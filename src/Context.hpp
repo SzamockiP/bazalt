@@ -46,14 +46,18 @@ enum class ValidationMode
 // The async upload machinery, seen from the Context's side. A tiny virtual
 // interface rather than the real class: UploadManager.hpp needs Context.hpp
 // (queues, timeline, deletion queue), so Context can only know it abstractly.
-// main.cpp creates the concrete UploadManager lazily on the first load_image.
+// main.cpp creates the concrete UploadManager right after Context::create, so
+// this is never null and there is one place that counts uploads.
 class UploadManagerBase
 {
 public:
     virtual ~UploadManagerBase() = default;
-    virtual bool uploads_done() = 0;
     virtual double upload_progress() = 0;
     virtual void wait_all() = 0;
+    // An upload that skipped the worker (create_buffer, create_image(array) —
+    // already-decoded bytes submitted on the calling thread) joins the same
+    // batch, so one counter answers "are the uploads done" for both kinds.
+    virtual void note_direct_upload(std::uint64_t serial) = 0;
 };
 
 // These live in headers that include Context.hpp, so Context can only name them.
@@ -325,21 +329,6 @@ public:
         return depth_stencil_format_;
     }
 
-    // Block until the device has finished everything. The submit paths already
-    // wait on the timeline where they must, so this is for the cases outside a
-    // frame: timing a batch of work, or making sure nothing is in flight before
-    // a measurement. Takes the queue mutex because the upload worker submits
-    // from its own thread and every VkQueue must be externally synchronized.
-    std::expected<void, Error> wait_idle()
-    {
-        std::lock_guard lock(queue_mutex_);
-        if (auto e = check(vk_.vkDeviceWaitIdle(vkb_device_.device), "wait for device idle"))
-        {
-            return std::unexpected(*e);
-        }
-        return {};
-    }
-
     // Internal — for use by renderers and other subsystems
     const vkb::Instance& vkb_instance() const
     {
@@ -522,8 +511,9 @@ public:
 
     // ── Asynchronous headless submits ─────────────────────────────────────────
     //
-    // A headless ctx.submit() blocks on vkQueueWaitIdle, which is right when the
-    // next line reads the result and wrong when it does not: a compute prototype
+    // A headless ctx.submit() blocks on the serial it just signalled, which is
+    // right when the next line reads the result and wrong when it does not: a
+    // compute prototype
     // that submits in a loop leaves the GPU idle between iterations, and the
     // whole loop runs at the speed of the round trip rather than of the work.
     //
@@ -553,22 +543,82 @@ public:
         {
             return;
         }
-        wait_for_serial(slot_serial_[frame_serial_ % frames_in_flight_]);
+        // Frame pacing: a failure here surfaces at the next submit, which is
+        // where a caller can be told about it.
+        static_cast<void>(wait_for_serial(slot_serial_[frame_serial_ % frames_in_flight_]));
     }
 
-    // Blocks until every submit made so far has finished, then reclaims what the
-    // deletion queue was holding for them.
-    void wait_for_submits()
+    // Blocks until everything this Context started has finished — the uploads
+    // still decoding on the worker as well as every submit — then reclaims what
+    // the deletion queue was holding for them.
+    //
+    // This is the one wait verb. A caller who wants less waits on the resource
+    // (Buffer::wait, Image::wait); there is nothing that wants more, because
+    // vkDeviceWaitIdle would also stall the other Contexts sharing the device.
+    std::expected<void, Error> wait_for_submits()
     {
-        wait_for_serial(submit_serial_.load());
+        // Uploads first: a job still in the decode queue has no serial yet, so
+        // waiting the timeline before it submits would miss it.
+        if (upload_manager_)
+        {
+            upload_manager_->wait_all();
+        }
+        auto r = wait_for_serial(submit_serial_.load());
         flush_deletion_queue();
+        return r;
     }
 
-    void wait_for_serial(std::uint64_t serial)
+    // Submits one already-recorded command buffer on the graphics queue and
+    // signals the submission timeline with the serial it returns. Every
+    // one-shot submit goes through here — deferred_submit for the main thread,
+    // the upload worker for its own — so there is one description of what a
+    // submit signals. Takes the queue mutex: the worker is not the only thread
+    // that submits.
+    //
+    // Who frees the command buffer afterwards is the caller's business, and it
+    // differs: the main thread parks it in the deletion queue, while the worker
+    // must free it back into its own pool from its own thread.
+    std::expected<std::uint64_t, Error> submit_one_shot(VkCommandBuffer cmd)
+    {
+        std::lock_guard lock(queue_mutex_);
+        const std::uint64_t serial = advance_submit_serial();
+
+        VkSemaphore timeline = submit_timeline_;
+        VkTimelineSemaphoreSubmitInfo timelineInfo{
+            .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+            .pNext = nullptr,
+            .waitSemaphoreValueCount = 0,
+            .pWaitSemaphoreValues = nullptr,
+            .signalSemaphoreValueCount = 1,
+            .pSignalSemaphoreValues = &serial};
+        VkSubmitInfo submitInfo{
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .pNext = &timelineInfo,
+            .waitSemaphoreCount = 0,
+            .pWaitSemaphores = nullptr,
+            .pWaitDstStageMask = nullptr,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &cmd,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &timeline};
+        if (auto e = check(
+                vk_.vkQueueSubmit(graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
+                "submit one-shot command buffer",
+                ErrorCode::Resource))
+        {
+            return std::unexpected(*e);
+        }
+        return serial;
+    }
+
+    // The one place that blocks on the submission timeline. Everything that
+    // waits for GPU work — a frame's ring slot, an image upload, a readback —
+    // comes through here, so a wait is never wider than the work it waits for.
+    std::expected<void, Error> wait_for_serial(std::uint64_t serial)
     {
         if (serial == 0)
         {
-            return;
+            return {};
         }
         VkSemaphore timeline = submit_timeline_;
         VkSemaphoreWaitInfo waitInfo{
@@ -578,7 +628,14 @@ public:
             .semaphoreCount = 1,
             .pSemaphores = &timeline,
             .pValues = &serial};
-        vk_.vkWaitSemaphores(vkb_device_.device, &waitInfo, UINT64_MAX);
+        if (auto e = check(
+                vk_.vkWaitSemaphores(vkb_device_.device, &waitInfo, UINT64_MAX),
+                "wait for submitted GPU work",
+                ErrorCode::Resource))
+        {
+            return std::unexpected(*e);
+        }
+        return {};
     }
 
     // ── Deferred destruction ──────────────────────────────────────────────────
@@ -642,21 +699,17 @@ public:
         upload_manager_ = std::move(manager);
     }
 
-    // The highest serial of an upload that did NOT go through the worker:
-    // create_buffer and create_image(array) hand over bytes that are already
-    // decoded, so they submit on the calling thread and only skip the wait.
-    // They are still uploads, so wait_for_uploads and uploads_done have to see
-    // them, and the batch counters inside UploadManager cannot.
+    // An upload that did NOT go through the worker: create_buffer and
+    // create_image(array) hand over bytes that are already decoded, so they
+    // submit on the calling thread and only skip the wait. It still counts as
+    // an upload, so it joins the worker's batch instead of being tracked
+    // beside it.
     void note_upload_serial(std::uint64_t serial)
     {
-        std::uint64_t seen = upload_serial_.load();
-        while (serial > seen && !upload_serial_.compare_exchange_weak(seen, serial))
+        if (upload_manager_)
         {
+            upload_manager_->note_direct_upload(serial);
         }
-    }
-    std::uint64_t last_upload_serial() const
-    {
-        return upload_serial_.load();
     }
 
     // ── Hot reload ────────────────────────────────────────────────────────────
@@ -1528,6 +1581,5 @@ private:
 
     std::unordered_map<std::uint32_t, std::shared_ptr<Sampler>> sampler_cache_;
     std::unique_ptr<UploadManagerBase> upload_manager_;
-    std::atomic<std::uint64_t> upload_serial_{0};
     std::unique_ptr<HotReloadBase> hot_reload_;
 };

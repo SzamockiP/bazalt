@@ -37,7 +37,7 @@ def submit_and_read(ctx, target, record):
     record(cmd)
     cmd.end_rendering(target)
     ctx.submit(cmd)
-    return target.read_pixels()
+    return target.color[0].read()
 
 
 # ── draw() — non-indexed ──────────────────────────────────────────────────
@@ -115,7 +115,7 @@ def test_blend_composites_two_draws(ctx, fullscreen_vert):
     cmd.end_rendering(target)
     ctx.submit(cmd)
 
-    pixels = target.read_pixels()
+    pixels = target.color[0].read()
     assert np.allclose(pixels[32, 32, :3], [64, 0, 128], atol=3), pixels[32, 32]
 
 
@@ -151,11 +151,11 @@ def test_uniform_buffer_via_frame_descriptor_set(ctx, fullscreen_vert):
     cmd.end_rendering(target)
 
     ctx.submit(cmd)
-    assert np.allclose(target.read_pixels()[32, 32, :3], [0, 255, 0], atol=2)
+    assert np.allclose(target.color[0].read()[32, 32, :3], [0, 255, 0], atol=2)
 
     ubuf.update([1.0, 0.0, 1.0, 1.0])
     ctx.submit(cmd)
-    assert np.allclose(target.read_pixels()[32, 32, :3], [255, 0, 255], atol=2)
+    assert np.allclose(target.color[0].read()[32, 32, :3], [255, 0, 255], atol=2)
 
 
 def test_static_uniform_buffer_binds_and_reads(ctx, fullscreen_vert):
@@ -186,7 +186,7 @@ def test_static_uniform_buffer_binds_and_reads(ctx, fullscreen_vert):
     cmd.draw(3)
     cmd.end_rendering(target)
     ctx.submit(cmd)
-    assert np.allclose(target.read_pixels()[32, 32, :3], [0, 128, 255], atol=2)
+    assert np.allclose(target.color[0].read()[32, 32, :3], [0, 128, 255], atol=2)
 
 
 # ── storage buffers ───────────────────────────────────────────────────────

@@ -165,7 +165,7 @@ def test_an_updated_image_is_still_sampleable(ctx):
         cmd.bind_pipeline(pipe).bind_descriptor_set(dset, pipe, 0).draw(3)
     ctx.submit(cmd)
 
-    assert screen.read_pixels()[4, 4, 0] > 200
+    assert screen.color[0].read()[4, 4, 0] > 200
 
 
 # ── image.read(layer=, mip=) ────────────────────────────────────────────────

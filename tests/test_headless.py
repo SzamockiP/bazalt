@@ -32,7 +32,7 @@ def draw_triangle(ctx, target, shaders, buffers, clear=CLEAR):
     cmd.draw_indexed(3)
     cmd.end_rendering(target)
     ctx.submit(cmd)
-    return target.read_pixels()
+    return target.color[0].read()
 
 
 def test_render_target_reports_its_size(ctx):
@@ -50,7 +50,7 @@ def test_read_pixels_shape_and_dtype(ctx):
     cmd.end_rendering(target)
     ctx.submit(cmd)
 
-    pixels = target.read_pixels()
+    pixels = target.color[0].read()
     assert pixels.shape == (16, 32, 4)
     assert pixels.dtype == np.uint8
 
@@ -62,7 +62,7 @@ def test_read_pixels_before_any_render_is_an_error(ctx):
     read_pixels used to do exactly that (the rendered_ flag was never set)."""
     target = bz.RenderTarget(ctx, 32, 32)
     with pytest.raises(bz.ResourceError) as info:
-        target.read_pixels()
+        target.color[0].read()
     assert "no contents" in str(info.value)
 
 
@@ -75,7 +75,7 @@ def test_recorded_but_unsubmitted_commands_do_not_count_as_rendering(ctx):
     cmd.end_rendering(target)
     # No ctx.submit(cmd).
     with pytest.raises(bz.ResourceError):
-        target.read_pixels()
+        target.color[0].read()
 
 
 def test_clear_colour_reaches_the_image(ctx, triangle_shaders, triangle_buffers):
@@ -144,7 +144,7 @@ def test_target_is_reusable_after_readback(ctx, triangle_shaders, triangle_buffe
     discard the rendered contents between two reads."""
     target = bz.RenderTarget(ctx, 32, 32)
     first = draw_triangle(ctx, target, triangle_shaders, triangle_buffers)
-    second = target.read_pixels()
+    second = target.color[0].read()
     assert np.array_equal(first, second)
     assert not np.allclose(first[16, 16, :3], CLEAR_RGB, atol=2), \
         "both reads agreeing on a blank image would prove nothing"

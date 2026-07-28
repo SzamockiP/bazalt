@@ -18,6 +18,7 @@
 #include "Error.hpp"
 #include "Format.hpp"
 #include "Image.hpp"
+#include "ImmediateSubmit.hpp"
 
 // The async transport behind ctx.load_image().
 //
@@ -324,10 +325,18 @@ public:
 
     // ── UploadManagerBase (the Python-visible aggregate state) ────────────────
 
-    bool uploads_done() override
+    // An upload that never entered the decode queue: already-decoded bytes that
+    // create_buffer / create_image(array) submitted on the calling thread. It is
+    // started and submitted in the same breath, so both counters move together
+    // and the CPU-side predicate in wait_all() stays balanced.
+    void note_direct_upload(std::uint64_t serial) override
     {
-        std::lock_guard lock(mutex_);
-        return done_count_() == batch_started_;
+        {
+            std::lock_guard lock(mutex_);
+            ++batch_started_;
+            submitted_serials_.push_back(serial);
+        }
+        cv_.notify_all();
     }
 
     // Progress of the current batch, 0.0 .. 1.0 (1.0 when idle). The batch
@@ -362,18 +371,9 @@ public:
             }
         }
         // … then the GPU side: the timeline reaching the last upload.
-        if (wait_serial > 0)
-        {
-            VkSemaphore timeline = context_.submit_timeline();
-            VkSemaphoreWaitInfo waitInfo{
-                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
-                .pNext = nullptr,
-                .flags = 0,
-                .semaphoreCount = 1,
-                .pSemaphores = &timeline,
-                .pValues = &wait_serial};
-            context_.vk().vkWaitSemaphores(context_.device(), &waitInfo, UINT64_MAX);
-        }
+        // A failed wait surfaces on the image itself (img.wait() reports it);
+        // the aggregate verb has no single resource to blame.
+        static_cast<void>(context_.wait_for_serial(wait_serial));
     }
 
 private:
@@ -621,7 +621,7 @@ private:
     // Context timeline.
     void process_update_(Job& job)
     {
-        auto staging = Image::create_staging_bytes(context_, job.pixels.data(), job.pixels.size());
+        auto staging = create_staging_buffer(context_, job.pixels.size(), Staging::Upload, job.pixels.data());
         if (!staging)
         {
             fail_update_(job, staging.error().message.c_str());
@@ -696,33 +696,18 @@ private:
         return context_.vk().vkAllocateCommandBuffers(context_.device(), &allocInfo, &cmd) == VK_SUCCESS;
     }
 
-    // Submit signalling the Context timeline, which is how a frame waits for
-    // this work GPU-side. Holds the queue mutex: the worker is not the only
-    // thread that submits.
+    // The worker's half of a one-shot submit. Context::submit_one_shot does the
+    // Vulkan part; the worker keeps only what is its own — freeing the command
+    // buffer back into pool_ from this thread (see retired_).
     bool submit_(VkCommandBuffer cmd, std::uint64_t& serial)
     {
-        std::lock_guard lock(context_.queue_mutex());
-        serial = context_.advance_submit_serial();
-
-        VkSemaphore timeline = context_.submit_timeline();
-        VkTimelineSemaphoreSubmitInfo timelineInfo{
-            .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
-            .pNext = nullptr,
-            .waitSemaphoreValueCount = 0,
-            .pWaitSemaphoreValues = nullptr,
-            .signalSemaphoreValueCount = 1,
-            .pSignalSemaphoreValues = &serial};
-        VkSubmitInfo submitInfo{
-            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .pNext = &timelineInfo,
-            .waitSemaphoreCount = 0,
-            .pWaitSemaphores = nullptr,
-            .pWaitDstStageMask = nullptr,
-            .commandBufferCount = 1,
-            .pCommandBuffers = &cmd,
-            .signalSemaphoreCount = 1,
-            .pSignalSemaphores = &timeline};
-        return context_.vk().vkQueueSubmit(context_.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE) == VK_SUCCESS;
+        auto submitted = context_.submit_one_shot(cmd);
+        if (!submitted)
+        {
+            return false;
+        }
+        serial = *submitted;
+        return true;
     }
 
     // A layered load: decode every face into one contiguous N-layer block, then

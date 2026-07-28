@@ -87,7 +87,7 @@ def test_renamed_and_new_api_is_declared():
                      "class StencilOp(", "def stencil_test", "DEPTH_STENCIL",
                      "clear_stencil", "def color_mask", "def depth_clamp",
                      "def alpha_to_coverage", "def constant", "def copy_image",
-                     "def clear_image", "def wait_idle", "R32_UINT",
+                     "def clear_image", "R32_UINT",
                      "class BorderColor(", "CLAMP_TO_BORDER", "mip_lod_bias",
                      "stencil: bool = False", "INDEPENDENT_BLEND"):
         assert expected in text, f"{expected!r} missing from _core.pyi"

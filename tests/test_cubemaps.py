@@ -76,7 +76,7 @@ def test_cubemap_from_arrays_samples_every_face(ctx, fullscreen_vert):
         cmd.end_rendering(target)
         ctx.submit(cmd)
 
-        got = target.read_pixels()[4, 4, :3]
+        got = target.color[0].read()[4, 4, :3]
         assert np.allclose(got, [i * 40, 0, 0], atol=2), f"face {i}: {got}"
 
 
@@ -143,8 +143,8 @@ def test_empty_cubemap_compute_filled_then_sampled(ctx, fullscreen_vert):
 
         # Face i red = i/5 * 255; green 0.25, blue 0.5.
         expected = [round(i / 5 * 255), 64, 128]
-        assert np.allclose(target.read_pixels()[4, 4, :3], expected, atol=2), \
-            f"face {i}: {target.read_pixels()[4, 4, :3]}"
+        assert np.allclose(target.color[0].read()[4, 4, :3], expected, atol=2), \
+            f"face {i}: {target.color[0].read()[4, 4, :3]}"
 
 
 # ── bake once, sample later: the manual image barrier ──────────────────────
@@ -184,8 +184,8 @@ def test_compute_baked_cubemap_sampled_in_a_later_submit(ctx, fullscreen_vert):
         cmd.end_rendering(target)
         ctx.submit(cmd)
         expected = [round(i / 5 * 255), 64, 128]
-        assert np.allclose(target.read_pixels()[4, 4, :3], expected, atol=2), \
-            f"face {i}: {target.read_pixels()[4, 4, :3]}"
+        assert np.allclose(target.color[0].read()[4, 4, :3], expected, atol=2), \
+            f"face {i}: {target.color[0].read()[4, 4, :3]}"
 
 
 def test_image_barrier_rejects_non_shader_access(ctx):
@@ -230,8 +230,8 @@ def test_manual_barrier_then_auto_sample_in_one_recording(ctx, fullscreen_vert):
         ctx.submit(cmd)
 
         expected = [round(i / 5 * 255), 64, 128]
-        assert np.allclose(target.read_pixels()[4, 4, :3], expected, atol=2), \
-            f"face {i}: {target.read_pixels()[4, 4, :3]}"
+        assert np.allclose(target.color[0].read()[4, 4, :3], expected, atol=2), \
+            f"face {i}: {target.color[0].read()[4, 4, :3]}"
 
 
 # ── validation: the cube flag and layer consistency are enforced ───────────

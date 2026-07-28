@@ -64,7 +64,7 @@ def test_depth_stencil_target_builds_and_renders(ctx):
         draw(c, pipeline, [0.0, 1.0, 0.0, 1.0])
     ctx.submit(cmd)
 
-    assert np.allclose(target.read_pixels()[16, 16][:3], [0, 255, 0], atol=2)
+    assert np.allclose(target.color[0].read()[16, 16][:3], [0, 255, 0], atol=2)
 
 
 def test_a_mask_written_by_one_pass_gates_the_next(ctx, solid):
@@ -89,7 +89,7 @@ def test_a_mask_written_by_one_pass_gates_the_next(ctx, solid):
         with cmd.rendering(target, clear_color=None) as c:
             draw(c, second, [0.0, 0.0, 1.0, 1.0])
         ctx.submit(cmd)
-        return target.read_pixels()[16, 16][:3]
+        return target.color[0].read()[16, 16][:3]
 
     assert np.allclose(run(outside), [255, 0, 0], atol=2), "NOT_EQUAL painted a marked pixel"
     assert np.allclose(run(inside), [0, 0, 255], atol=2), "EQUAL skipped a marked pixel"
@@ -111,7 +111,7 @@ def test_write_mask_zero_writes_nothing(ctx, solid):
         draw(c, outside, [0.0, 0.0, 1.0, 1.0])
     ctx.submit(cmd)
 
-    assert np.allclose(target.read_pixels()[16, 16][:3], [0, 0, 255], atol=2)
+    assert np.allclose(target.color[0].read()[16, 16][:3], [0, 0, 255], atol=2)
 
 
 def test_clear_stencil_sets_the_starting_value(ctx, solid):
@@ -126,7 +126,7 @@ def test_clear_stencil_sets_the_starting_value(ctx, solid):
                            clear_stencil=clear_stencil) as c:
             draw(c, equal_one, [0.0, 1.0, 0.0, 1.0])
         ctx.submit(cmd)
-        return target.read_pixels()[16, 16][:3]
+        return target.color[0].read()[16, 16][:3]
 
     assert np.allclose(run(1), [0, 255, 0], atol=2)
     assert np.all(run(0) == 0), "the test passed against a stencil cleared to 0"
@@ -176,7 +176,7 @@ def test_a_window_can_carry_a_stencil(ctx):
         ctx.begin_frame()
         if renderer.acquire():
             renderer.present(cmd)
-        ctx.wait_idle()
+        ctx.wait()
     finally:
         del renderer
         del window

@@ -152,11 +152,6 @@ public:
     Window(const Window&) = delete;
     Window& operator=(const Window&) = delete;
 
-    bool should_close() const
-    {
-        return glfwWindowShouldClose(window_.get());
-    }
-
     bool is_open() const
     {
         return !glfwWindowShouldClose(window_.get());

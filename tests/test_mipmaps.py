@@ -86,5 +86,5 @@ def test_generate_mipmaps_fills_the_chain(ctx):
 
     # store_const writes (0.25, 0.5, 0.75); a solid colour box-downsamples to
     # itself at every level -> (64, 128, 191).
-    got = target.read_pixels()[4, 4, :3]
+    got = target.color[0].read()[4, 4, :3]
     assert np.allclose(got, [64, 128, 191], atol=2), got

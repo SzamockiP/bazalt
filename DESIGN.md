@@ -596,15 +596,59 @@ entry. The release is a label, not the organizing axis.
   about the trigger. The trigger was not a mesh loader getting slow. It was the API
   being unpredictable.
 
-- **Three wait verbs, three scopes, and the names have to be true** (0.18.0).
-  `res.wait()` is one resource, `ctx.wait_for_uploads()` is every upload, `ctx.wait()`
-  is every submit (`ctx.wait_idle()` is the device, and belongs to measurement, not to
-  this ladder). Making one-shot uploads asynchronous put `wait_for_uploads` at risk of
-  becoming a lie, since they never enter the worker's batch. Rather than over-wait —
-  draining the whole timeline would block on unrelated frames — the Context keeps the
-  highest one-shot upload serial and `wait_for_uploads` waits on that too. `uploads_done`
-  follows it; `upload_progress` deliberately does not, because a copy with no decode has
-  no progress between 0 and 1 to report.
+- **One wait verb, and one narrowing of it** (0.18.0). `ctx.wait()` waits for
+  everything this Context started; `res.wait()` narrows that to one resource. Nothing
+  else.
+
+  The release passed through a five-verb version first — `ctx.wait()`,
+  `ctx.wait_for_uploads()`, `ctx.wait_idle()`, `res.wait()`, plus the `uploads_done` and
+  `upload_progress` predicates — each one true, each one a slightly different width. That
+  is the failure mode rule 1 describes: no single addition was wrong, and the sum was a
+  ladder the reader has to memorize before they can wait for anything. Three of them
+  ended at the *same timeline semaphore*, so the widths were not even real.
+
+  What made them look distinct was bookkeeping, not semantics. One-shot uploads
+  (`create_buffer`, `create_image(array)`) never entered the worker's batch, so the
+  Context tracked their serial separately and `uploads_done` had to OR two systems
+  together. Registering them in the same batch — started and submitted in one step, since
+  they have no decode stage — deletes the second system, and with it the reason
+  `wait_for_uploads` was a different verb from `wait`. `upload_progress` then covers
+  every upload rather than decodes only, so `upload_progress == 1.0` says what
+  `uploads_done` used to.
+
+  `ctx.wait_idle()` went the same way. It was added in 0.17, before `ctx.wait()` existed,
+  and its docstring reason — "timing a batch of work, making sure nothing is in flight" —
+  is `ctx.wait()`'s job. What `vkDeviceWaitIdle` adds over the timeline is stalling *other
+  Contexts*, which is a bug in every caller that wanted it. The C++ `Context::wait_idle`
+  went with the binding: the destructor and swapchain recreation call `vkDeviceWaitIdle`
+  directly, and they are the only places that legitimately want the device.
+
+- **One GPU wait, one one-shot submit, one staging buffer** (0.18.0). Under the API,
+  five call sites had hand-rolled "wait for timeline value N" (two `vkWaitSemaphores`
+  copies, two `vkQueueWaitIdle`), `UploadManager` had a copy of `deferred_submit`'s
+  submit block, and six places built a staging buffer with the same twenty lines. All
+  three are now single functions: `Context::wait_for_serial`, `Context::submit_one_shot`,
+  and `create_staging_buffer(ctx, size, direction, data)`.
+
+  The two `vkQueueWaitIdle` replacements changed behaviour for the better. Both call
+  sites already held the exact serial their submit signalled, so draining the whole queue
+  made a readback or a `submit(wait=True)` block on whatever the upload worker happened
+  to have in flight. They now wait for their own work only.
+
+  One thing that looks like duplication and is not: the upload worker still frees its own
+  command buffers (`retired_`) instead of using the deletion queue. VMA is internally
+  synchronized so a staging buffer can retire anywhere, but command pools are externally
+  synchronized — the main thread draining the deletion queue while the worker allocates
+  from the same pool is a race the validation layers flag. `submit_one_shot` therefore
+  covers the submit and leaves the freeing policy to the caller, which is where the two
+  threads genuinely differ.
+
+- **`UploadManager` is created with the Context, not on the first `load_image`** (0.18.0).
+  Lazy creation cost five `if (!upload_manager())` blocks in the bindings and a null
+  branch in every aggregate query. Once the manager became the single place that counts
+  uploads, "it might not exist yet" stopped being an acceptable state. The worker thread
+  parks on a condition variable, so a Context that never loads an image pays a blocked
+  thread and nothing else.
 
 ### Asynchronous submits
 
@@ -616,8 +660,16 @@ entry. The release is a label, not the organizing axis.
   costs nothing. A blocking submit pays for none of it: it has already waited.
 
 - **`ctx.wait()` waits on the timeline, not on the device** (0.18). `vkDeviceWaitIdle`
-  would stall the upload worker and any other Context sharing the device. The timeline is
-  per Context and counts exactly the submits this Context made.
+  would stall any other Context sharing the device. The timeline is per Context and
+  counts exactly what this Context submitted.
+
+- **`submit(cmd, wait=True)` stays a keyword, not two verbs** (0.18). The audit that
+  collapsed the wait verbs left this one alone on purpose, and the reason generalizes:
+  a flag that selects *whether to wait for work you just described* is one path, because
+  the work is identical either way and only the caller's next line differs. Two names —
+  `submit_sync` / `submit_async` — would duplicate every future argument to `submit`.
+  Contrast the wait verbs, which were not one function with a flag but five functions
+  ending at the same semaphore.
 
 ### Errors and the pybind boundary
 
@@ -663,6 +715,15 @@ permanent ceiling.
    should compute a knob, not assert a version.** An assert turns their timetable into your
    red build, and the thing being gated (one skipped test) is strictly less bad than a job
    that refuses to run at all.
+5. **`supports_multiview()` is a second way to ask `supports(Feature)`** — found by the
+   0.18 audit and deliberately left standing, because the honest fix is not a deletion.
+   `FeatureInfo` maps each `Feature` to a plain `VkPhysicalDeviceFeatures` boolean through
+   a pointer-to-member, and multiview lives in `VkPhysicalDeviceVulkan11Features`. So
+   `Feature.MULTIVIEW` needs the table to grow a pNext column first — which **bindless
+   already needs** (see Proposed features), so the two arrive together or not at all.
+   Removing the method before then would lower the ceiling: there would be no way left to
+   ask. Both `Context.supports_multiview` and `Device.supports_multiview` go when the
+   enum entry lands. Target: with bindless, before 1.0.
 
 ### Ceilings accepted on purpose
 
@@ -949,6 +1010,31 @@ says what we did instead.
 Lasting engineering conclusions, distilled from the retrospectives. Do not repeat them.
 
 ### API design
+
+- **A second spelling is not a convenience, it is a fork** (0.18). The audit before
+  0.18 found six, and each had the same origin: an ergonomic shortcut added next to the
+  general form, both kept because removing either would break someone. `target.read_pixels()`
+  was `target.color[0].read()` with the layer and mip choice removed, and its own binding
+  comment said so. `target.mip(m)` was `target.layer(0, m)`, same constructor call.
+  `window.should_close()` was `not window.is_open()`. Each was one line of C++ and a
+  paragraph of documentation explaining which to prefer — the paragraph is the tell.
+
+  The one that survived the same test is `renderer.read_pixels()`, because a screenshot
+  is not a readback with different ergonomics: it needs `present(capture=True)` first,
+  it reads a capture-time extent, and it swizzles whatever channel order the compositor
+  picked. Different work, so a different verb — and once `target.read_pixels` was gone,
+  the shared name stopped being ambiguous too.
+
+- **A `with` block and an explicit begin/end pair are two paths unless the pair can
+  express something the block cannot** (0.18). `cmd.begin_label`/`end_label` could not:
+  a label always opens and closes inside one recording, so `with cmd.label(...)` covers
+  every use, and the pair's only distinguishing behaviour was tolerating an unbalanced
+  close — a failure mode the block makes unspellable. Removed.
+
+  `cmd.begin_rendering`/`end_rendering` stays for the opposite reason. A pass can
+  legitimately begin in one Python function and end in another (a helper that opens a
+  target, a branch that picks what to draw), which no `with` block spans. That is rule 2:
+  the block is the path, the pair is the escape hatch.
 
 - **When one API concept glues two Vulkan concepts together, split the API. Do not wrap it
   in a clever rule.** `renderer.begin_frame()` did the frame (the Context) and the acquire

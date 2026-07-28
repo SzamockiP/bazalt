@@ -54,7 +54,7 @@ def draw_over(ctx, target, pipeline, clear, rgba):
     cmd.draw(3)
     cmd.end_rendering(target)
     ctx.submit(cmd)
-    return target.read_pixels()[32, 32]
+    return target.color[0].read()[32, 32]
 
 
 # ── blend modes ───────────────────────────────────────────────────────────
@@ -136,7 +136,7 @@ def test_depth_write_false_leaves_the_buffer_alone(ctx, fullscreen_push):
         cmd.draw(3)
         cmd.end_rendering(target)
         ctx.submit(cmd)
-        return target.read_pixels()[32, 32]
+        return target.color[0].read()[32, 32]
 
     assert np.allclose(render(False)[:3], [0, 0, 255], atol=2), \
         "write=False still wrote depth, so the far draw was rejected"
@@ -178,7 +178,7 @@ def test_reversed_depth_needs_both_the_compare_and_the_clear(ctx, fullscreen_pus
         cmd.draw(3)
         cmd.end_rendering(target)
         ctx.submit(cmd)
-        return target.read_pixels()[32, 32]
+        return target.color[0].read()[32, 32]
 
     # 0.9 > 1.0 is false: the default clear rejects every fragment.
     assert np.allclose(render(1.0)[:3], [255, 0, 0], atol=2)
@@ -210,7 +210,7 @@ def test_clear_depth_is_ignored_when_the_pass_preserves(ctx, fullscreen_push):
     cmd.end_rendering(target)
     ctx.submit(cmd)
 
-    assert np.allclose(target.read_pixels()[32, 32, :3], [0, 255, 0], atol=2)
+    assert np.allclose(target.color[0].read()[32, 32, :3], [0, 255, 0], atol=2)
 
 
 def test_depth_bias_pushes_the_written_depth(ctx, fullscreen_push):
@@ -255,7 +255,7 @@ def test_depth_bias_pushes_the_written_depth(ctx, fullscreen_push):
         cmd.draw(3)
         cmd.end_rendering(target)
         ctx.submit(cmd)
-        return target.read_pixels()[32, 32]
+        return target.color[0].read()[32, 32]
 
     # No bias: both are at 0.9, LESS_OR_EQUAL lets the second one through.
     assert np.allclose(render(None)[:3], [0, 0, 255], atol=2)
@@ -323,7 +323,7 @@ def test_wide_lines_thicken_the_wireframe(extra_context):
         cmd.draw_indexed(3)
         cmd.end_rendering(target)
         ctx.submit(cmd)
-        px = target.read_pixels()
+        px = target.color[0].read()
         return int(np.count_nonzero(px[:, :, :3].any(axis=2)))
 
     assert painted(3.0) > painted(1.0)
@@ -360,7 +360,7 @@ def test_depth_test_off_still_writes_nothing(ctx, fullscreen_push):
     cmd.end_rendering(target)
     ctx.submit(cmd)
 
-    assert np.allclose(target.read_pixels()[32, 32, :3], [0, 0, 255], atol=2)
+    assert np.allclose(target.color[0].read()[32, 32, :3], [0, 0, 255], atol=2)
 
 
 # ── polygon mode ──────────────────────────────────────────────────────────
@@ -422,7 +422,7 @@ def test_line_mode_draws_edges_and_leaves_the_interior(extra_context):
         cmd.draw_indexed(3)
         cmd.end_rendering(target)
         ctx.submit(cmd)
-        return target.read_pixels().copy()
+        return target.color[0].read().copy()
 
     filled = render(bz.PolygonMode.FILL)
     lined = render(bz.PolygonMode.LINE)

@@ -686,7 +686,6 @@ public:
     // AND mipped target (e.g. a mipped cube for prefiltered reflections) needs the
     // combined form.
     std::expected<std::shared_ptr<RenderTarget>, Error> layer(std::uint32_t i, std::uint32_t mip = 0);
-    std::expected<std::shared_ptr<RenderTarget>, Error> mip(std::uint32_t m);
 
     // Multiview: render into EVERY layer in one pass (the shader keys per-view work
     // off gl_ViewIndex) instead of a pass per layer. Needs a layered target and the
@@ -1020,16 +1019,6 @@ inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::laye
             err_resource(std::format("mip {} is out of range; this target has {} mip level(s)", mip, mip_levels_)));
     }
     return std::make_shared<SubresourceTarget>(shared_from_this(), i, mip);
-}
-
-inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::mip(std::uint32_t m)
-{
-    if (m >= mip_levels_)
-    {
-        return std::unexpected(
-            err_resource(std::format("mip {} is out of range; this target has {} mip level(s)", m, mip_levels_)));
-    }
-    return std::make_shared<SubresourceTarget>(shared_from_this(), 0, m);
 }
 
 inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::all_layers()

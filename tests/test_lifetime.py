@@ -51,7 +51,7 @@ def test_dropping_everything_between_submits_is_safe(ctx, triangle_shaders):
         cmd.end_rendering(target)
         ctx.submit(cmd)
 
-        centre = target.read_pixels()[32, 32, :3]
+        centre = target.color[0].read()[32, 32, :3]
         assert not np.allclose(centre, np.array(CLEAR[:3]) * 255, atol=2)
 
         # Drop every resource this iteration created. Their handles go through
@@ -88,4 +88,4 @@ def test_rerecording_a_command_buffer_drops_old_resources_safely(ctx, triangle_s
     ctx.submit(cmd)
     record()  # clears the previous recording while nothing else is pending
     ctx.submit(cmd)
-    assert target.read_pixels() is not None
+    assert target.color[0].read() is not None

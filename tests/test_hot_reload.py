@@ -95,7 +95,7 @@ def make_renderer(ctx, target, pipeline):
         cmd.draw(3)
         cmd.end_rendering(target)
         ctx.submit(cmd)  # drains pending hot reloads
-        return target.read_pixels()
+        return target.color[0].read()
     return render
 
 

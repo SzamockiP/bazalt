@@ -46,7 +46,7 @@ def render_flat(context, color):
     cmd.begin_rendering(target, clear_color=color)
     cmd.end_rendering(target)
     context.submit(cmd)
-    return target.read_pixels()
+    return target.color[0].read()
 
 
 def test_two_contexts_are_alive_at_once(pair):

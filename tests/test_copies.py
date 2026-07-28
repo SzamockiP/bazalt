@@ -216,6 +216,6 @@ def test_copy_image_copies_the_whole_mip_chain(ctx):
         cmd.draw(3)
     ctx.submit(cmd)
 
-    out = screen.read_pixels()
+    out = screen.color[0].read()
     assert out[4, 4, 0] > 200, "the smallest mip of the destination was not copied"
     assert out[4, 4, 1] < 50

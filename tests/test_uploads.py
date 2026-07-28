@@ -3,7 +3,7 @@
 The image IS the future — there is no Future[Image] wrapper. A submit that
 samples a pending image waits for exactly that upload (GPU-side, via the
 submission timeline); everything else never blocks. `ready`/`wait()`/
-`wait_for_uploads()` exist for explicit control, not correctness.
+`ctx.wait()` exist for explicit control, not correctness.
 """
 
 import pathlib
@@ -96,7 +96,7 @@ def test_sampling_without_wait_renders_correctly(ctx, fullscreen_and_textured, t
         c.bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).draw(3)
     ctx.submit(cmd)
 
-    pixels = target.read_pixels()
+    pixels = target.color[0].read()
     assert np.allclose(pixels[15, 15, :3], red[:3], atol=2), pixels[15, 15]
     assert np.allclose(pixels[46, 46, :3], white[:3], atol=2), pixels[46, 46]
 
@@ -122,22 +122,20 @@ def test_unrelated_submits_do_not_wait_for_uploads(ctx, triangle_shaders, triang
     with cmd.rendering(target, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
         c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
     ctx.submit(cmd)
-    assert target.read_pixels() is not None
+    assert target.color[0].read() is not None
 
-    ctx.wait_for_uploads()
+    ctx.wait()
     assert all(img.ready for img in pending)
 
 
-def test_wait_for_uploads_and_progress_endpoints(ctx, tmp_path):
-    assert ctx.uploads_done  # idle
-    assert ctx.upload_progress == 1.0
+def test_wait_and_progress_endpoints(ctx, tmp_path):
+    assert ctx.upload_progress == 1.0  # idle
 
     png_path = tmp_path / "img.png"
     write_png(png_path, [[(1, 2, 3, 255)] * 32] * 32)
     imgs = [ctx.load_image(str(png_path)) for _ in range(8)]
 
-    ctx.wait_for_uploads()
-    assert ctx.uploads_done
+    ctx.wait()
     assert ctx.upload_progress == 1.0
     assert all(img.ready for img in imgs)
     np.testing.assert_array_equal(imgs[-1].read()[0, 0], [1, 2, 3, 255])
@@ -201,22 +199,22 @@ def test_drawing_from_a_fresh_buffer_needs_no_wait(ctx, triangle_shaders):
         c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
     ctx.submit(cmd)
 
-    pixels = target.read_pixels()
+    pixels = target.color[0].read()
     assert pixels[32, 32, 0] > 200, pixels[32, 32]
 
 
-def test_wait_for_uploads_covers_one_shot_uploads(ctx):
-    """They never enter the worker's batch, so uploads_done and
-    wait_for_uploads track them on the submission timeline instead. The verb
-    would be a lie otherwise."""
-    ctx.wait_for_uploads()
+def test_wait_covers_one_shot_uploads(ctx):
+    """They have no decode stage, so they join the batch already submitted
+    rather than being tracked beside it. ctx.wait() and upload_progress would
+    both be a lie otherwise."""
+    ctx.wait()
 
     buf = ctx.create_buffer(np.zeros(4096, dtype=np.float32), bz.BufferType.STORAGE,
                             bz.MemoryUsage.STATIC)
     img = ctx.create_image(np.zeros((256, 256, 4), dtype=np.uint8))
 
-    ctx.wait_for_uploads()
-    assert ctx.uploads_done
+    ctx.wait()
+    assert ctx.upload_progress == 1.0
     assert buf.ready
     assert img.ready
 

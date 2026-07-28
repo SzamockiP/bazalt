@@ -16,8 +16,8 @@ build a new `Image` every frame.
 Around that sit two smaller gaps that the same work reaches. Copying was half
 done: `copy_image` copied one mip level, a cross-Context transfer regenerated
 the others, there was no scaled copy and no buffer copy at all. And an `Image`
-held ONE layout for the whole thing, so a pass into `target.mip(1)` claimed mip
-0 had reached the final layout too — the reason the notes used to say "render
+held ONE layout for the whole thing, so a pass into `target.layer(0, 1)` claimed
+mip 0 had reached the final layout too — the reason the notes used to say "render
 every layer and every mip before you sample", which rules out the two things a
 mip chain is for.
 
@@ -29,7 +29,12 @@ Fourth theme, and the one that closes the release: which calls block.
 the GPU, and no part of either name said so. Now every write is asynchronous
 and every read blocks. That is one rule for the whole library.
 
-No breaking changes.
+Fifth theme, from an audit before the release: one path to one effect. Four
+releases of additions had left several effects reachable two ways — five verbs
+that waited, two names for reading a target back, an explicit begin/end pair
+beside the `with` block that replaced it. Each duplicate is now one verb. This
+is where the breaking changes come from, and they are the last batch before
+1.0 that touches these names.
 
 ### Added
 - **`img.update(array, layer=, mip=, region=)`.** Writes new pixels into an
@@ -120,9 +125,29 @@ No breaking changes.
   for the GPU**, for the same reason and with the same rule. `img.ready` is
   therefore `False` on the line after the call. That is not a problem to fix: a
   submit that samples the image waits for it, and `read()` waits for it.
-- **`ctx.wait_for_uploads()` and `ctx.uploads_done` cover these new uploads
-  too.** `ctx.upload_progress` does not, because a copy with no file to decode
-  has no progress to report between 0 and 1.
+- **`ctx.wait()` and `ctx.upload_progress` cover these new uploads too.** A
+  copy with no file to decode joins the same batch as a `load_image`, already
+  submitted, so one counter answers for both kinds.
+
+### Changed (breaking)
+- **`ctx.wait()` is the only wait verb.** It waits for everything this Context
+  started, uploads and submits together. `ctx.wait_for_uploads()`,
+  `ctx.wait_idle()` and `ctx.uploads_done` are removed: all three ended at the
+  same timeline semaphore and answered the same question at a slightly
+  different width. Replace every one of them with `ctx.wait()`. To wait for
+  less, wait on the resource — `buf.wait()` and `img.wait()` stay.
+  `ctx.upload_progress` stays and now counts every upload, so
+  `while ctx.upload_progress < 1.0:` replaces `while not ctx.uploads_done:`.
+- **`target.read_pixels()` is removed.** Use `target.color[0].read()`. It was
+  the same call with the layer and mip choice taken away, and `img.read()` is
+  the general reader. `renderer.read_pixels()` stays and keeps the name: a
+  screenshot is a different operation, with the capture protocol behind it.
+- **`cmd.begin_label()` and `cmd.end_label()` are removed.** Use
+  `with cmd.label("name"):`. A label always opens and closes inside one
+  recording, so the block can express everything the pair could.
+- **`target.mip(level)` is removed.** Use `target.layer(0, level)`, which is
+  what it called.
+- **`window.should_close()` is removed.** Use `not window.is_open()`.
 
 ### Notes
 - **Shader printf has two costs, and that is why it is off by default.** The
@@ -141,7 +166,7 @@ No breaking changes.
   `occlusionQueryPrecise` feature, and without it the specification allows any
   value above zero. Read `q.samples > 0` as the reliable part.
 - **`img.update()` is asynchronous.** Use `img.wait()`, `img.ready` or
-  `ctx.wait_for_uploads()` when you need to know it has landed. A submit that
+  `ctx.wait()` when you need to know it has landed. A submit that
   samples the image waits for it either way.
 - **A cross-Context transfer with a mip chain is slower now.** It reads and
   writes each level instead of regenerating them. The whole operation is
@@ -150,9 +175,9 @@ No breaking changes.
 - **One rule for what blocks: every write is asynchronous, every read blocks.**
   A write returns a handle, so it can hand you the resource before the GPU has
   it, and the resource is its own future. A read returns an array, so it has
-  nothing to hand you until the bytes arrive. Three verbs wait, at three
-  scopes: `res.wait()` for one resource, `ctx.wait_for_uploads()` for every
-  upload, `ctx.wait()` for every submit.
+  nothing to hand you until the bytes arrive. One verb waits: `ctx.wait()`,
+  for everything this Context started. `res.wait()` narrows it to one
+  resource.
 - **Tessellation, geometry shaders, indirect draw, a `RenderTarget` on images
   you own, and the window extras move to 0.19.**
 

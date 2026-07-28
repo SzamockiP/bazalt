@@ -93,8 +93,8 @@ def test_max_samples_is_a_power_of_two(ctx):
 def test_msaa_resolves_smooth_edges(ctx, triangle_shaders, white_triangle, samples):
     """A solid white triangle: samples=1 has hard black/white edges, samples>1
     grows grey partial-coverage pixels along the silhouette."""
-    aa1 = _render_white_triangle(ctx, triangle_shaders, white_triangle, samples=1).read_pixels()
-    aaN = _render_white_triangle(ctx, triangle_shaders, white_triangle, samples=samples).read_pixels()
+    aa1 = _render_white_triangle(ctx, triangle_shaders, white_triangle, samples=1).color[0].read()
+    aaN = _render_white_triangle(ctx, triangle_shaders, white_triangle, samples=samples).color[0].read()
 
     grey1 = _grey_edge_pixels(aa1)
     greyN = _grey_edge_pixels(aaN)

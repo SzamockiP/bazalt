@@ -92,7 +92,7 @@ def test_dispatch_to_draw_via_descriptor_read(ctx, fullscreen_vert, double_pipel
         cmd.bind_pipeline(gfx).bind_descriptor_set(gfx_set, gfx, set=0).draw(3)
     ctx.submit(cmd)
 
-    assert np.allclose(target.read_pixels()[16, 16, :3], [0, 0, 255], atol=2)
+    assert np.allclose(target.color[0].read()[16, 16, :3], [0, 0, 255], atol=2)
 
 
 def test_dispatch_to_vertex_fetch_hoists_the_barrier(ctx, double_pipeline):
@@ -129,7 +129,7 @@ def test_dispatch_to_vertex_fetch_hoists_the_barrier(ctx, double_pipeline):
         cmd.bind_pipeline(gfx).bind_vertex_buffer(verts).draw(3)
     ctx.submit(cmd)
 
-    assert np.allclose(target.read_pixels()[16, 16, :3], [255, 0, 0], atol=2)
+    assert np.allclose(target.color[0].read()[16, 16, :3], [255, 0, 0], atol=2)
 
 
 def test_draw_then_dispatch_is_write_after_read(ctx, double_pipeline):
@@ -159,7 +159,7 @@ def test_draw_then_dispatch_is_write_after_read(ctx, double_pipeline):
     cmd.dispatch(1)
     ctx.submit(cmd)
 
-    assert np.allclose(target.read_pixels()[16, 16, :3], [255, 0, 0], atol=2)
+    assert np.allclose(target.color[0].read()[16, 16, :3], [255, 0, 0], atol=2)
     assert np.allclose(verts.read(np.float32), tri)  # rewrote the same values
 
 

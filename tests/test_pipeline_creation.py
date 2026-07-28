@@ -41,7 +41,7 @@ def draw(ctx, target, pipeline):
     with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
         c.bind_pipeline(pipeline).draw(3)
     ctx.submit(cmd)
-    return target.read_pixels()[16, 16]
+    return target.color[0].read()[16, 16]
 
 
 def test_one_shader_two_pipelines_two_results(ctx, spec_pipeline):
@@ -253,7 +253,7 @@ def test_depth_clamp_keeps_geometry_behind_the_near_plane(extra_context):
             c.push_constants(pipeline, 0, struct.pack("4f", 1.0, 0.0, 0.0, 1.0))
             c.draw(3)
         ctx.submit(cmd)
-        return int(np.count_nonzero(target.read_pixels()[..., 0]))
+        return int(np.count_nonzero(target.color[0].read()[..., 0]))
 
     assert run(False) == 0, "the geometry was in front of the near plane after all"
     assert run(True) > 0, "depth_clamp did not keep the clipped geometry"
@@ -283,7 +283,7 @@ def test_alpha_to_coverage_softens_an_msaa_edge(ctx):
             c.push_constants(pipeline, 0, struct.pack("4f", 1.0, 1.0, 1.0, 0.5))
             c.draw(3)
         ctx.submit(cmd)
-        return int(target.read_pixels()[16, 16][0])
+        return int(target.color[0].read()[16, 16][0])
 
     assert run(False) == 255, "alpha changed the colour without coverage"
     assert 64 <= run(True) <= 192, "alpha_to_coverage did not drop any samples"

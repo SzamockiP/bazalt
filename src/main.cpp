@@ -492,25 +492,13 @@ void SwapchainRenderer::record_capture(VkCommandBuffer cmd)
                 { vmaDestroyBuffer(allocator, buffer, alloc); });
             capture_buffer_ = VK_NULL_HANDLE;
         }
-        VkBufferCreateInfo bufferInfo{
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .size = needed,
-            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-            .queueFamilyIndexCount = 0,
-            .pQueueFamilyIndices = nullptr};
-        VmaAllocationCreateInfo allocInfo{};
-        allocInfo.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
-        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
-        if (vmaCreateBuffer(
-                context_->allocator(), &bufferInfo, &allocInfo, &capture_buffer_, &capture_alloc_, nullptr) !=
-            VK_SUCCESS)
+        auto staging = create_staging_buffer(*context_, needed, Staging::Readback);
+        if (!staging)
         {
             capture_buffer_ = VK_NULL_HANDLE;
             return;
         }
+        std::tie(capture_buffer_, capture_alloc_) = *staging;
         capture_size_ = needed;
     }
 
@@ -1027,19 +1015,21 @@ std::expected<void, Error> context_submit(Context& context, std::shared_ptr<Comm
         // compute prototype submitting in a loop wants, because otherwise the
         // GPU idles between iterations and the loop runs at the speed of the
         // round trip rather than of the work.
+        // Waits for this submit and nothing else. A vkQueueWaitIdle here would
+        // also stall on whatever the upload worker has in flight, which this
+        // submit already waited for GPU-side where it mattered.
         if (wait)
         {
-            if (auto e =
-                    check(context.vk().vkQueueWaitIdle(context.graphics_queue()), "wait for submitted command buffer"))
+            if (auto r = context.wait_for_serial(serial); !r)
             {
-                return std::unexpected(*e);
+                return std::unexpected(r.error());
             }
         }
     }
 
-    // Only meaningful after a wait: the queue-idle above proves everything
-    // through the current serial is done. An async submit reclaims on the next
-    // ctx.wait() instead.
+    // Only meaningful after a wait: the wait above proves everything through
+    // this serial is done. An async submit reclaims on the next ctx.wait()
+    // instead.
     if (wait)
     {
         context.flush_deletion_queue();
@@ -1448,10 +1438,6 @@ PYBIND11_MODULE(_core, m)
 
                 std::vector<std::byte> pixels = update_pixels_from_numpy(*self, array, w, h);
 
-                if (!context->upload_manager())
-                {
-                    context->set_upload_manager(std::make_unique<UploadManager>(*context));
-                }
                 auto* manager = static_cast<UploadManager*>(context->upload_manager());
                 manager->update(
                     std::move(self),
@@ -1824,29 +1810,15 @@ PYBIND11_MODULE(_core, m)
                 const std::uint64_t generation = self->recording_generation();
                 return std::make_shared<Timer>(Timer{std::move(self), index, generation, false});
             })
-        // A named scope in a capture. `with cmd.label("shadow pass"):` is the
-        // form to use; begin_label/end_label stay public for the rare recording
-        // built without a with-block, and end_label ignores an unbalanced close.
+        // A named scope in a capture: `with cmd.label("shadow pass"):`. The
+        // scope is the whole verb — a label always opens and closes inside one
+        // recording, so there is nothing for an explicit begin/end pair to
+        // express that the with-block cannot.
         .def(
             "label",
             [](std::shared_ptr<CommandBuffer> self, std::string name)
             { return LabelScope{std::move(self), std::move(name)}; },
             py::arg("name"))
-        .def(
-            "begin_label",
-            [](std::shared_ptr<CommandBuffer> self, const std::string& name)
-            {
-                self->begin_label(name);
-                return self;
-            },
-            py::arg("name"))
-        .def(
-            "end_label",
-            [](std::shared_ptr<CommandBuffer> self)
-            {
-                self->end_label();
-                return self;
-            })
         // Occlusion query: counts the fragments of the draws inside it that
         // passed the depth and stencil tests. Must sit inside a rendering scope.
         .def(
@@ -2190,7 +2162,6 @@ PYBIND11_MODULE(_core, m)
             py::arg("logger") = py::none(),
             py::arg("mode") = WindowMode::WINDOWED)
         .def("is_open", &Window::is_open)
-        .def("should_close", &Window::should_close)
         .def("is_key_pressed", &Window::is_key_pressed, py::arg("key"))
         .def("is_mouse_button_pressed", &Window::is_mouse_button_pressed, py::arg("button"))
         .def("was_key_pressed", &Window::was_key_pressed, py::arg("key"))
@@ -2353,6 +2324,12 @@ PYBIND11_MODULE(_core, m)
                         raise_error(res.error());
                     }
                     auto context = std::move(res.value());
+                    // Eagerly, not on the first load_image: every upload counts
+                    // towards upload_progress and ctx.wait(), including the ones
+                    // that never reach the worker, so there must be exactly one
+                    // place that counts them and it must always exist. The worker
+                    // thread parks on a condition variable until something arrives.
+                    context->set_upload_manager(std::make_unique<UploadManager>(*context));
                     // One kwarg covers both shaders and images: it's one feature, "watch
                     // what you loaded". The watcher holds only weak refs, so it never
                     // keeps a resource alive.
@@ -2389,25 +2366,6 @@ PYBIND11_MODULE(_core, m)
         .def("supports", &Context::supports, py::arg("feature"))
         .def("supports_multiview", &Context::supports_multiview)
         .def("max_samples", &Context::max_samples)
-        // Blocking, so the GIL goes: another thread must be able to keep running
-        // Python while this one waits on the device.
-        .def(
-            "wait_idle",
-            [](Context& self)
-            {
-                {
-                    py::gil_scoped_release release;
-                    auto r = self.wait_idle();
-                    if (!r)
-                    {
-                        // Back under the GIL before raising — raise_error builds a
-                        // Python object, and doing that with the GIL released is an
-                        // access violation rather than an exception.
-                        py::gil_scoped_acquire acquire;
-                        raise_error(r.error());
-                    }
-                }
-            })
         .def_property_readonly("device_name", &Context::device_name)
         .def_property_readonly(
             "api_version", [](const Context& self) { return api_version_string(self.api_version()); })
@@ -2523,10 +2481,6 @@ PYBIND11_MODULE(_core, m)
             "load_image",
             [](Context& self, const py::bytes& blob, bool mipmaps, const std::string& name) -> py::object
             {
-                if (!self.upload_manager())
-                {
-                    self.set_upload_manager(std::make_unique<UploadManager>(self));
-                }
                 auto* manager = static_cast<UploadManager*>(self.upload_manager());
                 const std::string_view view = blob;
                 std::vector<std::byte> bytes(view.size());
@@ -2552,12 +2506,8 @@ PYBIND11_MODULE(_core, m)
                 // mangled files fail at the call site, and width/height are right
                 // away correct), the decode + copy run on the upload worker. The
                 // image is usable for recording at once; residency is enforced at
-                // submit. img.ready / img.wait() / ctx.wait_for_uploads() are the
+                // submit. img.ready / img.wait() / ctx.wait() are the
                 // explicit-control verbs.
-                if (!self.upload_manager())
-                {
-                    self.set_upload_manager(std::make_unique<UploadManager>(self));
-                }
                 auto* manager = static_cast<UploadManager*>(self.upload_manager());
                 auto image = unwrap(manager->load(path, mipmaps), self.logger().get());
                 name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
@@ -2579,10 +2529,6 @@ PYBIND11_MODULE(_core, m)
             [](Context& self, const std::vector<std::string>& paths, bool cube, bool mipmaps, const std::string& name)
                 -> py::object
             {
-                if (!self.upload_manager())
-                {
-                    self.set_upload_manager(std::make_unique<UploadManager>(self));
-                }
                 auto* manager = static_cast<UploadManager*>(self.upload_manager());
                 auto image = unwrap(manager->load_layered(paths, cube, mipmaps), self.logger().get());
                 name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
@@ -2593,40 +2539,13 @@ PYBIND11_MODULE(_core, m)
             py::arg("cube") = false,
             py::arg("mipmaps") = true,
             py::arg("name") = "")
-        // Both halves: the worker's decode batch, and the one-shot uploads that
-        // never enter it (create_buffer, create_image(array) — nothing to
-        // decode, so they submit on this thread and only skip the wait).
+        // Progress of the current batch of uploads, 0.0 .. 1.0 (1.0 when idle) —
+        // a loading bar without user-side threads. Covers both kinds: the
+        // load_image decodes on the worker, and the one-shot copies of
+        // create_buffer and create_image(array), which have nothing to decode
+        // and join the batch already submitted.
         .def_property_readonly(
-            "uploads_done",
-            [](const Context& self)
-            {
-                if (self.completed_submit_serial() < self.last_upload_serial())
-                {
-                    return false;
-                }
-                return self.upload_manager() ? self.upload_manager()->uploads_done() : true;
-            })
-        .def_property_readonly(
-            "upload_progress",
-            [](const Context& self)
-            {
-                // Progress of the current batch of load_image calls, 0.0 .. 1.0
-                // (1.0 when idle) — a loading bar without user-side threads.
-                // Decodes only: a create_buffer is one submit with no worker
-                // stage, so it has no progress to report between 0 and 1.
-                return self.upload_manager() ? self.upload_manager()->upload_progress() : 1.0;
-            })
-        .def(
-            "wait_for_uploads",
-            [](Context& self)
-            {
-                py::gil_scoped_release release;
-                if (self.upload_manager())
-                {
-                    self.upload_manager()->wait_all();
-                }
-                self.wait_for_serial(self.last_upload_serial());
-            })
+            "upload_progress", [](const Context& self) { return self.upload_manager()->upload_progress(); })
         // Registered before the buffer/list overloads so two ints never reach
         // the buffer protocol. Empty image: 2D, a texture array (layers>1), or a
         // cubemap (cube=True → 6 square faces). Filled by rendering into it or by
@@ -2850,10 +2769,6 @@ PYBIND11_MODULE(_core, m)
                 const std::uint32_t shared_mips = (std::ranges::min)(source->mip_levels(), image->mip_levels());
                 if (shared_mips > 1)
                 {
-                    if (!self.upload_manager())
-                    {
-                        self.set_upload_manager(std::make_unique<UploadManager>(self));
-                    }
                     auto* manager = static_cast<UploadManager*>(self.upload_manager());
                     for (std::uint32_t mip = 1; mip < shared_mips; ++mip)
                     {
@@ -2950,15 +2865,21 @@ PYBIND11_MODULE(_core, m)
             py::arg("cmd"),
             py::kw_only(),
             py::arg("wait") = true)
-        // The other half of submit(wait=False). Waits on the submission timeline
-        // rather than the device, so uploads and other Contexts are unaffected,
-        // and reclaims what the deletion queue was holding for the finished work.
+        // The one wait verb: every upload and every submit this Context started,
+        // finished. The other half of submit(wait=False), and where deferred
+        // destruction is reclaimed for that work. Waits on the submission
+        // timeline rather than the device, so the other Contexts sharing the
+        // device are unaffected.
         .def(
             "wait",
             [](Context& self)
             {
-                py::gil_scoped_release release;
-                self.wait_for_submits();
+                std::expected<void, Error> r;
+                {
+                    py::gil_scoped_release release;
+                    r = self.wait_for_submits();
+                }
+                unwrap(std::move(r), self.logger().get());
             });
 
     // ── RenderTarget ──
@@ -3055,18 +2976,6 @@ PYBIND11_MODULE(_core, m)
         .def_property_readonly(
             "depth",
             [](const OffscreenTarget& t) -> py::object { return t.depth() ? py::cast(t.depth()) : py::none(); })
-        // Kept as the ergonomic spelling for colour 0; the general form is
-        // target.color[i].read().
-        .def(
-            "read_pixels",
-            [](OffscreenTarget& self) -> py::array
-            {
-                if (self.colors().empty())
-                {
-                    raise_error(err_resource("read_pixels() on a depth-only RenderTarget; read target.depth instead"));
-                }
-                return image_to_numpy(*self.colors()[0]);
-            })
         // Render-to-layer / render-to-mip: a lightweight view of one subresource.
         // Pass it straight to cmd.rendering(...). Cube face i == layer i, Vulkan
         // order +X, -X, +Y, -Y, +Z, -Z.
@@ -3076,11 +2985,6 @@ PYBIND11_MODULE(_core, m)
             { return unwrap(self->layer(index, mip), nullptr); },
             py::arg("index"),
             py::arg("mip") = 0)
-        .def(
-            "mip",
-            [](std::shared_ptr<OffscreenTarget> self, std::uint32_t level)
-            { return unwrap(self->mip(level), nullptr); },
-            py::arg("level"))
         // Multiview: one pass into every layer (the shader uses gl_ViewIndex).
         .def("all_layers", [](std::shared_ptr<OffscreenTarget> self) { return unwrap(self->all_layers(), nullptr); });
 

@@ -1,4 +1,4 @@
-"""0.17: cmd.copy_image, cmd.clear_image, ctx.wait_idle and the sampler border.
+"""0.17: cmd.copy_image, cmd.clear_image, ctx.wait and the sampler border.
 
 An image could be created, uploaded to, rendered into and read back, but never
 copied to another one — which is what a history buffer (motion blur, a feedback
@@ -109,7 +109,7 @@ def test_clear_image_refuses_depth(ctx):
         cmd.clear_image(depth, [1.0, 1.0, 1.0, 1.0])
 
 
-def test_wait_idle_returns_after_the_work(ctx):
+def test_wait_returns_after_the_work(ctx):
     """Nothing observable beyond "it returns and the result is there" — the
     submit already waits. It exists for the cases outside a frame."""
     image = ctx.create_image(checkerboard())
@@ -118,7 +118,7 @@ def test_wait_idle_returns_after_the_work(ctx):
     cmd.begin()
     cmd.copy_image(image, dst)
     ctx.submit(cmd)
-    ctx.wait_idle()
+    ctx.wait()
     assert np.array_equal(dst.read(), image.read())
 
 
@@ -158,7 +158,7 @@ def test_the_border_colour_is_what_a_sample_outside_the_image_reads(ctx):
         with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
             c.bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).draw(3)
         ctx.submit(cmd)
-        return int(target.read_pixels()[16, 16][0])
+        return int(target.color[0].read()[16, 16][0])
 
     clamped = ctx.create_sampler(address_mode=bz.AddressMode.CLAMP)
     bordered = ctx.create_sampler(address_mode=bz.AddressMode.CLAMP_TO_BORDER,

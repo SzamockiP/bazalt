@@ -72,8 +72,8 @@ def test_chained_and_statement_styles_render_identically(ctx, triangle_shaders, 
          .end_rendering(chained_target))
     ctx.submit(cmd2)
 
-    np.testing.assert_array_equal(chained_target.read_pixels(),
-                                  statement_target.read_pixels())
+    np.testing.assert_array_equal(chained_target.color[0].read(),
+                                  statement_target.color[0].read())
 
 
 def test_rendering_scope_records_the_pair(ctx, triangle_shaders, triangle_buffers):
@@ -94,7 +94,7 @@ def test_rendering_scope_records_the_pair(ctx, triangle_shaders, triangle_buffer
         c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
     ctx.submit(cmd)
 
-    pixels = target.read_pixels()
+    pixels = target.color[0].read()
     assert not np.allclose(pixels[32, 32, :3], np.array(CLEAR[:3]) * 255, atol=2)
 
 
@@ -125,4 +125,4 @@ def test_rendering_scope_closes_on_exception(ctx, triangle_shaders, triangle_buf
     with cmd.rendering(target, clear_color=CLEAR) as c:
         c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
     ctx.submit(cmd)
-    assert target.read_pixels() is not None
+    assert target.color[0].read() is not None

@@ -37,7 +37,7 @@ def test_debug_names_are_accepted_and_render_cleanly(ctx):
     cmd.end_rendering(target)
     ctx.submit(cmd)
 
-    assert target.read_pixels().shape == (8, 8, 4)
+    assert target.color[0].read().shape == (8, 8, 4)
     assert buf is not None and img is not None
 
 
@@ -207,17 +207,17 @@ def test_debug_labels_render_cleanly(ctx):
                 cmd.bind_pipeline(pipeline).draw(3)
     ctx.submit(cmd)
 
-    assert target.read_pixels()[0, 0, 0] > 200
+    assert target.color[0].read()[0, 0, 0] > 200
 
 
-def test_end_label_without_a_begin_is_ignored(ctx):
-    """Recording the unbalanced end is undefined behaviour in Vulkan, so the
-    verb drops it. The `with` form cannot produce one; this covers the explicit
-    verbs, which someone will eventually mismatch."""
+def test_labels_nest(ctx):
+    """The scope is the whole verb, so an unbalanced close is unspellable.
+    Nesting is the part that still has to work."""
     cmd = ctx.create_command_buffer()
     cmd.begin()
-    cmd.end_label()
-    cmd.begin_label("one").end_label().end_label()
+    with cmd.label("outer"):
+        with cmd.label("inner"):
+            pass
     ctx.submit(cmd)
 
 
@@ -305,7 +305,7 @@ def test_memory_stats_shrink_again(ctx):
 
     del big
     gc.collect()
-    ctx.wait_idle()
+    ctx.wait()
     for _ in range(ctx.frames_in_flight + 1):
         ctx.begin_frame()
 

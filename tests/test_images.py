@@ -157,7 +157,7 @@ def test_sampling_with_an_explicit_nearest_sampler(ctx, tmp_path):
     cmd.end_rendering(target)
     ctx.submit(cmd)
 
-    pixels = target.read_pixels()
+    pixels = target.color[0].read()
     assert np.allclose(pixels[15, 15, :3], red[:3], atol=2)
     assert np.allclose(pixels[46, 46, :3], white[:3], atol=2)
 

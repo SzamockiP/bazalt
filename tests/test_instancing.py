@@ -66,7 +66,7 @@ def render(ctx, target, pipeline, vbuf, ibuf, instances, vertex_count=4):
     cmd.draw(vertex_count, instances=instances)
     cmd.end_rendering(target)
     ctx.submit(cmd)
-    return target.read_pixels()
+    return target.color[0].read()
 
 
 def float_instance_buffer(ctx, rows):
@@ -153,7 +153,7 @@ def test_draw_indexed_takes_an_instance_count(ctx, instanced):
           .draw_indexed(6, instances=4))
     ctx.submit(cmd)
 
-    pixels = target.read_pixels()
+    pixels = target.color[0].read()
     for (row, col), inst in zip(CENTRES, INSTANCES):
         expected = [round(c * 255) for c in inst[2:5]]
         assert np.allclose(pixels[row, col][:3], expected, atol=2)

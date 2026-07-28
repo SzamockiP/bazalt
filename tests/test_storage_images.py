@@ -135,5 +135,5 @@ def test_compute_written_image_sampled_by_graphics(ctx, fullscreen_vert):
     cmd.end_rendering(target)
     ctx.submit(cmd)
 
-    assert np.allclose(target.read_pixels()[16, 16, :3], [64, 128, 191], atol=2), \
-        target.read_pixels()[16, 16]
+    assert np.allclose(target.color[0].read()[16, 16, :3], [64, 128, 191], atol=2), \
+        target.color[0].read()[16, 16]

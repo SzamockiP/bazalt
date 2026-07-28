@@ -551,11 +551,6 @@ class RenderTarget(RenderTargetBase):
         target.depth."""
         ...
 
-    def mip(self, level: int) -> RenderTargetBase:
-        """A view of one mip level of this target, to render into with
-        cmd.rendering(target.mip(m)). The pass covers exactly that mip's size."""
-        ...
-
     def all_layers(self) -> RenderTargetBase:
         """A multiview view of the whole target: cmd.rendering(target.all_layers())
         renders into EVERY layer in ONE pass instead of a pass per layer. The
@@ -563,13 +558,6 @@ class RenderTarget(RenderTargetBase):
         for cube capture). Needs a layered target and ctx.supports_multiview();
         composes with MSAA (each view resolves into its own layer). Renders every
         layer, so the result is fully sampleable with no partial-render caveat."""
-        ...
-
-    def read_pixels(self) -> np.ndarray:
-        """Copy the colour attachment back to host memory as (height, width, 4) uint8.
-
-        Blocking, and it stalls the GPU — intended for tests and debugging.
-        """
         ...
 
 class GraphicsPipelineBuilder:
@@ -935,9 +923,8 @@ class CommandBuffer:
             print(t.ms)
 
         The handle is the identity — no names, no keys — so several, nested and
-        overlapping timers all work. Unlike frame.gpu_time_ms this needs no
-        window: the blocking headless submit means t.ms is ready as soon as
-        submit() returns. Self-gating: the query pool exists only once a timer is
+        overlapping timers all work. Unlike renderer.gpu_time_ms this needs no
+        window: t.ms is ready as soon as the submit you timed has finished. Self-gating: the query pool exists only once a timer is
         used, so apps that don't time pay nothing."""
         ...
 
@@ -952,17 +939,6 @@ class CommandBuffer:
         only when validation is on — so a release run pays nothing and simply
         shows no labels. Object names (name= on create_buffer / create_image /
         the pipeline builders) answer "which object"; this answers "which pass"."""
-        ...
-
-    def begin_label(self, name: str) -> CommandBuffer:
-        """The explicit half of label(). Prefer the `with` form, which cannot
-        leave a label open."""
-        ...
-
-    def end_label(self) -> CommandBuffer:
-        """Close the innermost open label. An unbalanced call is ignored rather
-        than recorded: ending a label that was never begun is undefined
-        behaviour in Vulkan."""
         ...
 
     def occlusion_query(self) -> OcclusionQuery:
@@ -1002,7 +978,9 @@ class OcclusionQuery:
     def samples(self) -> Optional[int]:
         """Fragments that passed the depth and stencil tests, or None if the
         command buffer was re-recorded since (the handle is stale) or the submit
-        has not completed (a blocking headless submit always has)."""
+        has not completed. Read it after the submit you measured has finished —
+        the default submit(wait=True) is enough; submit(wait=False) needs a
+        ctx.wait() first."""
         ...
     def __enter__(self) -> OcclusionQuery: ...
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
@@ -1025,8 +1003,9 @@ class Timer:
     def ms(self) -> Optional[float]:
         """Measured GPU time in milliseconds, or None if timestamps are
         unsupported, the command buffer was re-recorded since (the handle is
-        stale), or the submit has not completed (a blocking headless submit
-        always has)."""
+        stale), or the submit has not completed. Read it after the submit you
+        timed has finished — the default submit(wait=True) is enough;
+        submit(wait=False) needs a ctx.wait() first."""
         ...
     def __enter__(self) -> Timer: ...
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
@@ -1042,7 +1021,6 @@ class Window:
         """
         ...
     def is_open(self) -> bool: ...
-    def should_close(self) -> bool: ...
     def is_key_pressed(self, key: int) -> bool: ...
     def is_mouse_button_pressed(self, button: int) -> bool: ...
     def was_key_pressed(self, key: int) -> bool:
@@ -1427,17 +1405,11 @@ class Context:
         ...
 
     @property
-    def uploads_done(self) -> bool:
-        """Non-blocking: have all uploads finished? Covers the load_image
-        decodes and the one-shot copies of create_buffer and
-        create_image(array)."""
-        ...
-    @property
     def upload_progress(self) -> float:
-        """0.0 .. 1.0 for the current batch of load_image calls (1.0 when
-        idle) — a loading bar without user-side threads:
+        """0.0 .. 1.0 for the current batch of uploads (1.0 when idle) — a
+        loading bar without user-side threads:
 
-            while not ctx.uploads_done:
+            while ctx.upload_progress < 1.0:
                 draw_progress(ctx.upload_progress)
 
         "Batch" means everything queued since the last time uploads fully
@@ -1446,16 +1418,9 @@ class Context:
         semantics (settled in 0.9) — a second loading screen counts only its own
         images, not the ones a previous screen already finished.
 
-        Decodes only: a create_buffer or a create_image(array) is one submit
-        with no worker stage, so it has no progress to report between 0 and 1.
-        `uploads_done` still covers them."""
-        ...
-    def wait_for_uploads(self) -> None:
-        """Block until every pending upload has finished.
-
-        Both kinds: the load_image decodes on the worker, and the one-shot
-        copies of create_buffer and create_image(array), which have nothing to
-        decode and so never enter a batch."""
+        Covers both kinds: the load_image decodes on the worker, and the
+        one-shot copies of create_buffer and create_image(array), which have
+        nothing to decode and join the batch already submitted."""
         ...
     def create_image(self, width: int, height: int,
                      format: Format = Format.RGBA8, *, layers: int = 1,
@@ -1510,15 +1475,6 @@ class Context:
         hand-authored chain (rendered per level) becomes a generated one.
         ResourceError if the source is multisampled or still has no contents."""
         ...
-    def wait_idle(self) -> None:
-        """Block until the device has finished every submit.
-
-        The frame path already waits where it must, so this is for the cases
-        outside one: timing a batch of work, or making sure nothing is in flight
-        before a measurement. Releases the GIL while it waits.
-        """
-        ...
-
     def create_sampler(self, filter: Filter = Filter.LINEAR,
                        address_mode: AddressMode = AddressMode.REPEAT,
                        anisotropy: bool = True,
@@ -1577,12 +1533,16 @@ class Context:
         ...
 
     def wait(self) -> None:
-        """Block until every submit made so far has finished.
+        """Block until everything this Context started has finished — every
+        upload and every submit.
 
-        The other half of submit(wait=False), and where deferred destruction is
-        reclaimed for that work. Waits on the submission timeline rather than on
-        the device, so uploads and other Contexts are unaffected. Calling it with
-        nothing outstanding does nothing.
+        The one wait verb, and the other half of submit(wait=False). This is
+        also where deferred destruction is reclaimed for that work. Waits on the
+        submission timeline rather than on the device, so the other Contexts
+        sharing the GPU are unaffected. Calling it with nothing outstanding does
+        nothing.
+
+        To wait for less, wait on the resource: buf.wait() / img.wait().
         """
         ...
 

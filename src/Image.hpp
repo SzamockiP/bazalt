@@ -431,22 +431,7 @@ public:
         }
         if (upload_state_.load() == UploadState::Submitted)
         {
-            const std::uint64_t serial = upload_serial_.load();
-            VkSemaphore timeline = context_->submit_timeline();
-            VkSemaphoreWaitInfo waitInfo{
-                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
-                .pNext = nullptr,
-                .flags = 0,
-                .semaphoreCount = 1,
-                .pSemaphores = &timeline,
-                .pValues = &serial};
-            if (auto e = check(
-                    context_->vk().vkWaitSemaphores(context_->device(), &waitInfo, UINT64_MAX),
-                    "wait for image upload",
-                    ErrorCode::Resource))
-            {
-                return std::unexpected(*e);
-            }
+            return context_->wait_for_serial(upload_serial_.load());
         }
         return {};
     }
@@ -855,29 +840,12 @@ public:
         const VkDeviceSize size = static_cast<VkDeviceSize>(mip_width) * mip_height * info.bytes_per_pixel * layers;
         const VkImageAspectFlags aspect = aspect_mask_for(vk_format());
 
-        VkBufferCreateInfo bufferInfo{
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .size = size,
-            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-            .queueFamilyIndexCount = 0,
-            .pQueueFamilyIndices = nullptr};
-
-        VmaAllocationCreateInfo allocInfo{};
-        allocInfo.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
-        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
-
-        VkBuffer staging = VK_NULL_HANDLE;
-        VmaAllocation staging_alloc = VK_NULL_HANDLE;
-        if (auto e = check(
-                vmaCreateBuffer(context_->allocator(), &bufferInfo, &allocInfo, &staging, &staging_alloc, nullptr),
-                "create readback buffer",
-                ErrorCode::Resource))
+        auto staging_pair = create_staging_buffer(*context_, size, Staging::Readback);
+        if (!staging_pair)
         {
-            return std::unexpected(*e);
+            return std::unexpected(staging_pair.error());
         }
+        auto [staging, staging_alloc] = *staging_pair;
 
         auto submitted = immediate_submit(
             *context_,
@@ -972,8 +940,8 @@ public:
     // Records the whole first upload: transition all mips to TRANSFER_DST from
     // UNDEFINED (there are no contents to preserve), copy the staging buffer into
     // mip 0, then either blit the chain or transition to SHADER_READ_ONLY. The
-    // sync path replays this through immediate_submit; the upload worker records
-    // it into its own command buffer.
+    // main thread replays this through deferred_submit; the upload worker records
+    // it into a command buffer from its own pool.
     void record_upload_commands(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips)
     {
         record_image_transition(
@@ -1087,52 +1055,6 @@ public:
             1,
             1,
             layer);
-    }
-
-    // Staging for an arbitrary byte count. create_filled_staging computes its
-    // size from the whole image, which a partial update cannot use.
-    static std::expected<std::pair<VkBuffer, VmaAllocation>, Error> create_staging_bytes(
-        Context& context,
-        const void* data,
-        VkDeviceSize size)
-    {
-        VkBufferCreateInfo stagingInfo{
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .size = size,
-            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-            .queueFamilyIndexCount = 0,
-            .pQueueFamilyIndices = nullptr};
-        VmaAllocationCreateInfo stagingAllocInfo{};
-        stagingAllocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
-        stagingAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
-
-        VkBuffer staging = VK_NULL_HANDLE;
-        VmaAllocation staging_alloc = VK_NULL_HANDLE;
-        if (auto e = check(
-                vmaCreateBuffer(
-                    context.allocator(), &stagingInfo, &stagingAllocInfo, &staging, &staging_alloc, nullptr),
-                "create staging buffer for image update",
-                ErrorCode::Resource))
-        {
-            return std::unexpected(*e);
-        }
-
-        void* mapped = nullptr;
-        if (auto e = check(
-                vmaMapMemory(context.allocator(), staging_alloc, &mapped),
-                "map image staging buffer",
-                ErrorCode::Resource))
-        {
-            vmaDestroyBuffer(context.allocator(), staging, staging_alloc);
-            return std::unexpected(*e);
-        }
-        std::memcpy(mapped, data, static_cast<std::size_t>(size));
-        vmaUnmapMemory(context.allocator(), staging_alloc);
-
-        return std::pair{staging, staging_alloc};
     }
 
     // Standalone mip generation for cmd.generate_mipmaps(): mip 0 already holds
@@ -1272,44 +1194,7 @@ public:
     {
         const FormatInfo info = format_info(format_);
         const VkDeviceSize size = static_cast<VkDeviceSize>(width_) * height_ * info.bytes_per_pixel * array_layers_;
-
-        VkBufferCreateInfo stagingInfo{
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .size = size,
-            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-            .queueFamilyIndexCount = 0,
-            .pQueueFamilyIndices = nullptr};
-        VmaAllocationCreateInfo stagingAllocInfo{};
-        stagingAllocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
-        stagingAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
-
-        VkBuffer staging = VK_NULL_HANDLE;
-        VmaAllocation staging_alloc = VK_NULL_HANDLE;
-        if (auto e = check(
-                vmaCreateBuffer(
-                    context.allocator(), &stagingInfo, &stagingAllocInfo, &staging, &staging_alloc, nullptr),
-                "create staging buffer for image upload",
-                ErrorCode::Resource))
-        {
-            return std::unexpected(*e);
-        }
-
-        void* mapped = nullptr;
-        if (auto e = check(
-                vmaMapMemory(context.allocator(), staging_alloc, &mapped),
-                "map image staging buffer",
-                ErrorCode::Resource))
-        {
-            vmaDestroyBuffer(context.allocator(), staging, staging_alloc);
-            return std::unexpected(*e);
-        }
-        std::memcpy(mapped, pixels, static_cast<std::size_t>(size));
-        vmaUnmapMemory(context.allocator(), staging_alloc);
-
-        return std::pair{staging, staging_alloc};
+        return create_staging_buffer(context, size, Staging::Upload, pixels);
     }
 
     // Calls fn(layer, mip) for every subresource of one mip across a layer
