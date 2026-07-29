@@ -426,6 +426,117 @@ public:
         return target;
     }
 
+    // A target on images the caller already owns, instead of attachments this
+    // class allocates. Everything create() takes as a knob — extent, layers, cube,
+    // mip_levels — is read off the images instead, because the images already
+    // answer those questions and a second answer could disagree with them.
+    //
+    // It earns being a separate entry point rather than optional width/height on
+    // create() for the same reason blit_image is not copy_image(scale=True): the
+    // two do different jobs. "Allocate attachments for me" and "render into these"
+    // share only what happens afterwards.
+    //
+    // What this makes reachable: a graphics ping-pong between two textures, drawing
+    // over a texture a compute pass baked, and drawing into an image brought from
+    // another Context. All three were impossible while a target insisted on owning
+    // its attachments.
+    //
+    // Ownership needs no work: the images are held by shared_ptr exactly as the
+    // allocated ones are, and the destructor already destroys only its own views.
+    // Note that the target does WRITE to a borrowed image's layout tracking
+    // (mark_rendered / record_even_out) — that is the point, since final_layout()
+    // leaves the result sampleable.
+    static std::expected<std::shared_ptr<OffscreenTarget>, Error> create_from_images(
+        Context& context,
+        std::vector<std::shared_ptr<Image>> colors,
+        std::shared_ptr<Image> depth,
+        const std::string& name = "")
+    {
+        if (colors.empty() && !depth)
+        {
+            return std::unexpected(err_resource(
+                "A RenderTarget needs at least one attachment: pass color=[...], "
+                "depth=..., or both"));
+        }
+        for (const auto& image : colors)
+        {
+            if (!image)
+            {
+                return std::unexpected(err_resource("color contains a null image"));
+            }
+            if (format_info(image->format()).depth)
+            {
+                return std::unexpected(err_resource(
+                    std::format(
+                        "a {} image is a depth attachment and cannot go in color=; pass it as depth=",
+                        format_name(image->format()))));
+            }
+        }
+        if (depth && !format_info(depth->format()).depth)
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "depth= needs a depth format, got {}; create the image with bz.Format.D32F, "
+                    "or bz.Format.DEPTH_STENCIL when the pass needs a stencil buffer",
+                    format_name(depth->format()))));
+        }
+
+        // One extent, one layer count and one mip count for the whole target: the
+        // render area, the viewport and every subresource view come from a single
+        // set of numbers, so attachments that disagree have no correct answer.
+        // Reported as a mismatch rather than silently intersected — a target half
+        // the size of the texture handed in is never what was meant.
+        const Image* first = colors.empty() ? depth.get() : colors[0].get();
+        for (const auto& image : colors)
+        {
+            if (auto e = require_matching_attachment(*first, *image, "color"); !e)
+            {
+                return std::unexpected(e.error());
+            }
+        }
+        if (depth)
+        {
+            if (auto e = require_matching_attachment(*first, *depth, "depth"); !e)
+            {
+                return std::unexpected(e.error());
+            }
+        }
+
+        auto target = std::shared_ptr<OffscreenTarget>(new OffscreenTarget(context.shared_from_this()));
+        target->extent_ = {first->width(), first->height()};
+        // Single-sample only, and not an oversight: create_image has no samples=,
+        // so no image the caller can hand over is multisampled. MSAA therefore has
+        // no resolve pair to set up here, and msaa_colors_/msaa_depth_ stay empty.
+        target->samples_ = VK_SAMPLE_COUNT_1_BIT;
+        target->layers_ = first->array_layers();
+        target->mip_levels_ = first->mip_levels();
+        target->colors_ = std::move(colors);
+        target->depth_ = std::move(depth);
+
+        if (!name.empty())
+        {
+            // Names the target's use of the image, and accumulates on the object the
+            // same way a shared sampler's name does: an image may be an attachment
+            // here and a texture somewhere else, and neither caller can predict the
+            // other.
+            for (std::size_t i = 0; i < target->colors_.size(); ++i)
+            {
+                context.set_debug_name(
+                    VK_OBJECT_TYPE_IMAGE,
+                    reinterpret_cast<std::uint64_t>(target->colors_[i]->vk_image()),
+                    std::format("{} color[{}]", name, i));
+            }
+            if (target->depth_)
+            {
+                context.set_debug_name(
+                    VK_OBJECT_TYPE_IMAGE,
+                    reinterpret_cast<std::uint64_t>(target->depth_->vk_image()),
+                    std::format("{} depth", name));
+            }
+        }
+        return target;
+    }
+
     OffscreenTarget(const OffscreenTarget&) = delete;
     OffscreenTarget& operator=(const OffscreenTarget&) = delete;
 
@@ -701,6 +812,47 @@ private:
     explicit OffscreenTarget(std::shared_ptr<Context> context)
         : context_(std::move(context))
     {
+    }
+
+    // Every attachment of one target shares its extent, layer count and mip count.
+    // Checked against the first attachment rather than pairwise, which is the same
+    // result in fewer comparisons and gives a message naming a concrete reference.
+    static std::expected<void, Error> require_matching_attachment(
+        const Image& reference,
+        const Image& image,
+        const char* role)
+    {
+        if (image.width() != reference.width() || image.height() != reference.height())
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "every attachment of a RenderTarget must be the same size: {} is {}x{}, "
+                    "the first attachment is {}x{}",
+                    role,
+                    image.width(),
+                    image.height(),
+                    reference.width(),
+                    reference.height())));
+        }
+        if (image.array_layers() != reference.array_layers())
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "every attachment must have the same layer count: {} has {}, the first has {}",
+                    role,
+                    image.array_layers(),
+                    reference.array_layers())));
+        }
+        if (image.mip_levels() != reference.mip_levels())
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "every attachment must have the same mip count: {} has {}, the first has {}",
+                    role,
+                    image.mip_levels(),
+                    reference.mip_levels())));
+        }
+        return {};
     }
 
     // Shared body of the view accessors: cache lookup keyed by (VkImage, baseLayer,

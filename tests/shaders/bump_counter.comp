@@ -1,0 +1,14 @@
+#version 450
+
+// One atomic increment per invocation. With local_size_x = 1 the final counter IS
+// the group count the dispatch ran with, so a dispatch_indirect whose group count
+// came off the GPU is checked by reading one number.
+layout(local_size_x = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer Counter {
+    uint value;
+} counter;
+
+void main() {
+    atomicAdd(counter.value, 1u);
+}

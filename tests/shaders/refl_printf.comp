@@ -1,0 +1,6 @@
+#version 450
+#extension GL_EXT_debug_printf : enable
+// prints must be readable off UNOPTIMIZED words: -O deletes the print itself.
+layout(local_size_x = 1) in;
+layout(std430, set = 0, binding = 0) buffer Out { uint v[]; };
+void main() { debugPrintfEXT("v=%u", v[0]); v[0] = 1u; }

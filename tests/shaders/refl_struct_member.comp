@@ -1,0 +1,7 @@
+#version 450
+// A long access chain: array of structs, member, then element. The pointer must
+// still resolve back to the root variable.
+layout(local_size_x = 1) in;
+struct Item { vec4 pos; uint tags[4]; };
+layout(std430, set = 2, binding = 3) buffer Items { Item items[]; };
+void main() { items[gl_GlobalInvocationID.x].tags[2] = 7u; }

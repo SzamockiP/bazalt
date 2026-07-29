@@ -3,7 +3,7 @@
 from bazalt import _core
 from bazalt._core import *  # noqa: F401, F403
 
-__version__ = "0.18.0"
+__version__ = "0.19.0"
 
 __all__ = [
     # Core
@@ -15,6 +15,9 @@ __all__ = [
     "Device",
     "list_devices",
     "poll_events",
+    # Process-wide, like poll_events: the clipboard is not per window.
+    "get_clipboard",
+    "set_clipboard",
     "Logger",
     "LogMessage",
     # Resources

@@ -1124,6 +1124,10 @@ PYBIND11_MODULE(_core, m)
         .value("MULTI_DRAW_INDIRECT", Feature::MULTI_DRAW_INDIRECT)
         .value("SHADER_FLOAT64", Feature::SHADER_FLOAT64)
         .value("INDEPENDENT_BLEND", Feature::INDEPENDENT_BLEND)
+        .value("TESSELLATION", Feature::TESSELLATION)
+        .value("GEOMETRY_SHADER", Feature::GEOMETRY_SHADER)
+        .value("FRAGMENT_STORES", Feature::FRAGMENT_STORES)
+        .value("VERTEX_STAGE_STORES", Feature::VERTEX_STAGE_STORES)
         .export_values();
 
     py::enum_<BufferType>(m, "BufferType")
@@ -1144,6 +1148,9 @@ PYBIND11_MODULE(_core, m)
         .value("VERTEX", ShaderStage::VERTEX)
         .value("FRAGMENT", ShaderStage::FRAGMENT)
         .value("COMPUTE", ShaderStage::COMPUTE)
+        .value("TESS_CONTROL", ShaderStage::TESS_CONTROL)
+        .value("TESS_EVALUATION", ShaderStage::TESS_EVALUATION)
+        .value("GEOMETRY", ShaderStage::GEOMETRY)
         .export_values();
 
     py::enum_<VertexFormat>(m, "VertexFormat")
@@ -1161,6 +1168,7 @@ PYBIND11_MODULE(_core, m)
         .value("LINE_LIST", Topology::LINE_LIST)
         .value("TRIANGLE_STRIP", Topology::TRIANGLE_STRIP)
         .value("LINE_STRIP", Topology::LINE_STRIP)
+        .value("PATCH_LIST", Topology::PATCH_LIST)
         .export_values();
 
     // The vocabulary of cmd.barrier() in manual mode (auto_barriers=False).
@@ -1170,6 +1178,7 @@ PYBIND11_MODULE(_core, m)
         .value("VERTEX_READ", Access::VERTEX_READ)
         .value("INDEX_READ", Access::INDEX_READ)
         .value("UNIFORM_READ", Access::UNIFORM_READ)
+        .value("INDIRECT_READ", Access::INDIRECT_READ)
         .export_values();
 
     // Pixel formats — the name VertexFormat freed in 0.4.
@@ -1342,7 +1351,31 @@ PYBIND11_MODULE(_core, m)
             {
                 const auto& words = self.spirv();
                 return py::bytes(reinterpret_cast<const char*>(words.data()), words.size() * sizeof(uint32_t));
-            });
+            })
+        // Which (set, binding) pairs this shader writes, from SPIR-V reflection.
+        //
+        // Bound rather than kept internal for one reason: it is the only way the
+        // parser gets a referee in CI. Sync validation is skipped there (debt #4),
+        // so without this property the atomics path, the access-chain path and the
+        // fail-open cases are checked by nothing that runs on a runner. It is also
+        // the answer to "why is there no barrier here".
+        .def_property_readonly(
+            "writes",
+            [](const ShaderModule& self)
+            {
+                const auto& reflection = self.reflection();
+                py::list out;
+                for (const auto& [set, binding] : reflection.written_bindings)
+                {
+                    out.append(py::make_tuple(set, binding));
+                }
+                return out;
+            })
+        // True when the write scan could not follow something and every binding is
+        // therefore assumed written. See the invariant in SpirvReflect.hpp.
+        .def_property_readonly(
+            "writes_unknown", [](const ShaderModule& self) { return self.reflection().writes_unknown; })
+        .def_property_readonly("prints", [](const ShaderModule& self) { return self.reflection().prints; });
 
     // Image + Sampler replace the old Texture, which fused VkImage, view and a
     // per-texture sampler into one object. Samplers are cached on the Context;
@@ -1473,6 +1506,23 @@ PYBIND11_MODULE(_core, m)
             "fragment_shader",
             [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
             { return self.fragment_shader(std::move(shader)); })
+        .def(
+            "tess_control_shader",
+            [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
+            { return self.tess_control_shader(std::move(shader)); })
+        .def(
+            "tess_evaluation_shader",
+            [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
+            { return self.tess_evaluation_shader(std::move(shader)); })
+        .def(
+            "geometry_shader",
+            [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
+            { return self.geometry_shader(std::move(shader)); })
+        .def(
+            "patch_control_points",
+            [](GraphicsPipelineBuilder& self, std::uint32_t count) -> GraphicsPipelineBuilder&
+            { return self.patch_control_points(count); },
+            py::arg("count"))
         .def(
             "vertex_format",
             [](GraphicsPipelineBuilder& self, const std::vector<VertexFormat>& formats) -> GraphicsPipelineBuilder&
@@ -1937,6 +1987,48 @@ PYBIND11_MODULE(_core, m)
             py::arg("group_count_x"),
             py::arg("group_count_y") = 1,
             py::arg("group_count_z") = 1)
+        // Indirect draw/dispatch: the arguments come out of a storage buffer the
+        // GPU can write, so a compute pass decides what gets drawn. Chaining is
+        // preserved (return self) even though these are fallible — unwrap raises,
+        // and a successful call keeps reading like every other recording verb.
+        .def(
+            "draw_indirect",
+            [](std::shared_ptr<CommandBuffer> self,
+               std::shared_ptr<Buffer> buffer,
+               VkDeviceSize offset,
+               std::uint32_t count)
+            {
+                require_same_context(self->owner(), buffer->owner(), "draw_indirect");
+                unwrap(self->draw_indirect(std::move(buffer), offset, count), nullptr);
+                return self;
+            },
+            py::arg("buffer"),
+            py::arg("offset") = 0,
+            py::arg("count") = 1)
+        .def(
+            "draw_indexed_indirect",
+            [](std::shared_ptr<CommandBuffer> self,
+               std::shared_ptr<Buffer> buffer,
+               VkDeviceSize offset,
+               std::uint32_t count)
+            {
+                require_same_context(self->owner(), buffer->owner(), "draw_indexed_indirect");
+                unwrap(self->draw_indexed_indirect(std::move(buffer), offset, count), nullptr);
+                return self;
+            },
+            py::arg("buffer"),
+            py::arg("offset") = 0,
+            py::arg("count") = 1)
+        .def(
+            "dispatch_indirect",
+            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, VkDeviceSize offset)
+            {
+                require_same_context(self->owner(), buffer->owner(), "dispatch_indirect");
+                unwrap(self->dispatch_indirect(std::move(buffer), offset), nullptr);
+                return self;
+            },
+            py::arg("buffer"),
+            py::arg("offset") = 0)
         .def(
             "barrier",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, Access src, Access dst)
@@ -2193,6 +2285,65 @@ PYBIND11_MODULE(_core, m)
             py::arg("mode"))
         .def("set_size", &Window::set_size, py::arg("width"), py::arg("height"))
         .def("set_position", &Window::set_position, py::arg("x"), py::arg("y"))
+        .def("set_cursor_position", &Window::set_cursor_position, py::arg("x"), py::arg("y"))
+        .def(
+            "dropped_files",
+            // Copied into a Python list rather than returned by reference: the
+            // vector is rotated out from under the caller on the next poll cycle.
+            [](const Window& self) { return py::cast(self.dropped_files()); })
+        .def(
+            "set_icon",
+            [](Window& self, py::object icon)
+            {
+                if (icon.is_none())
+                {
+                    self.set_icon({}, 0, 0);
+                    return;
+                }
+                // Validated here, in the binding, for the same reason create_image
+                // validates here: this is a user error about the shape of a Python
+                // object, the GIL is held, and raise_error is legal.
+                auto array = icon.cast<py::array>();
+                // Compared against the dtype object, like image.update does, rather
+                // than against a kind character: numpy spells uint8's kind 'u' and
+                // its char code 'B', and a hand-written check picks the wrong one.
+                if (!array.dtype().is(py::dtype("uint8")))
+                {
+                    raise_error(err_window(
+                        std::format(
+                            "set_icon needs an RGBA8 array of dtype uint8, not {}; convert it with "
+                            "arr.astype(np.uint8)",
+                            py::str(array.dtype()).cast<std::string>())));
+                }
+                // Two conditions, two messages: "wrong number of dimensions" and
+                // "no alpha channel" are different mistakes, and one message
+                // covering both names neither.
+                if (array.ndim() != 3)
+                {
+                    raise_error(err_window(
+                        std::format(
+                            "set_icon needs a (height, width, 4) RGBA array, got {} dimensions", array.ndim())));
+                }
+                if (array.shape(2) != 4)
+                {
+                    raise_error(err_window(
+                        std::format(
+                            "set_icon needs 4 channels (RGBA), got {}; an icon has an alpha channel", array.shape(2))));
+                }
+                // memcpy ignores strides, so a view like arr[::2] or arr.T would
+                // copy other bytes. The 0.4 rule, applied again.
+                if (!(array.flags() & py::array::c_style))
+                {
+                    raise_error(err_window(
+                        "set_icon: the array must be C-contiguous (a strided view like arr.T "
+                        "or arr[::2] would copy other bytes). Use numpy.ascontiguousarray(a)."));
+                }
+                const auto height = static_cast<int>(array.shape(0));
+                const auto width = static_cast<int>(array.shape(1));
+                const auto* bytes = static_cast<const std::uint8_t*>(array.data());
+                self.set_icon(std::vector<std::uint8_t>(bytes, bytes + array.nbytes()), width, height);
+            },
+            py::arg("icon"))
         .def("set_resizable", &Window::set_resizable, py::arg("enable"))
         .def("set_always_on_top", &Window::set_always_on_top, py::arg("enable"))
         .def("set_opacity", &Window::set_opacity, py::arg("opacity"))
@@ -2260,6 +2411,21 @@ PYBIND11_MODULE(_core, m)
         "addressed to. One call services every window; the per-window distinction\n"
         "lives in the queries (is_key_pressed, is_open, renderer.acquire).\n"
         "Raises WindowError when no window exists.");
+
+    // Free functions for the same reason poll_events is one: the clipboard belongs
+    // to the process and the GLFW calls take no window.
+    m.def(
+        "get_clipboard",
+        []() { return unwrap(get_clipboard(), nullptr); },
+        "The system clipboard as text, or an empty string when it holds nothing or\n"
+        "holds something that is not text. Needs at least one live Window, because\n"
+        "GLFW is initialized with the first one.");
+
+    m.def(
+        "set_clipboard",
+        [](const std::string& text) { unwrap(set_clipboard(text), nullptr); },
+        py::arg("text"),
+        "Put text on the system clipboard. Needs at least one live Window.");
 
     m.def(
         "list_devices",
@@ -2927,8 +3093,28 @@ PYBIND11_MODULE(_core, m)
                         {
                             for (auto item : color.cast<py::sequence>())
                             {
+                                // Images here mean the caller wants the borrowed-attachment
+                                // overload below but also passed width/height, which that
+                                // overload does not take. pybind cannot fall through to it
+                                // once this signature has matched, so say so rather than
+                                // letting item.cast<Format>() report a cast error about a
+                                // type mismatch the caller did not make.
+                                if (py::isinstance<Image>(item))
+                                {
+                                    raise_error(err_resource(
+                                        "to render into images you already own, drop width and height: "
+                                        "bz.RenderTarget(ctx, color=[image]) — the size, layers and mip "
+                                        "levels come off the images"));
+                                }
                                 colors.push_back(item.cast<Format>());
                             }
+                        }
+                        else if (py::isinstance<Image>(color))
+                        {
+                            raise_error(err_resource(
+                                "to render into an image you already own, drop width and height: "
+                                "bz.RenderTarget(ctx, color=[image]) — the size, layers and mip "
+                                "levels come off the images"));
                         }
                         else
                         {
@@ -2972,6 +3158,73 @@ PYBIND11_MODULE(_core, m)
             py::arg("layers") = 1,
             py::arg("cube") = false,
             py::arg("mip_levels") = 1,
+            py::arg("name") = "")
+        // A target on images from create_image, instead of attachments the target
+        // allocates. A second __init__ rather than optional width/height on the one
+        // above: this signature has no width, height, samples, layers, cube or
+        // mip_levels, because every one of those is a property of the images now.
+        // pybind picks between the two on arity — width and height are required
+        // positionals up there and absent here.
+        .def(
+            py::init(
+                [](Context& context, py::object color, py::object depth, const std::string& name)
+                {
+                    std::vector<std::shared_ptr<Image>> colors;
+                    if (!color.is_none())
+                    {
+                        if (py::isinstance<Image>(color))
+                        {
+                            colors.push_back(color.cast<std::shared_ptr<Image>>());
+                        }
+                        else if (py::isinstance<py::sequence>(color) && !py::isinstance<py::str>(color))
+                        {
+                            for (auto item : color.cast<py::sequence>())
+                            {
+                                if (py::isinstance<Format>(item))
+                                {
+                                    raise_error(err_resource(
+                                        "color has pixel formats but no width and height. Pass the size "
+                                        "to have the target allocate its attachments — "
+                                        "bz.RenderTarget(ctx, 512, 512, color=bz.Format.RGBA8) — or pass "
+                                        "images from ctx.create_image to render into those."));
+                                }
+                                colors.push_back(item.cast<std::shared_ptr<Image>>());
+                            }
+                        }
+                        else
+                        {
+                            raise_error(err_resource(
+                                "color must be an Image, a list of them, or None. To have the target "
+                                "allocate its own attachments, pass a width and height with a bz.Format."));
+                        }
+                    }
+
+                    std::shared_ptr<Image> depth_image;
+                    if (!depth.is_none())
+                    {
+                        depth_image = depth.cast<std::shared_ptr<Image>>();
+                    }
+
+                    // The cross-Context guard belongs in the binding layer, as it does
+                    // for every other resource: this catches a user mistake, not a C++
+                    // invariant, and the GIL is held here.
+                    for (const auto& image : colors)
+                    {
+                        require_same_context(&context, image->owner(), "RenderTarget(color=)");
+                    }
+                    if (depth_image)
+                    {
+                        require_same_context(&context, depth_image->owner(), "RenderTarget(depth=)");
+                    }
+
+                    return unwrap(
+                        OffscreenTarget::create_from_images(context, std::move(colors), std::move(depth_image), name),
+                        context.logger().get());
+                }),
+            py::arg("context"),
+            py::kw_only(),
+            py::arg("color") = py::none(),
+            py::arg("depth") = py::none(),
             py::arg("name") = "")
         .def_property_readonly("width", [](const OffscreenTarget& t) { return t.extent().width; })
         .def_property_readonly("height", [](const OffscreenTarget& t) { return t.extent().height; })

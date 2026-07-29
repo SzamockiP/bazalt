@@ -364,22 +364,34 @@ def test_entry_point_picks_a_function_out_of_one_hlsl_file(ctx):
     assert np.array_equal(render_fullscreen(ctx, vs, ps), reference)
 
 
-def test_an_entry_point_that_matches_nothing_compiles_to_an_empty_shader(ctx):
-    """An accepted ceiling, pinned here because it is a trap.
+def test_an_entry_point_that_matches_nothing_is_refused(ctx):
+    """Was an accepted ceiling until 0.19; now a real diagnostic.
 
-    glslang does not treat an unknown HLSL entry point as an error. It
-    synthesizes an empty one under the requested name, so the compile succeeds
-    and the shader draws nothing. Catching it needs SPIR-V reflection (debt #3).
+    glslang does not treat an unknown HLSL entry point as an error: it synthesizes
+    an empty one under the requested name, so the compile succeeds and the shader
+    draws nothing. This test used to pin that behaviour by SPIR-V size, because
+    catching it needed reflection (debt #3). Reflection exists now, so the typo is
+    named at the compile that caused it.
 
-    The size comparison is the only cheap signal: the real function is several
-    times the empty stub. If glslang ever starts erroring, this test fails and
-    the ceiling can be promoted to a real diagnostic — which is the point of
-    pinning it.
+    Gated on HLSL with an explicit entry_point, so a GLSL main() that deliberately
+    does nothing is never accused — which the next test checks.
     """
     both = str(SHADER_DIR / "two_entry_points.hlsl")
+    # The real function still compiles.
     real = ctx.compile_shader(both, bz.ShaderStage.VERTEX, entry_point="VSMain")
-    bogus = ctx.compile_shader(both, bz.ShaderStage.VERTEX, entry_point="NoSuchFunction")
-    assert len(bogus.spirv) < len(real.spirv) // 2
+    assert len(real.spirv) > 0
+
+    with pytest.raises(bz.ShaderError, match="matches no function"):
+        ctx.compile_shader(both, bz.ShaderStage.VERTEX, entry_point="NoSuchFunction")
+
+
+def test_a_deliberately_empty_glsl_shader_is_not_accused(ctx):
+    """The empty-entry-point check must not fire on GLSL. A vertex shader whose
+    main() writes nothing is legal and occasionally useful, and it has no
+    entry_point= to have misspelled."""
+    empty = "#version 450\nvoid main() {}\n"
+    module = ctx.compile_shader("empty.vert", bz.ShaderStage.VERTEX, source=empty)
+    assert len(module.spirv) > 0
 
 
 def test_entry_point_on_glsl_says_so(ctx):

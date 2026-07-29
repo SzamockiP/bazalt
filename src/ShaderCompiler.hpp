@@ -15,12 +15,21 @@
 
 #include "Context.hpp"
 #include "Error.hpp"
+#include "SpirvReflect.hpp"
 
+// Appended rather than inserted in pipeline order (which would put the two
+// tessellation stages between VERTEX and FRAGMENT): pybind enum values are API,
+// nothing iterates this enum in pipeline order, and renumbering FRAGMENT costs a
+// break for a cosmetic gain. TESS_* rather than TESSELLATION_*, matching both
+// shaderc's own spelling and the .tesc/.tese extensions every GLSL toolchain uses.
 enum class ShaderStage
 {
     VERTEX,
     FRAGMENT,
-    COMPUTE
+    COMPUTE,
+    TESS_CONTROL,    // VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
+    TESS_EVALUATION, // VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT
+    GEOMETRY
 };
 
 // The content of a shader when it does not come from its path: GLSL or HLSL
@@ -53,6 +62,12 @@ inline constexpr VkShaderStageFlagBits to_vk(ShaderStage stage)
             return VK_SHADER_STAGE_FRAGMENT_BIT;
         case ShaderStage::COMPUTE:
             return VK_SHADER_STAGE_COMPUTE_BIT;
+        case ShaderStage::TESS_CONTROL:
+            return VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+        case ShaderStage::TESS_EVALUATION:
+            return VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+        case ShaderStage::GEOMETRY:
+            return VK_SHADER_STAGE_GEOMETRY_BIT;
     }
     // Not std::unreachable(): pybind enums accept arbitrary ints, so a forged
     // ShaderStage from Python must degrade gracefully, not invoke UB.
@@ -69,6 +84,12 @@ inline constexpr shaderc_shader_kind to_shaderc_kind(ShaderStage stage)
             return shaderc_glsl_fragment_shader;
         case ShaderStage::COMPUTE:
             return shaderc_glsl_compute_shader;
+        case ShaderStage::TESS_CONTROL:
+            return shaderc_glsl_tess_control_shader;
+        case ShaderStage::TESS_EVALUATION:
+            return shaderc_glsl_tess_evaluation_shader;
+        case ShaderStage::GEOMETRY:
+            return shaderc_glsl_geometry_shader;
     }
     return shaderc_glsl_vertex_shader;
 }
@@ -84,7 +105,8 @@ public:
         std::vector<std::string> includes,
         std::vector<uint32_t> spirv,
         IncludeDirs include_dirs = {},
-        std::string entry_point = {})
+        std::string entry_point = {},
+        ShaderReflection reflection = {})
         : context_(context),
           module_(module),
           path_(path),
@@ -92,7 +114,8 @@ public:
           includes_(std::move(includes)),
           spirv_(std::move(spirv)),
           include_dirs_(std::move(include_dirs)),
-          entry_point_(std::move(entry_point))
+          entry_point_(std::move(entry_point)),
+          reflection_(std::move(reflection))
     {
     }
 
@@ -112,7 +135,8 @@ public:
           includes_(std::move(other.includes_)),
           spirv_(std::move(other.spirv_)),
           include_dirs_(std::move(other.include_dirs_)),
-          entry_point_(std::move(other.entry_point_))
+          entry_point_(std::move(other.entry_point_)),
+          reflection_(std::move(other.reflection_))
     {
         other.module_ = VK_NULL_HANDLE;
     }
@@ -130,6 +154,7 @@ public:
             spirv_ = std::move(other.spirv_);
             include_dirs_ = std::move(other.include_dirs_);
             entry_point_ = std::move(other.entry_point_);
+            reflection_ = std::move(other.reflection_);
             other.module_ = VK_NULL_HANDLE;
         }
         return *this;
@@ -169,6 +194,12 @@ public:
     {
         return entry_point_;
     }
+    // What the SPIR-V says this shader does — see SpirvReflect.hpp. Read by the
+    // barrier tracker through Pipeline::shaders() at record time.
+    const ShaderReflection& reflection() const
+    {
+        return reflection_;
+    }
 
     // Swap in a freshly compiled body (hot reload). MAIN THREAD ONLY: the
     // compile that produced these parts ran an unlocked RecordingIncluder. The
@@ -178,7 +209,11 @@ public:
     // hold the old VkPipeline built from it. Pipelines pick the new module up on
     // their next rebuild(); the ShaderModule object identity never changes, so
     // the watcher's weak_ptr and every builder's shared_ptr stay valid.
-    void replace(VkShaderModule module, std::vector<std::string> includes, std::vector<uint32_t> spirv)
+    void replace(
+        VkShaderModule module,
+        std::vector<std::string> includes,
+        std::vector<uint32_t> spirv,
+        ShaderReflection reflection)
     {
         if (module_ != VK_NULL_HANDLE && context_)
         {
@@ -188,6 +223,9 @@ public:
         module_ = module;
         includes_ = std::move(includes);
         spirv_ = std::move(spirv);
+        // Swapped with the words it describes. A reload that kept the old
+        // reflection would compute barriers for the shader that used to be there.
+        reflection_ = std::move(reflection);
     }
 
 private:
@@ -210,6 +248,7 @@ private:
     // live here or the reloaded shader is quietly a different shader.
     IncludeDirs include_dirs_;
     std::string entry_point_;
+    ShaderReflection reflection_;
 };
 
 // Resolves #include relative to the directory of the INCLUDING file (both "..."
@@ -334,6 +373,12 @@ public:
         VkShaderModule module;
         std::vector<std::string> includes;
         std::vector<uint32_t> spirv;
+        // Derived from `spirv`, and travelling WITH it on purpose. Every path that
+        // produces words fills this in the same call, so the two can never
+        // disagree — which matters most for hot reload: computing reflection in
+        // compile() instead would leave every reloaded module carrying its
+        // original's answers, silently.
+        ShaderReflection reflection;
     };
 
     // One entry point for every shader form. The extension of `path` decides how
@@ -361,7 +406,70 @@ public:
             std::move(parts->includes),
             std::move(parts->spirv),
             std::move(include_dirs),
-            entry_point);
+            entry_point,
+            std::move(parts->reflection));
+    }
+
+    static constexpr const char* stage_name(ShaderStage stage)
+    {
+        switch (stage)
+        {
+            case ShaderStage::VERTEX:
+                return "VERTEX";
+            case ShaderStage::FRAGMENT:
+                return "FRAGMENT";
+            case ShaderStage::COMPUTE:
+                return "COMPUTE";
+            case ShaderStage::TESS_CONTROL:
+                return "TESS_CONTROL";
+            case ShaderStage::TESS_EVALUATION:
+                return "TESS_EVALUATION";
+            case ShaderStage::GEOMETRY:
+                return "GEOMETRY";
+        }
+        return "unknown";
+    }
+
+    // Which optional device feature a stage needs, or nullopt for the three that
+    // every conformant device has. A table rather than an if-chain at each call
+    // site, so the compile gate and the pipeline gate cannot disagree about the
+    // answer or about the wording.
+    static constexpr std::optional<Feature> feature_for_stage(ShaderStage stage)
+    {
+        switch (stage)
+        {
+            case ShaderStage::TESS_CONTROL:
+            case ShaderStage::TESS_EVALUATION:
+                return Feature::TESSELLATION;
+            case ShaderStage::GEOMETRY:
+                return Feature::GEOMETRY_SHADER;
+            case ShaderStage::VERTEX:
+            case ShaderStage::FRAGMENT:
+            case ShaderStage::COMPUTE:
+                return std::nullopt;
+        }
+        // Not std::unreachable(): pybind enums accept arbitrary ints, and a forged
+        // stage needing no feature is the harmless answer — it fails later, at the
+        // switch that has to name a real VkShaderStageFlagBits.
+        return std::nullopt;
+    }
+
+    // Public because the pipeline builder calls it too: see the comment on the
+    // second gate in GraphicsPipelineBuilder::build.
+    static std::expected<void, Error> check_stage_supported(const Context& context, ShaderStage stage)
+    {
+        const auto feature = feature_for_stage(stage);
+        if (!feature || context.supports(*feature))
+        {
+            return {};
+        }
+        return std::unexpected(err_shader(
+            std::format(
+                "a {} shader requires the {} feature; create the Context with "
+                "features=[bz.Feature.{}] (or optional=[...])",
+                stage_name(stage),
+                feature_name(*feature),
+                feature_name(*feature))));
     }
 
     // The compile without the wrapper. Reads the file fresh from `path` (unless
@@ -377,6 +485,23 @@ public:
         const IncludeDirs& include_dirs = {},
         const std::string& entry_point = {})
     {
+        // Before anything is compiled or loaded: a stage whose feature is off
+        // cannot even have its module CREATED. Every path below ends at
+        // vkCreateShaderModule, and SPIR-V for these stages declares
+        // OpCapability Tessellation / Geometry, which the layers reject when the
+        // matching feature is not enabled
+        // (VUID-VkShaderModuleCreateInfo-pCode-08740).
+        //
+        // So the gate belongs here, at the line the user actually wrote. The
+        // pipeline builder checks the same thing, and that check is NOT redundant
+        // — it catches a module compiled on a Context that has the feature and
+        // then handed to a pipeline on one that does not — but by then the invalid
+        // module already exists, which is too late to be the primary diagnostic.
+        if (auto e = check_stage_supported(context, stage); !e)
+        {
+            return std::unexpected(e.error());
+        }
+
         // Ready SPIR-V short-circuits everything: nothing is compiled, so the
         // extension, the include dirs and the entry point have no work to do.
         if (source && std::holds_alternative<std::vector<std::uint32_t>>(*source))
@@ -456,6 +581,13 @@ private:
         // it and the shader silently stops printing. So printf costs the
         // optimizer, for every shader in the Context, and that is one of the two
         // reasons shader_printf is opt-in rather than always on.
+        // Since 0.19 a printf Context compiles unoptimized only where it has to.
+        // The order matters and is easy to get backwards: `prints` can only be read
+        // off UNOPTIMIZED words, because -O deletes the print that would prove it.
+        // So compile at zero first, reflect, and recompile at performance when the
+        // shader turns out not to print. A printing shader is one compile; a
+        // non-printing one in a printf Context is two, in a debugging mode where
+        // every shader used to pay the optimizer.
         options.SetOptimizationLevel(
             context.shader_printf() ? shaderc_optimization_level_zero : shaderc_optimization_level_performance);
 
@@ -498,12 +630,50 @@ private:
         }
 
         std::vector<uint32_t> spirv(module.cbegin(), module.cend());
+        ShaderReflection reflection = reflect_spirv(spirv, hlsl ? entry_point : std::string{});
+
+        // The second half of the printf decision described above. Recompiling
+        // discards the unoptimized words entirely, so make_vk_module runs once,
+        // after this — a module built from the wrong words would be the whole cost
+        // of the optimization plus a wasted VkShaderModule.
+        if (context.shader_printf() && !reflection.prints)
+        {
+            options.SetOptimizationLevel(shaderc_optimization_level_performance);
+            shaderc::SpvCompilationResult optimized =
+                compiler.CompileGlslToSpv(text, kind, path.c_str(), entry.c_str(), options);
+            // A failure here would be surprising — the same source just compiled —
+            // so fall back to the words already in hand rather than failing a
+            // compile that succeeded.
+            if (optimized.GetCompilationStatus() == shaderc_compilation_status_success)
+            {
+                spirv.assign(optimized.cbegin(), optimized.cend());
+                reflection = reflect_spirv(spirv, hlsl ? entry_point : std::string{});
+            }
+        }
+
+        // An HLSL entry point matching no function is not an error to glslang: it
+        // synthesizes one under the requested name, so the compile succeeds and the
+        // shader draws nothing. That was an accepted ceiling until there was a way
+        // to see it. Gated on HLSL with an explicit name, because a GLSL main() that
+        // deliberately does nothing is legitimate.
+        if (hlsl && !entry_point.empty() && reflection.empty_entry_point)
+        {
+            return std::unexpected(err_shader(
+                std::format(
+                    "entry_point=\"{}\" matches no function in {}. glslang does not treat that as an "
+                    "error — it synthesizes an empty entry point under that name, so the shader would "
+                    "compile and then draw nothing. Check the spelling against the HLSL source.",
+                    entry_point,
+                    path),
+                path));
+        }
+
         auto vk_module = make_vk_module(context, spirv);
         if (!vk_module)
         {
             return std::unexpected(vk_module.error());
         }
-        return CompiledParts{*vk_module, recorder->included(), std::move(spirv)};
+        return CompiledParts{*vk_module, recorder->included(), std::move(spirv), std::move(reflection)};
     }
 
     static std::expected<CompiledParts, Error> load_spv(Context& context, const std::string& path, ShaderStage stage)
@@ -542,7 +712,10 @@ private:
             return std::unexpected(err_shader(tag + " is not a SPIR-V binary (bad magic number)", tag));
         }
 
-        if (!spv_declares_stage(spirv, stage))
+        // One walk answers the stage question and everything else. This replaces a
+        // second, near-identical loop that existed only to find OpEntryPoint.
+        ShaderReflection reflection = reflect_spirv(spirv);
+        if (!reflection.declares_execution_model(execution_model_of(stage)))
         {
             return std::unexpected(err_shader(
                 std::format(
@@ -552,68 +725,45 @@ private:
                 tag));
         }
 
+        // Foreign SPIR-V, so the write scan is not trusted to be complete. bazalt
+        // knows the write opcodes its own GLSL/HLSL compiles down to; it cannot know
+        // what another toolchain emitted, and a module using an opcode the parser
+        // does not list would be reported as writing nothing. Provenance is the one
+        // thing the parser cannot see and this function knows for certain, so the
+        // flag is set here rather than guessed there.
+        reflection.writes_unknown = true;
+
         auto vk_module = make_vk_module(context, spirv);
         if (!vk_module)
         {
             return std::unexpected(vk_module.error());
         }
-        return CompiledParts{*vk_module, {}, std::move(spirv)};
+        return CompiledParts{*vk_module, {}, std::move(spirv), std::move(reflection)};
     }
 
-    static constexpr const char* stage_name(ShaderStage stage)
+    // ShaderStage to the SPIR-V ExecutionModel it compiles to. The fifth switch on
+    // the enum, and like the other four it has no default: a new stage must break
+    // the build here rather than silently claim to be a vertex shader.
+    static constexpr std::uint32_t execution_model_of(ShaderStage stage)
     {
         switch (stage)
         {
             case ShaderStage::VERTEX:
-                return "VERTEX";
+                return 0;
+            case ShaderStage::TESS_CONTROL:
+                return 1;
+            case ShaderStage::TESS_EVALUATION:
+                return 2;
+            case ShaderStage::GEOMETRY:
+                return 3;
             case ShaderStage::FRAGMENT:
-                return "FRAGMENT";
+                return 4;
             case ShaderStage::COMPUTE:
-                return "COMPUTE";
+                return 5;
         }
-        return "unknown";
-    }
-
-    // True when ANY OpEntryPoint in the binary matches `stage` — multi-entry-
-    // point modules are legal SPIR-V. Walks instructions from word 5; a zero
-    // word count means a malformed binary, and bailing out (-> "no entry point
-    // found") beats looping forever on garbage.
-    static bool spv_declares_stage(const std::vector<uint32_t>& words, ShaderStage stage)
-    {
-        // Sentinel matches no execution model: a forged pybind int degrades to
-        // "no entry point found" instead of UB. No default case — a new stage
-        // must be a compiler diagnostic here, per project convention.
-        uint32_t wanted = 0xFFFFFFFFu;
-        switch (stage)
-        {
-            case ShaderStage::VERTEX:
-                wanted = 0;
-                break; // ExecutionModel Vertex
-            case ShaderStage::FRAGMENT:
-                wanted = 4;
-                break; // ExecutionModel Fragment
-            case ShaderStage::COMPUTE:
-                wanted = 5;
-                break; // ExecutionModel GLCompute
-        }
-
-        constexpr uint32_t op_entry_point = 15;
-        std::size_t i = 5; // header is 5 words
-        while (i < words.size())
-        {
-            uint32_t opcode = words[i] & 0xFFFFu;
-            uint32_t count = words[i] >> 16;
-            if (count == 0)
-            {
-                return false;
-            }
-            if (opcode == op_entry_point && i + 1 < words.size() && words[i + 1] == wanted)
-            {
-                return true;
-            }
-            i += count;
-        }
-        return false;
+        // A sentinel matching no execution model, so a forged pybind int degrades to
+        // "declares no entry point" instead of matching a real stage.
+        return 0xFFFFFFFFu;
     }
 
     static std::expected<VkShaderModule, Error> make_vk_module(Context& context, const std::vector<uint32_t>& spirv)

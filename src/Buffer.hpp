@@ -112,6 +112,20 @@ public:
         return data_type_ == DataType::UINT16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
     }
 
+    // Remembered for the same reason data_type_ is, and it lives on the base rather
+    // than on DynamicBuffer (where it used to) because the indirect draw verbs need
+    // it from a plain Buffer&: only a STORAGE buffer carries
+    // VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, so this turns a layers-only VUID into a
+    // bazalt error that names the fix. Set once, in Buffer::create.
+    BufferType buffer_type() const
+    {
+        return buffer_type_;
+    }
+    void set_buffer_type(BufferType type)
+    {
+        buffer_type_ = type;
+    }
+
     static std::expected<std::shared_ptr<Buffer>, Error> create(
         Context& context,
         const void* data,
@@ -121,6 +135,7 @@ public:
 
 protected:
     DataType data_type_ = DataType::FLOAT;
+    BufferType buffer_type_ = BufferType::UNIFORM;
 };
 
 class StaticBuffer : public Buffer
@@ -245,8 +260,17 @@ public:
             // VERTEX also: a compute shader writing vertices into an SSBO that
             // the graphics pipeline then consumes via bind_vertex_buffer is the
             // canonical compute->graphics hand-off (examples/11_particles).
+            //
+            // INDIRECT too, and unconditionally (0.19). The whole point of an
+            // indirect draw is a compute shader writing the draw arguments, so the
+            // type that carries STORAGE_BUFFER is the type that carries this.
+            // Gating it behind a fifth BufferType would make "which buffers can be
+            // indirect" a second rule to remember for a usage bit that costs
+            // nothing — the same reasoning that gave DYNAMIC buffers the transfer
+            // bits in 0.18.
             case BufferType::STORAGE:
-                usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+                usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                         VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
                 break;
             // Constant data that never changes (e.g. baked matrices) is a legitimate
             // STATIC uniform buffer. Without this the buffer was created with only
@@ -394,11 +418,6 @@ public:
     {
         return buffers_[frame];
     }
-    BufferType buffer_type() const
-    {
-        return type_;
-    }
-
     // Host-visible: map the current frame's copy, no GPU round trip. Note the
     // GPU may not have consumed it yet — this reads what update() wrote.
     std::expected<std::vector<std::byte>, Error> read_bytes() override
@@ -457,6 +476,13 @@ public:
         VkBufferUsageFlags usage = (type == BufferType::STORAGE) ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                                                  : VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
         usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        // Indirect for the same reason a STATIC storage buffer gets it (0.19), and
+        // it matters here too: draw arguments the CPU rewrites every frame are a
+        // DYNAMIC buffer, and that is the case where the count is not GPU-derived.
+        if (type == BufferType::STORAGE)
+        {
+            usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+        }
 
         VmaAllocationCreateInfo allocInfo{};
         allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
@@ -521,12 +547,27 @@ inline std::expected<std::shared_ptr<Buffer>, Error> Buffer::create(
     BufferType type,
     MemoryUsage usage)
 {
+    // The single funnel for both kinds, which is why the type is recorded here and
+    // not in each derived create: one place, and it cannot drift between them.
+    std::expected<std::shared_ptr<Buffer>, Error> buffer;
     if (usage == MemoryUsage::DYNAMIC)
     {
-        return DynamicBuffer::create(context, data, data_size, type);
+        auto made = DynamicBuffer::create(context, data, data_size, type);
+        if (!made)
+        {
+            return std::unexpected(made.error());
+        }
+        buffer = *made;
     }
     else
     {
-        return StaticBuffer::create(context, data, data_size, type);
+        auto made = StaticBuffer::create(context, data, data_size, type);
+        if (!made)
+        {
+            return std::unexpected(made.error());
+        }
+        buffer = *made;
     }
+    (*buffer)->set_buffer_type(type);
+    return buffer;
 }

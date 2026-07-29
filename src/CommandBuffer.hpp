@@ -36,6 +36,9 @@ public:
         // Per-command-buffer override of the Context-wide mode, so one hot
         // path can go manual without flipping the whole application.
         cmd->auto_barriers_ = auto_barriers.value_or(ctx->auto_barriers());
+        // Told once, here and not in begin(): the mask describes the device, not
+        // the recording, so tracker_.reset() must leave it alone.
+        cmd->tracker_.set_all_shader_stages(ctx->all_shader_stages());
         cmd->command_buffers_.resize(ctx->frames_in_flight(), VK_NULL_HANDLE);
 
         VkCommandBufferAllocateInfo allocInfo{
@@ -100,6 +103,8 @@ public:
         tracker_.reset();
         bound_graphics_sets_.clear();
         bound_compute_sets_.clear();
+        bound_graphics_pipeline_.reset();
+        bound_compute_pipeline_.reset();
         tracked_writes_ = false;
         in_rendering_ = false;
         rendering_insert_pos_ = 0;
@@ -533,6 +538,26 @@ public:
 
     CommandBuffer& bind_pipeline(std::shared_ptr<Pipeline> pipeline)
     {
+        // Remembered as record-time state, not only pushed as a replay lambda: the
+        // tracker needs the bound pipeline to ask its shaders what they write, and
+        // before 0.19 a draw had no way to find out which pipeline it belonged to.
+        // Keyed on the bind point exactly as bind_descriptor_set already is, so a
+        // compute and a graphics pipeline can be bound at once.
+        //
+        // No lifetime problem: the replay lambda captures the same shared_ptr, and a
+        // CommandBuffer is not owned by the Context, so this is not the "a deferred
+        // lambda holds nothing that indirectly holds the Context" case.
+        if (pipeline)
+        {
+            if (pipeline->bind_point() == VK_PIPELINE_BIND_POINT_COMPUTE)
+            {
+                bound_compute_pipeline_ = pipeline;
+            }
+            else
+            {
+                bound_graphics_pipeline_ = pipeline;
+            }
+        }
         commands_.push_back([pipeline](VkCommandBuffer cmd, const FrameContext& frame)
                             { frame.vk->vkCmdBindPipeline(cmd, pipeline->bind_point(), pipeline->get()); });
         return *this;
@@ -604,6 +629,85 @@ public:
         return *this;
     }
 
+    // ── Indirect draw and dispatch (0.19) ─────────────────────────────────────
+    //
+    // The arguments come out of a buffer the GPU can write, so a compute pass
+    // decides what gets drawn and the CPU never learns the answer. That is the
+    // whole feature: culling, LOD selection and particle compaction stop needing a
+    // readback between the pass that decides and the draw that obeys.
+    //
+    // Three verbs rather than a buffer= kwarg on draw/draw_indexed/dispatch,
+    // because such a kwarg would invalidate vertex_count and instances in the same
+    // signature — the shape 0.15 rejected for the cross-Context transfer. They
+    // return expected because they have real preconditions, unlike draw().
+    //
+    // bazalt declares no struct type for the arguments. The layout is
+    // VkDrawIndirectCommand and numpy already writes it:
+    //
+    //     np.array([[vertex_count, instance_count, first_vertex, first_instance]],
+    //              dtype=np.uint32)
+    //
+    // A dtype that exists only to be converted fails the scope test's second
+    // question, and a std430 struct in GLSL is byte-identical to the above.
+    std::expected<void, Error> draw_indirect(
+        std::shared_ptr<Buffer> buffer,
+        VkDeviceSize offset = 0,
+        std::uint32_t count = 1)
+    {
+        // 16 bytes: vertexCount, instanceCount, firstVertex, firstInstance.
+        if (auto e = check_indirect_(buffer, offset, count, sizeof(VkDrawIndirectCommand), "draw_indirect"); !e)
+        {
+            return std::unexpected(e.error());
+        }
+        track_indirect_(buffer);
+        track_draw_();
+        commands_.push_back(
+            [buffer = std::move(buffer), offset, count](VkCommandBuffer cmd, const FrameContext& frame)
+            { frame.vk->vkCmdDrawIndirect(cmd, buffer->get(), offset, count, sizeof(VkDrawIndirectCommand)); });
+        return {};
+    }
+
+    std::expected<void, Error> draw_indexed_indirect(
+        std::shared_ptr<Buffer> buffer,
+        VkDeviceSize offset = 0,
+        std::uint32_t count = 1)
+    {
+        // 20 bytes, and note vertexOffset is SIGNED: indexCount, instanceCount,
+        // firstIndex, vertexOffset (int32), firstInstance.
+        if (auto e =
+                check_indirect_(buffer, offset, count, sizeof(VkDrawIndexedIndirectCommand), "draw_indexed_indirect");
+            !e)
+        {
+            return std::unexpected(e.error());
+        }
+        track_indirect_(buffer);
+        track_draw_();
+        commands_.push_back(
+            [buffer = std::move(buffer), offset, count](VkCommandBuffer cmd, const FrameContext& frame)
+            {
+                frame.vk->vkCmdDrawIndexedIndirect(
+                    cmd, buffer->get(), offset, count, sizeof(VkDrawIndexedIndirectCommand));
+            });
+        return {};
+    }
+
+    // No count: vkCmdDispatchIndirect takes exactly one VkDispatchIndirectCommand
+    // (12 bytes, x/y/z group counts), so there is no multi-dispatch to gate.
+    // Deliberately NOT refused inside a rendering scope, because plain dispatch()
+    // is not either — one rule for both.
+    std::expected<void, Error> dispatch_indirect(std::shared_ptr<Buffer> buffer, VkDeviceSize offset = 0)
+    {
+        if (auto e = check_indirect_(buffer, offset, 1, sizeof(VkDispatchIndirectCommand), "dispatch_indirect"); !e)
+        {
+            return std::unexpected(e.error());
+        }
+        track_indirect_(buffer);
+        track_dispatch_();
+        commands_.push_back([buffer = std::move(buffer), offset](VkCommandBuffer cmd, const FrameContext& frame)
+                            { frame.vk->vkCmdDispatchIndirect(cmd, buffer->get(), offset); });
+        return {};
+    }
+
     // Manual-mode barrier (also legal, if redundant, in auto mode). Refused
     // inside a rendering scope: vkCmdPipelineBarrier is invalid there, and in
     // manual mode nothing is hoisted by magic — that would be a second,
@@ -620,8 +724,8 @@ public:
                 "cmd.barrier() is not allowed inside a rendering scope; "
                 "record it before begin_rendering"));
         }
-        const StageAccess s = to_vk(src);
-        const StageAccess d = to_vk(dst);
+        const StageAccess s = to_vk(src, context_->all_shader_stages());
+        const StageAccess d = to_vk(dst, context_->all_shader_stages());
         record_barrier_(std::move(buffer), {s.stages, d.stages, s.access, d.access});
         return {};
     }
@@ -656,8 +760,8 @@ public:
                 "cmd.barrier(image, ...) takes Access.SHADER_WRITE (GENERAL) or "
                 "Access.SHADER_READ (SHADER_READ_ONLY); other accesses are buffer-only"));
         }
-        const StageAccess s = to_vk(src);
-        const StageAccess d = to_vk(dst);
+        const StageAccess s = to_vk(src, context_->all_shader_stages());
+        const StageAccess d = to_vk(dst, context_->all_shader_stages());
         Image* img = image.get();
         record_image_barrier_(std::move(image), {*old_layout, *new_layout, s.stages, d.stages, s.access, d.access});
         // Keep the auto-tracker in sync: a later automatic use of this image in
@@ -711,7 +815,7 @@ public:
                 "generate_mipmaps: src must be Access.SHADER_READ (mip 0 in "
                 "SHADER_READ_ONLY) or Access.SHADER_WRITE (mip 0 in GENERAL)"));
         }
-        const StageAccess s = to_vk(src);
+        const StageAccess s = to_vk(src, context_->all_shader_stages());
         Image* img = image.get();
         commands_.push_back(
             [image = std::move(image), layout = *src_layout, s](VkCommandBuffer cmd, const FrameContext& frame)
@@ -721,7 +825,10 @@ public:
         if (auto_barriers_)
         {
             tracker_.note_image_layout(
-                img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+                img,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                context_->all_shader_stages(),
+                VK_ACCESS_SHADER_READ_BIT);
         }
         return {};
     }
@@ -802,9 +909,15 @@ public:
             // it or the next automatic use transitions from a stale layout — the
             // same rule the manual image barrier follows.
             tracker_.note_image_layout(
-                src_ptr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+                src_ptr,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                context_->all_shader_stages(),
+                VK_ACCESS_SHADER_READ_BIT);
             tracker_.note_image_layout(
-                dst_ptr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+                dst_ptr,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                context_->all_shader_stages(),
+                VK_ACCESS_SHADER_READ_BIT);
         }
         return {};
     }
@@ -881,9 +994,15 @@ public:
         if (auto_barriers_)
         {
             tracker_.note_image_layout(
-                src_ptr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+                src_ptr,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                context_->all_shader_stages(),
+                VK_ACCESS_SHADER_READ_BIT);
             tracker_.note_image_layout(
-                dst_ptr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+                dst_ptr,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                context_->all_shader_stages(),
+                VK_ACCESS_SHADER_READ_BIT);
         }
         return {};
     }
@@ -1027,7 +1146,10 @@ public:
         if (auto_barriers_)
         {
             tracker_.note_image_layout(
-                img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+                img,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                context_->all_shader_stages(),
+                VK_ACCESS_SHADER_READ_BIT);
         }
         return {};
     }
@@ -1354,9 +1476,18 @@ public:
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                 .pNext = nullptr,
                 .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                // INDIRECT_COMMAND_READ is in here for the same reason
+                // VERTEX_ATTRIBUTE_READ is (0.19): the canonical indirect chain has
+                // compute writing the draw arguments, so frame N+1's command
+                // processor reads exactly what frame N's dispatch is still writing.
+                // Missing it is invisible without sync validation.
                 .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
-                                 VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT};
-            constexpr VkPipelineStageFlags stages = kAllShaderStages | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+                                 VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
+                                 VK_ACCESS_INDIRECT_COMMAND_READ_BIT};
+            // Not constexpr any more: the shader-stage half of this mask depends on
+            // which stages the device enabled (see Context::all_shader_stages).
+            const VkPipelineStageFlags stages = context_->all_shader_stages() | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                                                VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
             frame.vk->vkCmdPipelineBarrier(vkCmd, stages, stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
         }
         for (auto& cmd_func : commands_)
@@ -1557,6 +1688,84 @@ private:
         }
     }
 
+    // Everything the three indirect verbs check, in one place so they cannot
+    // disagree about which buffer is legal or what the message says.
+    std::expected<void, Error> check_indirect_(
+        const std::shared_ptr<Buffer>& buffer,
+        VkDeviceSize offset,
+        std::uint32_t count,
+        VkDeviceSize stride,
+        const char* what)
+    {
+        if (!buffer)
+        {
+            return std::unexpected(err_resource(std::format("{}: buffer is null", what)));
+        }
+        // Only BufferType::STORAGE carries VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, so
+        // this names the fix instead of leaving the layers to report a usage flag.
+        if (buffer->buffer_type() != BufferType::STORAGE)
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: the arguments must live in a BufferType.STORAGE buffer, which is the "
+                    "one that carries the indirect usage flag. A compute shader writing the "
+                    "draw arguments needs it to be a storage buffer anyway.",
+                    what)));
+        }
+        // The spec requires a 4-byte-aligned offset, and every argument struct is a
+        // run of 32-bit words, so an unaligned one is always a mistake.
+        if (offset % 4 != 0)
+        {
+            return std::unexpected(
+                err_resource(std::format("{}: offset must be a multiple of 4, got {}", what, offset)));
+        }
+        if (count == 0)
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: count must be at least 1. To draw nothing, write 0 into the "
+                    "instanceCount of the argument struct — that is the GPU-side way to say it.",
+                    what)));
+        }
+        if (offset + static_cast<VkDeviceSize>(count) * stride > buffer->size())
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: {} argument struct(s) of {} bytes at offset {} need {} bytes, but the "
+                    "buffer is {}",
+                    what,
+                    count,
+                    stride,
+                    offset,
+                    offset + static_cast<VkDeviceSize>(count) * stride,
+                    buffer->size())));
+        }
+        // count>1 is multiDrawIndirect, which is NOT free: it is a feature bit, and
+        // this is the release that finally gives Feature.MULTI_DRAW_INDIRECT an API
+        // to be reachable through. Checked at record time rather than in the
+        // binding, so the C++ API is as safe as the Python one.
+        if (count > 1 && !context_->supports(Feature::MULTI_DRAW_INDIRECT))
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: count>1 requires the MULTI_DRAW_INDIRECT feature; create the Context "
+                    "with features=[bz.Feature.MULTI_DRAW_INDIRECT] (or optional=[...]), or "
+                    "issue one call per draw.",
+                    what)));
+        }
+        return {};
+    }
+
+    // The command processor reads the arguments at DRAW_INDIRECT, which is earlier
+    // than any shader stage — so a compute pass that wrote them in this recording
+    // needs the barrier this produces, and hoist_or_push_ lifts it out of a
+    // rendering scope on its own.
+    void track_indirect_(const std::shared_ptr<Buffer>& buffer)
+    {
+        track_use_(buffer, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT, false);
+        record_buffer_use_(buffer);
+    }
+
     void track_use_(
         const std::shared_ptr<Buffer>& buffer,
         VkPipelineStageFlags stages,
@@ -1598,100 +1807,117 @@ private:
         }
     }
 
-    // Storage buffers in graphics shaders are conservatively READS. Writes are
-    // invisible without shader reflection — the documented limit of auto mode;
-    // cmd.barrier() covers that case by hand.
-    void track_draw_()
+    // Does the pipeline bound at this bind point write (set, binding)?
+    //
+    // Asks each of its shaders' reflection at record time, so a hot-reload
+    // replace() is picked up without invalidating anything. Fail-open on purpose:
+    // with no pipeline bound there is nothing to ask, and the answer has to be the
+    // conservative one — a draw with no pipeline is a bug the layers name precisely,
+    // and guessing "not written" there would silently drop a real barrier.
+    bool pipeline_writes_(const std::shared_ptr<Pipeline>& pipeline, std::uint32_t set, std::uint32_t binding) const
+    {
+        if (!pipeline)
+        {
+            return true;
+        }
+        return std::ranges::any_of(
+            pipeline->shaders(),
+            [&](const std::shared_ptr<ShaderModule>& s) { return s && s->reflection().writes(set, binding); });
+    }
+
+    // The shared body of track_draw_ and track_dispatch_. Before 0.19 these were
+    // two functions that disagreed about the same question: the graphics one called
+    // every storage buffer a READ (so a fragment SSBO write was invisible) and
+    // handled storage images not at all, while the compute one called both
+    // READ+WRITE unconditionally. Now they differ only in their stage mask, which is
+    // the only thing that was ever really different about them.
+    //
+    // What reflection changes in each direction:
+    //
+    //  * Graphics gains the writes it never saw. A fragment imageStore was worse
+    //    than untracked — DescriptorSet::set_storage_image already recorded the
+    //    image as resting in GENERAL, so the layout the descriptor promised and the
+    //    layout the image was in disagreed unless the user wrote a barrier by hand.
+    //  * Compute LOSES barriers it did not need. `use(..., writes=true)` wipes read
+    //    state, so two dispatches that only read the same input SSBO used to get a
+    //    WAW barrier between them, and tracked_writes_ also switched on the
+    //    per-replay memory barrier. A `readonly buffer` shared down a chain of
+    //    passes is the common case, not an exotic one.
+    //
+    // Safe in both directions because of the fail-open invariant in
+    // SpirvReflect.hpp: a barrier only ever disappears on a positive proof that no
+    // store, atomic or imageWrite touches that binding.
+    void track_descriptor_uses_(
+        const std::unordered_map<uint32_t, std::shared_ptr<DescriptorSet>>& sets,
+        const std::shared_ptr<Pipeline>& pipeline,
+        VkPipelineStageFlags stages)
     {
         if (!auto_barriers_)
         {
             return;
         }
-        for (auto& [idx, set] : bound_graphics_sets_)
+        for (const auto& [set_index, set] : sets)
         {
             for (const auto& bb : set->buffers())
             {
                 if (bb.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
                 {
+                    const bool writes = pipeline_writes_(pipeline, set_index, bb.binding);
                     track_use_(
                         bb.buffer,
-                        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                        VK_ACCESS_SHADER_READ_BIT,
-                        false);
+                        stages,
+                        writes ? (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT) : VK_ACCESS_SHADER_READ_BIT,
+                        writes);
                 }
                 else if (bb.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
                 {
-                    track_use_(
-                        bb.buffer,
-                        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                        VK_ACCESS_UNIFORM_READ_BIT,
-                        false);
+                    // A uniform buffer is read-only by definition, so there is
+                    // nothing for reflection to decide.
+                    track_use_(bb.buffer, stages, VK_ACCESS_UNIFORM_READ_BIT, false);
                 }
             }
-            // A sampled image only needs a barrier if the tracker has already
-            // seen it — i.e. compute wrote it earlier in this recording and it
-            // is still in GENERAL. An uploaded texture the tracker never saw
-            // rests in SHADER_READ_ONLY and is left untouched (the pre-0.9
-            // behaviour), so ordinary texturing pays nothing.
             for (const auto& bi : set->images())
             {
-                if (bi.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && tracker_.tracks(bi.image.get()))
+                if (bi.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                 {
+                    // GENERAL either way: it is the only layout a storage image is
+                    // read or written in, so an unwritten one still needs the
+                    // transition. Only the access mask and the WAW ordering narrow.
+                    const bool writes = pipeline_writes_(pipeline, set_index, bi.binding);
                     track_image_use_(
                         bi.image,
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                        VK_ACCESS_SHADER_READ_BIT,
-                        false);
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        stages,
+                        writes ? (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT) : VK_ACCESS_SHADER_READ_BIT,
+                        writes);
+                }
+                else if (bi.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && tracker_.tracks(bi.image.get()))
+                {
+                    // A sampled image only needs a barrier if the tracker has
+                    // already seen it — i.e. something wrote it earlier in this
+                    // recording and it is still in GENERAL. An uploaded texture the
+                    // tracker never saw rests in SHADER_READ_ONLY and is left
+                    // untouched, so ordinary texturing pays nothing.
+                    track_image_use_(
+                        bi.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, stages, VK_ACCESS_SHADER_READ_BIT, false);
                 }
             }
         }
     }
 
-    // Compute SSBOs are conservatively READ+WRITE: without reflection there is
-    // no telling a `readonly buffer` from a mutated one, and the pessimism
-    // costs one barrier, not correctness.
+    // The stage mask is the Context's, not a VERTEX|FRAGMENT literal: with
+    // tessellation or geometry enabled a graphics pipeline has stages those two bits
+    // do not name, and a barrier that omits a stage does not cover the read it was
+    // recorded for. Legal by construction — the mask only ever holds bits whose
+    // feature the device enabled.
+    void track_draw_()
+    {
+        track_descriptor_uses_(bound_graphics_sets_, bound_graphics_pipeline_, context_->all_shader_stages());
+    }
+
     void track_dispatch_()
     {
-        if (!auto_barriers_)
-        {
-            return;
-        }
-        for (auto& [idx, set] : bound_compute_sets_)
-        {
-            for (const auto& bb : set->buffers())
-            {
-                if (bb.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
-                {
-                    track_use_(
-                        bb.buffer,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                        true);
-                }
-                else if (bb.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
-                {
-                    track_use_(bb.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_UNIFORM_READ_BIT, false);
-                }
-            }
-            // Storage images are conservatively READ+WRITE, like storage
-            // buffers: without reflection a `readonly` image is indistinguishable
-            // from a written one, and GENERAL is the only layout either is
-            // accessed in. The transition to GENERAL (from UNDEFINED on first
-            // use, or from a prior use's layout) rides on this barrier.
-            for (const auto& bi : set->images())
-            {
-                if (bi.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-                {
-                    track_image_use_(
-                        bi.image,
-                        VK_IMAGE_LAYOUT_GENERAL,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                        true);
-                }
-            }
-        }
+        track_descriptor_uses_(bound_compute_sets_, bound_compute_pipeline_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     }
 
     std::shared_ptr<Context> context_;
@@ -1713,6 +1939,10 @@ private:
     std::size_t rendering_insert_pos_ = 0;
     std::unordered_map<uint32_t, std::shared_ptr<DescriptorSet>> bound_graphics_sets_;
     std::unordered_map<uint32_t, std::shared_ptr<DescriptorSet>> bound_compute_sets_;
+    // Record-time state, so the tracker can read the bound shaders' reflection.
+    // Cleared in begin() with the sets, because both describe one recording.
+    std::shared_ptr<Pipeline> bound_graphics_pipeline_;
+    std::shared_ptr<Pipeline> bound_compute_pipeline_;
 
     // ── GPU timers (query pool survives begin(); results read after submit) ──
     VkQueryPool timer_pool_ = VK_NULL_HANDLE;

@@ -15,7 +15,12 @@ enum class Access
     SHADER_WRITE,
     VERTEX_READ,
     INDEX_READ,
-    UNIFORM_READ
+    UNIFORM_READ,
+    // The draw or dispatch arguments themselves, read by the command processor
+    // rather than by a shader. Appended, not inserted, because pybind enum values
+    // are API. One entry covers both draw and dispatch: DRAW_INDIRECT is the stage
+    // the spec names for indirect *and* dispatch-indirect data.
+    INDIRECT_READ
 };
 
 struct StageAccess
@@ -27,26 +32,33 @@ struct StageAccess
 // Core-1.0 pairs on purpose: the whole codebase rides vkCmdPipelineBarrier,
 // not synchronization2, and mixing models would be a second way to say the
 // same thing.
-inline constexpr VkPipelineStageFlags kAllShaderStages =
-    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-
-inline constexpr StageAccess to_vk(Access access)
+//
+// `all_shader_stages` is the caller's Context::all_shader_stages() and has no
+// default. There used to be a constexpr kAllShaderStages here, and it could not
+// survive tessellation: wide enough to cover a tessellation read, it is illegal
+// on a Context without the feature (VUID-vkCmdPipelineBarrier-srcStageMask-04090
+// /-04091); narrow enough to always be legal, it drops that read. Deleting the
+// constant rather than defaulting the parameter is deliberate — a call site that
+// was missed is a compile error, which is the only referee a mask has.
+inline constexpr StageAccess to_vk(Access access, VkPipelineStageFlags all_shader_stages)
 {
     switch (access)
     {
         case Access::SHADER_READ:
-            return {kAllShaderStages, VK_ACCESS_SHADER_READ_BIT};
+            return {all_shader_stages, VK_ACCESS_SHADER_READ_BIT};
         case Access::SHADER_WRITE:
-            return {kAllShaderStages, VK_ACCESS_SHADER_WRITE_BIT};
+            return {all_shader_stages, VK_ACCESS_SHADER_WRITE_BIT};
         case Access::VERTEX_READ:
             return {VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT};
         case Access::INDEX_READ:
             return {VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_INDEX_READ_BIT};
         case Access::UNIFORM_READ:
-            return {kAllShaderStages, VK_ACCESS_UNIFORM_READ_BIT};
+            return {all_shader_stages, VK_ACCESS_UNIFORM_READ_BIT};
+        case Access::INDIRECT_READ:
+            return {VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT};
     }
     // Not std::unreachable(): pybind enums accept arbitrary ints.
-    return {kAllShaderStages, VK_ACCESS_SHADER_READ_BIT};
+    return {all_shader_stages, VK_ACCESS_SHADER_READ_BIT};
 }
 
 // The image layout each shader access implies: a storage image written by a
@@ -81,6 +93,14 @@ inline std::optional<VkImageLayout> image_layout_for(Access access)
 class ResourceTracker
 {
 public:
+    // The mask the first-use floor below synchronizes against. Set once from the
+    // owning Context when the CommandBuffer is created, not per recording: it is a
+    // property of the device, not of what is being recorded.
+    void set_all_shader_stages(VkPipelineStageFlags stages)
+    {
+        all_shader_stages_ = stages;
+    }
+
     struct Barrier
     {
         VkPipelineStageFlags src_stages;
@@ -167,7 +187,7 @@ public:
         {
             if (s == 0)
             {
-                return {kAllShaderStages, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT};
+                return {all_shader_stages_, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT};
             }
             return {s, a};
         };
@@ -268,6 +288,13 @@ private:
         VkPipelineStageFlags read_stages = 0;
         VkAccessFlags read_access = 0;
     };
+
+    // Defaults to the mask every conformant device has, so a tracker nobody told
+    // is narrow rather than illegal. reset() must NOT clear it: it survives every
+    // recording, like the device it describes.
+    VkPipelineStageFlags all_shader_stages_ = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
     std::unordered_map<Buffer*, BufferState> states_;
     std::unordered_map<Image*, ImageState> image_states_;

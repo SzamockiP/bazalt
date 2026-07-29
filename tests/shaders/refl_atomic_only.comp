@@ -1,0 +1,8 @@
+#version 450
+// The case a store-only scan gets WRONG: binding 0 is mutated by nothing but
+// atomicAdd, which is what a GPU counter looks like. Reported as read-only, its
+// barrier disappears and the next pass reads a stale count.
+layout(local_size_x = 1) in;
+layout(std430, set = 0, binding = 0) buffer Counter { uint total; };
+layout(std430, set = 0, binding = 1) readonly buffer In { uint src[]; };
+void main() { if (src[gl_GlobalInvocationID.x] > 0u) atomicAdd(total, 1u); }

@@ -1,0 +1,90 @@
+#version 450
+
+// Frustum culling on the GPU, writing both the draw arguments and the compacted
+// list of survivors. The CPU never learns how many cubes passed.
+//
+// This is the shape to reach for while there is no GPU-side draw COUNT: ONE
+// VkDrawIndexedIndirectCommand whose instanceCount an atomic accumulates, plus a
+// compacted instance buffer the vertex shader indexes with gl_InstanceIndex. The
+// alternative — N commands and vkCmdDrawIndexedIndirectCount — needs a feature bit
+// that lives in a pNext struct bazalt's feature table cannot reach yet.
+layout(local_size_x = 64) in;
+
+// Exactly VkDrawIndexedIndirectCommand. Note vertexOffset is signed.
+layout(std430, set = 0, binding = 0) buffer DrawArgs {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint firstInstance;
+} args;
+
+// Every candidate: xyz = centre, w = radius.
+layout(std430, set = 0, binding = 1) readonly buffer Candidates {
+    vec4 spheres[];
+};
+
+// The survivors, in the order the atomics happened to allocate. The vertex shader
+// reads this and never sees the culled ones at all.
+layout(std430, set = 0, binding = 2) writeonly buffer Visible {
+    vec4 visible[];
+};
+
+layout(push_constant) uniform Push {
+    mat4 view_proj;
+    uint count;
+    uint index_count;
+} push;
+
+// A sphere is outside if it sits fully behind any one frustum plane. The planes
+// come out of the view-projection matrix's ROWS, which is why this needs no
+// CPU-side frustum at all.
+//
+// Rows, and the distinction is not pedantic: GLSL indexes a mat4 by COLUMN, so
+// `m[3] + m[0]` is two columns added together and produces a plane that means
+// nothing. The symptom is not a crash or a wrong-looking plane — it is a frustum
+// that rejects almost everything, which reads as "culling is working very well"
+// until you count what survived against what should have.
+bool visible_sphere(vec3 centre, float radius) {
+    mat4 m = transpose(push.view_proj);
+    vec4 planes[6];
+    planes[0] = m[3] + m[0]; // left
+    planes[1] = m[3] - m[0]; // right
+    planes[2] = m[3] + m[1]; // bottom
+    planes[3] = m[3] - m[1]; // top
+    planes[4] = m[3] + m[2]; // near
+    planes[5] = m[3] - m[2]; // far
+
+    for (int i = 0; i < 6; ++i) {
+        vec4 p = planes[i];
+        float len = length(p.xyz);
+        if (len > 0.0 && (dot(p.xyz, centre) + p.w) / len < -radius) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+
+    // cmd.fill_buffer already zeroed the whole struct, so instanceCount starts at
+    // 0 and only the constant fields need writing.
+    if (i == 0) {
+        args.indexCount = push.index_count;
+        args.firstIndex = 0;
+        args.vertexOffset = 0;
+        args.firstInstance = 0;
+    }
+
+    if (i >= push.count) {
+        return;
+    }
+    vec4 sphere = spheres[i];
+    if (visible_sphere(sphere.xyz, sphere.w)) {
+        // The atomic returns the slot this invocation won, which is what makes the
+        // output compact instead of sparse.
+        uint slot = atomicAdd(args.instanceCount, 1u);
+        visible[slot] = sphere;
+    }
+}

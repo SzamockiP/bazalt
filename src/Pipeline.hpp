@@ -93,6 +93,12 @@ enum class Topology
     // change what an index buffer's largest value means.
     TRIANGLE_STRIP,
     LINE_STRIP,
+    // The input to a tessellation control shader: a run of patch_control_points
+    // vertices with no implied topology at all. What the patch becomes is decided
+    // by the tessellation evaluation shader's own `layout(triangles)` and the
+    // tessellation levels the control shader writes, so there is no PATCH_STRIP
+    // and no separate triangle/quad/isoline spelling here.
+    PATCH_LIST,
 };
 
 // How a fragment's colour combines with what the attachment already holds.
@@ -188,6 +194,8 @@ inline constexpr VkPrimitiveTopology to_vk(Topology topology)
             return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
         case Topology::LINE_STRIP:
             return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+        case Topology::PATCH_LIST:
+            return VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
     }
     // Not std::unreachable(): pybind enums accept arbitrary ints.
     return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -408,6 +416,18 @@ public:
     VkPipelineLayout layout() const
     {
         return layout_;
+    }
+
+    // Every stage this pipeline was built from, in pipeline order.
+    //
+    // Returned as the live list rather than a precomputed "what does this pipeline
+    // write" map, and that is the point: the tracker asks each module for its
+    // reflection at RECORD time, so a hot-reload replace() is picked up with
+    // nothing to invalidate. It is the same trick desc_.recreate uses for the
+    // handles, applied to what the handles mean.
+    const std::vector<std::shared_ptr<ShaderModule>>& shaders() const
+    {
+        return desc_.shaders;
     }
 
     // ── Hot reload ────────────────────────────────────────────────────────────
@@ -687,6 +707,42 @@ public:
         return std::forward<Self>(self);
     }
 
+    // One verb per stage rather than a `shader(module, stage)` taking the stage as
+    // an argument: a module already knows its own stage, so that argument could
+    // disagree with it, and vertex_shader/fragment_shader set the pattern in 0.2.
+    // The two tessellation stages are set together or not at all — see build().
+    template <typename Self>
+    Self&& tess_control_shader(this Self&& self, std::shared_ptr<ShaderModule> shader)
+    {
+        self.tess_control_shader_ = std::move(shader);
+        return std::forward<Self>(self);
+    }
+
+    template <typename Self>
+    Self&& tess_evaluation_shader(this Self&& self, std::shared_ptr<ShaderModule> shader)
+    {
+        self.tess_evaluation_shader_ = std::move(shader);
+        return std::forward<Self>(self);
+    }
+
+    template <typename Self>
+    Self&& geometry_shader(this Self&& self, std::shared_ptr<ShaderModule> shader)
+    {
+        self.geometry_shader_ = std::move(shader);
+        return std::forward<Self>(self);
+    }
+
+    // How many vertices the vertex buffer groups into one patch — the INPUT size,
+    // which is why it belongs on the pipeline and not in the shader. The control
+    // shader's own `layout(vertices = N) out` is its OUTPUT count, a different
+    // number, and nothing here can derive one from the other.
+    template <typename Self>
+    Self&& patch_control_points(this Self&& self, std::uint32_t count)
+    {
+        self.patch_control_points_ = count;
+        return std::forward<Self>(self);
+    }
+
     template <typename Self>
     Self&& vertex_format(this Self&& self, const std::vector<VertexFormat>& formats)
     {
@@ -918,20 +974,19 @@ public:
     }
 
     // A specialization constant for one stage. It takes a stage for the same
-    // reason every other graphics declarator does: the two stages are separate
-    // SPIR-V modules and a constant id means whatever that module says it means.
+    // reason every other graphics declarator does: each stage is a separate
+    // SPIR-V module and a constant id means whatever that module says it means.
     // The same id may legitimately carry a different value in each stage.
+    //
+    // Keyed by stage rather than sorted into per-stage vectors by an if/else. The
+    // old form tested FRAGMENT and sent everything else to the vertex list, so a
+    // TESS_CONTROL constant would have been baked into the vertex shader — and a
+    // switch would only have moved that bug into a default case. A map has no
+    // illegal state: a bucket no module claims is simply never read.
     template <typename Self>
     Self&& constant(this Self&& self, std::uint32_t id, std::uint32_t bytes, ShaderStage stage)
     {
-        if (stage == ShaderStage::FRAGMENT)
-        {
-            self.fragment_constants_.push_back({id, bytes});
-        }
-        else
-        {
-            self.vertex_constants_.push_back({id, bytes});
-        }
+        self.constants_[stage].push_back({id, bytes});
         return std::forward<Self>(self);
     }
 
@@ -1054,6 +1109,92 @@ public:
                 "A fragment shader must be provided when the target has colour "
                 "attachments (only depth-only targets can omit it)"));
         }
+        // Tessellation is a PAIR of stages with a fixed-function tessellator
+        // between them, so one without the other is not a partial pipeline, it is
+        // an invalid one. Caught here rather than by the layers, because "which of
+        // the two did I forget" is the useful half of the message.
+        if (static_cast<bool>(tess_control_shader_) != static_cast<bool>(tess_evaluation_shader_))
+        {
+            return std::unexpected(err_shader(
+                "tessellation needs BOTH stages: set tess_control_shader and "
+                "tess_evaluation_shader together, or neither"));
+        }
+        // Not redundant with the same check inside compile_shader, and not a
+        // second spelling of it either: this one catches a module compiled on a
+        // Context that HAS the feature and then built into a pipeline on one that
+        // does not. Both call the same function, so the two cannot disagree about
+        // which feature a stage needs or about what the message says.
+        for (const std::shared_ptr<ShaderModule>* slot :
+             {&tess_control_shader_, &tess_evaluation_shader_, &geometry_shader_})
+        {
+            if (*slot)
+            {
+                if (auto e = ShaderCompiler::check_stage_supported(context_, (*slot)->stage()); !e)
+                {
+                    return std::unexpected(e.error());
+                }
+            }
+        }
+        // A graphics shader that WRITES a descriptor needs a feature bit, and which
+        // one depends on its stage. Asked of the reflection rather than of the
+        // declarators, so declaring a storage image and only reading it costs
+        // nothing — the gate fires on what the shader does, not on what the pipeline
+        // could do.
+        //
+        // written_bindings rather than writes(): a module whose scan came out
+        // `writes_unknown` (foreign SPIR-V) claims to write everything, and demanding
+        // the feature for every .spv shader would break callers who never write at
+        // all. Such a module reaching this point behaves as it did before 0.19 — the
+        // layers report it — which is the honest trade for a diagnostic.
+        for (const std::shared_ptr<ShaderModule>* slot :
+             {&vertex_shader_, &tess_control_shader_, &tess_evaluation_shader_, &geometry_shader_, &fragment_shader_})
+        {
+            if (!*slot || (*slot)->reflection().written_bindings.empty())
+            {
+                continue;
+            }
+            const bool fragment = (*slot)->stage() == ShaderStage::FRAGMENT;
+            const Feature needed = fragment ? Feature::FRAGMENT_STORES : Feature::VERTEX_STAGE_STORES;
+            if (!context_.supports(needed))
+            {
+                return std::unexpected(err_shader(
+                    std::format(
+                        "the {} shader writes a storage buffer or image, which requires the {} feature; "
+                        "create the Context with features=[bz.Feature.{}] (or optional=[...])",
+                        ShaderCompiler::stage_name((*slot)->stage()),
+                        feature_name(needed),
+                        feature_name(needed))));
+            }
+        }
+        // The two halves of one statement: a patch has no meaning without stages to
+        // tessellate it, and a tessellation pipeline has nothing to read without
+        // patches. Both spellings of the mistake get the same explanation.
+        if (tess_control_shader_ && topology_ != Topology::PATCH_LIST)
+        {
+            return std::unexpected(err_shader(
+                "a tessellation pipeline must draw patches; add "
+                "topology(bz.Topology.PATCH_LIST) and patch_control_points(n)"));
+        }
+        if (topology_ == Topology::PATCH_LIST && !tess_control_shader_)
+        {
+            return std::unexpected(err_shader(
+                "Topology.PATCH_LIST is only valid with tessellation shaders; set "
+                "tess_control_shader and tess_evaluation_shader, or pick another topology"));
+        }
+        if (tess_control_shader_)
+        {
+            const std::uint32_t max_patch = context_.max_patch_control_points();
+            if (patch_control_points_ == 0 || patch_control_points_ > max_patch)
+            {
+                return std::unexpected(err_shader(
+                    std::format(
+                        "patch_control_points must be between 1 and {} on this GPU, not {} — it is "
+                        "how many vertices of the vertex buffer make one patch (3 for a triangle "
+                        "patch, 4 for a quad)",
+                        max_patch,
+                        patch_control_points_)));
+            }
+        }
 
         // Descriptor set layouts and the pipeline layout are created ONCE and
         // reused across every hot-reload rebuild: they come from the builder's
@@ -1089,10 +1230,12 @@ public:
         GraphicsState state{
             .vertex = vertex_shader_,
             .fragment = fragment_shader_,
+            .tess_control = tess_control_shader_,
+            .tess_evaluation = tess_evaluation_shader_,
+            .geometry = geometry_shader_,
             .formats = formats_,
             .instance_formats = instance_formats_,
-            .vertex_constants = vertex_constants_,
-            .fragment_constants = fragment_constants_,
+            .constants = constants_,
             .depth_test = depth_test_,
             .depth_write = depth_write_,
             .depth_compare = depth_compare_,
@@ -1108,6 +1251,7 @@ public:
             .blend_overrides = blend_overrides_,
             .alpha_to_coverage = alpha_to_coverage_,
             .topology = topology_,
+            .patch_control_points = patch_control_points_,
             .color_formats = std::move(colorFormats),
             .depth_format = depthFormat,
             .samples = samples,
@@ -1130,10 +1274,17 @@ public:
         cleanup_pipeline_layout.release();
 
         PipelineDesc desc;
-        desc.shaders.push_back(vertex_shader_);
-        if (fragment_shader_)
+        // Every stage the pipeline has, because Pipeline::uses() matches against
+        // exactly this list: a module missing from it is a shader the watcher
+        // recompiles and whose pipeline is then never rebuilt, so the edit appears
+        // to do nothing. A loop rather than five ifs for that reason.
+        for (const std::shared_ptr<ShaderModule>* slot :
+             {&vertex_shader_, &tess_control_shader_, &tess_evaluation_shader_, &geometry_shader_, &fragment_shader_})
         {
-            desc.shaders.push_back(fragment_shader_);
+            if (*slot)
+            {
+                desc.shaders.push_back(*slot);
+            }
         }
         desc.recreate = [state = std::move(state), pipelineLayout](Context& c)
         { return create_pipeline_(c, state, pipelineLayout); };
@@ -1176,13 +1327,15 @@ private:
     {
         std::shared_ptr<ShaderModule> vertex;
         std::shared_ptr<ShaderModule> fragment;
+        std::shared_ptr<ShaderModule> tess_control;
+        std::shared_ptr<ShaderModule> tess_evaluation;
+        std::shared_ptr<ShaderModule> geometry;
         std::vector<VertexFormat> formats;
         std::vector<VertexFormat> instance_formats;
         // Part of the rebuildable state, not of the ShaderModule: a hot reload
         // recompiles the source and must re-apply the same values, or the
         // reloaded pipeline would quietly differ from the one it replaces.
-        std::vector<SpecConstant> vertex_constants;
-        std::vector<SpecConstant> fragment_constants;
+        std::map<ShaderStage, std::vector<SpecConstant>> constants;
         bool depth_test = false;
         bool depth_write = true;
         CompareOp depth_compare = CompareOp::LESS_OR_EQUAL;
@@ -1198,6 +1351,7 @@ private:
         std::map<std::uint32_t, BlendOverride> blend_overrides;
         bool alpha_to_coverage = false;
         Topology topology = Topology::TRIANGLE_LIST;
+        std::uint32_t patch_control_points = 0;
         std::vector<VkFormat> color_formats;
         VkFormat depth_format = VK_FORMAT_UNDEFINED;
         VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1224,9 +1378,8 @@ private:
         const GraphicsState& s,
         VkPipelineLayout pipelineLayout)
     {
-        const SpecializationBlock vertexSpec(s.vertex_constants);
-        const SpecializationBlock fragmentSpec(s.fragment_constants);
-        const std::vector<VkPipelineShaderStageCreateInfo> shaderStages = shader_stages_(s, vertexSpec, fragmentSpec);
+        std::vector<SpecializationBlock> specs;
+        const std::vector<VkPipelineShaderStageCreateInfo> shaderStages = shader_stages_(s, specs);
 
         // Vertex input — the CreateInfo points into vertexInput, so it lives here.
         const VertexInput vertexInput = vertex_input_(s);
@@ -1246,6 +1399,16 @@ private:
             .flags = 0,
             .topology = to_vk(s.topology),
             .primitiveRestartEnable = VK_FALSE};
+
+        // Only read when the pipeline has tessellation stages, so it costs a
+        // struct on the stack and nothing else. patchControlPoints is the INPUT
+        // patch size — how the vertex buffer groups into patches — and build()
+        // has already validated it against maxTessellationPatchSize.
+        const VkPipelineTessellationStateCreateInfo tessellationState{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .patchControlPoints = s.patch_control_points};
 
         // Dynamic State
         std::vector<VkDynamicState> dynamicStates = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
@@ -1329,7 +1492,7 @@ private:
             .pStages = shaderStages.data(),
             .pVertexInputState = &vertexInputInfo,
             .pInputAssemblyState = &inputAssembly,
-            .pTessellationState = nullptr,
+            .pTessellationState = s.tess_control ? &tessellationState : nullptr,
             .pViewportState = &viewportState,
             .pRasterizationState = &rasterizer,
             .pMultisampleState = &multisampling,
@@ -1357,36 +1520,48 @@ private:
         return graphicsPipeline;
     }
 
-    // 1 stage (depth-only) or 2. The fragment stage is optional exactly when
-    // the target has no colour attachments — build() enforces that pairing.
+    // Every stage this pipeline has, walked in Vulkan's own pipeline order. One
+    // (depth-only) to five. Vertex is mandatory; build() enforces which of the
+    // others are legal together.
     //
-    // The specialization blocks are the caller's, not ours: their data has to
-    // stay alive until vkCreateGraphicsPipelines has read it, and a local here
-    // would dangle the moment this function returns.
+    // The stage bit is to_vk(module->stage()) and no longer a literal per slot.
+    // The literals were correct while there were exactly two slots and became a
+    // liability at five: a module set on the wrong verb would have been announced
+    // to Vulkan as the stage the slot expected rather than the stage it is.
+    //
+    // The specialization blocks are the caller's, not ours: their data has to stay
+    // alive until vkCreateGraphicsPipelines has read it, and a local here would
+    // dangle the moment this function returns.
     static std::vector<VkPipelineShaderStageCreateInfo> shader_stages_(
         const GraphicsState& s,
-        const SpecializationBlock& vertexSpec,
-        const SpecializationBlock& fragmentSpec)
+        std::vector<SpecializationBlock>& specs)
     {
         std::vector<VkPipelineShaderStageCreateInfo> stages;
-        stages.push_back(
-            {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-             .pNext = nullptr,
-             .flags = 0,
-             .stage = VK_SHADER_STAGE_VERTEX_BIT,
-             .module = s.vertex->get(),
-             .pName = entry_name_(*s.vertex),
-             .pSpecializationInfo = vertexSpec.get()});
-        if (s.fragment)
+        stages.reserve(5);
+        // reserve() before the first emplace_back is load-bearing. Each block's
+        // `info` points into that block's own entries/data vectors, and while a
+        // vector move does carry those heap buffers along, not reallocating at all
+        // costs one line and removes the question entirely.
+        specs.reserve(5);
+
+        for (const std::shared_ptr<ShaderModule>* slot :
+             {&s.vertex, &s.tess_control, &s.tess_evaluation, &s.geometry, &s.fragment})
         {
+            const std::shared_ptr<ShaderModule>& module = *slot;
+            if (!module)
+            {
+                continue;
+            }
+            const auto it = s.constants.find(module->stage());
+            specs.emplace_back(it != s.constants.end() ? it->second : std::vector<SpecConstant>{});
             stages.push_back(
                 {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                  .pNext = nullptr,
                  .flags = 0,
-                 .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-                 .module = s.fragment->get(),
-                 .pName = entry_name_(*s.fragment),
-                 .pSpecializationInfo = fragmentSpec.get()});
+                 .stage = to_vk(module->stage()),
+                 .module = module->get(),
+                 .pName = entry_name_(*module),
+                 .pSpecializationInfo = specs.back().get()});
         }
         return stages;
     }
@@ -1535,10 +1710,12 @@ private:
     Context& context_;
     std::shared_ptr<ShaderModule> vertex_shader_;
     std::shared_ptr<ShaderModule> fragment_shader_;
+    std::shared_ptr<ShaderModule> tess_control_shader_;
+    std::shared_ptr<ShaderModule> tess_evaluation_shader_;
+    std::shared_ptr<ShaderModule> geometry_shader_;
     std::vector<VertexFormat> formats_;
     std::vector<VertexFormat> instance_formats_;
-    std::vector<SpecConstant> vertex_constants_;
-    std::vector<SpecConstant> fragment_constants_;
+    std::map<ShaderStage, std::vector<SpecConstant>> constants_;
     bool depth_test_ = false;
     bool depth_write_ = true;
     CompareOp depth_compare_ = CompareOp::LESS_OR_EQUAL;
@@ -1554,6 +1731,7 @@ private:
     std::map<std::uint32_t, BlendOverride> blend_overrides_;
     bool alpha_to_coverage_ = false;
     Topology topology_ = Topology::TRIANGLE_LIST;
+    std::uint32_t patch_control_points_ = 0;
     bool sample_shading_ = false;
     float min_sample_shading_ = 1.0f;
     std::string name_;

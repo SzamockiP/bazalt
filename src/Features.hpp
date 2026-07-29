@@ -29,6 +29,20 @@ enum class Feature
     MULTI_DRAW_INDIRECT,   // multiDrawIndirect
     SHADER_FLOAT64,        // shaderFloat64
     INDEPENDENT_BLEND,     // independentBlend — a different blend state per MRT attachment
+    TESSELLATION,          // tessellationShader — the TESS_CONTROL and TESS_EVALUATION stages
+    GEOMETRY_SHADER,       // geometryShader — the GEOMETRY stage
+    // Writing a storage buffer or storage image from a GRAPHICS shader. Two bits
+    // rather than one because Vulkan splits them by stage, and the split is real:
+    // a deferred pass writing from the fragment shader needs the first, a vertex
+    // shader compacting geometry needs the second.
+    //
+    // These exist as of 0.19 because the graphics storage_image() declarator landed
+    // in 0.17 without them, so a fragment imageStore worked on the GPU and failed
+    // pipeline creation. Fourth time a capability that reads like plain command
+    // recording turned out to have a feature bit, after fillModeNonSolid, wideLines
+    // and independentBlend.
+    FRAGMENT_STORES,    // fragmentStoresAndAtomics
+    VERTEX_STAGE_STORES // vertexPipelineStoresAndAtomics — vertex, tessellation, geometry
 };
 
 // Every Feature above maps to a plain VkPhysicalDeviceFeatures boolean, so the
@@ -43,7 +57,10 @@ struct FeatureInfo
     VkBool32 VkPhysicalDeviceFeatures::* bit;
 };
 
-inline constexpr std::array<FeatureInfo, 8> kFeatureTable{{
+// std::to_array, not std::array<FeatureInfo, N>: the extent was a hardcoded 8 and
+// adding a row meant editing a number in a second place, which is exactly the kind
+// of edit a compiler should be doing. Deduced, it cannot go stale.
+inline constexpr auto kFeatureTable = std::to_array<FeatureInfo>({
     {Feature::ANISOTROPIC_FILTERING, "ANISOTROPIC_FILTERING", &VkPhysicalDeviceFeatures::samplerAnisotropy},
     {Feature::WIREFRAME, "WIREFRAME", &VkPhysicalDeviceFeatures::fillModeNonSolid},
     {Feature::WIDE_LINES, "WIDE_LINES", &VkPhysicalDeviceFeatures::wideLines},
@@ -52,7 +69,11 @@ inline constexpr std::array<FeatureInfo, 8> kFeatureTable{{
     {Feature::MULTI_DRAW_INDIRECT, "MULTI_DRAW_INDIRECT", &VkPhysicalDeviceFeatures::multiDrawIndirect},
     {Feature::SHADER_FLOAT64, "SHADER_FLOAT64", &VkPhysicalDeviceFeatures::shaderFloat64},
     {Feature::INDEPENDENT_BLEND, "INDEPENDENT_BLEND", &VkPhysicalDeviceFeatures::independentBlend},
-}};
+    {Feature::TESSELLATION, "TESSELLATION", &VkPhysicalDeviceFeatures::tessellationShader},
+    {Feature::GEOMETRY_SHADER, "GEOMETRY_SHADER", &VkPhysicalDeviceFeatures::geometryShader},
+    {Feature::FRAGMENT_STORES, "FRAGMENT_STORES", &VkPhysicalDeviceFeatures::fragmentStoresAndAtomics},
+    {Feature::VERTEX_STAGE_STORES, "VERTEX_STAGE_STORES", &VkPhysicalDeviceFeatures::vertexPipelineStoresAndAtomics},
+});
 
 inline constexpr const FeatureInfo& feature_info(Feature feature)
 {

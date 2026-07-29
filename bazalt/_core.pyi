@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import IntEnum
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence, overload
 
 import numpy as np
 
@@ -105,6 +105,17 @@ class Feature(IntEnum):
     SHADER_FLOAT64 = 6
     #: A different blend state or colour mask per MRT attachment.
     INDEPENDENT_BLEND = 7
+    #: The TESS_CONTROL and TESS_EVALUATION stages, and Topology.PATCH_LIST.
+    TESSELLATION = 8
+    #: The GEOMETRY stage. Absent on MoltenVK, and slow on modern hardware.
+    GEOMETRY_SHADER = 9
+    #: A FRAGMENT shader writing a storage buffer or storage image
+    #: (fragmentStoresAndAtomics). Needed by the graphics storage_image()
+    #: declarator, which shipped in 0.17 without it.
+    FRAGMENT_STORES = 10
+    #: The same for the pre-rasterization stages — vertex, tessellation, geometry
+    #: (vertexPipelineStoresAndAtomics).
+    VERTEX_STAGE_STORES = 11
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -121,9 +132,22 @@ class DataType(IntEnum):
     INT32 = 3
 
 class ShaderStage(IntEnum):
+    """Which stage a shader is compiled for.
+
+    The tessellation and geometry values are appended rather than placed in
+    pipeline order, because the numbers are API. Each needs its device feature:
+    compile_shader refuses the stage without it, since SPIR-V for these stages
+    declares a capability the driver rejects when the feature is off.
+    """
     VERTEX = 0
     FRAGMENT = 1
     COMPUTE = 2
+    #: Needs Feature.TESSELLATION. Sets the subdivision levels per patch.
+    TESS_CONTROL = 3
+    #: Needs Feature.TESSELLATION. Places each vertex the tessellator generated.
+    TESS_EVALUATION = 4
+    #: Needs Feature.GEOMETRY_SHADER. Per primitive, and may change its type.
+    GEOMETRY = 5
 
 class VertexFormat(IntEnum):
     """Vertex attribute layout. Renamed from `Format`, which is reserved for
@@ -148,6 +172,10 @@ class Topology(IntEnum):
     LINE_LIST = 2
     TRIANGLE_STRIP = 3
     LINE_STRIP = 4
+    #: The input to a tessellation control shader: a run of patch_control_points
+    #: vertices with no implied topology. Only valid with tessellation shaders,
+    #: and they are only valid with this — the pipeline build checks both ways.
+    PATCH_LIST = 5
 
 class BlendMode(IntEnum):
     """How a fragment combines with what the attachment already holds.
@@ -188,6 +216,9 @@ class Access(IntEnum):
     VERTEX_READ = 2
     INDEX_READ = 3
     UNIFORM_READ = 4
+    #: The draw or dispatch arguments themselves, read by the command processor
+    #: rather than by a shader — the hazard behind cmd.draw_indirect (0.19).
+    INDIRECT_READ = 5
 
 class Format(IntEnum):
     """Pixel formats.
@@ -370,6 +401,41 @@ class ShaderModule:
         """The SPIR-V words. `open(p, "wb").write(shader.spirv)` produces a
         file that compile_shader("*.spv", stage) loads back."""
         ...
+    @property
+    def writes(self) -> list[tuple[int, int]]:
+        """The (set, binding) pairs this shader WRITES, from SPIR-V reflection
+        (0.19). Sorted, and empty when the shader provably writes nothing.
+
+        This is what lets bazalt insert automatic barriers for a storage buffer or
+        storage image written by a graphics shader, which used to need a manual
+        cmd.barrier(). It counts stores, image writes and atomics — a buffer touched
+        only by atomicAdd is written.
+
+        Exposed mainly so the reflection has a referee: it is also the answer to
+        "why is there no barrier here". Reads are not reported; bazalt takes the
+        bindings a shader may read from the pipeline builder's declarators.
+        """
+        ...
+    @property
+    def writes_unknown(self) -> bool:
+        """True when the write scan could not follow something, so every binding is
+        assumed written and no barrier is narrowed (0.19).
+
+        Set for ready SPIR-V (a .spv file or source=bytes), because bazalt only
+        knows the write opcodes its own GLSL and HLSL compile down to. Also set by a
+        descriptor passed into a function or appearing in a pointer phi. The rule is
+        one-directional: the tracker may be pessimistic, never optimistic.
+        """
+        ...
+    @property
+    def prints(self) -> bool:
+        """True when the shader calls debugPrintfEXT (0.19).
+
+        A printf Context compiles only these shaders unoptimized — a print is a
+        non-semantic instruction the optimizer may delete, so it cannot survive -O.
+        Every other shader in that Context is optimized normally.
+        """
+        ...
 
 class Image:
     """A GPU image: pixels + format. May be 2D, a texture array (array_layers >
@@ -502,13 +568,40 @@ class RenderTargetBase:
     ...
 
 class RenderTarget(RenderTargetBase):
-    """An offscreen target backed by its own Images. No window required.
+    """An offscreen target backed by Images. No window required.
 
     The attachments are ordinary Images: `target.color[0]` and `target.depth`
     go straight into DescriptorSet.set_image — that is the whole
     render-to-texture and shadow-map API.
+
+    Two ways to build one, and they do different jobs. Pass a width and height and
+    the target allocates its attachments from pixel formats. Pass images from
+    create_image and it renders into those instead — that signature has no size,
+    samples, layers, cube or mip_levels, because the images already answer all of
+    them (0.19).
     """
 
+    @overload
+    def __init__(self, context: Context, *,
+                 color: Optional[Image | Sequence[Image]] = None,
+                 depth: Optional[Image] = None, name: str = "") -> None:
+        """Render into images you already own, rather than attachments the target
+        allocates.
+
+        What this makes reachable: a graphics ping-pong between two textures,
+        drawing over a texture a compute pass baked, and drawing into an image
+        carried from another Context. All three were impossible while a target
+        insisted on owning its attachments.
+
+        Every attachment must be the same size with the same layer and mip count;
+        a mismatch is refused rather than intersected. Single-sample only, because
+        create_image has no samples=. The target holds the images, so dropping your
+        reference does not take the attachment with it — and it does write to their
+        layout tracking, which is what leaves the result sampleable.
+        """
+        ...
+
+    @overload
     def __init__(self, context: Context, width: int, height: int,
                  color: Optional[Format | Sequence[Format]] = Format.RGBA8,
                  depth: Optional[Format] = None,
@@ -563,6 +656,36 @@ class RenderTarget(RenderTargetBase):
 class GraphicsPipelineBuilder:
     def vertex_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder: ...
     def fragment_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder: ...
+    def tess_control_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder:
+        """The tessellation control stage: how finely to subdivide each patch.
+
+        Set together with tess_evaluation_shader — one without the other is not a
+        partial pipeline but an invalid one, and build() says so. A tessellation
+        pipeline also needs topology(PATCH_LIST) and patch_control_points(n).
+        """
+    def tess_evaluation_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder:
+        """The tessellation evaluation stage: where each generated vertex goes.
+
+        This is where displacement happens. See tess_control_shader.
+        """
+    def geometry_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder:
+        """The geometry stage: one invocation per primitive, and it may emit a
+        DIFFERENT primitive type — triangles to lines, a point to a quad.
+
+        Needs Feature.GEOMETRY_SHADER. It is slow on modern hardware and absent on
+        MoltenVK, so prefer it for debug views over hot paths. Routing one draw
+        into every layer of an array attachment does NOT need it: that is
+        target.all_layers().
+        """
+    def patch_control_points(self, count: int) -> GraphicsPipelineBuilder:
+        """How many vertices of the vertex buffer make one patch — 3 for a
+        triangle patch, 4 for a quad.
+
+        This is the INPUT patch size, which is why it lives on the pipeline: the
+        control shader's own `layout(vertices = N) out` is its OUTPUT count, a
+        different number that neither one can derive from the other. Required
+        with tessellation, and checked against the device's limit.
+        """
     def vertex_format(self, formats: list[VertexFormat]) -> GraphicsPipelineBuilder: ...
     def instance_format(self, formats: list[VertexFormat]) -> GraphicsPipelineBuilder:
         """The attributes of a second vertex buffer, advanced once per instance.
@@ -788,6 +911,45 @@ class CommandBuffer:
         ...
     def dispatch(self, group_count_x: int, group_count_y: int = 1,
                  group_count_z: int = 1) -> CommandBuffer: ...
+
+    def draw_indirect(self, buffer: Buffer, offset: int = 0,
+                      count: int = 1) -> CommandBuffer:
+        """Draw with arguments read out of a buffer, so a compute pass decides what
+        gets drawn and the CPU never learns the answer (0.19).
+
+        `buffer` must be BufferType.STORAGE — the only type carrying the indirect
+        usage flag, and what a compute shader needs anyway. bazalt declares no
+        struct type: the layout is VkDrawIndirectCommand, four uint32s, and numpy
+        writes it directly.
+
+            args = ctx.create_buffer(
+                np.array([vertex_count, instances, 0, 0], dtype=np.uint32),
+                bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+            cmd.draw_indirect(args)
+
+        A std430 GLSL struct of four uints is byte-identical, so a compute shader
+        can zero it with cmd.fill_buffer and accumulate instanceCount atomically.
+        count>1 reads that many consecutive structs and needs
+        Feature.MULTI_DRAW_INDIRECT. To draw nothing, write 0 into instanceCount —
+        count=0 is refused, because only one of the two can be decided on the GPU.
+        """
+        ...
+    def draw_indexed_indirect(self, buffer: Buffer, offset: int = 0,
+                              count: int = 1) -> CommandBuffer:
+        """draw_indirect through the bound index buffer (0.19).
+
+        The struct is VkDrawIndexedIndirectCommand, five words: indexCount,
+        instanceCount, firstIndex, vertexOffset (SIGNED int32), firstInstance.
+        """
+        ...
+    def dispatch_indirect(self, buffer: Buffer, offset: int = 0) -> CommandBuffer:
+        """Dispatch with the group counts read out of a buffer (0.19).
+
+        The struct is VkDispatchIndirectCommand: three uint32s, x/y/z. There is no
+        count — the command takes exactly one. Unlike the draw verbs this needs no
+        feature bit.
+        """
+        ...
 
     def barrier(self, buffer: Buffer, src: Access, dst: Access) -> CommandBuffer:
         """Record a buffer barrier by hand. Required between dependent uses
@@ -1046,7 +1208,37 @@ class Window:
         """
         ...
     def was_mouse_button_pressed(self, button: int) -> bool: ...
+    def dropped_files(self) -> list[str]:
+        """Paths dropped onto the window during the last poll cycle (0.19).
+
+        Empty on almost every frame. A drop is a change that expires with the
+        cycle, like a key edge or a scroll notch, so this reads the same twice
+        inside one frame and does not consume: two readers both see the drop.
+        """
+        ...
     def set_cursor_mode(self, mode: int) -> None: ...
+    def set_cursor_position(self, x: float, y: float) -> None:
+        """Move the cursor, without the move reading as the user moving it (0.19).
+
+        get_mouse_state().dx/dy stay at rest across the jump, so a warp never
+        injects a delta the size of itself. That is what makes the hidden-cursor
+        recentring pattern work: warp to the centre, then read the delta from it.
+
+        Do NOT combine it with CURSOR_DISABLED and a per-frame warp. That mode
+        already hands out unbounded virtual motion and recentres itself, so warping
+        every frame cancels every frame's delta and the camera stops turning. Pick
+        one: disabled and no warp, or hidden and warp.
+        """
+        ...
+    def set_icon(self, icon: Optional[np.ndarray]) -> None:
+        """The task-bar and title-bar icon, as a (height, width, 4) uint8 RGBA
+        array. None restores the system default (0.19).
+
+        The array must be C-contiguous — a strided view would copy other bytes.
+        The platform may ignore the request: macOS takes the icon from the app
+        bundle and Wayland from the desktop file. Same contract as set_opacity.
+        """
+        ...
     def get_mouse_state(self) -> MouseState: ...
     def set_title(self, title: str) -> None: ...
     def set_mode(self, mode: WindowMode) -> None:
@@ -1158,6 +1350,23 @@ def poll_events() -> None:
     Raises WindowError when no window exists — with none open there is no queue
     to drain, and a loop still pumping is a bug rather than a no-op.
     """
+    ...
+
+def get_clipboard() -> str:
+    """The system clipboard as text (0.19).
+
+    Empty when the clipboard holds nothing, or holds something that is not text
+    (an image, a file list) — "nothing to paste" is an answer, not an error.
+
+    A free function for the same reason poll_events is one: the GLFW calls take
+    no window and the clipboard belongs to the process, so a method would invent
+    a per-window distinction that does not exist. Raises WindowError with no live
+    Window, because GLFW is initialized with the first one.
+    """
+    ...
+
+def set_clipboard(text: str) -> None:
+    """Put text on the system clipboard. See get_clipboard (0.19)."""
     ...
 
 def list_devices() -> list[Device]:

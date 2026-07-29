@@ -1,0 +1,7 @@
+#version 450
+// The negative case, and the whole point of the feature: binding 1 is read and
+// must be ABSENT from writes, or nothing is ever narrowed.
+layout(local_size_x = 1) in;
+layout(std430, set = 0, binding = 0) buffer Out { uint v[]; };
+layout(std430, set = 1, binding = 1) readonly buffer In { uint src[]; };
+void main() { v[0] = src[gl_GlobalInvocationID.x]; }

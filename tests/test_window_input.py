@@ -293,3 +293,133 @@ def test_an_untouched_key_is_not_an_edge(ctx):
             assert not window.was_mouse_button_pressed(bz.MOUSE_BUTTON_RIGHT)
     finally:
         window = None
+
+
+# ── window extras (0.19) ──────────────────────────────────────────────────
+#
+# A drop and an icon cannot be provoked from here: no OS input, and no way to ask
+# the compositor what icon it is showing. So these pin the half that is ours —
+# a drop list is per-cycle state and behaves like every other per-cycle query,
+# and set_icon accepts what it says it accepts. The clipboard is the exception and
+# gets a real end-to-end test, because a set/get round trip needs no OS input at
+# all. `examples/27_drop_and_icon` is the referee for the rest.
+
+def test_dropped_files_is_per_cycle_state(ctx):
+    """A drop expires with the poll cycle, so dropped_files() must read the same
+    twice inside one frame and start empty — the same contract as the key edges,
+    because it uses the same rotation."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    try:
+        for _ in range(3):
+            bz.poll_events()
+            first = window.dropped_files()
+            second = window.dropped_files()
+            assert first == []
+            # Reading must not consume: two callers in one frame both see a drop.
+            assert first == second
+            assert isinstance(first, list)
+    finally:
+        window = None
+
+
+def test_set_cursor_position_does_not_fabricate_a_mouse_delta(ctx):
+    """Warping the cursor must not read as the user moving it.
+
+    This is the whole reason set_cursor_position touches pos_x_/first_mouse_:
+    mouse_callback accumulates `new position - last position`, so a warp would
+    otherwise inject a delta the size of the jump — and a camera would swing exactly
+    as far as the code moved the cursor to avoid.
+
+    Asserted as a bound rather than an exact zero, and the bound is the point. The
+    real cursor belongs to whoever is at the machine: it may be over this window and
+    moving, and that movement is a genuine delta the test has no business rejecting.
+    The bug injects a delta the size of the WARP, so a jump of several hundred pixels
+    that produces a delta of a few dozen is the discriminating signal. An exact zero
+    passes on a quiet machine and fails on a busy one, which is a flake rather than a
+    test — it failed exactly that way once before this bound existed.
+    """
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window(width=640, height=480)
+    try:
+        bz.poll_events()
+        window.get_mouse_state()          # settle: adopt wherever the cursor is
+
+        for target_x, target_y in ((600, 440), (20, 20)):
+            bz.poll_events()
+            window.set_cursor_position(target_x, target_y)
+            bz.poll_events()
+            mouse = window.get_mouse_state()
+            # The warps above are >= 400 px apart, so the unfixed behaviour reports
+            # hundreds. Incidental hand movement between two polls is nothing like it.
+            assert abs(mouse.dx) < 100.0, f"warp leaked into dx: {mouse.dx}"
+            assert abs(mouse.dy) < 100.0, f"warp leaked into dy: {mouse.dy}"
+    finally:
+        window = None
+
+
+def test_set_icon_takes_rgba8_and_none(ctx):
+    """The platform may ignore the request (macOS reads the bundle, Wayland the
+    desktop file), so what is testable is that bazalt accepts a valid array and
+    refuses the three ways an array is wrong — validated in the binding, on the
+    main thread, like every other numpy argument."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    np = pytest.importorskip("numpy")
+    window = a_window()
+    try:
+        icon = np.zeros((16, 16, 4), dtype=np.uint8)
+        icon[..., 0] = 255
+        icon[..., 3] = 255
+        window.set_icon(icon)
+        # None restores the system default, so "clear it" needs no second verb.
+        window.set_icon(None)
+
+        with pytest.raises(bz.WindowError, match="uint8"):
+            window.set_icon(np.zeros((16, 16, 4), dtype=np.float32))
+        with pytest.raises(bz.WindowError, match="4 channels"):
+            window.set_icon(np.zeros((16, 16, 3), dtype=np.uint8))
+        with pytest.raises(bz.WindowError, match="dimensions"):
+            window.set_icon(np.zeros((16, 16), dtype=np.uint8))
+        # memcpy ignores strides, so a view would copy other bytes.
+        with pytest.raises(bz.WindowError, match="C-contiguous"):
+            window.set_icon(np.zeros((16, 32, 4), dtype=np.uint8)[:, ::2])
+    finally:
+        window = None
+
+
+def test_the_clipboard_round_trips(ctx):
+    """The one extra that is testable end to end: set then get is a process round
+    trip with no OS input in it.
+
+    Free functions rather than Window methods, for the same reason poll_events is
+    one: the GLFW calls take no window and the clipboard belongs to the process, so
+    a method would invent a per-window distinction that does not exist.
+    """
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    try:
+        bz.set_clipboard("bazalt clipboard round trip")
+        assert bz.get_clipboard() == "bazalt clipboard round trip"
+        # Empty is a value, not a failure.
+        bz.set_clipboard("")
+        assert bz.get_clipboard() == ""
+    finally:
+        window = None
+
+
+def test_the_clipboard_needs_a_window():
+    """GLFW is initialized with the first Window and shut down with the last, so
+    the clipboard says so instead of returning nothing. No `ctx` fixture: this must
+    run with no window alive, which is the state the guard is about."""
+    try:
+        bz.get_clipboard()
+    except bz.WindowError:
+        return
+    # A window from another test may still be alive in this process. That is not a
+    # failure of the guard, so skip rather than assert on something this test did
+    # not control.
+    pytest.skip("a window is still alive in this process")

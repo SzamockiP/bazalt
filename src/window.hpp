@@ -121,6 +121,7 @@ public:
         glfwSetKeyCallback(window->window_.get(), key_callback);
         glfwSetMouseButtonCallback(window->window_.get(), mouse_button_callback);
         glfwSetFramebufferSizeCallback(window->window_.get(), framebuffer_resize_callback);
+        glfwSetDropCallback(window->window_.get(), drop_callback);
 
         // Start level with the world: a window created mid-loop must not rotate
         // an empty pending_ into current_ on its first query.
@@ -183,9 +184,60 @@ public:
         return std::ranges::find(current_.buttons, button) != current_.buttons.end();
     }
 
+    // Paths dropped onto the window during the last poll cycle, empty most frames.
+    // Reads like was_key_pressed: idempotent within a cycle, and it does not
+    // consume, so two readers in one frame both see the drop.
+    const std::vector<std::string>& dropped_files() const
+    {
+        rotate_();
+        return current_.dropped;
+    }
+
     void set_cursor_mode(int mode)
     {
         glfwSetInputMode(window_.get(), GLFW_CURSOR, mode);
+    }
+
+    // Move the cursor, and make sure the move does not read as the user moving it.
+    //
+    // A warp is not mouse movement, and mouse_callback cannot tell the difference:
+    // it accumulates `new position - pos_x_`, so a warp would inject a delta the
+    // size of the jump. Re-arming first_mouse_ makes the next real cursor event
+    // adopt its position with no delta, which is the mechanism already in place for
+    // the meaningless jump from (0,0) at startup.
+    //
+    // That suppression is what makes the hidden-cursor recentring pattern work
+    // (warp to the centre, then read the delta from the centre). It does NOT
+    // combine with CURSOR_DISABLED: that mode already hands out unbounded virtual
+    // motion and recentres itself, so warping every frame there cancels every
+    // frame's delta and the camera stops turning. Pick one — disabled and no warp,
+    // or hidden and warp.
+    void set_cursor_position(double x, double y)
+    {
+        glfwSetCursorPos(window_.get(), x, y);
+        pos_x_ = static_cast<float>(x);
+        pos_y_ = static_cast<float>(y);
+        first_mouse_ = true;
+    }
+
+    // The window's icon in the task bar and title bar, as RGBA8 pixels. Empty
+    // pixels restore the system default.
+    //
+    // The platform may refuse: macOS takes its icon from the bundle and Wayland
+    // from the desktop file, and GLFW reports that through the error callback
+    // rather than failing here. Same contract as set_opacity — a request, not a
+    // guarantee.
+    void set_icon(const std::vector<std::uint8_t>& rgba, int width, int height)
+    {
+        if (rgba.empty())
+        {
+            glfwSetWindowIcon(window_.get(), 0, nullptr);
+            return;
+        }
+        // const_cast because GLFWimage takes a non-const pointer and glfwSetWindowIcon
+        // copies the pixels before returning; it never writes through it.
+        GLFWimage image{.width = width, .height = height, .pixels = const_cast<unsigned char*>(rgba.data())};
+        glfwSetWindowIcon(window_.get(), 1, &image);
     }
 
     MouseState get_mouse_state() const
@@ -524,6 +576,12 @@ private:
         // A handful of keys per cycle, so a linear scan beats a set.
         std::vector<int> keys;
         std::vector<int> buttons;
+        // Files dropped onto the window during this cycle, as UTF-8 paths. It
+        // belongs here and not in a field of its own for the 0.16 reason: a drop
+        // is a change that expires with the cycle, exactly like a key edge or a
+        // scroll notch, so it shares the one rotation mechanism rather than
+        // inventing a second lifetime to remember.
+        std::vector<std::string> dropped;
     };
 
     // The callbacks append to pending_; a reader whose generation is stale
@@ -623,6 +681,20 @@ private:
             win->framebuffer_resized_ = true;
         }
     };
+
+    static void drop_callback(GLFWwindow* window, int count, const char** paths)
+    {
+        Window* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
+        if (!win)
+            return;
+
+        // GLFW owns `paths` only for the duration of this call, so the strings are
+        // copied, not referenced.
+        for (int i = 0; i < count; ++i)
+        {
+            win->pending_.dropped.emplace_back(paths[i]);
+        }
+    };
 };
 // Drain the OS event queue and dispatch each event to the window the OS
 // addressed it to. Deliberately NOT a method on Window: glfwPollEvents takes no
@@ -655,5 +727,41 @@ inline std::expected<void, Error> poll_events()
     // After the dispatch, so the generation counts *completed* cycles and the
     // events this call just delivered are the ones a query now reports.
     Window::poll_generation_.fetch_add(1, std::memory_order_relaxed);
+    return {};
+}
+
+// The system clipboard. Free functions, not Window methods, for the same reason
+// poll_events() is a free function: glfwGetClipboardString and
+// glfwSetClipboardString take no window (GLFW accepts NULL and the clipboard is
+// per process, not per window), so a method would invent a per-window distinction
+// that does not exist and read as "this window's clipboard".
+//
+// Both need GLFW initialized, which means at least one live Window — the same
+// precondition and the same message shape as poll_events().
+inline std::expected<std::string, Error> get_clipboard()
+{
+    if (Window::window_count_.load() == 0)
+    {
+        return std::unexpected(err_window(
+            "The clipboard needs a window: GLFW is initialized with the first Window "
+            "and shut down with the last, and the clipboard belongs to the process, "
+            "not to any one window."));
+    }
+    // Null on an empty clipboard, or when it holds something that is not text (an
+    // image, a file list). Neither is an error — "no text to paste" is an answer.
+    const char* text = glfwGetClipboardString(nullptr);
+    return text ? std::string(text) : std::string();
+}
+
+inline std::expected<void, Error> set_clipboard(const std::string& text)
+{
+    if (Window::window_count_.load() == 0)
+    {
+        return std::unexpected(err_window(
+            "The clipboard needs a window: GLFW is initialized with the first Window "
+            "and shut down with the last, and the clipboard belongs to the process, "
+            "not to any one window."));
+    }
+    glfwSetClipboardString(nullptr, text.c_str());
     return {};
 }
