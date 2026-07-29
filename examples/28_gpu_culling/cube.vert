@@ -23,11 +23,17 @@ void main() {
     vec3 world = sphere.xyz + inPos * sphere.w;
 
     vNormal = inNormal;
-    // Colour by slot so the compaction is visible: the survivors are packed from 0
-    // upwards, so the palette shifts as the camera turns rather than each cube
-    // keeping one colour.
-    float t = float(gl_InstanceIndex) * 0.13;
-    vTint = 0.5 + 0.5 * vec3(sin(t), sin(t + 2.1), sin(t + 4.2));
+
+    // Colour derived from the cube's own POSITION, never from gl_InstanceIndex.
+    //
+    // The slot a survivor lands in comes from atomicAdd, so it depends on the order
+    // the workgroups happened to finish in and is different every frame even when
+    // nothing moved. Tinting by the slot makes all of them strobe — which looks
+    // like a broken draw and is really just the compaction being unordered. The
+    // position is stable, so each cube keeps its colour and the only thing that
+    // changes is which cubes are inside the frustum.
+    float t = dot(sphere.xyz, vec3(0.07, 0.11, 0.13));
+    vTint = 0.45 + 0.55 * vec3(sin(t), sin(t + 2.1), sin(t + 4.2));
 
     gl_Position = push.view_proj * vec4(world, 1.0);
 }

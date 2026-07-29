@@ -70,6 +70,17 @@ def load(path):
     except bz.ResourceError as e:
         print(f"[skip] {path}: {e}")
         return
+
+    # Rewriting a descriptor set that a submitted frame is still reading is
+    # illegal: Vulkan only allows it for bindings created with
+    # UPDATE_AFTER_BIND, which is a descriptor-indexing feature. With frames in
+    # flight, the previous frame's command buffer still references this set.
+    #
+    # So wait first. A drop or a paste happens when a person does something, not
+    # every frame, so the stall costs nothing here — and it is the honest fix
+    # rather than a second descriptor set to juggle.
+    ctx.wait()
+
     texture = loaded
     texture_path = str(path)
     desc_set.set_image(0, texture, sampler)

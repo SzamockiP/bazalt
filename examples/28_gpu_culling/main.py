@@ -44,16 +44,25 @@ INDEX_COUNT = 36
 # ── the candidates ────────────────────────────────────────────────────────
 # xyz = centre, w = radius. A wide flat slab, so turning the camera changes how
 # many are inside the frustum by a lot.
+# The slab is deliberately tight. Spread the same 20,000 cubes over a few hundred
+# units and almost every survivor is far enough away to be sub-pixel, so the screen
+# looks nearly empty and the demo shows nothing. Dense and close means the cubes
+# that survive are actually visible, and the count still swings by thousands as the
+# camera turns.
 rng = np.random.default_rng(7)
 spheres = np.empty((COUNT, 4), dtype=np.float32)
-spheres[:, 0] = rng.uniform(-120.0, 120.0, COUNT)
-spheres[:, 1] = rng.uniform(-6.0, 6.0, COUNT)
-spheres[:, 2] = rng.uniform(-120.0, 120.0, COUNT)
-spheres[:, 3] = rng.uniform(0.35, 0.9, COUNT)
+spheres[:, 0] = rng.uniform(-45.0, 45.0, COUNT)
+spheres[:, 1] = rng.uniform(-5.0, 5.0, COUNT)
+spheres[:, 2] = rng.uniform(-45.0, 45.0, COUNT)
+spheres[:, 3] = rng.uniform(0.5, 1.1, COUNT)
 
 candidates = ctx.create_buffer(spheres, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
 # The compacted survivors. Sized for the worst case (everything visible), because
 # the CPU cannot know the real number — that is the point of the example.
+#
+# STATIC, i.e. device-local. NOT MemoryUsage.DYNAMIC: that means host-visible
+# memory allocated for sequential CPU writes, and a compute shader writing into it
+# is outside what it is for — the data does not come back.
 visible = ctx.create_buffer(COUNT * 16, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
 # One VkDrawIndexedIndirectCommand: 5 words.
 args = ctx.create_buffer(20, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
@@ -118,7 +127,7 @@ draw = (ctx.graphics_pipeline()
         .cull_mode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE)
         .build(renderer))
 
-pool = ctx.create_descriptor_pool(max_sets=4, storage_buffers=8)
+pool = ctx.create_descriptor_pool(max_sets=8, storage_buffers=16)
 cull_set = pool.allocate_set(cull, set=0)
 cull_set.set_buffer(0, args)
 cull_set.set_buffer(1, candidates)
