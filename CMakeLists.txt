@@ -71,30 +71,27 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb)
 
+# The binding layer is eight translation units, not one. Until 0.20 main.cpp
+# carried every binding and included the whole header-only core, so a rebuild used
+# one core out of however many the machine has. The headers stay header-only --
+# they are templated and inline, and splitting them would be a rewrite for a cost
+# the precompiled header already removes.
+#
+# The .hpp files used to be listed here for IDE display. They are gone because the
+# list drifted: HotReload.hpp, Device.hpp, SpirvReflect.hpp, ResourceTracker.hpp
+# and MpscQueue.hpp were all missing, and nothing noticed, which is what a list
+# that serves no build purpose does.
 add_library(_core MODULE
     src/main.cpp
+    src/bindings/Enums.cpp
+    src/bindings/Resources.cpp
+    src/bindings/Pipelines.cpp
+    src/bindings/Commands.cpp
+    src/bindings/Windowing.cpp
+    src/bindings/ContextBind.cpp
+    src/bindings/Targets.cpp
     src/vma_impl.cpp
     src/stb_impl.cpp
-    src/Buffer.hpp
-    src/CommandBuffer.hpp
-    src/Context.hpp
-    src/DescriptorSet.hpp
-    src/Error.hpp
-    src/Features.hpp
-    src/Format.hpp
-    src/Image.hpp
-    src/ImmediateSubmit.hpp
-    src/Logger.hpp
-    src/MpscQueue.hpp
-    src/Pipeline.hpp
-    src/Renderer.hpp
-    src/RenderTarget.hpp
-    src/Sampler.hpp
-    src/ScopeGuard.hpp
-    src/ShaderCompiler.hpp
-    src/SurfaceProvider.hpp
-    src/UploadManager.hpp
-    src/window.hpp
 )
 
 target_link_libraries(_core PRIVATE 
@@ -105,7 +102,19 @@ target_link_libraries(_core PRIVATE
     vk-bootstrap::vk-bootstrap
     Vulkan::shaderc_combined
 )
-target_include_directories(_core PRIVATE ${stb_SOURCE_DIR})
+# src/ on the path because the binding files sit in src/bindings/ and include the
+# core headers by name.
+target_include_directories(_core PRIVATE ${stb_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+# Parse pybind11, volk and the C++23 standard library once instead of eight times.
+target_precompile_headers(_core PRIVATE src/bindings/Pch.hpp)
+
+# target_precompile_headers applies to EVERY source of the target, and these two
+# exist only to instantiate a third-party implementation. Forcing pybind11 into
+# them is waste at best, and vma_impl.cpp is order-sensitive around
+# VMA_IMPLEMENTATION.
+set_source_files_properties(src/vma_impl.cpp src/stb_impl.cpp
+    PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 set_target_properties(_core PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}" SUFFIX "${PYTHON_MODULE_EXTENSION}")
 
 target_compile_features(_core PRIVATE cxx_std_23)

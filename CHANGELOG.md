@@ -5,6 +5,106 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.20.0] — 2026-07-29
+
+No new feature. This release splits the binding layer into eight translation
+units, fixes four bugs and removes one API nobody meant to publish.
+
+The library reached about 19,000 lines of C++ and all of it compiled as one
+translation unit: `src/main.cpp` held every binding and included the whole
+header-only core. One translation unit means one CPU core, and 0.14 had already
+needed `/bigobj` because the object file passed a hard format limit. The
+bindings now live in `src/bindings/`, one file per subject, and `main.cpp` is
+the module definition plus seven calls. The core headers stay headers.
+
+The four bugs were found by reading the binding layer rather than by writing
+anything new, and two of them crash rather than misbehave. That is the argument
+for the audit: the tests were green the whole time.
+
+### Fixed
+- **A `SwapchainRenderer` outlived the `Window` it was built from.** The
+  renderer reads the window on every present, through lambdas that captured the
+  raw window pointer and a pointer to the window's own resize flag. Nothing tied
+  the two lifetimes, so `del window` left both pointers dangling and the next
+  `present()` read freed memory.
+- **`record_frame` raised a Python exception with the GIL released.** A failed
+  `vkBeginCommandBuffer` or `vkEndCommandBuffer` took the interpreter down
+  instead of raising `bz.DeviceLostError`. Both submit paths reach it without the
+  GIL. It returns the error now, and `SwapchainRenderer.present` does too.
+- **Five bounds checks could be bypassed by a large offset.** They were written
+  `offset + length > size` on unsigned values, so an offset near the maximum
+  wrapped the sum to a small number and passed. `buffer.update(data,
+  offset=2**64 - 10)` reached a memory copy through an invalid pointer. The
+  others are `image.update(region=)`, `cmd.copy_buffer`, `cmd.fill_buffer` and
+  the indirect draw verbs.
+- **Ten methods refused the keyword arguments their own type stub declared.**
+  `gb.cull_mode(mode=..., front_face=...)` raised `TypeError`, because the
+  binding registered no parameter names. The affected methods are
+  `vertex_shader`, `fragment_shader`, `tess_control_shader`,
+  `tess_evaluation_shader`, `geometry_shader`, `vertex_format`, `cull_mode`,
+  `topology` and `push_constant` on `GraphicsPipelineBuilder`, plus
+  `ComputePipelineBuilder.shader`.
+
+### Removed
+- **`.export_values()` on all 15 enums that had it.** This is the only break in
+  the release, and the reason it is 0.20.0 and not 0.19.1.
+
+  The switch binds every enum member a second time as a bare module attribute,
+  so `bz.ShaderStage.VERTEX` had a twin `bz.VERTEX`. About sixty such names
+  existed: `NONE`, `ERROR`, `INFO`, `LINE`, `POINT`, `FILL`, `ALPHA`, `STATIC`,
+  `DEVICE`, `WINDOW` and more. None of them appear in `_core.pyi` or in
+  `__all__`, and nothing in the README, the tests or the 28 examples used them.
+
+  Two collided, and the enum that bound last silently won: `bz.VERTEX` was
+  `ShaderStage.VERTEX`, so `BufferType.VERTEX` had no bare spelling, and
+  `bz.FLOAT` was `VertexFormat.FLOAT`, so `DataType.FLOAT` had none either.
+
+  Use the qualified name. `bz.ShaderStage.VERTEX`, not `bz.VERTEX`.
+
+### Changed
+- **The bindings are eight files.** `src/bindings/` holds `Enums.cpp`,
+  `Resources.cpp`, `Pipelines.cpp`, `Commands.cpp`, `Windowing.cpp`,
+  `ContextBind.cpp` and `Targets.cpp`, with `Common.hpp` for what they share and
+  `Pch.hpp` as a precompiled header for the third-party includes. A new binding
+  goes in the file that owns its subject. The call order in `main.cpp` carries
+  the two registration constraints that are real and the one that only looks
+  real.
+- **A rebuild reuses its build directory.** scikit-build-core deletes its build
+  tree by default, so every install reconfigured CMake and rebuilt glfw, volk and
+  vk-bootstrap from scratch. This was the largest single change to build time in
+  the release, it is two lines of configuration, and it has nothing to do with the
+  split.
+
+  The measured numbers, because the split is a trade and not a win everywhere:
+
+  | | 0.19.0 | 0.20.0 |
+  |---|---|---|
+  | rebuild after editing one binding | 66.1s | **25.8s** |
+  | rebuild after editing a core header | 66.1s | **43.9s** |
+  | of which pip and CMake overhead | 10.2s | 13.1s |
+
+  Against a same-configuration baseline, that is 36.6s before the split versus
+  25.8s after for a binding edit, and 43.9s after for a core-header edit — 30%
+  faster on the first and 20% **slower** on the second. Eight translation units
+  each parse the header-only core, and one did before. The header parse is what
+  dominates a rebuild, and making it cheaper means splitting the core into
+  `.hpp` + `.cpp`, which is a rewrite this release does not attempt.
+- **Sixty exception messages joined two clauses with a semicolon** and now read
+  as two sentences, which is what the writing convention already asked for.
+- **Six messages said too little to act on.** The image-upload failures named an
+  internal object and discarded the Vulkan result code; `create_buffer` would
+  not say which element type it found or how to state one; the render-target
+  check named neither the wrong argument nor its value; two shader messages
+  explained a binary format instead of naming the bad file; and the window
+  failures named a C library the user has never heard of.
+
+### Added
+- `tests/test_bounds.py` — a near-maximum offset on each of the five verbs.
+- A test that scans every bound method for a missing parameter name, so the
+  whole class of the keyword-argument bug is caught rather than the ten
+  instances of it.
+- A test that the bare enum names stay gone.
+
 ## [0.19.0] — 2026-07-29
 
 "The stages the pipeline could not run". `ShaderStage` had three values, so a
