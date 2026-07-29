@@ -36,6 +36,9 @@ public:
         // Per-command-buffer override of the Context-wide mode, so one hot
         // path can go manual without flipping the whole application.
         cmd->auto_barriers_ = auto_barriers.value_or(ctx->auto_barriers());
+        // Told once, here and not in begin(): the mask describes the device, not
+        // the recording, so tracker_.reset() must leave it alone.
+        cmd->tracker_.set_all_shader_stages(ctx->all_shader_stages());
         cmd->command_buffers_.resize(ctx->frames_in_flight(), VK_NULL_HANDLE);
 
         VkCommandBufferAllocateInfo allocInfo{
@@ -620,8 +623,8 @@ public:
                 "cmd.barrier() is not allowed inside a rendering scope; "
                 "record it before begin_rendering"));
         }
-        const StageAccess s = to_vk(src);
-        const StageAccess d = to_vk(dst);
+        const StageAccess s = to_vk(src, context_->all_shader_stages());
+        const StageAccess d = to_vk(dst, context_->all_shader_stages());
         record_barrier_(std::move(buffer), {s.stages, d.stages, s.access, d.access});
         return {};
     }
@@ -656,8 +659,8 @@ public:
                 "cmd.barrier(image, ...) takes Access.SHADER_WRITE (GENERAL) or "
                 "Access.SHADER_READ (SHADER_READ_ONLY); other accesses are buffer-only"));
         }
-        const StageAccess s = to_vk(src);
-        const StageAccess d = to_vk(dst);
+        const StageAccess s = to_vk(src, context_->all_shader_stages());
+        const StageAccess d = to_vk(dst, context_->all_shader_stages());
         Image* img = image.get();
         record_image_barrier_(std::move(image), {*old_layout, *new_layout, s.stages, d.stages, s.access, d.access});
         // Keep the auto-tracker in sync: a later automatic use of this image in
@@ -711,7 +714,7 @@ public:
                 "generate_mipmaps: src must be Access.SHADER_READ (mip 0 in "
                 "SHADER_READ_ONLY) or Access.SHADER_WRITE (mip 0 in GENERAL)"));
         }
-        const StageAccess s = to_vk(src);
+        const StageAccess s = to_vk(src, context_->all_shader_stages());
         Image* img = image.get();
         commands_.push_back(
             [image = std::move(image), layout = *src_layout, s](VkCommandBuffer cmd, const FrameContext& frame)
@@ -721,7 +724,10 @@ public:
         if (auto_barriers_)
         {
             tracker_.note_image_layout(
-                img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+                img,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                context_->all_shader_stages(),
+                VK_ACCESS_SHADER_READ_BIT);
         }
         return {};
     }
@@ -802,9 +808,15 @@ public:
             // it or the next automatic use transitions from a stale layout — the
             // same rule the manual image barrier follows.
             tracker_.note_image_layout(
-                src_ptr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+                src_ptr,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                context_->all_shader_stages(),
+                VK_ACCESS_SHADER_READ_BIT);
             tracker_.note_image_layout(
-                dst_ptr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+                dst_ptr,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                context_->all_shader_stages(),
+                VK_ACCESS_SHADER_READ_BIT);
         }
         return {};
     }
@@ -881,9 +893,15 @@ public:
         if (auto_barriers_)
         {
             tracker_.note_image_layout(
-                src_ptr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+                src_ptr,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                context_->all_shader_stages(),
+                VK_ACCESS_SHADER_READ_BIT);
             tracker_.note_image_layout(
-                dst_ptr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+                dst_ptr,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                context_->all_shader_stages(),
+                VK_ACCESS_SHADER_READ_BIT);
         }
         return {};
     }
@@ -1027,7 +1045,10 @@ public:
         if (auto_barriers_)
         {
             tracker_.note_image_layout(
-                img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kAllShaderStages, VK_ACCESS_SHADER_READ_BIT);
+                img,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                context_->all_shader_stages(),
+                VK_ACCESS_SHADER_READ_BIT);
         }
         return {};
     }
@@ -1356,7 +1377,9 @@ public:
                 .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
                 .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
                                  VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT};
-            constexpr VkPipelineStageFlags stages = kAllShaderStages | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+            // Not constexpr any more: the shader-stage half of this mask depends on
+            // which stages the device enabled (see Context::all_shader_stages).
+            const VkPipelineStageFlags stages = context_->all_shader_stages() | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
             frame.vk->vkCmdPipelineBarrier(vkCmd, stages, stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
         }
         for (auto& cmd_func : commands_)
@@ -1601,6 +1624,12 @@ private:
     // Storage buffers in graphics shaders are conservatively READS. Writes are
     // invisible without shader reflection — the documented limit of auto mode;
     // cmd.barrier() covers that case by hand.
+    //
+    // The stage mask is the Context's, not a VERTEX|FRAGMENT literal: with
+    // tessellation or geometry enabled a graphics pipeline has stages those two
+    // bits do not name, and a barrier that omits a stage does not cover the read
+    // it was recorded for. Legal by construction — the mask only ever contains
+    // bits whose feature the device enabled.
     void track_draw_()
     {
         if (!auto_barriers_)
@@ -1613,19 +1642,11 @@ private:
             {
                 if (bb.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
                 {
-                    track_use_(
-                        bb.buffer,
-                        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                        VK_ACCESS_SHADER_READ_BIT,
-                        false);
+                    track_use_(bb.buffer, context_->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT, false);
                 }
                 else if (bb.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
                 {
-                    track_use_(
-                        bb.buffer,
-                        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                        VK_ACCESS_UNIFORM_READ_BIT,
-                        false);
+                    track_use_(bb.buffer, context_->all_shader_stages(), VK_ACCESS_UNIFORM_READ_BIT, false);
                 }
             }
             // A sampled image only needs a barrier if the tracker has already
@@ -1640,7 +1661,7 @@ private:
                     track_image_use_(
                         bi.image,
                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                        context_->all_shader_stages(),
                         VK_ACCESS_SHADER_READ_BIT,
                         false);
                 }

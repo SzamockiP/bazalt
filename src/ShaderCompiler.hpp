@@ -16,11 +16,19 @@
 #include "Context.hpp"
 #include "Error.hpp"
 
+// Appended rather than inserted in pipeline order (which would put the two
+// tessellation stages between VERTEX and FRAGMENT): pybind enum values are API,
+// nothing iterates this enum in pipeline order, and renumbering FRAGMENT costs a
+// break for a cosmetic gain. TESS_* rather than TESSELLATION_*, matching both
+// shaderc's own spelling and the .tesc/.tese extensions every GLSL toolchain uses.
 enum class ShaderStage
 {
     VERTEX,
     FRAGMENT,
-    COMPUTE
+    COMPUTE,
+    TESS_CONTROL,    // VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
+    TESS_EVALUATION, // VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT
+    GEOMETRY
 };
 
 // The content of a shader when it does not come from its path: GLSL or HLSL
@@ -53,6 +61,12 @@ inline constexpr VkShaderStageFlagBits to_vk(ShaderStage stage)
             return VK_SHADER_STAGE_FRAGMENT_BIT;
         case ShaderStage::COMPUTE:
             return VK_SHADER_STAGE_COMPUTE_BIT;
+        case ShaderStage::TESS_CONTROL:
+            return VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+        case ShaderStage::TESS_EVALUATION:
+            return VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+        case ShaderStage::GEOMETRY:
+            return VK_SHADER_STAGE_GEOMETRY_BIT;
     }
     // Not std::unreachable(): pybind enums accept arbitrary ints, so a forged
     // ShaderStage from Python must degrade gracefully, not invoke UB.
@@ -69,6 +83,12 @@ inline constexpr shaderc_shader_kind to_shaderc_kind(ShaderStage stage)
             return shaderc_glsl_fragment_shader;
         case ShaderStage::COMPUTE:
             return shaderc_glsl_compute_shader;
+        case ShaderStage::TESS_CONTROL:
+            return shaderc_glsl_tess_control_shader;
+        case ShaderStage::TESS_EVALUATION:
+            return shaderc_glsl_tess_evaluation_shader;
+        case ShaderStage::GEOMETRY:
+            return shaderc_glsl_geometry_shader;
     }
     return shaderc_glsl_vertex_shader;
 }
@@ -364,6 +384,48 @@ public:
             entry_point);
     }
 
+    // Which optional device feature a stage needs, or nullopt for the three that
+    // every conformant device has. A table rather than an if-chain at each call
+    // site, so the compile gate and the pipeline gate cannot disagree about the
+    // answer or about the wording.
+    static constexpr std::optional<Feature> feature_for_stage(ShaderStage stage)
+    {
+        switch (stage)
+        {
+            case ShaderStage::TESS_CONTROL:
+            case ShaderStage::TESS_EVALUATION:
+                return Feature::TESSELLATION;
+            case ShaderStage::GEOMETRY:
+                return Feature::GEOMETRY_SHADER;
+            case ShaderStage::VERTEX:
+            case ShaderStage::FRAGMENT:
+            case ShaderStage::COMPUTE:
+                return std::nullopt;
+        }
+        // Not std::unreachable(): pybind enums accept arbitrary ints, and a forged
+        // stage needing no feature is the harmless answer — it fails later, at the
+        // switch that has to name a real VkShaderStageFlagBits.
+        return std::nullopt;
+    }
+
+    // Public because the pipeline builder calls it too: see the comment on the
+    // second gate in GraphicsPipelineBuilder::build.
+    static std::expected<void, Error> check_stage_supported(const Context& context, ShaderStage stage)
+    {
+        const auto feature = feature_for_stage(stage);
+        if (!feature || context.supports(*feature))
+        {
+            return {};
+        }
+        return std::unexpected(err_shader(
+            std::format(
+                "a {} shader requires the {} feature; create the Context with "
+                "features=[bz.Feature.{}] (or optional=[...])",
+                stage_name(stage),
+                feature_name(*feature),
+                feature_name(*feature))));
+    }
+
     // The compile without the wrapper. Reads the file fresh from `path` (unless
     // `source` overrides it), so a watcher recompiles simply by calling this
     // again with the module's stored path and stage. MAIN THREAD ONLY when it
@@ -377,6 +439,23 @@ public:
         const IncludeDirs& include_dirs = {},
         const std::string& entry_point = {})
     {
+        // Before anything is compiled or loaded: a stage whose feature is off
+        // cannot even have its module CREATED. Every path below ends at
+        // vkCreateShaderModule, and SPIR-V for these stages declares
+        // OpCapability Tessellation / Geometry, which the layers reject when the
+        // matching feature is not enabled
+        // (VUID-VkShaderModuleCreateInfo-pCode-08740).
+        //
+        // So the gate belongs here, at the line the user actually wrote. The
+        // pipeline builder checks the same thing, and that check is NOT redundant
+        // — it catches a module compiled on a Context that has the feature and
+        // then handed to a pipeline on one that does not — but by then the invalid
+        // module already exists, which is too late to be the primary diagnostic.
+        if (auto e = check_stage_supported(context, stage); !e)
+        {
+            return std::unexpected(e.error());
+        }
+
         // Ready SPIR-V short-circuits everything: nothing is compiled, so the
         // extension, the include dirs and the entry point have no work to do.
         if (source && std::holds_alternative<std::vector<std::uint32_t>>(*source))
@@ -570,6 +649,12 @@ private:
                 return "FRAGMENT";
             case ShaderStage::COMPUTE:
                 return "COMPUTE";
+            case ShaderStage::TESS_CONTROL:
+                return "TESS_CONTROL";
+            case ShaderStage::TESS_EVALUATION:
+                return "TESS_EVALUATION";
+            case ShaderStage::GEOMETRY:
+                return "GEOMETRY";
         }
         return "unknown";
     }
@@ -595,6 +680,15 @@ private:
             case ShaderStage::COMPUTE:
                 wanted = 5;
                 break; // ExecutionModel GLCompute
+            case ShaderStage::TESS_CONTROL:
+                wanted = 1;
+                break; // ExecutionModel TessellationControl
+            case ShaderStage::TESS_EVALUATION:
+                wanted = 2;
+                break; // ExecutionModel TessellationEvaluation
+            case ShaderStage::GEOMETRY:
+                wanted = 3;
+                break; // ExecutionModel Geometry
         }
 
         constexpr uint32_t op_entry_point = 15;

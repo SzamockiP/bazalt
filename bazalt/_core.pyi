@@ -105,6 +105,10 @@ class Feature(IntEnum):
     SHADER_FLOAT64 = 6
     #: A different blend state or colour mask per MRT attachment.
     INDEPENDENT_BLEND = 7
+    #: The TESS_CONTROL and TESS_EVALUATION stages, and Topology.PATCH_LIST.
+    TESSELLATION = 8
+    #: The GEOMETRY stage. Absent on MoltenVK, and slow on modern hardware.
+    GEOMETRY_SHADER = 9
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -121,9 +125,22 @@ class DataType(IntEnum):
     INT32 = 3
 
 class ShaderStage(IntEnum):
+    """Which stage a shader is compiled for.
+
+    The tessellation and geometry values are appended rather than placed in
+    pipeline order, because the numbers are API. Each needs its device feature:
+    compile_shader refuses the stage without it, since SPIR-V for these stages
+    declares a capability the driver rejects when the feature is off.
+    """
     VERTEX = 0
     FRAGMENT = 1
     COMPUTE = 2
+    #: Needs Feature.TESSELLATION. Sets the subdivision levels per patch.
+    TESS_CONTROL = 3
+    #: Needs Feature.TESSELLATION. Places each vertex the tessellator generated.
+    TESS_EVALUATION = 4
+    #: Needs Feature.GEOMETRY_SHADER. Per primitive, and may change its type.
+    GEOMETRY = 5
 
 class VertexFormat(IntEnum):
     """Vertex attribute layout. Renamed from `Format`, which is reserved for
@@ -148,6 +165,10 @@ class Topology(IntEnum):
     LINE_LIST = 2
     TRIANGLE_STRIP = 3
     LINE_STRIP = 4
+    #: The input to a tessellation control shader: a run of patch_control_points
+    #: vertices with no implied topology. Only valid with tessellation shaders,
+    #: and they are only valid with this — the pipeline build checks both ways.
+    PATCH_LIST = 5
 
 class BlendMode(IntEnum):
     """How a fragment combines with what the attachment already holds.
@@ -563,6 +584,36 @@ class RenderTarget(RenderTargetBase):
 class GraphicsPipelineBuilder:
     def vertex_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder: ...
     def fragment_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder: ...
+    def tess_control_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder:
+        """The tessellation control stage: how finely to subdivide each patch.
+
+        Set together with tess_evaluation_shader — one without the other is not a
+        partial pipeline but an invalid one, and build() says so. A tessellation
+        pipeline also needs topology(PATCH_LIST) and patch_control_points(n).
+        """
+    def tess_evaluation_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder:
+        """The tessellation evaluation stage: where each generated vertex goes.
+
+        This is where displacement happens. See tess_control_shader.
+        """
+    def geometry_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder:
+        """The geometry stage: one invocation per primitive, and it may emit a
+        DIFFERENT primitive type — triangles to lines, a point to a quad.
+
+        Needs Feature.GEOMETRY_SHADER. It is slow on modern hardware and absent on
+        MoltenVK, so prefer it for debug views over hot paths. Routing one draw
+        into every layer of an array attachment does NOT need it: that is
+        target.all_layers().
+        """
+    def patch_control_points(self, count: int) -> GraphicsPipelineBuilder:
+        """How many vertices of the vertex buffer make one patch — 3 for a
+        triangle patch, 4 for a quad.
+
+        This is the INPUT patch size, which is why it lives on the pipeline: the
+        control shader's own `layout(vertices = N) out` is its OUTPUT count, a
+        different number that neither one can derive from the other. Required
+        with tessellation, and checked against the device's limit.
+        """
     def vertex_format(self, formats: list[VertexFormat]) -> GraphicsPipelineBuilder: ...
     def instance_format(self, formats: list[VertexFormat]) -> GraphicsPipelineBuilder:
         """The attributes of a second vertex buffer, advanced once per instance.

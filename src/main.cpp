@@ -1124,6 +1124,8 @@ PYBIND11_MODULE(_core, m)
         .value("MULTI_DRAW_INDIRECT", Feature::MULTI_DRAW_INDIRECT)
         .value("SHADER_FLOAT64", Feature::SHADER_FLOAT64)
         .value("INDEPENDENT_BLEND", Feature::INDEPENDENT_BLEND)
+        .value("TESSELLATION", Feature::TESSELLATION)
+        .value("GEOMETRY_SHADER", Feature::GEOMETRY_SHADER)
         .export_values();
 
     py::enum_<BufferType>(m, "BufferType")
@@ -1144,6 +1146,9 @@ PYBIND11_MODULE(_core, m)
         .value("VERTEX", ShaderStage::VERTEX)
         .value("FRAGMENT", ShaderStage::FRAGMENT)
         .value("COMPUTE", ShaderStage::COMPUTE)
+        .value("TESS_CONTROL", ShaderStage::TESS_CONTROL)
+        .value("TESS_EVALUATION", ShaderStage::TESS_EVALUATION)
+        .value("GEOMETRY", ShaderStage::GEOMETRY)
         .export_values();
 
     py::enum_<VertexFormat>(m, "VertexFormat")
@@ -1161,6 +1166,7 @@ PYBIND11_MODULE(_core, m)
         .value("LINE_LIST", Topology::LINE_LIST)
         .value("TRIANGLE_STRIP", Topology::TRIANGLE_STRIP)
         .value("LINE_STRIP", Topology::LINE_STRIP)
+        .value("PATCH_LIST", Topology::PATCH_LIST)
         .export_values();
 
     // The vocabulary of cmd.barrier() in manual mode (auto_barriers=False).
@@ -1473,6 +1479,23 @@ PYBIND11_MODULE(_core, m)
             "fragment_shader",
             [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
             { return self.fragment_shader(std::move(shader)); })
+        .def(
+            "tess_control_shader",
+            [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
+            { return self.tess_control_shader(std::move(shader)); })
+        .def(
+            "tess_evaluation_shader",
+            [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
+            { return self.tess_evaluation_shader(std::move(shader)); })
+        .def(
+            "geometry_shader",
+            [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
+            { return self.geometry_shader(std::move(shader)); })
+        .def(
+            "patch_control_points",
+            [](GraphicsPipelineBuilder& self, std::uint32_t count) -> GraphicsPipelineBuilder&
+            { return self.patch_control_points(count); },
+            py::arg("count"))
         .def(
             "vertex_format",
             [](GraphicsPipelineBuilder& self, const std::vector<VertexFormat>& formats) -> GraphicsPipelineBuilder&

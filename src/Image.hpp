@@ -1012,6 +1012,7 @@ public:
         VkImageLayout from)
     {
         const VkImageAspectFlags aspect = aspect_mask_for(vk_format());
+        const VkPipelineStageFlags shader_stages = context_->all_shader_stages();
         record_image_transition(
             context_->vk(),
             cmd,
@@ -1020,7 +1021,7 @@ public:
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             VK_ACCESS_SHADER_READ_BIT,
             VK_ACCESS_TRANSFER_WRITE_BIT,
-            kAllShaderStages,
+            shader_stages,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
             aspect,
             mip,
@@ -1049,7 +1050,7 @@ public:
             VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_ACCESS_SHADER_READ_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
-            kAllShaderStages,
+            shader_stages,
             aspect,
             mip,
             1,
@@ -1543,6 +1544,10 @@ inline void record_image_copy(
     Image& dst,
     VkImageLayout src_layout)
 {
+    // Read off the source rather than threaded in as a parameter: both images
+    // already belong to this Context (the binding layer compares owners), so the
+    // fact is here, and record_image_transition takes `vk` for the same reason.
+    const VkPipelineStageFlags shader_stages = src.owner()->all_shader_stages();
     const std::uint32_t layers = src.array_layers();
     // Every level the two images share. 0.17 copied mip 0 only and called the
     // rest a ceiling ("a full chain is N regions for a case that has not come
@@ -1560,7 +1565,7 @@ inline void record_image_copy(
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
         VK_ACCESS_TRANSFER_READ_BIT,
-        kAllShaderStages,
+        shader_stages,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         src.aspect(),
         0,
@@ -1576,7 +1581,7 @@ inline void record_image_copy(
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         0,
         VK_ACCESS_TRANSFER_WRITE_BIT,
-        kAllShaderStages,
+        shader_stages,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst.aspect(),
         0,
@@ -1621,7 +1626,7 @@ inline void record_image_copy(
             image == &src ? VK_ACCESS_TRANSFER_READ_BIT : VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_ACCESS_SHADER_READ_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
-            kAllShaderStages,
+            shader_stages,
             image->aspect(),
             0,
             mips,
@@ -1649,6 +1654,7 @@ inline void record_image_blit(
     VkImageLayout src_layout,
     VkFilter filter)
 {
+    const VkPipelineStageFlags shader_stages = src.owner()->all_shader_stages();
     const std::uint32_t layers = (std::ranges::min)(src.array_layers(), dst.array_layers());
 
     record_image_transition(
@@ -1659,7 +1665,7 @@ inline void record_image_blit(
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
         VK_ACCESS_TRANSFER_READ_BIT,
-        kAllShaderStages,
+        shader_stages,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         src.aspect(),
         0,
@@ -1673,7 +1679,7 @@ inline void record_image_blit(
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         0,
         VK_ACCESS_TRANSFER_WRITE_BIT,
-        kAllShaderStages,
+        shader_stages,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst.aspect(),
         0,
@@ -1707,7 +1713,7 @@ inline void record_image_blit(
             image == &src ? VK_ACCESS_TRANSFER_READ_BIT : VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_ACCESS_SHADER_READ_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
-            kAllShaderStages,
+            shader_stages,
             image->aspect(),
             0,
             1,
@@ -1720,6 +1726,7 @@ inline void record_image_blit(
 // is: the clear covers all of them.
 inline void record_image_clear(const VolkDeviceTable& vk, VkCommandBuffer cmd, Image& image, std::array<float, 4> color)
 {
+    const VkPipelineStageFlags shader_stages = image.owner()->all_shader_stages();
     const std::uint32_t layers = image.array_layers();
     record_image_transition(
         vk,
@@ -1729,7 +1736,7 @@ inline void record_image_clear(const VolkDeviceTable& vk, VkCommandBuffer cmd, I
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         0,
         VK_ACCESS_TRANSFER_WRITE_BIT,
-        kAllShaderStages,
+        shader_stages,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         image.aspect(),
         0,
@@ -1754,7 +1761,7 @@ inline void record_image_clear(const VolkDeviceTable& vk, VkCommandBuffer cmd, I
         VK_ACCESS_TRANSFER_WRITE_BIT,
         VK_ACCESS_SHADER_READ_BIT,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
-        kAllShaderStages,
+        shader_stages,
         image.aspect(),
         0,
         image.mip_levels(),

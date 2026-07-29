@@ -29,6 +29,8 @@ enum class Feature
     MULTI_DRAW_INDIRECT,   // multiDrawIndirect
     SHADER_FLOAT64,        // shaderFloat64
     INDEPENDENT_BLEND,     // independentBlend — a different blend state per MRT attachment
+    TESSELLATION,          // tessellationShader — the TESS_CONTROL and TESS_EVALUATION stages
+    GEOMETRY_SHADER,       // geometryShader — the GEOMETRY stage
 };
 
 // Every Feature above maps to a plain VkPhysicalDeviceFeatures boolean, so the
@@ -43,7 +45,10 @@ struct FeatureInfo
     VkBool32 VkPhysicalDeviceFeatures::* bit;
 };
 
-inline constexpr std::array<FeatureInfo, 8> kFeatureTable{{
+// std::to_array, not std::array<FeatureInfo, N>: the extent was a hardcoded 8 and
+// adding a row meant editing a number in a second place, which is exactly the kind
+// of edit a compiler should be doing. Deduced, it cannot go stale.
+inline constexpr auto kFeatureTable = std::to_array<FeatureInfo>({
     {Feature::ANISOTROPIC_FILTERING, "ANISOTROPIC_FILTERING", &VkPhysicalDeviceFeatures::samplerAnisotropy},
     {Feature::WIREFRAME, "WIREFRAME", &VkPhysicalDeviceFeatures::fillModeNonSolid},
     {Feature::WIDE_LINES, "WIDE_LINES", &VkPhysicalDeviceFeatures::wideLines},
@@ -52,7 +57,9 @@ inline constexpr std::array<FeatureInfo, 8> kFeatureTable{{
     {Feature::MULTI_DRAW_INDIRECT, "MULTI_DRAW_INDIRECT", &VkPhysicalDeviceFeatures::multiDrawIndirect},
     {Feature::SHADER_FLOAT64, "SHADER_FLOAT64", &VkPhysicalDeviceFeatures::shaderFloat64},
     {Feature::INDEPENDENT_BLEND, "INDEPENDENT_BLEND", &VkPhysicalDeviceFeatures::independentBlend},
-}};
+    {Feature::TESSELLATION, "TESSELLATION", &VkPhysicalDeviceFeatures::tessellationShader},
+    {Feature::GEOMETRY_SHADER, "GEOMETRY_SHADER", &VkPhysicalDeviceFeatures::geometryShader},
+});
 
 inline constexpr const FeatureInfo& feature_info(Feature feature)
 {

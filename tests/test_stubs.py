@@ -97,7 +97,12 @@ def test_renamed_and_new_api_is_declared():
                      "def memory_stats", "class MemoryStats",
                      "def subgroup_size", "shader_printf",
                      "def read_pixels", "capture: bool = False",
-                     "wait: bool = True", "def ready", "def upload_progress"):
+                     "wait: bool = True", "def ready", "def upload_progress",
+                     # 0.19
+                     "TESS_CONTROL", "TESS_EVALUATION", "GEOMETRY = 5",
+                     "TESSELLATION = 8", "GEOMETRY_SHADER = 9", "PATCH_LIST = 5",
+                     "def tess_control_shader", "def tess_evaluation_shader",
+                     "def geometry_shader", "def patch_control_points"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 

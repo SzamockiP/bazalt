@@ -354,6 +354,21 @@ public:
         return multiview_supported_;
     }
 
+    // Every pipeline stage that can run a shader ON THIS DEVICE — the stage mask
+    // "a shader read/wrote this" resolves to in a barrier.
+    //
+    // It is per-Context and not a constant, which is the whole point. Vulkan
+    // forbids the tessellation and geometry stage bits in a barrier mask unless
+    // the matching feature is enabled (VUID-vkCmdPipelineBarrier-srcStageMask-04090
+    // and -04091), so a constant wide enough for a tessellating Context is a
+    // validation error on every other one. And a constant narrow enough to be
+    // always legal silently drops the read a tessellation shader just made. The
+    // enabled feature set is the only thing that answers both.
+    VkPipelineStageFlags all_shader_stages() const
+    {
+        return all_shader_stages_;
+    }
+
     // The highest MSAA sample count this GPU can back with *both* a colour and a
     // depth attachment — the intersection is what a RenderTarget actually needs,
     // since a single count has to serve every attachment in one pass. Returned as
@@ -379,6 +394,18 @@ public:
             }
         }
         return 1;
+    }
+
+    // The largest patch_control_points this GPU accepts. Read straight off the
+    // cached properties rather than re-querying like max_samples() does, because
+    // vk-bootstrap already filled them (device_name() below reads the same
+    // struct). NOT bound in main.cpp on purpose: the guaranteed minimum is 32 and
+    // a patch is 3 or 4 vertices in practice, so nobody needs to ask — this exists
+    // so the pipeline builder can name the limit in its error instead of letting
+    // the validation layers do it.
+    std::uint32_t max_patch_control_points() const
+    {
+        return vkb_physical_device_.properties.limits.maxTessellationPatchSize;
     }
 
     std::string device_name() const
@@ -1272,6 +1299,21 @@ private:
                 "Updating the graphics driver usually fixes this."));
         }
 
+        // Computed here, after every insertion into enabled_features_, because
+        // that set is the only honest source: a barrier mask may name the
+        // tessellation or geometry stage only when the feature behind it is on.
+        ctx.all_shader_stages_ = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        if (ctx.enabled_features_.contains(Feature::TESSELLATION))
+        {
+            ctx.all_shader_stages_ |= VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+                                      VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT;
+        }
+        if (ctx.enabled_features_.contains(Feature::GEOMETRY_SHADER))
+        {
+            ctx.all_shader_stages_ |= VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
+        }
+
         ctx.vkb_physical_device_.enable_features_if_present(enabled_features);
         return {};
     }
@@ -1559,6 +1601,14 @@ private:
     bool swapchain_supported_ = false;
     bool dynamic_rendering_khr_ = false;
     bool multiview_supported_ = false;
+
+    // Set by configure_features_ from enabled_features_. The default is the mask
+    // every conformant device has, so a Context that somehow skipped the
+    // computation is narrow (a missing barrier) rather than illegal (a validation
+    // error on every barrier).
+    VkPipelineStageFlags all_shader_stages_ = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
     // Set by configure_features_: 1.3 on the core path, 1.2 on the KHR path.
     std::uint32_t negotiated_api_version_ = VK_API_VERSION_1_2;
