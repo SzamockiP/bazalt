@@ -5,7 +5,7 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
-## [0.20.0] — 2026-07-29
+## [0.20.0] — 2026-07-30
 
 No new feature. This release splits the binding layer into eight translation
 units, fixes four bugs and removes one API nobody meant to publish.
