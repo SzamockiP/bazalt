@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import IntEnum
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence, overload
 
 import numpy as np
 
@@ -523,13 +523,40 @@ class RenderTargetBase:
     ...
 
 class RenderTarget(RenderTargetBase):
-    """An offscreen target backed by its own Images. No window required.
+    """An offscreen target backed by Images. No window required.
 
     The attachments are ordinary Images: `target.color[0]` and `target.depth`
     go straight into DescriptorSet.set_image — that is the whole
     render-to-texture and shadow-map API.
+
+    Two ways to build one, and they do different jobs. Pass a width and height and
+    the target allocates its attachments from pixel formats. Pass images from
+    create_image and it renders into those instead — that signature has no size,
+    samples, layers, cube or mip_levels, because the images already answer all of
+    them (0.19).
     """
 
+    @overload
+    def __init__(self, context: Context, *,
+                 color: Optional[Image | Sequence[Image]] = None,
+                 depth: Optional[Image] = None, name: str = "") -> None:
+        """Render into images you already own, rather than attachments the target
+        allocates.
+
+        What this makes reachable: a graphics ping-pong between two textures,
+        drawing over a texture a compute pass baked, and drawing into an image
+        carried from another Context. All three were impossible while a target
+        insisted on owning its attachments.
+
+        Every attachment must be the same size with the same layer and mip count;
+        a mismatch is refused rather than intersected. Single-sample only, because
+        create_image has no samples=. The target holds the images, so dropping your
+        reference does not take the attachment with it — and it does write to their
+        layout tracking, which is what leaves the result sampleable.
+        """
+        ...
+
+    @overload
     def __init__(self, context: Context, width: int, height: int,
                  color: Optional[Format | Sequence[Format]] = Format.RGBA8,
                  depth: Optional[Format] = None,
