@@ -423,7 +423,15 @@ namespace
     // `capture_into` is the renderer that wants a copy of its presentable image
     // this frame, or null. It records inside this command buffer because that is
     // the only place the image is legally ours (see SwapchainRenderer::read_pixels).
-    VkCommandBuffer record_frame(
+    //
+    // Returns the Error rather than raising it. Both callers reach here from a
+    // binding that released the GIL, and raise_error without the GIL is an access
+    // violation, not an exception -- the same 0.14 lesson require_same_context and
+    // present_command_buffer already carry in their comments. These two paths were
+    // the last that still raised from under the release: a vkBeginCommandBuffer or
+    // vkEndCommandBuffer that returns DEVICE_LOST or an out-of-memory result would
+    // have crashed the interpreter instead of raising bz.DeviceLostError.
+    std::expected<VkCommandBuffer, Error> record_frame(
         CommandBuffer& cmd,
         const Context& ctx,
         TimestampRange ts = {},
@@ -442,7 +450,7 @@ namespace
 
         if (auto e = check(vk.vkBeginCommandBuffer(vkCmd, &beginInfo), "begin recording command buffer"))
         {
-            raise_error(*e);
+            return std::unexpected(*e);
         }
 
         // The queries must be reset on the device before use; doing it here (rather
@@ -469,143 +477,35 @@ namespace
 
         if (auto e = check(vk.vkEndCommandBuffer(vkCmd), "record command buffer"))
         {
-            raise_error(*e);
+            return std::unexpected(*e);
         }
 
         return vkCmd;
     }
 
 } // namespace
-// Records the frame's own copy of the presentable image into a host-visible
-// buffer. Runs inside record_frame, i.e. between acquire and present, which is
-// the only window in which touching a presentable image is legal at all.
-void SwapchainRenderer::record_capture(VkCommandBuffer cmd)
-{
-    if (!supports_readback_)
-    {
-        return;
-    }
-    const VkExtent2D extent = swapchain_extent_;
-    const VkDeviceSize needed = static_cast<VkDeviceSize>(extent.width) * extent.height * 4;
-    if (capture_buffer_ == VK_NULL_HANDLE || capture_size_ < needed)
-    {
-        if (capture_buffer_ != VK_NULL_HANDLE)
-        {
-            // Deferred: a previous frame's copy may still be in flight.
-            context_->defer_destroy(
-                [allocator = context_->allocator(), buffer = capture_buffer_, alloc = capture_alloc_]
-                { vmaDestroyBuffer(allocator, buffer, alloc); });
-            capture_buffer_ = VK_NULL_HANDLE;
-        }
-        auto staging = create_staging_buffer(*context_, needed, Staging::Readback);
-        if (!staging)
-        {
-            capture_buffer_ = VK_NULL_HANDLE;
-            return;
-        }
-        std::tie(capture_buffer_, capture_alloc_) = *staging;
-        capture_size_ = needed;
-    }
-
-    VkImage source = swapchain_images_[image_index_];
-    // end_rendering has already retired it to PRESENT_SRC, and it goes back
-    // there: the compositor takes it from that layout a moment later.
-    record_image_transition(
-        context_->vk(),
-        cmd,
-        source,
-        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_ACCESS_TRANSFER_READ_BIT,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT);
-
-    VkBufferImageCopy region{
-        .bufferOffset = 0,
-        .bufferRowLength = 0,
-        .bufferImageHeight = 0,
-        .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-        .imageOffset = {0, 0, 0},
-        .imageExtent = {extent.width, extent.height, 1}};
-    context_->vk().vkCmdCopyImageToBuffer(
-        cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, capture_buffer_, 1, &region);
-
-    record_image_transition(
-        context_->vk(),
-        cmd,
-        source,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-        VK_ACCESS_TRANSFER_READ_BIT,
-        VK_ACCESS_MEMORY_READ_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-
-    capture_extent_ = extent;
-    capture_slot_ = current_frame();
-    captured_ = true;
-}
-
-std::expected<std::vector<std::byte>, Error> SwapchainRenderer::read_pixels()
-{
-    if (!supports_readback_)
-    {
-        return std::unexpected(err_resource(
-            "renderer.read_pixels(): this surface does not allow the swapchain images to be copied "
-            "from (the compositor refused VK_IMAGE_USAGE_TRANSFER_SRC_BIT). Render into a "
-            "bz.RenderTarget and read that instead."));
-    }
-    if (!captured_ || capture_buffer_ == VK_NULL_HANDLE)
-    {
-        return std::unexpected(err_resource(
-            "renderer.read_pixels(): no frame has been captured. Ask for one with "
-            "renderer.present(cmd, capture=True) — a presentable image may only be copied while it "
-            "is acquired, so the copy has to ride that frame's own submit."));
-    }
-
-    // The copy is part of that frame's submit, so this is where it is waited on.
-    context_->vk().vkWaitForFences(context_->device(), 1, &in_flight_fences_[capture_slot_], VK_TRUE, UINT64_MAX);
-
-    const std::size_t size = static_cast<std::size_t>(capture_extent_.width) * capture_extent_.height * 4;
-    std::vector<std::byte> out(size);
-    void* mapped = nullptr;
-    if (auto e = check(
-            vmaMapMemory(context_->allocator(), capture_alloc_, &mapped),
-            "map the swapchain capture buffer",
-            ErrorCode::Resource))
-    {
-        return std::unexpected(*e);
-    }
-    std::memcpy(out.data(), mapped, size);
-    vmaUnmapMemory(context_->allocator(), capture_alloc_);
-
-    // BGRA is what most compositors hand out. Swapping here keeps the channel
-    // order one thing rather than a property of the machine, so out[y, x, 0] is
-    // red everywhere.
-    if (swapchain_format_ == VK_FORMAT_B8G8R8A8_UNORM || swapchain_format_ == VK_FORMAT_B8G8R8A8_SRGB)
-    {
-        for (std::size_t i = 0; i + 2 < out.size(); i += 4)
-        {
-            std::swap(out[i], out[i + 2]);
-        }
-    }
-    return out;
-}
-
-void SwapchainRenderer::present(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial, bool capture)
+std::expected<void, Error> SwapchainRenderer::present(
+    std::shared_ptr<CommandBuffer> cmd,
+    std::uint64_t upload_wait_serial,
+    bool capture)
 {
     TimestampRange ts{};
     if (timestamps_supported())
     {
         ts = {timestamp_pool(), 2 * current_frame()};
     }
-    end_frame(record_frame(*cmd, *context(), ts, capture ? this : nullptr), upload_wait_serial);
+    auto vkCmd = record_frame(*cmd, *context(), ts, capture ? this : nullptr);
+    if (!vkCmd)
+    {
+        return std::unexpected(vkCmd.error());
+    }
+    end_frame(*vkCmd, upload_wait_serial);
     if (timestamps_supported())
     {
         // The slot now holds results acquire() can read once its fence signals.
         mark_timestamp_written();
     }
+    return {};
 }
 
 // Upload residency, per command buffer: every image this recording references
@@ -669,8 +569,7 @@ std::expected<void, Error> present_command_buffer(
     {
         return std::unexpected(upload_wait_serial.error());
     }
-    renderer.present(std::move(cmd), *upload_wait_serial, capture);
-    return {};
+    return renderer.present(std::move(cmd), *upload_wait_serial, capture);
 }
 
 // A specialization constant's four bytes, from whichever Python number was
@@ -976,7 +875,12 @@ std::expected<void, Error> context_submit(Context& context, std::shared_ptr<Comm
     {
         return std::unexpected(upload_wait_serial.error());
     }
-    VkCommandBuffer vkCmd = record_frame(*cmd, context);
+    auto recorded = record_frame(*cmd, context);
+    if (!recorded)
+    {
+        return std::unexpected(recorded.error());
+    }
+    VkCommandBuffer vkCmd = *recorded;
 
     VkSemaphore timeline = context.submit_timeline();
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;

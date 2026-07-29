@@ -478,7 +478,12 @@ public:
         slot_written_[current_frame()] = true;
     }
 
-    void present(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial = 0, bool capture = false);
+    // Fails rather than raises: the caller reached here with the GIL released,
+    // and the recording it drives can fail on a lost device.
+    std::expected<void, Error> present(
+        std::shared_ptr<CommandBuffer> cmd,
+        std::uint64_t upload_wait_serial = 0,
+        bool capture = false);
 
     // ── Readback ─────────────────────────────────────────────────────────────
     //
@@ -497,11 +502,124 @@ public:
 
     // Records the capture copy into the frame's command buffer. Called by
     // present() only, and only while the swapchain image is acquired.
-    void record_capture(VkCommandBuffer cmd);
+    // Records the frame's own copy of the presentable image into a host-visible
+    // buffer. Runs inside record_frame, i.e. between acquire and present, which is
+    // the only window in which touching a presentable image is legal at all.
+    void record_capture(VkCommandBuffer cmd)
+    {
+        if (!supports_readback_)
+        {
+            return;
+        }
+        const VkExtent2D extent = swapchain_extent_;
+        const VkDeviceSize needed = static_cast<VkDeviceSize>(extent.width) * extent.height * 4;
+        if (capture_buffer_ == VK_NULL_HANDLE || capture_size_ < needed)
+        {
+            if (capture_buffer_ != VK_NULL_HANDLE)
+            {
+                // Deferred: a previous frame's copy may still be in flight.
+                context_->defer_destroy(
+                    [allocator = context_->allocator(), buffer = capture_buffer_, alloc = capture_alloc_]
+                    { vmaDestroyBuffer(allocator, buffer, alloc); });
+                capture_buffer_ = VK_NULL_HANDLE;
+            }
+            auto staging = create_staging_buffer(*context_, needed, Staging::Readback);
+            if (!staging)
+            {
+                capture_buffer_ = VK_NULL_HANDLE;
+                return;
+            }
+            std::tie(capture_buffer_, capture_alloc_) = *staging;
+            capture_size_ = needed;
+        }
+
+        VkImage source = swapchain_images_[image_index_];
+        // end_rendering has already retired it to PRESENT_SRC, and it goes back
+        // there: the compositor takes it from that layout a moment later.
+        record_image_transition(
+            context_->vk(),
+            cmd,
+            source,
+            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+        VkBufferImageCopy region{
+            .bufferOffset = 0,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {extent.width, extent.height, 1}};
+        context_->vk().vkCmdCopyImageToBuffer(
+            cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, capture_buffer_, 1, &region);
+
+        record_image_transition(
+            context_->vk(),
+            cmd,
+            source,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            VK_ACCESS_TRANSFER_READ_BIT,
+            VK_ACCESS_MEMORY_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+
+        capture_extent_ = extent;
+        capture_slot_ = current_frame();
+        captured_ = true;
+    }
 
     // The captured frame as RGBA8 bytes. Blocks until that frame's submit has
     // completed, because the copy is part of it.
-    std::expected<std::vector<std::byte>, Error> read_pixels();
+    std::expected<std::vector<std::byte>, Error> read_pixels()
+    {
+        if (!supports_readback_)
+        {
+            return std::unexpected(err_resource(
+                "renderer.read_pixels(): this surface does not allow the swapchain images to be copied "
+                "from (the compositor refused VK_IMAGE_USAGE_TRANSFER_SRC_BIT). Render into a "
+                "bz.RenderTarget and read that instead."));
+        }
+        if (!captured_ || capture_buffer_ == VK_NULL_HANDLE)
+        {
+            return std::unexpected(err_resource(
+                "renderer.read_pixels(): no frame has been captured. Ask for one with "
+                "renderer.present(cmd, capture=True) — a presentable image may only be copied while it "
+                "is acquired, so the copy has to ride that frame's own submit."));
+        }
+
+        // The copy is part of that frame's submit, so this is where it is waited on.
+        context_->vk().vkWaitForFences(context_->device(), 1, &in_flight_fences_[capture_slot_], VK_TRUE, UINT64_MAX);
+
+        const std::size_t size = static_cast<std::size_t>(capture_extent_.width) * capture_extent_.height * 4;
+        std::vector<std::byte> out(size);
+        void* mapped = nullptr;
+        if (auto e = check(
+                vmaMapMemory(context_->allocator(), capture_alloc_, &mapped),
+                "map the swapchain capture buffer",
+                ErrorCode::Resource))
+        {
+            return std::unexpected(*e);
+        }
+        std::memcpy(out.data(), mapped, size);
+        vmaUnmapMemory(context_->allocator(), capture_alloc_);
+
+        // BGRA is what most compositors hand out. Swapping here keeps the channel
+        // order one thing rather than a property of the machine, so out[y, x, 0] is
+        // red everywhere.
+        if (swapchain_format_ == VK_FORMAT_B8G8R8A8_UNORM || swapchain_format_ == VK_FORMAT_B8G8R8A8_SRGB)
+        {
+            for (std::size_t i = 0; i + 2 < out.size(); i += 4)
+            {
+                std::swap(out[i], out[i + 2]);
+            }
+        }
+        return out;
+    }
 
     VkExtent2D capture_extent() const
     {
