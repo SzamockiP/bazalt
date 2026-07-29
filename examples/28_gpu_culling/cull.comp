@@ -37,16 +37,23 @@ layout(push_constant) uniform Push {
 } push;
 
 // A sphere is outside if it sits fully behind any one frustum plane. The planes
-// come straight out of the view-projection matrix rows, which is why this needs no
+// come out of the view-projection matrix's ROWS, which is why this needs no
 // CPU-side frustum at all.
+//
+// Rows, and the distinction is not pedantic: GLSL indexes a mat4 by COLUMN, so
+// `m[3] + m[0]` is two columns added together and produces a plane that means
+// nothing. The symptom is not a crash or a wrong-looking plane — it is a frustum
+// that rejects almost everything, which reads as "culling is working very well"
+// until you count what survived against what should have.
 bool visible_sphere(vec3 centre, float radius) {
+    mat4 m = transpose(push.view_proj);
     vec4 planes[6];
-    planes[0] = push.view_proj[3] + push.view_proj[0]; // left
-    planes[1] = push.view_proj[3] - push.view_proj[0]; // right
-    planes[2] = push.view_proj[3] + push.view_proj[1]; // bottom
-    planes[3] = push.view_proj[3] - push.view_proj[1]; // top
-    planes[4] = push.view_proj[3] + push.view_proj[2]; // near
-    planes[5] = push.view_proj[3] - push.view_proj[2]; // far
+    planes[0] = m[3] + m[0]; // left
+    planes[1] = m[3] - m[0]; // right
+    planes[2] = m[3] + m[1]; // bottom
+    planes[3] = m[3] - m[1]; // top
+    planes[4] = m[3] + m[2]; // near
+    planes[5] = m[3] - m[2]; // far
 
     for (int i = 0; i < 6; ++i) {
         vec4 p = planes[i];
