@@ -15,6 +15,9 @@ __all__ = [
     "Device",
     "list_devices",
     "poll_events",
+    # Process-wide, like poll_events: the clipboard is not per window.
+    "get_clipboard",
+    "set_clipboard",
     "Logger",
     "LogMessage",
     # Resources

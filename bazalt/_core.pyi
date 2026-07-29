@@ -1124,7 +1124,34 @@ class Window:
         """
         ...
     def was_mouse_button_pressed(self, button: int) -> bool: ...
+    def dropped_files(self) -> list[str]:
+        """Paths dropped onto the window during the last poll cycle (0.19).
+
+        Empty on almost every frame. A drop is a change that expires with the
+        cycle, like a key edge or a scroll notch, so this reads the same twice
+        inside one frame and does not consume: two readers both see the drop.
+        """
+        ...
     def set_cursor_mode(self, mode: int) -> None: ...
+    def set_cursor_position(self, x: float, y: float) -> None:
+        """Move the cursor, for re-centring it every frame in a look-around
+        camera (0.19).
+
+        A warp is not mouse movement, and bazalt makes sure it does not read as
+        any: get_mouse_state().dx/dy stay at rest across the jump. Without that,
+        re-centring would inject a delta the size of the jump and swing the
+        camera exactly as far as the code moved the cursor to avoid.
+        """
+        ...
+    def set_icon(self, icon: Optional[np.ndarray]) -> None:
+        """The task-bar and title-bar icon, as a (height, width, 4) uint8 RGBA
+        array. None restores the system default (0.19).
+
+        The array must be C-contiguous — a strided view would copy other bytes.
+        The platform may ignore the request: macOS takes the icon from the app
+        bundle and Wayland from the desktop file. Same contract as set_opacity.
+        """
+        ...
     def get_mouse_state(self) -> MouseState: ...
     def set_title(self, title: str) -> None: ...
     def set_mode(self, mode: WindowMode) -> None:
@@ -1236,6 +1263,23 @@ def poll_events() -> None:
     Raises WindowError when no window exists — with none open there is no queue
     to drain, and a loop still pumping is a bug rather than a no-op.
     """
+    ...
+
+def get_clipboard() -> str:
+    """The system clipboard as text (0.19).
+
+    Empty when the clipboard holds nothing, or holds something that is not text
+    (an image, a file list) — "nothing to paste" is an answer, not an error.
+
+    A free function for the same reason poll_events is one: the GLFW calls take
+    no window and the clipboard belongs to the process, so a method would invent
+    a per-window distinction that does not exist. Raises WindowError with no live
+    Window, because GLFW is initialized with the first one.
+    """
+    ...
+
+def set_clipboard(text: str) -> None:
+    """Put text on the system clipboard. See get_clipboard (0.19)."""
     ...
 
 def list_devices() -> list[Device]:

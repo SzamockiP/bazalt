@@ -103,7 +103,9 @@ def test_renamed_and_new_api_is_declared():
                      "TESSELLATION = 8", "GEOMETRY_SHADER = 9", "PATCH_LIST = 5",
                      "def tess_control_shader", "def tess_evaluation_shader",
                      "def geometry_shader", "def patch_control_points",
-                     "color: Optional[Image | Sequence[Image]]"):
+                     "color: Optional[Image | Sequence[Image]]",
+                     "def dropped_files", "def set_cursor_position", "def set_icon",
+                     "def get_clipboard", "def set_clipboard"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 

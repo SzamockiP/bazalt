@@ -2216,6 +2216,65 @@ PYBIND11_MODULE(_core, m)
             py::arg("mode"))
         .def("set_size", &Window::set_size, py::arg("width"), py::arg("height"))
         .def("set_position", &Window::set_position, py::arg("x"), py::arg("y"))
+        .def("set_cursor_position", &Window::set_cursor_position, py::arg("x"), py::arg("y"))
+        .def(
+            "dropped_files",
+            // Copied into a Python list rather than returned by reference: the
+            // vector is rotated out from under the caller on the next poll cycle.
+            [](const Window& self) { return py::cast(self.dropped_files()); })
+        .def(
+            "set_icon",
+            [](Window& self, py::object icon)
+            {
+                if (icon.is_none())
+                {
+                    self.set_icon({}, 0, 0);
+                    return;
+                }
+                // Validated here, in the binding, for the same reason create_image
+                // validates here: this is a user error about the shape of a Python
+                // object, the GIL is held, and raise_error is legal.
+                auto array = icon.cast<py::array>();
+                // Compared against the dtype object, like image.update does, rather
+                // than against a kind character: numpy spells uint8's kind 'u' and
+                // its char code 'B', and a hand-written check picks the wrong one.
+                if (!array.dtype().is(py::dtype("uint8")))
+                {
+                    raise_error(err_window(
+                        std::format(
+                            "set_icon needs an RGBA8 array of dtype uint8, not {}; convert it with "
+                            "arr.astype(np.uint8)",
+                            py::str(array.dtype()).cast<std::string>())));
+                }
+                // Two conditions, two messages: "wrong number of dimensions" and
+                // "no alpha channel" are different mistakes, and one message
+                // covering both names neither.
+                if (array.ndim() != 3)
+                {
+                    raise_error(err_window(
+                        std::format(
+                            "set_icon needs a (height, width, 4) RGBA array, got {} dimensions", array.ndim())));
+                }
+                if (array.shape(2) != 4)
+                {
+                    raise_error(err_window(
+                        std::format(
+                            "set_icon needs 4 channels (RGBA), got {}; an icon has an alpha channel", array.shape(2))));
+                }
+                // memcpy ignores strides, so a view like arr[::2] or arr.T would
+                // copy other bytes. The 0.4 rule, applied again.
+                if (!(array.flags() & py::array::c_style))
+                {
+                    raise_error(err_window(
+                        "set_icon: the array must be C-contiguous (a strided view like arr.T "
+                        "or arr[::2] would copy other bytes). Use numpy.ascontiguousarray(a)."));
+                }
+                const auto height = static_cast<int>(array.shape(0));
+                const auto width = static_cast<int>(array.shape(1));
+                const auto* bytes = static_cast<const std::uint8_t*>(array.data());
+                self.set_icon(std::vector<std::uint8_t>(bytes, bytes + array.nbytes()), width, height);
+            },
+            py::arg("icon"))
         .def("set_resizable", &Window::set_resizable, py::arg("enable"))
         .def("set_always_on_top", &Window::set_always_on_top, py::arg("enable"))
         .def("set_opacity", &Window::set_opacity, py::arg("opacity"))
@@ -2283,6 +2342,21 @@ PYBIND11_MODULE(_core, m)
         "addressed to. One call services every window; the per-window distinction\n"
         "lives in the queries (is_key_pressed, is_open, renderer.acquire).\n"
         "Raises WindowError when no window exists.");
+
+    // Free functions for the same reason poll_events is one: the clipboard belongs
+    // to the process and the GLFW calls take no window.
+    m.def(
+        "get_clipboard",
+        []() { return unwrap(get_clipboard(), nullptr); },
+        "The system clipboard as text, or an empty string when it holds nothing or\n"
+        "holds something that is not text. Needs at least one live Window, because\n"
+        "GLFW is initialized with the first one.");
+
+    m.def(
+        "set_clipboard",
+        [](const std::string& text) { unwrap(set_clipboard(text), nullptr); },
+        py::arg("text"),
+        "Put text on the system clipboard. Needs at least one live Window.");
 
     m.def(
         "list_devices",
