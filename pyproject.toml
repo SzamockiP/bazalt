@@ -33,3 +33,7 @@ testpaths = ["tests"]
 
 [tool.scikit-build]
 wheel.packages = ["bazalt"]
+# Without this scikit-build-core builds in a temporary directory and deletes it, so
+# every `pip install .` re-configures CMake and rebuilds glfw, volk and vk-bootstrap
+# from scratch. A persistent tree makes a rebuild incremental.
+build-dir = "build/{wheel_tag}"

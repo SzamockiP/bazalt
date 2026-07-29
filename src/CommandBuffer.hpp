@@ -1037,7 +1037,7 @@ public:
         {
             return std::unexpected(err_resource("copy_buffer: nothing to copy (size is 0)"));
         }
-        if (src_offset + length > src->size() || dst_offset + length > dst->size())
+        if (!fits_within(src_offset, length, src->size()) || !fits_within(dst_offset, length, dst->size()))
         {
             return std::unexpected(err_resource(
                 std::format(
@@ -1099,7 +1099,7 @@ public:
                     size)));
         }
         const VkDeviceSize length = size != 0 ? size : (buffer->size() > offset ? buffer->size() - offset : 0);
-        if (length == 0 || offset + length > buffer->size())
+        if (length == 0 || !fits_within(offset, length, buffer->size()))
         {
             return std::unexpected(err_resource(
                 std::format(
@@ -1727,7 +1727,10 @@ private:
                     "instanceCount of the argument struct — that is the GPU-side way to say it.",
                     what)));
         }
-        if (offset + static_cast<VkDeviceSize>(count) * stride > buffer->size())
+        // stride is always a sizeof() of an argument struct, so the product cannot
+        // overflow 64 bits. Adding the offset to it can, hence fits_within.
+        const VkDeviceSize needed = static_cast<VkDeviceSize>(count) * stride;
+        if (!fits_within(offset, needed, buffer->size()))
         {
             return std::unexpected(err_resource(
                 std::format(
@@ -1737,7 +1740,7 @@ private:
                     count,
                     stride,
                     offset,
-                    offset + static_cast<VkDeviceSize>(count) * stride,
+                    needed,
                     buffer->size())));
         }
         // count>1 is multiDrawIndirect, which is NOT free: it is a feature bit, and

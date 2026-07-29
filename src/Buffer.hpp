@@ -439,7 +439,7 @@ public:
 
     std::expected<void, Error> update(std::span<const std::byte> data, size_t offset = 0) override
     {
-        if (offset + data.size() > size_)
+        if (!fits_within(offset, data.size(), size_))
         {
             return std::unexpected(err_resource(
                 std::format(

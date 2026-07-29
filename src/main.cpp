@@ -1087,8 +1087,7 @@ PYBIND11_MODULE(_core, m)
     py::enum_<Severity>(m, "Severity", py::arithmetic())
         .value("INFO", Severity::Info)
         .value("WARNING", Severity::Warning)
-        .value("ERROR", Severity::Error)
-        .export_values();
+        .value("ERROR", Severity::Error);
 
     py::enum_<Source>(m, "Source")
         .value("GENERAL", Source::General)
@@ -1096,8 +1095,7 @@ PYBIND11_MODULE(_core, m)
         .value("WINDOW", Source::Window)
         .value("SHADER", Source::Shader)
         .value("UPLOAD", Source::Upload)
-        .value("DEVICE", Source::Device)
-        .export_values();
+        .value("DEVICE", Source::Device);
 
     py::class_<LogMessage>(m, "LogMessage")
         .def_readonly("severity", &LogMessage::severity)
@@ -1127,22 +1125,19 @@ PYBIND11_MODULE(_core, m)
         .value("TESSELLATION", Feature::TESSELLATION)
         .value("GEOMETRY_SHADER", Feature::GEOMETRY_SHADER)
         .value("FRAGMENT_STORES", Feature::FRAGMENT_STORES)
-        .value("VERTEX_STAGE_STORES", Feature::VERTEX_STAGE_STORES)
-        .export_values();
+        .value("VERTEX_STAGE_STORES", Feature::VERTEX_STAGE_STORES);
 
     py::enum_<BufferType>(m, "BufferType")
         .value("VERTEX", BufferType::VERTEX)
         .value("INDEX", BufferType::INDEX)
         .value("UNIFORM", BufferType::UNIFORM)
-        .value("STORAGE", BufferType::STORAGE)
-        .export_values();
+        .value("STORAGE", BufferType::STORAGE);
 
     py::enum_<DataType>(m, "DataType")
         .value("FLOAT", DataType::FLOAT)
         .value("UINT32", DataType::UINT32)
         .value("UINT16", DataType::UINT16)
-        .value("INT32", DataType::INT32)
-        .export_values();
+        .value("INT32", DataType::INT32);
 
     py::enum_<ShaderStage>(m, "ShaderStage")
         .value("VERTEX", ShaderStage::VERTEX)
@@ -1150,8 +1145,7 @@ PYBIND11_MODULE(_core, m)
         .value("COMPUTE", ShaderStage::COMPUTE)
         .value("TESS_CONTROL", ShaderStage::TESS_CONTROL)
         .value("TESS_EVALUATION", ShaderStage::TESS_EVALUATION)
-        .value("GEOMETRY", ShaderStage::GEOMETRY)
-        .export_values();
+        .value("GEOMETRY", ShaderStage::GEOMETRY);
 
     py::enum_<VertexFormat>(m, "VertexFormat")
         .value("FLOAT2", VertexFormat::FLOAT2)
@@ -1159,8 +1153,7 @@ PYBIND11_MODULE(_core, m)
         .value("FLOAT4", VertexFormat::FLOAT4)
         .value("FLOAT", VertexFormat::FLOAT)
         .value("UBYTE4_NORM", VertexFormat::UBYTE4_NORM)
-        .value("UINT", VertexFormat::UINT)
-        .export_values();
+        .value("UINT", VertexFormat::UINT);
 
     py::enum_<Topology>(m, "Topology")
         .value("TRIANGLE_LIST", Topology::TRIANGLE_LIST)
@@ -1168,8 +1161,7 @@ PYBIND11_MODULE(_core, m)
         .value("LINE_LIST", Topology::LINE_LIST)
         .value("TRIANGLE_STRIP", Topology::TRIANGLE_STRIP)
         .value("LINE_STRIP", Topology::LINE_STRIP)
-        .value("PATCH_LIST", Topology::PATCH_LIST)
-        .export_values();
+        .value("PATCH_LIST", Topology::PATCH_LIST);
 
     // The vocabulary of cmd.barrier() in manual mode (auto_barriers=False).
     py::enum_<Access>(m, "Access")
@@ -1178,8 +1170,7 @@ PYBIND11_MODULE(_core, m)
         .value("VERTEX_READ", Access::VERTEX_READ)
         .value("INDEX_READ", Access::INDEX_READ)
         .value("UNIFORM_READ", Access::UNIFORM_READ)
-        .value("INDIRECT_READ", Access::INDIRECT_READ)
-        .export_values();
+        .value("INDIRECT_READ", Access::INDIRECT_READ);
 
     // Pixel formats — the name VertexFormat freed in 0.4.
     py::enum_<Format>(m, "Format")
@@ -1232,31 +1223,26 @@ PYBIND11_MODULE(_core, m)
     py::enum_<BlendMode>(m, "BlendMode")
         .value("ALPHA", BlendMode::ALPHA)
         .value("ADDITIVE", BlendMode::ADDITIVE)
-        .value("PREMULTIPLIED", BlendMode::PREMULTIPLIED)
-        .export_values();
+        .value("PREMULTIPLIED", BlendMode::PREMULTIPLIED);
 
     py::enum_<PolygonMode>(m, "PolygonMode")
         .value("FILL", PolygonMode::FILL)
         .value("LINE", PolygonMode::LINE)
-        .value("POINT", PolygonMode::POINT)
-        .export_values();
+        .value("POINT", PolygonMode::POINT);
 
     py::enum_<CullMode>(m, "CullMode")
         .value("NONE", CullMode::NONE)
         .value("BACK", CullMode::BACK)
         .value("FRONT", CullMode::FRONT)
-        .value("FRONT_AND_BACK", CullMode::FRONT_AND_BACK)
-        .export_values();
+        .value("FRONT_AND_BACK", CullMode::FRONT_AND_BACK);
 
     py::enum_<FrontFace>(m, "FrontFace")
         .value("CLOCKWISE", FrontFace::CLOCKWISE)
-        .value("COUNTER_CLOCKWISE", FrontFace::COUNTER_CLOCKWISE)
-        .export_values();
+        .value("COUNTER_CLOCKWISE", FrontFace::COUNTER_CLOCKWISE);
 
     py::enum_<MemoryUsage>(m, "MemoryUsage")
         .value("STATIC", MemoryUsage::STATIC)
-        .value("DYNAMIC", MemoryUsage::DYNAMIC)
-        .export_values();
+        .value("DYNAMIC", MemoryUsage::DYNAMIC);
 
     py::class_<MouseState>(m, "MouseState")
         .def_readonly("x", &MouseState::x)
@@ -1454,7 +1440,7 @@ PYBIND11_MODULE(_core, m)
                     y = py::cast<std::uint32_t>(seq[1]);
                     w = py::cast<std::uint32_t>(seq[2]);
                     h = py::cast<std::uint32_t>(seq[3]);
-                    if (w == 0 || h == 0 || x + w > level_w || y + h > level_h)
+                    if (w == 0 || h == 0 || !fits_within(x, w, level_w) || !fits_within(y, h, level_h))
                     {
                         throw py::value_error(
                             std::format(
@@ -1501,23 +1487,28 @@ PYBIND11_MODULE(_core, m)
         .def(
             "vertex_shader",
             [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
-            { return self.vertex_shader(std::move(shader)); })
+            { return self.vertex_shader(std::move(shader)); },
+            py::arg("shader"))
         .def(
             "fragment_shader",
             [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
-            { return self.fragment_shader(std::move(shader)); })
+            { return self.fragment_shader(std::move(shader)); },
+            py::arg("shader"))
         .def(
             "tess_control_shader",
             [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
-            { return self.tess_control_shader(std::move(shader)); })
+            { return self.tess_control_shader(std::move(shader)); },
+            py::arg("shader"))
         .def(
             "tess_evaluation_shader",
             [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
-            { return self.tess_evaluation_shader(std::move(shader)); })
+            { return self.tess_evaluation_shader(std::move(shader)); },
+            py::arg("shader"))
         .def(
             "geometry_shader",
             [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
-            { return self.geometry_shader(std::move(shader)); })
+            { return self.geometry_shader(std::move(shader)); },
+            py::arg("shader"))
         .def(
             "patch_control_points",
             [](GraphicsPipelineBuilder& self, std::uint32_t count) -> GraphicsPipelineBuilder&
@@ -1526,7 +1517,8 @@ PYBIND11_MODULE(_core, m)
         .def(
             "vertex_format",
             [](GraphicsPipelineBuilder& self, const std::vector<VertexFormat>& formats) -> GraphicsPipelineBuilder&
-            { return self.vertex_format(formats); })
+            { return self.vertex_format(formats); },
+            py::arg("formats"))
         .def(
             "instance_format",
             [](GraphicsPipelineBuilder& self, const std::vector<VertexFormat>& formats) -> GraphicsPipelineBuilder&
@@ -1541,8 +1533,10 @@ PYBIND11_MODULE(_core, m)
             py::arg("compare") = CompareOp::LESS_OR_EQUAL)
         .def(
             "cull_mode",
-            [](GraphicsPipelineBuilder& self, CullMode mode, FrontFace frontFace) -> GraphicsPipelineBuilder&
-            { return self.cull_mode(mode, frontFace); })
+            [](GraphicsPipelineBuilder& self, CullMode mode, FrontFace front_face) -> GraphicsPipelineBuilder&
+            { return self.cull_mode(mode, front_face); },
+            py::arg("mode"),
+            py::arg("front_face"))
         .def(
             "polygon_mode",
             [](GraphicsPipelineBuilder& self, PolygonMode mode) -> GraphicsPipelineBuilder&
@@ -1624,7 +1618,8 @@ PYBIND11_MODULE(_core, m)
         .def(
             "topology",
             [](GraphicsPipelineBuilder& self, Topology topology) -> GraphicsPipelineBuilder&
-            { return self.topology(topology); })
+            { return self.topology(topology); },
+            py::arg("topology"))
         .def(
             "sample_shading",
             [](GraphicsPipelineBuilder& self, bool enable, float min_fraction) -> GraphicsPipelineBuilder&
@@ -1634,7 +1629,9 @@ PYBIND11_MODULE(_core, m)
         .def(
             "push_constant",
             [](GraphicsPipelineBuilder& self, uint32_t size, ShaderStage stage) -> GraphicsPipelineBuilder&
-            { return self.push_constant(size, stage); })
+            { return self.push_constant(size, stage); },
+            py::arg("size"),
+            py::arg("stage"))
         .def(
             "uniform_buffer",
             [](GraphicsPipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set)
@@ -1692,7 +1689,8 @@ PYBIND11_MODULE(_core, m)
         .def(
             "shader",
             [](ComputePipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> ComputePipelineBuilder&
-            { return self.shader(std::move(shader)); })
+            { return self.shader(std::move(shader)); },
+            py::arg("shader"))
         .def(
             "uniform_buffer",
             [](ComputePipelineBuilder& self, uint32_t binding, uint32_t set) -> ComputePipelineBuilder&
@@ -2251,8 +2249,7 @@ PYBIND11_MODULE(_core, m)
         .value("WINDOWED", WindowMode::WINDOWED)
         .value("FRAMELESS", WindowMode::FRAMELESS)
         .value("FULLSCREEN", WindowMode::FULLSCREEN)
-        .value("FULLSCREEN_WINDOWED", WindowMode::FULLSCREEN_WINDOWED)
-        .export_values();
+        .value("FULLSCREEN_WINDOWED", WindowMode::FULLSCREEN_WINDOWED);
 
     py::class_<Window>(m, "Window")
         .def(
@@ -3283,7 +3280,13 @@ PYBIND11_MODULE(_core, m)
             py::arg("context"),
             py::arg("present_mode") = PresentMode::MAILBOX,
             py::arg("samples") = 1,
-            py::arg("stencil") = false)
+            py::arg("stencil") = false,
+            // The SurfaceProvider that get_surface_provider() returns captures the raw
+            // GLFWwindow* and a pointer to the Window's own resize flag, and the renderer
+            // keeps it for its whole life. So the Window has to outlive the renderer, and
+            // nothing else says so: `del window` alone would leave both pointers dangling.
+            // The hwnd overload below captures an integer and needs no such tie.
+            py::keep_alive<1, 2>())
         .def(
             py::init(
                 [](uint64_t hwnd,
