@@ -37,8 +37,11 @@ void bind_context(py::module_& m)
                    bool gpu_timing,
                    bool shader_printf)
                 {
-                    // An argument-validity error, so ValueError — matching what
-                    // validation="nonsense" raises, not the BazaltError hierarchy.
+                    // ValueError: 1..4 is a fixed range in the signature, so the
+                    // argument is wrong on its own — no device, no resource. It must
+                    // also stay out of the BazaltError hierarchy, or
+                    // `except bz.InitializationError` (fall back to headless) would
+                    // swallow a typo in the kwargs. See DESIGN.md.
                     if (frames_in_flight < 1 || frames_in_flight > 4)
                     {
                         throw py::value_error(

@@ -154,26 +154,29 @@ void bind_resources(py::module_& m)
                std::uint32_t mip,
                const py::object& region)
             {
+                // ResourceError, not ValueError: every one of these needs the image
+                // to decide, and image.read() answers the same questions the same
+                // way. See "Which exception a user error gets" in DESIGN.md.
                 Context* context = const_cast<Context*>(self->owner());
                 if (!context)
                 {
-                    throw py::value_error("update(): this image has no Context");
+                    raise_error(err_resource("update(): this image has no Context"));
                 }
                 if (self->samples() != 1)
                 {
-                    throw py::value_error(
+                    raise_error(err_resource(
                         "update(): a multisampled image cannot be uploaded to. It is rendered "
-                        "into and resolved out");
+                        "into and resolved out"));
                 }
                 if (layer >= self->array_layers())
                 {
-                    throw py::value_error(
-                        std::format("update(layer={}): this image has {} layer(s)", layer, self->array_layers()));
+                    raise_error(err_resource(
+                        std::format("update(layer={}): this image has {} layer(s)", layer, self->array_layers())));
                 }
                 if (mip >= self->mip_levels())
                 {
-                    throw py::value_error(
-                        std::format("update(mip={}): this image has {} mip level(s)", mip, self->mip_levels()));
+                    raise_error(err_resource(
+                        std::format("update(mip={}): this image has {} mip level(s)", mip, self->mip_levels())));
                 }
 
                 const std::uint32_t level_w = mip_extent(self->width(), mip);
@@ -182,6 +185,8 @@ void bind_resources(py::module_& m)
                 if (!region.is_none())
                 {
                     py::sequence seq = py::cast<py::sequence>(region);
+                    // ValueError, unlike the rest of them: a 3-tuple is malformed on
+                    // its own, and no image has to be consulted to say so.
                     if (py::len(seq) != 4)
                     {
                         throw py::value_error("update(region=): expected (x, y, width, height)");
@@ -192,7 +197,7 @@ void bind_resources(py::module_& m)
                     h = py::cast<std::uint32_t>(seq[3]);
                     if (w == 0 || h == 0 || !fits_within(x, w, level_w) || !fits_within(y, h, level_h))
                     {
-                        throw py::value_error(
+                        raise_error(err_resource(
                             std::format(
                                 "update(region=({}, {}, {}, {})): does not fit in the {}x{} of mip {}",
                                 x,
@@ -201,7 +206,7 @@ void bind_resources(py::module_& m)
                                 h,
                                 level_w,
                                 level_h,
-                                mip));
+                                mip)));
                     }
                 }
 

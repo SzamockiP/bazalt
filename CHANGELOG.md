@@ -17,9 +17,9 @@ needed `/bigobj` because the object file passed a hard format limit. The
 bindings now live in `src/bindings/`, one file per subject, and `main.cpp` is
 the module definition plus seven calls. The core headers stay headers.
 
-The four bugs were found by reading the binding layer rather than by writing
-anything new, and two of them crash rather than misbehave. That is the argument
-for the audit: the tests were green the whole time.
+The bugs were found by reading the binding layer rather than by writing anything
+new, and two of them crash rather than misbehave. That is the argument for the
+audit: the tests were green the whole time.
 
 ### Fixed
 - **A `SwapchainRenderer` outlived the `Window` it was built from.** The
@@ -27,6 +27,13 @@ for the audit: the tests were green the whole time.
   raw window pointer and a pointer to the window's own resize flag. Nothing tied
   the two lifetimes, so `del window` left both pointers dangling and the next
   `present()` read freed memory.
+- **A frame that failed to record was never given back, so the next frame hung.**
+  `acquire()` resets the frame slot's fence and only a submit signals it. When
+  `present()` started reporting a failed recording instead of crashing (below),
+  it left that fence unsignalled, and `acquire()` waits on it without a timeout
+  three frames later. The exception is now followed by the frame being released:
+  the fence is signalled, the acquire semaphore is consumed and the swapchain is
+  recreated.
 - **`record_frame` raised a Python exception with the GIL released.** A failed
   `vkBeginCommandBuffer` or `vkEndCommandBuffer` took the interpreter down
   instead of raising `bz.DeviceLostError`. Both submit paths reach it without the
@@ -44,6 +51,25 @@ for the audit: the tests were green the whole time.
   `tess_evaluation_shader`, `geometry_shader`, `vertex_format`, `cull_mode`,
   `topology` and `push_constant` on `GraphicsPipelineBuilder`, plus
   `ComputePipelineBuilder.shader`.
+
+### Changed
+- **Nine user errors raise `bz.ResourceError` where they raised `ValueError`.**
+  The same mistake on the same object used to get two different answers:
+  `image.read(layer=9)` raised `bz.ResourceError` and `image.update(pixels,
+  layer=9)` raised `ValueError`. The C-contiguous rule reported the same sentence
+  as `bz.ResourceError` from `Buffer.update` and as `ValueError` from
+  `Image.update`, and the type stub only documented the first.
+
+  The rule is now one line: **`ValueError` when the argument is wrong on its own,
+  `bz.ResourceError` when a resource had to be consulted to know it was wrong.**
+  So `image.update` raises `bz.ResourceError` for a layer, a mip or a region the
+  image does not have, for a dtype or shape its format does not accept, for a
+  strided array and for a multisampled image. `frames_in_flight` outside 1..4, an
+  unknown `validation=` name and a `region=` that is not four numbers stay
+  `ValueError` — and stay outside `BazaltError` on purpose, so that
+  `except bz.InitializationError` (fall back to headless) cannot swallow a typo.
+
+  Catch `(bz.ResourceError, ValueError)` if you were relying on the old type.
 
 ### Removed
 - **`.export_values()` on all 15 enums that had it.** This is the only break in

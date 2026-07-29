@@ -26,10 +26,6 @@
 #include <span>
 #include <chrono>
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
 #include "Error.hpp"
 #include "Logger.hpp"
 #include "window.hpp"
@@ -397,7 +393,11 @@ inline ValidationMode parse_validation(const std::string& value)
         return ValidationMode::Off;
     if (value == "sync")
         return ValidationMode::Sync;
-    throw std::invalid_argument(std::format("validation must be one of 'auto', 'on', 'off', 'sync' (got '{}')", value));
+    // ValueError: a name outside a fixed set, and nothing about the device or a
+    // resource enters the decision. py::value_error rather than
+    // std::invalid_argument, which pybind translates to the same class — one
+    // spelling for one outcome.
+    throw py::value_error(std::format("validation must be one of 'auto', 'on', 'off', 'sync' (got '{}')", value));
 }
 
 // A Context built without a logger used to render with validation off and say
@@ -502,6 +502,9 @@ inline std::expected<void, Error> SwapchainRenderer::present(
     auto vkCmd = record_frame(*cmd, *context(), ts, capture ? this : nullptr);
     if (!vkCmd)
     {
+        // Nothing was submitted, and acquire() already reset this slot's fence.
+        // Without this the raise below is followed by a hang on the next frame.
+        abandon_frame_();
         return std::unexpected(vkCmd.error());
     }
     end_frame(*vkCmd, upload_wait_serial);
@@ -788,6 +791,10 @@ inline py::array image_to_numpy(Image& image, std::uint32_t layer = 0, std::uint
 // from a thread that cannot raise. `memcpy` ignores strides, so a non-contiguous
 // array is refused with the fix rather than uploaded as garbage — the same rule
 // create_image has followed since 0.4.
+//
+// ResourceError, not ValueError: the image's own format decides each of these, and
+// contiguous_nbytes above already answers the identical question about a buffer
+// that way. See "Which exception a user error gets" in DESIGN.md.
 inline std::vector<std::byte> update_pixels_from_numpy(
     Image& image,
     const py::array& array,
@@ -797,26 +804,26 @@ inline std::vector<std::byte> update_pixels_from_numpy(
     const FormatInfo info = format_info(image.format());
     if (info.numpy_dtype[0] == '\0')
     {
-        throw py::value_error(
+        raise_error(err_resource(
             std::format(
                 "update() is not available for {}: the format packs several values into one texel, "
                 "so no array describes it",
-                format_name(image.format())));
+                format_name(image.format()))));
     }
     if (!(array.flags() & py::array::c_style))
     {
-        throw py::value_error(
+        raise_error(err_resource(
             "update(): the array must be C-contiguous (a copy is not made silently, because a "
-            "strided array would upload garbage). Use numpy.ascontiguousarray(a).");
+            "strided array would upload garbage). Use numpy.ascontiguousarray(a)."));
     }
     if (!array.dtype().is(py::dtype(info.numpy_dtype)))
     {
-        throw py::value_error(
+        raise_error(err_resource(
             std::format(
                 "update(): this image is {}, so the array must have dtype {}, not {}",
                 format_name(image.format()),
                 info.numpy_dtype,
-                py::str(array.dtype()).cast<std::string>()));
+                py::str(array.dtype()).cast<std::string>())));
     }
 
     const py::ssize_t expected_h = static_cast<py::ssize_t>(height);
@@ -835,7 +842,7 @@ inline std::vector<std::byte> update_pixels_from_numpy(
         {
             got += (i ? ", " : "") + std::to_string(array.shape(i));
         }
-        throw py::value_error(
+        raise_error(err_resource(
             std::format(
                 "update(): expected an array of shape ({}, {}, {}) for a {} region of a {} image, got ({})",
                 height,
@@ -843,7 +850,7 @@ inline std::vector<std::byte> update_pixels_from_numpy(
                 info.channels,
                 format_name(image.format()),
                 format_name(image.format()),
-                got));
+                got)));
     }
 
     const std::size_t size = static_cast<std::size_t>(width) * height * info.bytes_per_pixel;

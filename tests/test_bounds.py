@@ -37,7 +37,7 @@ def test_image_update_refuses_a_wrapping_region(ctx):
     pixels = np.zeros((8, 4, 4), dtype=np.uint8)
 
     # x + 4 wraps to 2, which is < 8.
-    with pytest.raises(ValueError):
+    with pytest.raises(bz.ResourceError):
         image.update(pixels, region=(U32_MAX - 1, 0, 4, 8))
 
 

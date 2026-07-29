@@ -110,31 +110,31 @@ def test_update_rejects_a_non_contiguous_array(ctx):
     img = ctx.create_image(rgba(8, 8, RED))
     strided = rgba(8, 16, GREEN)[:, ::2]
 
-    with pytest.raises(ValueError, match="ascontiguousarray"):
+    with pytest.raises(bz.ResourceError, match="ascontiguousarray"):
         img.update(strided)
 
 
 def test_update_rejects_the_wrong_dtype(ctx):
     img = ctx.create_image(rgba(8, 8, RED))
-    with pytest.raises(ValueError, match="dtype"):
+    with pytest.raises(bz.ResourceError, match="dtype"):
         img.update(np.zeros((8, 8, 4), dtype=np.float32))
 
 
 def test_update_rejects_the_wrong_shape(ctx):
     img = ctx.create_image(rgba(8, 8, RED))
-    with pytest.raises(ValueError, match="shape"):
+    with pytest.raises(bz.ResourceError, match="shape"):
         img.update(rgba(4, 4, GREEN))
 
 
 def test_update_rejects_a_region_outside_the_image(ctx):
     img = ctx.create_image(rgba(8, 8, RED))
-    with pytest.raises(ValueError, match="does not fit"):
+    with pytest.raises(bz.ResourceError, match="does not fit"):
         img.update(rgba(4, 4, GREEN), region=(6, 6, 4, 4))
 
 
 def test_update_rejects_a_layer_that_does_not_exist(ctx):
     img = ctx.create_image(rgba(8, 8, RED))
-    with pytest.raises(ValueError, match="layer"):
+    with pytest.raises(bz.ResourceError, match="layer"):
         img.update(rgba(8, 8, GREEN), layer=3)
 
 

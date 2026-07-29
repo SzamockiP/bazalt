@@ -911,6 +911,41 @@ entry. The release is a label, not the organizing axis.
   exception class through the `unwrap()` helpers. `ShaderError` must be catchable on its
   own, or hot reload is pointless.
 
+- **Which exception a user error gets** (0.20). `ErrorCode` decides which `BazaltError` a
+  *bazalt* failure becomes, and says nothing about the errors the binding layer diagnoses
+  itself. Those had drifted into two answers for one question:
+  `image.read(layer=9)` raised `ResourceError` from the core and `image.update(pixels,
+  layer=9)` raised `ValueError` from the binding lambda. The C-contiguous rule was worse —
+  the *same sentence* arrived as `ResourceError` from `Buffer.update` and as `ValueError`
+  from `Image.update`, and the type stub documented only the first.
+
+  The line is **what had to be consulted to know it was wrong**:
+
+  - **`ValueError`** — the call is malformed on its own. A value outside a fixed range in
+    the signature (`frames_in_flight` is 1..4), a name outside a fixed set
+    (`validation="nonsense"`), a sequence of the wrong length (`region=` is four numbers).
+    No resource, no data, no device enters the decision, and fixing it means editing a
+    literal.
+  - **`BazaltError`, usually `ResourceError`** — the call is well formed and wrong for this
+    resource, this data or this GPU. A layer or mip the image does not have, a dtype or
+    shape its format does not accept, a strided array, a multisampled image being written.
+    Deciding it means asking an object.
+
+  Nine sites moved to `ResourceError` and three keep `ValueError`. The reason the
+  `ValueError` half is not folded into the hierarchy for tidiness: `except
+  bz.InitializationError` is the "fall back to headless" handler, and a typo in a keyword
+  argument must not be caught by it. `except bz.BazaltError` must not either. Python's own
+  answer for "your argument is nonsense" is already `ValueError`, and pybind raises it next
+  door for a failed cast, so this agrees with the language rather than inventing a rule.
+
+  Two things generalize past the fix. **A user error decided in the binding layer needs the
+  rule stated, because `unwrap()` does not reach it** — every one of the eleven was written
+  in isolation and each was locally defensible. And **the drift was invisible to the tests
+  that covered it**: `test_streaming.py` asserted `ValueError` five times and passed, because
+  a test written beside the code inherits the code's assumption. What catches this class is a
+  test that puts the two spellings of one question side by side
+  (`test_read_and_update_agree_on_the_exception_type`).
+
 - **Anything under a released GIL returns `std::expected`** (0.14). A pybind throw
   constructs a Python object, so it needs the GIL, and `raise_error` under
   `py::gil_scoped_release` is an access violation, not an exception. Both submit paths run
@@ -927,6 +962,32 @@ entry. The release is a label, not the organizing axis.
   pybind so they could move to a header, and `record_frame` came back "not free" for a
   reason that turned out to be the bug. The general form: *when a refactor asks "does this
   code depend on layer X", a surprising yes is worth reading before it is worked around.*
+
+- **A frame that is acquired and never submitted has to be given back** (0.20), and turning
+  a crash into an exception is what made this reachable. `acquire()` resets the slot's
+  in-flight fence, and only a submit signals it, so `present()` returning an error on a
+  failed `record_frame` left a fence nobody would ever signal — and `acquire()` waits on it
+  with `UINT64_MAX` three frames later. The 0.20 fix therefore replaced a crash with a
+  correct `bz.OutOfMemoryError` **followed by a hang**, which is worse than the crash: the
+  exception says the frame failed, and the traceback for the hang points at an unrelated
+  line in the next iteration of the loop.
+
+  `abandon_frame_()` submits nothing, waits on the acquire semaphore (the next
+  `vkAcquireNextImageKHR` needs it unsignalled) and signals the fence, then recreates the
+  swapchain, because Vulkan releases an acquired image on present or on swapchain
+  destruction and this frame does neither. The lesson is the general one: **every early
+  return between `acquire()` and `end_frame()` owes the slot the same bookkeeping
+  `end_frame` does.** Untested, and honestly so — the trigger is an out-of-memory result
+  from `vkBeginCommandBuffer`, which no test can provoke without an injected allocator.
+
+  The sibling is **found and not fixed**: `end_frame` logs a failed `vkQueueSubmit` and
+  presents anyway, which waits on a render-finished semaphore that submit was going to
+  signal. The same fence is stranded, so the hang is identical. It is not the same one-line
+  fix, because `advance_submit_serial()` has already reserved a value on the Context
+  timeline that the failed submit was going to signal, and anything waiting for that serial
+  is stranded too. Fixing it is a decision about whether a reserved serial can be signalled
+  by hand or must never be reserved before a submit succeeds — pre-1.0, and it wants its own
+  release rather than a patch at the end of this one.
 
 ---
 

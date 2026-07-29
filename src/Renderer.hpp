@@ -779,6 +779,44 @@ public:
     }
 
 private:
+    // Gives up an acquired frame that will never be submitted, and puts the slot
+    // back where end_frame leaves it.
+    //
+    // acquire() resets this slot's in-flight fence, and only a submit signals it
+    // again. So a frame that is acquired and then abandoned leaves a fence that
+    // never signals, and the next acquire() on this slot waits on it with no
+    // timeout — a hang, several frames after the call that actually failed. An
+    // empty submit signals the fence, and it consumes the acquire semaphore as
+    // well, which vkAcquireNextImageKHR needs unsignalled the next time round.
+    //
+    // Then the swapchain goes: Vulkan releases an acquired image when it is
+    // presented or when the swapchain is destroyed, and this frame does neither.
+    // If the empty submit fails too, the device is out of memory at a depth
+    // nothing here can recover from.
+    void abandon_frame_()
+    {
+        image_acquired_ = false;
+        VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        VkSubmitInfo submitInfo{
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .pNext = nullptr,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &image_available_semaphores_[current_frame()],
+            .pWaitDstStageMask = &wait_stage,
+            .commandBufferCount = 0,
+            .pCommandBuffers = nullptr,
+            .signalSemaphoreCount = 0,
+            .pSignalSemaphores = nullptr};
+        {
+            // Released before recreate_swapchain: that path takes the device idle,
+            // which must not happen while holding the queue mutex.
+            std::lock_guard lock(context_->queue_mutex());
+            context_->vk().vkQueueSubmit(
+                context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
+        }
+        recreate_swapchain();
+    }
+
     SwapchainRenderer(std::shared_ptr<Context> context, SurfaceProvider surface_provider)
         : context_(context),
           surface_provider_(std::move(surface_provider))
