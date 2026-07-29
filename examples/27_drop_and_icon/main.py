@@ -10,15 +10,16 @@ The four small things a prototype keeps needing and bazalt had no way to do:
      array. Press I to build one from the loaded texture, and O to go back to the
      system default. macOS and Wayland take the icon from elsewhere and will
      ignore this — a request, not a guarantee.
-  3. **Cursor position.** Hold the right mouse button to look around: the cursor
-     is re-centred every frame, which is what `set_cursor_position` is for. Note
-     that the camera does NOT jump when it warps — see the comment below.
+  3. **Cursor position.** Hold the right mouse button to look around, and press
+     HOME to snap the cursor back to the centre. Holding uses CURSOR_DISABLED,
+     which does its own recentring; `set_cursor_position` is the deliberate
+     one-shot move, and a warp is never mistaken for the user moving the mouse.
   4. **The clipboard.** C copies the current texture's path, V loads whatever
      path is on the clipboard. Free functions, because the clipboard belongs to
      the process rather than to any one window.
 
-Keys: C copies the path, V pastes one, I sets the icon, O clears it,
-right mouse drag looks around.
+Keys: C copies the path, V pastes one, I sets the icon, O clears it, HOME centres
+the cursor, right mouse HELD looks around.
 """
 
 import pathlib
@@ -134,12 +135,10 @@ while window.is_open():
         window.set_icon(None)
         print("[icon] back to the system default")
 
-    # 3. Cursor position: re-centre it every frame while looking around, which is
-    #    the case set_cursor_position exists for. The delta read below is the real
-    #    mouse movement and NOT the warp — bazalt re-arms the first-event
-    #    suppression when you set the position, so a warp cannot be mistaken for
-    #    the user moving the mouse. Without that, this loop would add the width of
-    #    the window to `yaw` every frame.
+    # 3. Look around while the right button is HELD. CURSOR_DISABLED hides the
+    #    cursor and hands out unbounded virtual motion, doing its own recentring —
+    #    so there is nothing here to warp, and get_mouse_state().dx/dy is the
+    #    movement.
     if window.is_mouse_button_pressed(bz.MOUSE_BUTTON_RIGHT):
         if not looking:
             window.set_cursor_mode(bz.CURSOR_DISABLED)
@@ -147,10 +146,20 @@ while window.is_open():
         mouse = window.get_mouse_state()
         yaw += mouse.dx * 0.25
         pitch = max(min(pitch + mouse.dy * 0.25, 85.0), -85.0)
-        window.set_cursor_position(window.width / 2, window.height / 2)
     elif looking:
         window.set_cursor_mode(bz.CURSOR_NORMAL)
         looking = False
+
+    #    set_cursor_position is for putting the cursor somewhere on purpose, which
+    #    is what HOME does here. It must NOT be combined with CURSOR_DISABLED and a
+    #    per-frame warp: bazalt re-arms its first-event suppression on a warp, so
+    #    that a warp is never mistaken for the user moving the mouse — and warping
+    #    every frame therefore cancels every frame's delta. That suppression is what
+    #    makes the hidden-cursor recentring pattern work, and what makes this
+    #    one-shot snap leave the camera alone.
+    if window.was_key_pressed(bz.KEY_HOME):
+        window.set_cursor_position(window.width / 2, window.height / 2)
+        print("[cursor] snapped to the centre")
 
     ctx.begin_frame()
     if not renderer.acquire():

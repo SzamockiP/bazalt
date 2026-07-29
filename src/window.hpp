@@ -198,15 +198,20 @@ public:
         glfwSetInputMode(window_.get(), GLFW_CURSOR, mode);
     }
 
-    // Move the cursor. The case this exists for is re-centring it every frame for a
-    // look-around camera, which is also why it has to do the second line.
+    // Move the cursor, and make sure the move does not read as the user moving it.
     //
     // A warp is not mouse movement, and mouse_callback cannot tell the difference:
-    // it accumulates `new position - pos_x_`, so warping to the centre would inject
-    // a delta the size of the jump and swing the camera exactly as far as the code
-    // moved the cursor to avoid. Re-arming first_mouse_ makes the next real cursor
-    // event adopt its position with no delta, which is the mechanism already in
-    // place for the meaningless jump from (0,0) at startup.
+    // it accumulates `new position - pos_x_`, so a warp would inject a delta the
+    // size of the jump. Re-arming first_mouse_ makes the next real cursor event
+    // adopt its position with no delta, which is the mechanism already in place for
+    // the meaningless jump from (0,0) at startup.
+    //
+    // That suppression is what makes the hidden-cursor recentring pattern work
+    // (warp to the centre, then read the delta from the centre). It does NOT
+    // combine with CURSOR_DISABLED: that mode already hands out unbounded virtual
+    // motion and recentres itself, so warping every frame there cancels every
+    // frame's delta and the camera stops turning. Pick one — disabled and no warp,
+    // or hidden and warp.
     void set_cursor_position(double x, double y)
     {
         glfwSetCursorPos(window_.get(), x, y);

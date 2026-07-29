@@ -1218,13 +1218,16 @@ class Window:
         ...
     def set_cursor_mode(self, mode: int) -> None: ...
     def set_cursor_position(self, x: float, y: float) -> None:
-        """Move the cursor, for re-centring it every frame in a look-around
-        camera (0.19).
+        """Move the cursor, without the move reading as the user moving it (0.19).
 
-        A warp is not mouse movement, and bazalt makes sure it does not read as
-        any: get_mouse_state().dx/dy stay at rest across the jump. Without that,
-        re-centring would inject a delta the size of the jump and swing the
-        camera exactly as far as the code moved the cursor to avoid.
+        get_mouse_state().dx/dy stay at rest across the jump, so a warp never
+        injects a delta the size of itself. That is what makes the hidden-cursor
+        recentring pattern work: warp to the centre, then read the delta from it.
+
+        Do NOT combine it with CURSOR_DISABLED and a per-frame warp. That mode
+        already hands out unbounded virtual motion and recentres itself, so warping
+        every frame cancels every frame's delta and the camera stops turning. Pick
+        one: disabled and no warp, or hidden and warp.
         """
         ...
     def set_icon(self, icon: Optional[np.ndarray]) -> None:

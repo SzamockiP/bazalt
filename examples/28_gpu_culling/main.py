@@ -275,12 +275,15 @@ while culled_window.is_open() and observer_window.is_open():
         if not looking:
             observer_window.set_cursor_mode(bz.CURSOR_DISABLED)
             looking = True
+        # CURSOR_DISABLED already gives unbounded virtual motion and does its own
+        # recentring, so there is nothing to warp here. Calling set_cursor_position
+        # every frame on top of it is the HIDDEN-cursor pattern, and mixing the two
+        # cancels the look entirely: bazalt re-arms its first-event suppression on a
+        # warp (so a warp is never mistaken for movement), so warping every frame
+        # suppresses every frame's delta.
         mouse = observer_window.get_mouse_state()
         obs_yaw += mouse.dx * 0.15
         obs_pitch = max(min(obs_pitch + mouse.dy * 0.15, 89.0), -89.0)
-        # Re-centring the cursor cannot be mistaken for the user moving it: bazalt
-        # re-arms the first-event suppression when you set the position (0.19).
-        observer_window.set_cursor_position(observer_window.width / 2, observer_window.height / 2)
     elif looking:
         observer_window.set_cursor_mode(bz.CURSOR_NORMAL)
         looking = False
