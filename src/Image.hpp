@@ -810,7 +810,7 @@ public:
                 "read() called on a multisampled image. Read the target's resolved "
                 "single-sample attachment (target.color[i] / target.depth) instead"));
         }
-        if (base_layer + layers > array_layers_)
+        if (!fits_within(base_layer, layers, array_layers_))
         {
             return std::unexpected(
                 err_resource(std::format("read(layer={}): this image has {} layer(s)", base_layer, array_layers_)));

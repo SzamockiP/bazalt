@@ -31,12 +31,12 @@ for the audit: the tests were green the whole time.
   `vkBeginCommandBuffer` or `vkEndCommandBuffer` took the interpreter down
   instead of raising `bz.DeviceLostError`. Both submit paths reach it without the
   GIL. It returns the error now, and `SwapchainRenderer.present` does too.
-- **Five bounds checks could be bypassed by a large offset.** They were written
+- **Six bounds checks could be bypassed by a large offset.** They were written
   `offset + length > size` on unsigned values, so an offset near the maximum
   wrapped the sum to a small number and passed. `buffer.update(data,
   offset=2**64 - 10)` reached a memory copy through an invalid pointer. The
-  others are `image.update(region=)`, `cmd.copy_buffer`, `cmd.fill_buffer` and
-  the indirect draw verbs.
+  others are `image.update(region=)`, `image.read(layer=)`, `cmd.copy_buffer`,
+  `cmd.fill_buffer` and the indirect draw verbs.
 - **Ten methods refused the keyword arguments their own type stub declared.**
   `gb.cull_mode(mode=..., front_face=...)` raised `TypeError`, because the
   binding registered no parameter names. The affected methods are

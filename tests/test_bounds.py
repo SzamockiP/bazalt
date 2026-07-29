@@ -41,6 +41,16 @@ def test_image_update_refuses_a_wrapping_region(ctx):
         image.update(pixels, region=(U32_MAX - 1, 0, 4, 8))
 
 
+def test_image_read_refuses_a_wrapping_layer(ctx):
+    """image.read() was the sixth site, and the one 0.20 missed: `base_layer +
+    layers` wrapped to 0, the check passed, and baseArrayLayer=4294967295
+    reached vkCmdCopyImageToBuffer. It returned an array of layer 0."""
+    image = ctx.create_image(np.zeros((4, 4, 4), dtype=np.uint8))
+
+    with pytest.raises(bz.ResourceError):
+        image.read(layer=U32_MAX)
+
+
 def test_copy_buffer_refuses_a_wrapping_offset(ctx):
     src = ctx.create_buffer([0.0] * 16, bz.BufferType.STORAGE,
                             bz.MemoryUsage.STATIC, bz.DataType.FLOAT)

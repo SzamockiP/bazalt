@@ -500,11 +500,8 @@ public:
     // afterwards. The frame that captures pays for a copy; every other frame
     // pays nothing.
 
-    // Records the capture copy into the frame's command buffer. Called by
-    // present() only, and only while the swapchain image is acquired.
-    // Records the frame's own copy of the presentable image into a host-visible
-    // buffer. Runs inside record_frame, i.e. between acquire and present, which is
-    // the only window in which touching a presentable image is legal at all.
+    // Records the copy into the frame's own command buffer, from record_frame and
+    // nowhere else: that is the one point between acquire and present.
     void record_capture(VkCommandBuffer cmd)
     {
         if (!supports_readback_)

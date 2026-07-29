@@ -11,7 +11,8 @@
 // Unified error type for the whole library.
 //
 // Every fallible operation returns std::expected<T, Error>. The ErrorCode maps
-// 1:1 onto a Python exception class at the pybind boundary (see main.cpp), so
+// 1:1 onto a Python exception class at the pybind boundary (see
+// bindings/Common.hpp), so
 // the code a call site picks decides what the user is able to catch.
 //
 // The distinction that matters is *recoverability*: ShaderError must be
@@ -159,7 +160,7 @@ inline std::optional<Error> check(
 template <typename T>
 constexpr bool fits_within(T offset, T length, T size)
 {
-    static_assert(std::is_unsigned_v<T>, "fits_within relies on unsigned wraparound rules");
+    static_assert(std::is_unsigned_v<T>, "fits_within compares sizes, and a size is never negative");
     return offset <= size && length <= size - offset;
 }
 

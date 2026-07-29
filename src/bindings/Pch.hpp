@@ -6,12 +6,9 @@
 // and reusing it is what makes the split pay: without this, splitting one big
 // translation unit into eight mostly multiplies the fixed cost by eight.
 //
-// No src/*.hpp goes in here, and this was measured rather than reasoned. Putting
-// the core headers in as well moves a rebuild after touching one binding file from
-// 25.8s to 20.8s, and a rebuild after touching a core header from 43.9s to 45.4s,
-// because the PCH itself then has to be rebuilt first and that step is serial.
-// Roughly a wash, so the version that keeps the PCH valid across every header edit
-// wins on the simpler behaviour.
+// No src/*.hpp goes in here. A bazalt header inside the PCH makes every edit to it
+// rebuild the PCH first, which is a serial step in front of a parallel build, and
+// it wins nothing back. See DESIGN.md for the numbers.
 
 // pybind11 FIRST, and the order is load-bearing. volk.h includes <windows.h> when
 // VK_USE_PLATFORM_WIN32_KHR is defined, <windows.h> defines min and max as macros,

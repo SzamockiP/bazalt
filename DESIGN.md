@@ -323,7 +323,7 @@ entry. The release is a label, not the organizing axis.
      everybody.
   3. **MSAA plus preserve is rejected, not supported.** The multisampled image is
      transient and the result lives in the resolve image, which is not what the next pass
-     renders into. The guard lives in `main.cpp` for the same reason as the
+     renders into. The guard lives in the binding layer for the same reason as the
      cross-Context one: it catches a user error, and the recording methods chain.
 
   Not guarded, and documented instead: a recording whose *only* pass preserves reads an
@@ -449,7 +449,7 @@ entry. The release is a label, not the organizing axis.
 
 - **A resource stays with its Context** (0.15). Hand one to the wrong command buffer and you
   get a `ResourceError` that names the mistake, not a driver crash. The guard lives in
-  `main.cpp`, not in the headers: `CommandBuffer` methods return `*this` for chaining and
+  the binding layer, not in the headers: `CommandBuffer` methods return `*this` for chaining and
   have no error channel, and this catches a **user error**, not a C++ invariant, so it
   belongs in the binding layer where the GIL is held and `raise_error` is legal. Every class
   got an `owner()` accessor (not `context()`, because `SwapchainRenderer` already has a
@@ -1613,12 +1613,21 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   half, and on its own it is only a probabilistic check — freed memory often still reads.
 
 - **`offset + length > size` on unsigned operands is a bypass, not a bounds check** (0.20).
-  Five of them, and the Python boundary hands the offset straight through, so
+  Six of them, and the Python boundary hands the offset straight through, so
   `buffer.update(data, offset=2**64 - 10)` wrapped the sum to a small number, passed, and
   reached a `memcpy` through a wild pointer. `fits_within(offset, length, size)` in
-  `Error.hpp` subtracts instead (`offset <= size && length <= size - offset`) and all five
+  `Error.hpp` subtracts instead (`offset <= size && length <= size - offset`) and all six
   call it, so they cannot drift apart. Test the near-maximum offset, not just the
   one-past-the-end one — the latter passes on the broken form too.
+
+  **Five was the count the first sweep found, and the sixth shipped in the same release
+  it was fixed in.** `image.read(layer=)` is `base_layer + layers > array_layers_` on
+  `uint32_t`, so it was the identical shape one grep away, and the sweep had gone looking
+  for `offset` and `size` by name. The lesson is the grep, not the site: search the
+  *arithmetic* (`+` on the left of a comparison against any limit), because the operands
+  of this bug are called `base_layer` and `array_layers_` as readily as `offset` and
+  `size`. It also shows what the bug costs when it is not a `memcpy`: the read returned
+  layer 0's pixels and a validation ERROR, so a silently wrong array is the good case.
 - **Chaining bindings return a `shared_ptr` to self** — a `.def(&...)` returning
   `CommandBuffer&` would try a COPY under the automatic policy.
 - **A deferred lambda captures the `shared_ptr` by value**, and that is the hot-reload

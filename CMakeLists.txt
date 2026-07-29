@@ -119,9 +119,9 @@ set_target_properties(_core PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}" SUFFIX "
 
 target_compile_features(_core PRIVATE cxx_std_23)
 if(MSVC)
-    # /bigobj: main.cpp is the whole binding layer in one translation unit, and
-    # 0.14 pushed it past COFF's 65,536-section limit. Every pybind lambda is a
-    # template instantiation, so this only ever grows.
+    # /bigobj: every pybind lambda is a template instantiation, and 0.14 pushed
+    # the binding layer past COFF's 65,536-section limit. The 0.20 split into
+    # eight files bought headroom, not immunity: any one of them can grow into it.
     #
     # /utf-8: the sources ARE UTF-8, but MSVC assumes the system code page for
     # both the source and the execution charset. Without this an em dash in an

@@ -1157,7 +1157,7 @@ public:
     // ── GPU timers ──────────────────────────────────────────────────────────
     //
     // A GPU timer is a pair of query slots — exactly a Vulkan timestamp query.
-    // The Python-facing handle (class Timer, in main.cpp) owns one such pair:
+    // The Python-facing handle (struct Timer, in bindings/Common.hpp) owns one pair:
     // cmd.timer() records the opening timestamp and hands back the handle, which
     // is stopped explicitly (t.stop()) or by a `with`, and read back off itself
     // (t.ms). The handle IS the identity — no name, no key — so multiple, nested
