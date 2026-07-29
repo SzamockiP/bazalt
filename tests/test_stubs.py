@@ -7,6 +7,8 @@ forgotten in the stub, which silently misleads every user's type checker.
 import pathlib
 import re
 
+import pytest
+
 import bazalt as bz
 
 PYI = pathlib.Path(bz.__file__).parent / "_core.pyi"
@@ -154,3 +156,20 @@ def test_exception_hierarchy_matches_the_stub():
 
 def test_version_is_declared():
     assert bz.__version__
+
+
+def test_the_two_version_strings_agree():
+    """0.19: the version lives in pyproject.toml AND bazalt/__init__.py, and until now
+    nothing compared them — so a release could ship a wheel whose metadata and
+    `bz.__version__` disagreed, which is the kind of thing nobody notices until a
+    bug report quotes the wrong one.
+
+    Skipped from an installed wheel, where there is no pyproject.toml to read.
+    """
+    pyproject = pathlib.Path(bz.__file__).resolve().parent.parent / "pyproject.toml"
+    if not pyproject.is_file():
+        pytest.skip("running against an installed wheel, not the source tree")
+    declared = re.search(r'^version = "([^"]+)"', pyproject.read_text(encoding="utf-8"), re.M)
+    assert declared, "pyproject.toml has no version line"
+    assert declared.group(1) == bz.__version__, (
+        f"pyproject.toml says {declared.group(1)} but bazalt.__version__ is {bz.__version__}")

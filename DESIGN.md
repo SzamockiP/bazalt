@@ -37,6 +37,17 @@ have taxed every later feature, because each new call site would have to go thro
 dispatch layer. Done after the resource types settled, it was one mechanical pass over a
 complete, frozen set of call sites.
 
+0.19 confirmed it again and added a second corollary: **the estimate is for the feature, and
+the invasive part is usually next to the feature rather than in it.** Tessellation was
+estimated at ~330 lines and the stages themselves were about that. What the estimate missed
+entirely was that the per-Context shader stage mask had to replace an `inline constexpr`,
+which is a pass over some twenty call sites in three headers — bigger than the feature, and
+forced by it. The same shape appeared twice more in one release: reflection needed
+`bind_pipeline` to start keeping state and `DescriptorSet` to remember its binding indices,
+and it needed two new `Feature` rows before the thing it fixes was even legal to do. When
+sizing a feature, ask what it makes *unavoidable* elsewhere; that is where the release goes
+over.
+
 ---
 
 ## The scope test — what belongs in bazalt
@@ -495,6 +506,132 @@ entry. The release is a label, not the organizing axis.
   report it as a missing file. The same trap `compile_shader(source=)` hit in 0.16, and
   the third time this codebase has had to order overloads by Python type.
 
+### Shader stages, and the mask they broke
+
+- **Geometry is not redundant with tessellation, and mesh shaders do not settle it**
+  (0.19). Tessellation subdivides a patch through fixed-function hardware and hands back
+  the same kind of primitive, so "triangles in, lines out" is outside what it can express:
+  normals as lines, a point becoming a quad, and per-primitive culling have no tessellation
+  route. What DID take geometry's most famous job is already here — routing one draw into
+  every layer used to need `gl_Layer` from a geometry shader, and `target.all_layers()`
+  (multiview, 0.13) does it without one, which is why the stage looks redundant at first
+  glance. Mesh shaders supersede both, reach roughly half of reported devices, and give
+  back no fixed-function tessellator, so they stay a future additive `Feature` (see the
+  rejection of a 2.0). Geometry's marginal cost once the tessellation plumbing exists is
+  about forty lines, so skipping it would have saved nothing measurable.
+
+- **The shader stage mask had to stop being a constant, and that was the release's
+  invasive pass** (0.19). `kAllShaderStages` was an `inline constexpr` covering vertex,
+  fragment and compute. Neither option survived tessellation: wide enough to cover a
+  tessellation read, it is illegal on a Context without the feature
+  (VUID-vkCmdPipelineBarrier-srcStageMask-04090/-04091, and the validation-as-assert
+  fixture turns that into a suite-wide failure); narrow enough to always be legal, it
+  silently drops the read a tessellation shader just made. Only the enabled feature set
+  answers both, so it became `Context::all_shader_stages()`.
+
+  The constant was **deleted** rather than given a defaulted parameter, and that is the
+  verification: a stage mask has no other referee, so a missed call site has to be a
+  compile error. Same lesson as `volkLoadInstanceOnly` in 0.15 — make the old road stop
+  working. `CommandBuffer::execute` gave a second, independent reason: its replay
+  wrap-around barrier read `constexpr … = kAllShaderStages | VERTEX_INPUT_BIT`.
+
+- **A stage's feature is checked at `compile_shader`, not only at `build()`** (0.19).
+  SPIR-V for these stages declares `OpCapability Tessellation` / `Geometry`, and
+  `vkCreateShaderModule` rejects a capability whose feature is off
+  (VUID-VkShaderModuleCreateInfo-pCode-08740). A gate only in the pipeline builder fires
+  *after* the invalid module exists, so the diagnostic belongs at the line the user wrote.
+  The pipeline gate stays and is not a duplicate: it catches a module compiled on a Context
+  that HAS the feature. Both call one function, so they cannot disagree about which feature
+  a stage needs or about the wording.
+
+- **A specialization constant is keyed by stage, not sorted into two lists** (0.19).
+  `constant(id, bytes, stage)` tested `FRAGMENT` and sent everything else to the vertex
+  list, so a `TESS_CONTROL` constant would have been baked into the vertex shader. A switch
+  would only have moved that bug into a `default:`; a map keyed by stage has no illegal
+  state, because a bucket no module claims is simply never read.
+
+- **`Topology.PATCH_LIST` and tessellation imply each other** (0.19). A patch has nothing
+  to subdivide it and a tessellation pipeline has nothing to read without patches, so both
+  spellings of the mistake are refused with the same explanation. `patch_control_points` is
+  the INPUT patch size, which is why it lives on the pipeline: the control shader's own
+  `layout(vertices = N) out` is its OUTPUT count, a different number, and neither can be
+  derived from the other.
+
+### Reflection, and what it is allowed to conclude
+
+- **Reads are always assumed; writes are only ever narrowed by a positive proof of
+  absence** (0.19). This one sentence is the whole safety argument for
+  `src/SpirvReflect.hpp`. Every uncertainty sets `writes_unknown` and `writes()` then
+  answers true for everything, so an uncertain module behaves exactly as bazalt did before
+  reflection existed. The only way to LOSE correctness is a parser bug that positively
+  claims "no write" where there is one, which is the narrow class the opcode tables are
+  built to keep small.
+
+- **The atomics are not a detail of the write scan, they are half of it** (0.19). A buffer
+  mutated by nothing but `atomicAdd` is what a GPU counter looks like, and `imageAtomicAdd`
+  reaches its image through `OpImageTexelPointer` rather than through a load. A scan that
+  looked only for `OpStore` would report both as read-only and silently reinstate the exact
+  debt this pays off. `OpAtomicLoad` is the one atomic that is a read, and a buffer touched
+  by nothing else is genuinely read-only.
+
+- **Provenance is the trust boundary, not capabilities** (0.19). The first version of the
+  parser had a capability allowlist to catch instruction sets it had never been taught.
+  Wrong mechanism, and instructively so: the numbers are a long enum, a list written from
+  memory is wrong in both directions, and being wrong the SAFE way (flagging a capability
+  that is fine) silently turns the whole feature off while looking like it works. The real
+  question is "did bazalt compile this?" — which the caller knows for certain and the
+  parser cannot see at all. `ShaderCompiler` sets `writes_unknown` for `.spv` and
+  `source=bytes`, and the parser stays about parsing.
+
+- **Reflection is computed in `compile_parts`, not in `compile`** (0.19). It travels in the
+  same call as the words it describes, so the two cannot drift. One level up, every
+  hot-reloaded module would keep its original's answers and the tracker would order the
+  shader that used to be there — silently, and only after an edit. This is the 0.16 rule
+  ("anything a build depends on that it cannot re-derive lives with the result") applied to
+  derived data instead of settings.
+
+- **The tracker asks the pipeline at record time, and the pipeline asks its modules**
+  (0.19). `Pipeline::shaders()` returns the live list rather than a precomputed write map,
+  which is the same trick `desc_.recreate` uses for the handles: a `replace()` is picked up
+  with nothing to invalidate. `bind_pipeline` had to start recording the bound pipeline as
+  record-time state, because before this a draw had no way to find out which pipeline it
+  belonged to. With no pipeline bound the answer is the conservative one — a draw with no
+  pipeline is a bug the layers name precisely, and guessing "not written" there would drop
+  a real barrier.
+
+- **`track_draw_` and `track_dispatch_` are one function differing by a stage mask**
+  (0.19). They used to disagree about the same question: the graphics one called every
+  storage buffer a READ and handled storage images not at all, the compute one called both
+  READ+WRITE unconditionally. Compute LOSES barriers in the merge, and that is the point:
+  `use(..., writes=true)` wipes read state, so two dispatches that only read one input SSBO
+  used to get a WAW barrier between them and to switch on the per-replay memory barrier.
+
+- **A graphics shader that writes a descriptor needs a feature bit** (0.19), and the gate
+  asks the reflection rather than the declarator, so declaring a storage image and only
+  reading it costs nothing. Fourth release running where something that reads like plain
+  command recording turns out to have one, after `fillModeNonSolid`, `wideLines` and
+  `independentBlend`. The gate reads `written_bindings` and not `writes()`, because a module
+  flagged `writes_unknown` claims to write everything and demanding the feature for every
+  `.spv` shader would break callers who never write at all.
+
+### Indirect work
+
+- **The indirect verbs are three verbs, and bazalt declares no struct for their arguments**
+  (0.19). A `buffer=` kwarg on `draw` would invalidate `vertex_count` and `instances` in
+  the same signature, which is the shape 0.15 rejected for the cross-Context transfer. And
+  the argument layout is `VkDrawIndirectCommand` — four `uint32`s that numpy already
+  writes, byte-identical to a std430 GLSL struct. A dtype declared in bazalt would be a
+  type that exists only to be converted, which fails the scope test's second question.
+
+- **`BufferType::STORAGE` carries the indirect usage bit unconditionally** (0.19). The
+  whole use case is a compute shader writing the arguments, so the type that carries
+  `STORAGE_BUFFER` is the type that carries this. A fifth `BufferType` would fragment "can
+  I bind this as an SSBO" and make "which buffers can be indirect" a second rule to
+  remember, for a bit that costs nothing — the same reasoning that gave DYNAMIC buffers the
+  transfer bits in 0.18. `type_` moved from `DynamicBuffer` to the `Buffer` base so the
+  verbs can refuse a non-STORAGE buffer by name instead of leaving the layers to report a
+  usage flag.
+
 ### Diagnostics
 
 - **`shader_printf` is a separate switch, not a fifth `ValidationMode`** (0.18). The modes
@@ -694,16 +831,29 @@ permanent ceiling.
    per-Context table, and the device-level globals stay unloaded on purpose.
 2. ✅ **The 1.2 path was untested in CI** — PAID in 0.15. A second lavapipe job runs with
    `BAZALT_FORCE_VULKAN_1_2=1`, and the same knob works locally on any driver.
-3. **ResourceTracker: no SPIR-V reflection** — the tracker does not read the bindings from
-   SPIR-V, so SSBO and `imageStore` writes from **graphics** shaders stay untracked. The
-   ceiling is a manual `cmd.barrier()`, which exists for buffers and images since 0.10.
-   The graphics `storage_image()` declarator arrived in 0.17 WITHOUT waiting for reflection:
-   the declarator and the tracking are separate questions, and until then a fragment
-   `imageStore` was not merely untracked but unreachable — this file said otherwise, which is
-   what a claim with no test behind it does. What reflection still buys is the automatic
-   barrier, optional binding declarators, a real diagnostic for the empty-HLSL-entry-point
-   ceiling, and — since 0.18 — the ability to compile only the printing shaders
-   unoptimized instead of all of them. Target: before 1.0.
+3. ✅ **ResourceTracker: no SPIR-V reflection** — PAID in 0.19. `src/SpirvReflect.hpp`
+   walks a module once and reports which `(set, binding)` pairs it writes, which
+   execution models it declares, whether it prints, and whether a requested HLSL entry
+   point resolved to an empty function. It bought four things: the automatic barrier for
+   graphics SSBO and storage-image writes, `STORAGE_IMAGE` being tracked in the graphics
+   path *at all*, compute narrowed from conservative to actual, and the two ceilings
+   below turning into real behaviour.
+
+   The entry was understated in one way and overstated in another, and both are worth
+   keeping. Understated: this was not only "untracked". `set_storage_image` already
+   recorded the image as resting in GENERAL while `track_draw_` never transitioned it, so
+   the layout the descriptor promised and the layout the image was in disagreed — a
+   validation error, not a slow path. Overstated: it listed **optional binding
+   declarators** as something reflection buys. That is now rejected on purpose (see
+   below).
+
+   It also turned up that the feature was unreachable for a second reason nobody had
+   noticed: a graphics shader writing a descriptor needs `fragmentStoresAndAtomics` or
+   `vertexPipelineStoresAndAtomics`, so 0.17's declarator produced a write that worked on
+   the GPU and a pipeline that failed to build. `Feature::FRAGMENT_STORES` and
+   `Feature::VERTEX_STAGE_STORES` landed with the reflection, and the gate asks the
+   reflection rather than the declarator: declaring a storage image and only reading it
+   costs nothing.
 4. **The sync-validation test is skipped in CI** — the LunarG layer for noble is still
    1.4.313 and does not report shader hazards. Version 1.4.350 does, but SDK 1.4.350 being
    *released* is not the same thing as a package for noble existing, which is what 0.17 got
@@ -725,6 +875,12 @@ permanent ceiling.
    Removing the method before then would lower the ceiling: there would be no way left to
    ask. Both `Context.supports_multiview` and `Device.supports_multiview` go when the
    enum entry lands. Target: with bindless, before 1.0.
+
+   0.19 added four plain-feature rows (tessellation, geometry and the two graphics-store
+   bits) and needed no column, which is the confirmation that the column really is only
+   wanted by the pNext capabilities. It also found a third customer for it:
+   `drawIndirectCount`, which is what a GPU-decided draw *count* needs. So the column now
+   has three, and they still arrive together or not at all.
 
 ### Ceilings accepted on purpose
 
@@ -748,11 +904,10 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
   "fullscreens on the other screen". A `monitor=` argument and video-mode enumeration
   (resolution and refresh rate) are deferred until somebody asks. Upgrade path: both are
   additive.
-- **An HLSL entry point that matches no function compiles to an empty shader** (0.16).
-  glslang does not treat it as an error: it synthesizes an entry point under the requested
-  name, so the compile succeeds and the shader draws nothing. Detecting it needs SPIR-V
-  reflection (debt #3). A test pins the behaviour by SPIR-V size, so a future glslang that
-  does complain is noticed and the ceiling can become a real diagnostic.
+- ✅ **An HLSL entry point that matches no function compiles to an empty shader** (0.16) —
+  CLOSED in 0.19. Reflection sees the empty body and no interface, so the typo is refused at
+  the compile that caused it. Gated on HLSL with an explicit `entry_point`, because a GLSL
+  `main()` that deliberately does nothing is legitimate and has no name to misspell.
 - **`line_width` other than 1.0 needs `WIDE_LINES`** (0.16), because a driver may support
   exactly one width. Same shape as `polygon_mode` needing `WIREFRAME`: the rasterizer looks
   like free fixed-function state and is not.
@@ -785,9 +940,13 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
 - **Shader printf needs the validation layers** (0.18). It is a layer service, not a
   driver one, so it is unavailable in a release run by construction. Upgrade path: none —
   this is what the feature IS.
-- **A printf Context compiles every shader unoptimized** (0.18), not only the ones that
-  print. Telling them apart needs SPIR-V reflection (debt #3), and the switch is a
-  debugging mode where the optimizer is the smaller loss.
+- ✅ **A printf Context compiles every shader unoptimized** (0.18) — CLOSED in 0.19.
+  Reflection reports whether a module imports `NonSemantic.DebugPrintf`. The ORDER is the
+  whole trick and is easy to write backwards: `prints` can only be read off unoptimized
+  words, because `-O` deletes the print that would prove it. So bazalt compiles at zero,
+  reflects, and recompiles at performance when the shader turns out not to print. A
+  printing shader is one compile; a quiet one in a printf Context is two, and it is no
+  longer taxed for the Context it happens to be in.
 - **An occlusion count is not precise** (0.18). `occlusionQueryPrecise` is a feature bit,
   and without it the spec allows any non-zero value. `samples > 0` is the promise.
   Upgrade path: a `Feature`, additive.
@@ -802,6 +961,42 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
 - **A cross-Context transfer of a mipped image is O(layers x mips) readbacks** (0.18).
   Upgrade path: a single readback of every level, which needs a staging layout the host
   side does not currently describe.
+- **Automatic barriers are computed at RECORD time from reflection** (0.19), so a hot
+  reload that makes a shader start writing an already-bound resource does not re-barrier a
+  recording that is only replayed. Much narrower than it sounds: `rebuild()` never
+  recreates the descriptor layouts, so a reload cannot *add* a binding — the hazard is
+  exactly "declared, bound, previously read-only, now written". And every example records
+  inside the frame loop; `examples/12_hot_reload` builds a fresh CommandBuffer each frame,
+  in the example whose subject IS hot reload. Nothing can close it automatically, because
+  re-deriving the barriers means re-running user Python. Upgrade path: a generation counter
+  on `ShaderModule` bumped by `replace()`, checked at `execute()` to warn.
+- **The write scan fails open** (0.19). A descriptor handed to a function, one appearing in
+  a pointer `OpPhi`, a decoration group, a malformed word, or SPIR-V bazalt did not compile
+  are all treated as written. The tracker may be pessimistic, never optimistic: an
+  uncertain module behaves exactly as bazalt did before reflection existed. Writes through
+  `buffer_device_address` stay invisible, and no bazalt API can produce such a buffer.
+  Upgrade path: a real def-use pass over call graphs, when a shader measurably pays for it.
+- **Reflection is only trusted for SPIR-V bazalt compiled** (0.19). A `.spv` file or
+  `compile_shader(source=bytes)` sets `writes_unknown`, so no barrier is narrowed for it.
+  The first attempt at this was a capability allowlist, and that was the wrong mechanism:
+  the numbers are a long enum, a list written from memory is wrong in both directions, and
+  being wrong the SAFE way silently turns the whole feature off while looking like it
+  works. Provenance is the thing the parser cannot see and the caller knows for certain.
+  Upgrade path: teach the parser more write opcodes, and trust more of them.
+- **A borrowed-image `RenderTarget` is single-sample** (0.19), because `create_image` has
+  no `samples=`. Upgrade path: that kwarg, additive.
+- **The indirect verbs take no `stride=`, and `count` is CPU-side** (0.19). A packed array
+  is the one obvious way and `offset=` covers starting later in the buffer. A GPU-decided
+  draw COUNT needs `vkCmdDrawIndirectCount` and `drawIndirectCount` in
+  `VkPhysicalDeviceVulkan12Features` — the same pNext column debt #5 waits on. The shape to
+  use instead is one command whose `instanceCount` a compute pass accumulates atomically,
+  plus a compacted instance buffer (`examples/28_gpu_culling`).
+- **The tracker orders uses within ONE recording** (0.19, and true since 0.6 — written down
+  now because indirect draw made it easy to hit). Two CommandBuffers that share a
+  GPU-written buffer are ordered by nothing the tracker can see, so the second recording
+  needs a manual `cmd.barrier()`. `examples/28_gpu_culling` does exactly that, because the
+  compute pass runs in one window's recording and the other window reads its output.
+  Upgrade path: Context-level tracking of which serial last wrote a resource.
 
 ---
 
@@ -837,33 +1032,24 @@ layer, the stub, tests, an example and the docs.
 - ✅ **Stencil** — DONE in 0.17.
 - ✅ **CPU image streaming: `image.update(array)`** — DONE in 0.18, with `layer=`, `mip=`
   and `region=`, plus `image.read(layer=, mip=)` as its readback half.
-- **Tessellation and geometry stages** (~330 lines). `ShaderStage` has three values, so
-  there is no displacement on terrain, no adaptive LOD, no normals drawn as lines, no
-  wireframe-on-shaded and no grass or fur grown from a point. Two entries in
-  `ShaderStage`, `tesc`/`tese`/`geom` in shaderc, `patch_control_points` and
-  `Topology.PATCH_LIST`, and two new `Feature`s — both plain `VkPhysicalDeviceFeatures`
-  members, so the table needs no new column. Geometry is slow on modern hardware and
-  absent on MoltenVK, which is exactly what rule 3 and `Feature` are for. Ranked first for
-  0.19: these make effects.
-- **A `RenderTarget` on images you already own** (~200 lines).
-  `bz.RenderTarget(ctx, color=[img])`, where the images come from `create_image`. A target
-  always allocates its own attachments today, so a graphics ping-pong, drawing into a
-  texture brought from another Context, and drawing over a compute-baked texture are all
-  unreachable. The usage bits are already there. Open question: it is a fifth way to build
-  a target, so check it against rule 1 first — the argument for is that it differs by the
-  type of the first argument, exactly like the fourth `create_image` overload.
+- ✅ **Tessellation and geometry stages** — DONE in 0.19. Three `ShaderStage` entries, not
+  two: the tessellation pair plus geometry. The estimate missed the invasive part, which was
+  not the stages but the *stage mask* — see the decision below.
+- ✅ **A `RenderTarget` on images you already own** — DONE in 0.19. The open question
+  resolved in favour: it passes rule 1 for the reason the fourth `create_image` overload
+  does — it differs by the type of the argument, and "allocate attachments for me" is not a
+  variant of "render into these", the same distinction that keeps `blit_image` out of
+  `copy_image(scale=True)`. Ownership needed no work at all: `OffscreenTarget` already held
+  attachments by `shared_ptr` and its destructor already destroyed only its own views.
 
 **Performance:**
 
 - ✅ **Pipeline cache**, in memory — DONE in 0.17. On disk at 1.0, when the frozen API gives
   a stable format.
 - ✅ **Specialization constants** — DONE in 0.17.
-- **Indirect draw and dispatch** (~250 lines). `draw_indexed_indirect(buffer, offset=,
-  count=)` and `dispatch_indirect(buffer)`, plus an `Access.INDIRECT_READ` for the tracker.
-  Compute writes the draw arguments, so culling happens on the GPU. It would also make
-  `Feature::MULTI_DRAW_INDIRECT` reachable, which is advertised today with no API behind it.
-  `What 1.0 means` says to decide this deliberately rather than let it drift. Its
-  prerequisite landed early: `cmd.fill_buffer` (0.18) is how the draw-count is zeroed.
+- ✅ **Indirect draw and dispatch** — DONE in 0.19, which answers the `What 1.0 means`
+  question by shipping rather than deferring. `Feature::MULTI_DRAW_INDIRECT` finally has an
+  API behind it after sitting in the table since 0.5.
 - **Bindless / descriptor arrays** (~630 lines). `texture(binding, stage, set, count=N)` and
   `set_image(binding, image, index=)`: one pipeline and one draw for many materials. Needs
   `FeatureInfo` to grow a column first — it maps only plain `VkPhysicalDeviceFeatures`
@@ -884,8 +1070,10 @@ layer, the stub, tests, an example and the docs.
   `read_pixels()`. The estimate assumed one verb; the spec required two.
 - ✅ **Async headless submit** — DONE in 0.18.
 - ✅ **`buffer.update(data, offset=)`** — DONE in 0.18.
-- **Window extras** (~120 lines) — dropped files (drag a texture onto the window and reload
-  it), a window icon, setting the cursor position, the clipboard. Queued for 0.19.
+- ✅ **Window extras** — DONE in 0.19. Dropped files went into `PollState` and rotate with
+  the key edges, because a drop is the same kind of thing they are: a change that expires
+  with the poll cycle. The clipboard became free functions for the reason `poll_events()` is
+  one.
 - **Gamepad** (~90 lines) — axes and buttons from GLFW. The weakest ratio of value to API
   surface on this list.
 - ✅ **An async `StaticBuffer`** — DONE in 0.18.0.
@@ -979,6 +1167,26 @@ says what we did instead.
 - **Exposing both combined depth/stencil formats** (0.17). `D24S8` and `D32F_S8` differ by
   which driver has them, which is the one thing the caller cannot know and the library can.
   We took one `DEPTH_STENCIL` name and picked per device.
+- **Optional binding declarators, inferred from SPIR-V** (0.19). Debt #3 listed these as
+  something reflection would buy. Rejected once reflection existed, for two reasons. It is
+  not merely a second way to declare a layout, it is a second way that *disagrees with the
+  first at reload time*: `Pipeline::rebuild()` never recreates `layout_`/`desc_layouts_` on
+  purpose, so reflected bindings would let a shader edit invalidate a live
+  `VkDescriptorSetLayout` and every `DescriptorSet` allocated from it — leaving a choice
+  between refusing reloads that change bindings (a worse ceiling than typing the
+  declarator) and making descriptor-set lifetime reload-aware. And a declarator carries a
+  `stage`, which reflection of one module cannot supply for a merged layout. So reflection
+  reports what a shader WRITES and never what it declares.
+
+- **Validating the reflected bindings against the builder's declarators** (0.19). It reads
+  like a free diagnostic and is not: a shader may legally declare a descriptor the pipeline
+  did not, as long as nothing dereferences it, so the check would let a hot reload reject an
+  edit that runs fine. It is the binding-declarator idea wearing a diagnostic's coat.
+
+- **A capability allowlist in the SPIR-V parser** (0.19). See the decision above: the safe
+  direction of being wrong is the one that silently disables the feature, which is the worst
+  property a safety mechanism can have. Provenance replaced it.
+
 - **A `stencil=` kwarg on `RenderTarget`** (0.17). The stencil is part of the depth
   attachment's format in Vulkan, so a second bool beside `depth=` would let a caller ask for
   a stencil with no depth attachment at all. `depth=bz.Format.DEPTH_STENCIL` says it once.
@@ -1110,6 +1318,42 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   None, so `wait()` returned immediately and the next `read()` gave the PREVIOUS
   contents — one update behind, forever. A wrong answer, not a slow one, and invisible to
   a test that only checks the final state.
+
+- **A safety mechanism whose failure mode is "silently does nothing" is worse than none**
+  (0.19). The rejected capability allowlist could be wrong in two directions. Wrong the
+  dangerous way, it misses a write. Wrong the SAFE way, it flags a capability that is fine,
+  every module becomes `writes_unknown`, every barrier stays conservative — and the whole
+  feature is off while the tests still pass and the API still answers. Before writing a
+  conservative fallback, ask what it looks like when the fallback fires for the wrong
+  reason. If the answer is "exactly like working", find a different mechanism.
+
+- **A plausible number is not a verified number** (0.19). `examples/28_gpu_culling` reported
+  about 350 survivors out of 20,000 and that was accepted for a whole release, because it
+  is the sort of number frustum culling produces. The frustum planes were being built from
+  the view-projection matrix's COLUMNS — GLSL indexes a `mat4` by column, so `m[3] + m[0]`
+  adds two columns and yields a plane that means nothing. Garbage planes reject almost
+  everything, which reads as "culling is working very well". The fix was cheap; finding it
+  needed the same test written independently on the CPU, and writing THAT exposed the bug
+  twice, because the first version indexed pyglm's `to_list()` as rows and reproduced the
+  wrong answer exactly. General form: for anything whose output is a count or a
+  measurement, a second implementation is the referee. Eyeballing a plausible magnitude is
+  not.
+
+- **Verifying an example by starting it and watching for errors proves almost nothing**
+  (0.19). Three real bugs in `27_drop_and_icon` and `28_gpu_culling` survived a clean
+  20-second run each: the run never dropped a file, never pasted, and never pressed a key,
+  so the paths under test never executed. An example's interactive paths have to be driven
+  directly — call the function the key would call, against real data — and its visual claim
+  has to be measured (a closed outline is "zero object pixels adjacent to background", not
+  "looks right").
+
+- **A comment that overstates a use case gets followed** (0.19). `set_cursor_position`'s
+  comment called per-frame recentring "the case this exists for". That is the pattern for a
+  HIDDEN cursor; with `CURSOR_DISABLED` the mode already hands out unbounded motion and
+  recentres itself, so warping every frame cancels every frame's delta. Two examples were
+  then written from that comment and both had a camera that stopped turning while the button
+  was held. Documentation that names one pattern as *the* pattern is a design statement, and
+  it will be obeyed.
 
 - **Dropping a wait means auditing every reader, not only the one in the ticket.** Making
   `StaticBuffer` asynchronous is a two-line change at the create site and a race
@@ -1344,6 +1588,15 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   ~1900 frames on a real driver with no validation output and `ctx.memory_stats()` flat at
   1.5 MB, which is the claim the feature makes: streaming into ONE image does not grow.
   A version that built a new Image per frame would climb there.
+
+- **Running an example is not the same as exercising it** (0.19). Every new example in this
+  release ran clean on the first try and three of them were still broken, because a
+  non-interactive run never drops a file, never pastes, never holds a mouse button. What
+  actually caught them: driving the interactive paths directly from a script (call what the
+  key calls, against real data), and turning each visual claim into a number that can fail —
+  "zero object pixels adjacent to background" for a closed outline, "pixel-identical with
+  culling on and off" for the culled view, "the same count as the CPU computes" for the
+  culling itself. Add the measurement, not another look.
 - **The headless fallback** (no windowing extensions) still has no coverage. It is a separate
   path from the API version, which CI does cover since 0.15.
 - **The windowed path is verified by running the examples, and that is load-bearing.** The

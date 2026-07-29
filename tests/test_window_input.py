@@ -328,19 +328,34 @@ def test_set_cursor_position_does_not_fabricate_a_mouse_delta(ctx):
     """Warping the cursor must not read as the user moving it.
 
     This is the whole reason set_cursor_position touches pos_x_/first_mouse_:
-    mouse_callback accumulates `new position - last position`, so re-centring the
-    cursor for a look-around camera would otherwise inject a delta the size of the
-    jump and swing the camera exactly as far as the code moved the cursor to avoid.
+    mouse_callback accumulates `new position - last position`, so a warp would
+    otherwise inject a delta the size of the jump — and a camera would swing exactly
+    as far as the code moved the cursor to avoid.
+
+    Asserted as a bound rather than an exact zero, and the bound is the point. The
+    real cursor belongs to whoever is at the machine: it may be over this window and
+    moving, and that movement is a genuine delta the test has no business rejecting.
+    The bug injects a delta the size of the WARP, so a jump of several hundred pixels
+    that produces a delta of a few dozen is the discriminating signal. An exact zero
+    passes on a quiet machine and fails on a busy one, which is a flake rather than a
+    test — it failed exactly that way once before this bound existed.
     """
     if ctx.headless:
         pytest.skip("no swapchain support (headless Context)")
-    window = a_window()
+    window = a_window(width=640, height=480)
     try:
         bz.poll_events()
-        window.set_cursor_position(64, 48)
-        bz.poll_events()
-        mouse = window.get_mouse_state()
-        assert mouse.dx == 0.0 and mouse.dy == 0.0
+        window.get_mouse_state()          # settle: adopt wherever the cursor is
+
+        for target_x, target_y in ((600, 440), (20, 20)):
+            bz.poll_events()
+            window.set_cursor_position(target_x, target_y)
+            bz.poll_events()
+            mouse = window.get_mouse_state()
+            # The warps above are >= 400 px apart, so the unfixed behaviour reports
+            # hundreds. Incidental hand movement between two polls is nothing like it.
+            assert abs(mouse.dx) < 100.0, f"warp leaked into dx: {mouse.dx}"
+            assert abs(mouse.dy) < 100.0, f"warp leaked into dy: {mouse.dy}"
     finally:
         window = None
 

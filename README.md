@@ -211,10 +211,15 @@ pixels = target.color[0].read()      # numpy (600, 800, 4) uint8
 - **Vulkan, and not an engine.** You keep the pipelines, the command buffers and the memory.
   Bazalt removes the setup code and the object lifetimes.
 - **Barriers on their own.** Bazalt tracks the hazards while you record, then inserts the
-  barriers and the layout changes. `Context(auto_barriers=False)` gives that job back to you
-  through `cmd.barrier()`.
+  barriers and the layout changes. It reads the SPIR-V to find out which resources a shader
+  writes, so a storage image written by a fragment shader is ordered for you.
+  `Context(auto_barriers=False)` gives that job back to you through `cmd.barrier()`.
 - **Compute beside graphics.** One command buffer holds a dispatch and a draw. A dispatch
   writes the vertices and the draw reads them. Results come back as NumPy arrays.
+- **Every pipeline stage.** Vertex, fragment and compute, plus tessellation for displacement
+  and adaptive detail, and geometry for a primitive that becomes a different one. A dispatch
+  or a draw can also read its own arguments from a buffer the GPU filled, so the count never
+  travels back to the CPU.
 - **One rule for what blocks.** Every write is asynchronous and every read blocks. A handle
   is its own future, so normal code waits nowhere. `buf.read()` blocks, because it has
   nothing to give you until the bytes arrive.
@@ -252,9 +257,11 @@ Every directory in `examples/` runs on its own.
 | Shadows and deferred | [09_shadow_map](examples/09_shadow_map), [17_cascade_shadows](examples/17_cascade_shadows), [10_gbuffer_mrt](examples/10_gbuffer_mrt) |
 | Cubemaps and layers | [14_skybox](examples/14_skybox), [16_env_capture](examples/16_env_capture) (six faces), [18_multiview](examples/18_multiview) |
 | Image quality | [15_msaa](examples/15_msaa), [23_outline](examples/23_outline) (stencil) |
+| Pipeline stages | [25_tessellation](examples/25_tessellation) (displacement and adaptive detail), [26_geometry_normals](examples/26_geometry_normals) (triangles become lines) |
+| GPU-driven work | [28_gpu_culling](examples/28_gpu_culling) (indirect draw, two windows) |
 | Data in and out | [24_video_texture](examples/24_video_texture) (per-frame updates), [22_instancing](examples/22_instancing) (20000 instances) |
 | Windows and devices | [19_multi_window](examples/19_multi_window), [20_multi_context](examples/20_multi_context) (two GPUs), [21_window_modes](examples/21_window_modes), [08_pyqt_integration](examples/08_pyqt_integration) |
-| Tools | [12_hot_reload](examples/12_hot_reload) |
+| Tools | [12_hot_reload](examples/12_hot_reload), [27_drop_and_icon](examples/27_drop_and_icon) (drag a picture onto the window) |
 
 [CHANGELOG.md](CHANGELOG.md) lists what each release added. [DESIGN.md](DESIGN.md) gives the
 reasons behind the API.

@@ -5,6 +5,130 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.19.0] — 2026-07-29
+
+"The stages the pipeline could not run". `ShaderStage` had three values, so a
+whole class of effect had no route at all: no displacement on terrain, no
+adaptive detail, no normals drawn as lines, no grass grown from a point. This
+release adds the two tessellation stages and the geometry stage, each behind its
+own feature.
+
+Three of those words need separating, because they sound like one thing.
+Tessellation subdivides a patch with fixed-function hardware between two small
+shaders. A geometry shader runs per primitive and may emit a **different** kind
+of primitive, which is why tessellation does not replace it — "triangles in,
+lines out" is outside what tessellation can say. Mesh shaders do replace both,
+and they reach about half of the machines bazalt runs on, so they stay a future
+feature rather than a baseline.
+
+Second theme: the barriers. Bazalt now reads the SPIR-V to find out which
+resources a shader writes. Until now a storage buffer bound to a graphics
+pipeline was assumed read-only and a storage image bound to one was not tracked
+at all, so a fragment shader that wrote an image needed a hand-written
+`cmd.barrier()`. That was not a slow path, it was a wrong one.
+
+Third theme: work the GPU decides for itself. A draw or a dispatch can read its
+arguments out of a buffer, so a compute pass chooses what gets drawn and the
+count never travels back to the CPU.
+
+Fourth theme: the small things a prototype keeps needing. A render target on
+images you already own, files dropped on the window, a window icon, the
+clipboard.
+
+### Added
+- **Tessellation: `tess_control_shader()` and `tess_evaluation_shader()`.** With
+  `topology(bz.Topology.PATCH_LIST)` and `patch_control_points(n)`. The vertex
+  buffer holds flat patches and the surface is a function, so detail is chosen
+  per frame from where the camera is. Needs `bz.Feature.TESSELLATION`.
+- **Geometry: `geometry_shader()`.** One invocation per primitive, and it may
+  emit another kind: a triangle becomes the lines of its normals, a point
+  becomes a quad. Needs `bz.Feature.GEOMETRY_SHADER`. It is slow on modern
+  hardware and absent on MoltenVK, so reach for it for a debug view rather than
+  a hot path. Sending one draw into every layer of an array attachment does
+  **not** need it — that is `target.all_layers()`.
+- **`bz.RenderTarget(ctx, color=[image], depth=image)`.** Render into images from
+  `create_image` instead of attachments the target allocates. This is what a
+  graphics ping-pong between two textures needs, and drawing over a texture a
+  compute pass baked, and drawing into an image carried from another Context.
+  There is no size in that call: the images answer that question already.
+- **`cmd.draw_indirect(buffer)`, `cmd.draw_indexed_indirect(buffer)` and
+  `cmd.dispatch_indirect(buffer)`.** The arguments come out of a storage buffer,
+  so a compute pass decides what to draw. Culling and particle compaction stop
+  needing a readback between the pass that decides and the draw that obeys.
+  bazalt declares no struct type for the arguments: the layout is
+  `VkDrawIndirectCommand` and NumPy writes it. `count>1` needs
+  `bz.Feature.MULTI_DRAW_INDIRECT`.
+- **`Access.INDIRECT_READ`**, for a manual barrier against the command processor
+  reading those arguments.
+- **`window.dropped_files()`.** The paths dropped on the window during the last
+  poll cycle, so dragging a picture onto a prototype is two lines. Like the key
+  edges, it reads the same twice inside one frame.
+- **`window.set_icon(rgba)`** takes a (height, width, 4) uint8 array, or `None`
+  for the system default. **`window.set_cursor_position(x, y)`** moves the
+  cursor, and the move never reads as the user moving it.
+- **`bz.get_clipboard()` and `bz.set_clipboard(text)`.** Free functions, because
+  the clipboard belongs to the process and not to any one window — the same
+  reason `poll_events()` is one.
+- **`shader.writes`, `shader.writes_unknown` and `shader.prints`.** What the
+  SPIR-V says a shader does. `writes` is the list of `(set, binding)` pairs it
+  writes, which is what decides the barriers, and it is readable so you can see
+  why a barrier is or is not there.
+- **`bz.Feature.FRAGMENT_STORES` and `bz.Feature.VERTEX_STAGE_STORES.`** Writing
+  a storage buffer or image from a graphics shader. 0.17 added the declarator
+  for it without these, so the write worked on the GPU and the pipeline failed
+  to build.
+- **Examples `25_tessellation`** (displaced terrain with detail chosen per
+  patch), **`26_geometry_normals`** (normals as lines, from the mesh's own
+  buffer), **`27_drop_and_icon`** and **`28_gpu_culling`** (two windows: one is
+  the camera the culling is done for, the other flies around and shows you what
+  is left).
+
+### Changed
+- **Bazalt reads the SPIR-V to decide barriers.** A storage buffer or image
+  written by a graphics shader is now ordered against a later read with no
+  `cmd.barrier()`. Compute loses barriers it never needed: two dispatches that
+  only read the same buffer used to get one between them. Reads are always
+  assumed and a write is only ever ruled out by proof, so an unusual shader is
+  treated exactly as it was before.
+- **A `Context(shader_printf=True)` compiles only the shaders that print without
+  the optimizer.** Every shader in that Context used to pay for it.
+- **`compile_shader` refuses a stage whose feature is off.** SPIR-V for
+  tessellation and geometry names a capability the driver rejects, so the error
+  arrives at the line you wrote instead of at the pipeline.
+- **An HLSL `entry_point=` that matches no function is refused.** glslang
+  answers a misspelled name with an empty shader that draws nothing, and that
+  was an accepted limit until there was a way to see it.
+- **`BufferType.STORAGE` carries the indirect usage flag**, so any storage buffer
+  can hold draw arguments. A compute shader writing them needs a storage buffer
+  anyway.
+
+### Fixed
+- **Error messages arrived with a broken character in them.** The sources are
+  UTF-8 and the compiler was reading them as the system code page, so an em dash
+  reached Python as one invalid byte. Eleven messages were affected, and one
+  arrived empty.
+- **Example `23_outline` drew six detached quads instead of a ring.** It grew
+  the silhouette along the vertex normal, and a cube has one normal per face, so
+  the faces moved apart and left the edges open.
+
+### Notes
+- **Tessellation and geometry are optional features, so ask for them.**
+  `Context(features=[bz.Feature.TESSELLATION])` fails on a device without it;
+  `optional=[...]` and `ctx.supports(...)` let a program carry on without.
+- **A geometry shader is the wrong tool for a hot path.** Modern hardware runs
+  it slowly and Metal has none at all. Its own trick — changing the kind of
+  primitive — is what to use it for.
+- **The draw count stays on the CPU.** A GPU-decided *count* needs an extension
+  bazalt cannot reach yet. One draw command whose instance count a compute
+  shader accumulates does the same job with no extension, and
+  `examples/28_gpu_culling` is that shape.
+- **`set_cursor_position` does not combine with `CURSOR_DISABLED`.** That mode
+  already hands out unbounded motion and recentres itself, so warping every
+  frame cancels every frame's movement. Pick one.
+- **Automatic barriers are decided while you record.** A hot reload that makes a
+  shader start writing a resource it only read does not re-barrier a recording
+  that is only replayed. Record the frame again, which every example does.
+
 ## [0.18.0] — 2026-07-28
 
 "Data, copies and tools". The boundary between your program and the GPU was
