@@ -5,6 +5,151 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.20.0] — 2026-07-30
+
+No new feature. This release splits the binding layer into eight translation
+units, fixes six bugs and removes one API nobody meant to publish.
+
+The library reached about 19,000 lines of C++ and all of it compiled as one
+translation unit: `src/main.cpp` held every binding and included the whole
+header-only core. One translation unit means one CPU core, and 0.14 had already
+needed `/bigobj` because the object file passed a hard format limit. The
+bindings now live in `src/bindings/`, one file per subject, and `main.cpp` is
+the module definition plus seven calls. The core headers stay headers.
+
+The bugs were found by reading the binding layer rather than by writing anything
+new, and four of them crash or hang rather than misbehave. That is the argument
+for the audit: the tests were green the whole time.
+
+### Added
+- **`tests/test_bounds.py`** — a near-maximum offset on each of the six verbs
+  that take one.
+- A test that scans every bound method for a missing parameter name, so the whole
+  class of the keyword-argument bug is caught rather than the ten instances of it.
+- A test that puts `read()` and `update()` side by side on the same mistake, which
+  is what catches an exception type drifting apart again.
+- A test that the bare enum names stay gone.
+
+### Changed
+- **The bindings are eight files.** `src/bindings/` holds `Enums.cpp`,
+  `Resources.cpp`, `Pipelines.cpp`, `Commands.cpp`, `Windowing.cpp`,
+  `ContextBind.cpp` and `Targets.cpp`, with `Common.hpp` for what they share and
+  `Pch.hpp` as a precompiled header for the third-party includes. A new binding
+  goes in the file that owns its subject. The call order in `main.cpp` carries
+  the two registration constraints that are real and the one that only looks
+  real.
+- **A rebuild reuses its build directory.** scikit-build-core deletes its build
+  tree by default, so every install reconfigured CMake and rebuilt glfw, volk and
+  vk-bootstrap from scratch. This was the largest single change to build time in
+  the release, it is two lines of configuration, and it has nothing to do with the
+  split.
+
+  The measured numbers, because the split is a trade and not a win everywhere:
+
+  | | 0.19.0 | 0.20.0 |
+  |---|---|---|
+  | rebuild after editing one binding | 66.1s | **25.8s** |
+  | rebuild after editing a core header | 66.1s | **43.9s** |
+  | of which pip and CMake overhead | 10.2s | 13.1s |
+
+  Against a same-configuration baseline, that is 36.6s before the split versus
+  25.8s after for a binding edit, and 43.9s after for a core-header edit — 30%
+  faster on the first and 20% **slower** on the second. Eight translation units
+  each parse the header-only core, and one did before. The header parse is what
+  dominates a rebuild, and making it cheaper means splitting the core into
+  `.hpp` + `.cpp`, which is a rewrite this release does not attempt.
+- **Sixty exception messages joined two clauses with a semicolon** and now read
+  as two sentences, which is what the writing convention already asked for.
+- **Six messages said too little to act on.** The image-upload failures named an
+  internal object and discarded the Vulkan result code; `create_buffer` would
+  not say which element type it found or how to state one; the render-target
+  check named neither the wrong argument nor its value; two shader messages
+  explained a binary format instead of naming the bad file; and the window
+  failures named a C library the user has never heard of.
+
+### Changed (breaking)
+- **`.export_values()` is gone from all 15 enums that had it.** This is the break
+  that makes the release 0.20.0 and not 0.19.1.
+
+  The switch binds every enum member a second time as a bare module attribute,
+  so `bz.ShaderStage.VERTEX` had a twin `bz.VERTEX`. About sixty such names
+  existed: `NONE`, `ERROR`, `INFO`, `LINE`, `POINT`, `FILL`, `ALPHA`, `STATIC`,
+  `DEVICE`, `WINDOW` and more. None of them appear in `_core.pyi` or in
+  `__all__`, and nothing in the README, the tests or the 28 examples used them.
+
+  Two collided, and the enum that bound last silently won: `bz.VERTEX` was
+  `ShaderStage.VERTEX`, so `BufferType.VERTEX` had no bare spelling, and
+  `bz.FLOAT` was `VertexFormat.FLOAT`, so `DataType.FLOAT` had none either.
+
+  Use the qualified name. `bz.ShaderStage.VERTEX`, not `bz.VERTEX`.
+- **Nine user errors raise `bz.ResourceError` where they raised `ValueError`.**
+  The same mistake on the same object used to get two different answers:
+  `image.read(layer=9)` raised `bz.ResourceError` and `image.update(pixels,
+  layer=9)` raised `ValueError`. The C-contiguous rule reported the same sentence
+  as `bz.ResourceError` from `Buffer.update` and as `ValueError` from
+  `Image.update`, and the type stub only documented the first.
+
+  The rule is now one line: **`ValueError` when the argument is wrong on its own,
+  `bz.ResourceError` when a resource had to be consulted to know it was wrong.**
+  So `image.update` raises `bz.ResourceError` for a layer, a mip or a region the
+  image does not have, for a dtype or shape its format does not accept, for a
+  strided array and for a multisampled image. `frames_in_flight` outside 1..4, an
+  unknown `validation=` name and a `region=` that is not four numbers stay
+  `ValueError`.
+
+  Catch `(bz.ResourceError, ValueError)` if you were relying on the old type.
+
+### Fixed
+- **A `SwapchainRenderer` outlived the `Window` it was built from.** The
+  renderer reads the window on every present, through lambdas that captured the
+  raw window pointer and a pointer to the window's own resize flag. Nothing tied
+  the two lifetimes, so `del window` left both pointers dangling and the next
+  `present()` read freed memory.
+- **`record_frame` raised a Python exception with the GIL released.** A failed
+  `vkBeginCommandBuffer` or `vkEndCommandBuffer` took the interpreter down
+  instead of raising `bz.DeviceLostError`. Both submit paths reach it without the
+  GIL. It returns the error now, and `SwapchainRenderer.present` does too.
+- **A frame that failed to record was never given back, so the next frame hung.**
+  `acquire()` resets the frame slot's fence and only a submit signals it. Once
+  `present()` reported a failed recording instead of crashing, it left that fence
+  unsignalled, and `acquire()` waits on it without a timeout three frames later.
+  The exception is now followed by the frame being released: the fence is
+  signalled, the acquire semaphore is consumed and the swapchain is recreated.
+- **A failed submit presented anyway.** `present()` logged a `vkQueueSubmit`
+  failure and then called `vkQueuePresentKHR`, which waits on a render-finished
+  semaphore that the failed submit was going to signal. It strands the same frame
+  fence as well. The present is now skipped and the frame is given back, so the
+  window logs the lost frame and carries on with the next one.
+- **Six bounds checks could be bypassed by a large offset.** They were written
+  `offset + length > size` on unsigned values, so an offset near the maximum
+  wrapped the sum to a small number and passed. `buffer.update(data,
+  offset=2**64 - 10)` reached a memory copy through an invalid pointer. The
+  others are `image.update(region=)`, `image.read(layer=)`, `cmd.copy_buffer`,
+  `cmd.fill_buffer` and the indirect draw verbs.
+- **Ten methods refused the keyword arguments their own type stub declared.**
+  `gb.cull_mode(mode=..., front_face=...)` raised `TypeError`, because the
+  binding registered no parameter names. The affected methods are
+  `vertex_shader`, `fragment_shader`, `tess_control_shader`,
+  `tess_evaluation_shader`, `geometry_shader`, `vertex_format`, `cull_mode`,
+  `topology` and `push_constant` on `GraphicsPipelineBuilder`, plus
+  `ComputePipelineBuilder.shader`.
+
+### Notes
+- **Nothing about the split is visible from Python.** The module is the same
+  module: every binding, every registration order and every annotation came
+  across unchanged, and the type stub did not move.
+- **A `ValueError` stays outside `BazaltError` on purpose.** `except
+  bz.InitializationError` is the fall-back-to-headless handler and `except
+  bz.BazaltError` is the catch-all, and a typo in a keyword argument must not be
+  caught by either. Python already answers `ValueError` to "this argument is
+  nonsense", and pybind raises it next door for a failed cast.
+- **A lost frame is skipped, not fatal.** `acquire()` returning `False` and a
+  failed submit both log the frame and let the loop carry on, which is the
+  contract the whole windowed path follows.
+- **The two frame-recovery fixes have no test.** Both need an out-of-memory result
+  from a command-buffer call, which no test can provoke without an injected
+  allocator. The windowed path was verified by running the examples, as usual.
+
 ## [0.19.0] — 2026-07-29
 
 "The stages the pipeline could not run". `ShaderStage` had three values, so a

@@ -478,7 +478,12 @@ public:
         slot_written_[current_frame()] = true;
     }
 
-    void present(std::shared_ptr<CommandBuffer> cmd, std::uint64_t upload_wait_serial = 0, bool capture = false);
+    // Fails rather than raises: the caller reached here with the GIL released,
+    // and the recording it drives can fail on a lost device.
+    std::expected<void, Error> present(
+        std::shared_ptr<CommandBuffer> cmd,
+        std::uint64_t upload_wait_serial = 0,
+        bool capture = false);
 
     // ── Readback ─────────────────────────────────────────────────────────────
     //
@@ -495,13 +500,123 @@ public:
     // afterwards. The frame that captures pays for a copy; every other frame
     // pays nothing.
 
-    // Records the capture copy into the frame's command buffer. Called by
-    // present() only, and only while the swapchain image is acquired.
-    void record_capture(VkCommandBuffer cmd);
+    // Records the copy into the frame's own command buffer, from record_frame and
+    // nowhere else: that is the one point between acquire and present.
+    void record_capture(VkCommandBuffer cmd)
+    {
+        if (!supports_readback_)
+        {
+            return;
+        }
+        const VkExtent2D extent = swapchain_extent_;
+        const VkDeviceSize needed = static_cast<VkDeviceSize>(extent.width) * extent.height * 4;
+        if (capture_buffer_ == VK_NULL_HANDLE || capture_size_ < needed)
+        {
+            if (capture_buffer_ != VK_NULL_HANDLE)
+            {
+                // Deferred: a previous frame's copy may still be in flight.
+                context_->defer_destroy(
+                    [allocator = context_->allocator(), buffer = capture_buffer_, alloc = capture_alloc_]
+                    { vmaDestroyBuffer(allocator, buffer, alloc); });
+                capture_buffer_ = VK_NULL_HANDLE;
+            }
+            auto staging = create_staging_buffer(*context_, needed, Staging::Readback);
+            if (!staging)
+            {
+                capture_buffer_ = VK_NULL_HANDLE;
+                return;
+            }
+            std::tie(capture_buffer_, capture_alloc_) = *staging;
+            capture_size_ = needed;
+        }
+
+        VkImage source = swapchain_images_[image_index_];
+        // end_rendering has already retired it to PRESENT_SRC, and it goes back
+        // there: the compositor takes it from that layout a moment later.
+        record_image_transition(
+            context_->vk(),
+            cmd,
+            source,
+            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+        VkBufferImageCopy region{
+            .bufferOffset = 0,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {extent.width, extent.height, 1}};
+        context_->vk().vkCmdCopyImageToBuffer(
+            cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, capture_buffer_, 1, &region);
+
+        record_image_transition(
+            context_->vk(),
+            cmd,
+            source,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            VK_ACCESS_TRANSFER_READ_BIT,
+            VK_ACCESS_MEMORY_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+
+        capture_extent_ = extent;
+        capture_slot_ = current_frame();
+        captured_ = true;
+    }
 
     // The captured frame as RGBA8 bytes. Blocks until that frame's submit has
     // completed, because the copy is part of it.
-    std::expected<std::vector<std::byte>, Error> read_pixels();
+    std::expected<std::vector<std::byte>, Error> read_pixels()
+    {
+        if (!supports_readback_)
+        {
+            return std::unexpected(err_resource(
+                "renderer.read_pixels(): this surface does not allow the swapchain images to be copied "
+                "from (the compositor refused VK_IMAGE_USAGE_TRANSFER_SRC_BIT). Render into a "
+                "bz.RenderTarget and read that instead."));
+        }
+        if (!captured_ || capture_buffer_ == VK_NULL_HANDLE)
+        {
+            return std::unexpected(err_resource(
+                "renderer.read_pixels(): no frame has been captured. Ask for one with "
+                "renderer.present(cmd, capture=True) — a presentable image may only be copied while it "
+                "is acquired, so the copy has to ride that frame's own submit."));
+        }
+
+        // The copy is part of that frame's submit, so this is where it is waited on.
+        context_->vk().vkWaitForFences(context_->device(), 1, &in_flight_fences_[capture_slot_], VK_TRUE, UINT64_MAX);
+
+        const std::size_t size = static_cast<std::size_t>(capture_extent_.width) * capture_extent_.height * 4;
+        std::vector<std::byte> out(size);
+        void* mapped = nullptr;
+        if (auto e = check(
+                vmaMapMemory(context_->allocator(), capture_alloc_, &mapped),
+                "map the swapchain capture buffer",
+                ErrorCode::Resource))
+        {
+            return std::unexpected(*e);
+        }
+        std::memcpy(out.data(), mapped, size);
+        vmaUnmapMemory(context_->allocator(), capture_alloc_);
+
+        // BGRA is what most compositors hand out. Swapping here keeps the channel
+        // order one thing rather than a property of the machine, so out[y, x, 0] is
+        // red everywhere.
+        if (swapchain_format_ == VK_FORMAT_B8G8R8A8_UNORM || swapchain_format_ == VK_FORMAT_B8G8R8A8_SRGB)
+        {
+            for (std::size_t i = 0; i + 2 < out.size(); i += 4)
+            {
+                std::swap(out[i], out[i + 2]);
+            }
+        }
+        return out;
+    }
 
     VkExtent2D capture_extent() const
     {
@@ -615,7 +730,8 @@ public:
 
         // The lock ends before recreate_swapchain below: that path takes the
         // device idle, which must not happen while holding the queue mutex.
-        VkResult result;
+        VkResult result = VK_SUCCESS;
+        bool submitted = false;
         {
             std::lock_guard lock(context_->queue_mutex());
 
@@ -652,8 +768,25 @@ public:
                         Source::Device,
                         std::format("Failed to submit draw command buffer ({})", vk_result_name(submit_result)));
             }
+            else
+            {
+                submitted = true;
+                result = context_->vk().vkQueuePresentKHR(present_queue_, &presentInfo);
+            }
+        }
 
-            result = context_->vk().vkQueuePresentKHR(present_queue_, &presentInfo);
+        if (!submitted)
+        {
+            // A submit that fails signals nothing, so presenting would wait on a
+            // render-finished semaphore nobody is going to signal, and the slot's
+            // fence is still as acquire() left it. Give the frame back instead.
+            //
+            // The reserved timeline serial is dropped with it, and that needs no
+            // repair: a timeline signal only has to be GREATER than the current
+            // value, and every wait is "value >= N", so the next submit's higher
+            // signal satisfies anything that was waiting for the skipped one.
+            abandon_frame_();
+            return;
         }
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR ||
@@ -664,6 +797,44 @@ public:
     }
 
 private:
+    // Gives up an acquired frame that will never be submitted, and puts the slot
+    // back where end_frame leaves it.
+    //
+    // acquire() resets this slot's in-flight fence, and only a submit signals it
+    // again. So a frame that is acquired and then abandoned leaves a fence that
+    // never signals, and the next acquire() on this slot waits on it with no
+    // timeout — a hang, several frames after the call that actually failed. An
+    // empty submit signals the fence, and it consumes the acquire semaphore as
+    // well, which vkAcquireNextImageKHR needs unsignalled the next time round.
+    //
+    // Then the swapchain goes: Vulkan releases an acquired image when it is
+    // presented or when the swapchain is destroyed, and this frame does neither.
+    // If the empty submit fails too, the device is out of memory at a depth
+    // nothing here can recover from.
+    void abandon_frame_()
+    {
+        image_acquired_ = false;
+        VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        VkSubmitInfo submitInfo{
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .pNext = nullptr,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &image_available_semaphores_[current_frame()],
+            .pWaitDstStageMask = &wait_stage,
+            .commandBufferCount = 0,
+            .pCommandBuffers = nullptr,
+            .signalSemaphoreCount = 0,
+            .pSignalSemaphores = nullptr};
+        {
+            // Released before recreate_swapchain: that path takes the device idle,
+            // which must not happen while holding the queue mutex.
+            std::lock_guard lock(context_->queue_mutex());
+            context_->vk().vkQueueSubmit(
+                context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
+        }
+        recreate_swapchain();
+    }
+
     SwapchainRenderer(std::shared_ptr<Context> context, SurfaceProvider surface_provider)
         : context_(context),
           surface_provider_(std::move(surface_provider))
@@ -826,7 +997,7 @@ private:
                 l->log(
                     Severity::Info,
                     Source::Device,
-                    "Requested present mode is not supported by this surface; falling back to FIFO (vsync)");
+                    "Requested present mode is not supported by this surface. Bazalt uses FIFO (vsync) instead");
         }
         active_present_mode_ = present_mode;
         auto extent = choose_swap_extent(details.capabilities, width, height);

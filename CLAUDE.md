@@ -92,13 +92,19 @@ The layering exists so nothing below `Renderer.hpp` knows swapchains exist.
 - **`HotReload.hpp`** — watches the shaders (plus `#include`s) and images bazalt itself
   loaded, recompiling/re-uploading in place; a bad edit logs and keeps the last good
   version. Drained on the main thread from `begin_frame` / `ctx.submit`.
-- **`Error.hpp` + `main.cpp`** — every fallible C++ operation returns
+- **`Error.hpp` + `bindings/Common.hpp`** — every fallible C++ operation returns
   `std::expected<T, Error>`; `ErrorCode` maps 1:1 onto a Python exception class at the
   pybind boundary via the `unwrap()` helpers. The exception *type* is the recoverability
   contract (`ShaderError` must be catchable alone or hot reload is pointless).
 
-`main.cpp` is the entire binding layer (one `PYBIND11_MODULE`), so it's the file that grows
-with every API addition.
+Since 0.20 the binding layer is `src/bindings/`, one file per subject
+(`Enums`/`Resources`/`Pipelines`/`Commands`/`Windowing`/`ContextBind`/`Targets`), plus
+`Common.hpp` for what they share and `Pch.hpp` for the third-party headers. `main.cpp` is
+only the `PYBIND11_MODULE` and the seven calls, **in an order that is load-bearing** — the
+comments there say why. A new binding goes in the file that owns its subject; a new shared
+helper goes in `Common.hpp` and must be `inline`, never an anonymous namespace (each TU
+would get its own copy of the `exc_*` handles and `raise_error` would go through a null
+one — it links and crashes at runtime).
 
 ## Conventions that bite if ignored
 
@@ -109,8 +115,9 @@ with every API addition.
   of its own (multi-context, `validation="sync"`) asks the `extra_context` factory, which
   applies the same referee.
 - **`bazalt/_core.pyi` is hand-written.** Any binding added, renamed or removed in
-  `main.cpp` also needs the stub, plus `__all__` and the explicit re-export list in
-  `bazalt/__init__.py`. `tests/test_stubs.py` is what catches the drift (and it's the only
+  `src/bindings/` also needs the stub, plus `__all__` and the explicit re-export list in
+  `bazalt/__init__.py`. Every `.def()` parameter needs a `py::arg()` too, or only a
+  positional call works while the stub advertises a keyword one. `tests/test_stubs.py` is what catches the drift (and it's the only
   test CI runs on each wheel).
 - **README code is executed** by `tests/test_readme.py` — edit the snippets and the test
   together.

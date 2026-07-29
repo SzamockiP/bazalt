@@ -11,7 +11,14 @@ import numpy as np
 # is recoverable, a lost device is not.
 
 class BazaltError(Exception):
-    """Base class for every error bazalt raises."""
+    """Base class for every error bazalt raises.
+
+    A BazaltError means bazalt looked at a resource, at your data or at the
+    device to decide. An argument that is wrong on its own — outside a fixed
+    range in the signature, a sequence of the wrong length, a name not in a
+    fixed set — raises ValueError instead, and stays outside this hierarchy on
+    purpose: `except bz.BazaltError` must not hide a typo in your keywords.
+    """
     ...
 
 class InitializationError(BazaltError):
@@ -514,6 +521,11 @@ class Image:
         being written, and it must be C-contiguous: memcpy ignores strides, so a
         transposed or sliced array would upload garbage rather than raise. Use
         numpy.ascontiguousarray() if needed.
+
+        Raises ResourceError for all of those, and for a layer, a mip or a region
+        this image does not have — the image decides each one, so it is the same
+        exception read() raises for the same question. A region= that is not four
+        numbers is a ValueError, because no image is needed to say so.
 
         region=(x, y, width, height) writes a rectangle and leaves the rest
         alone — what painting and a sprite atlas need. Omitted, the whole level

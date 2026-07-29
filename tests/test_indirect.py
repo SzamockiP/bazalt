@@ -347,7 +347,7 @@ def test_indirect_read_is_a_manual_barrier_access(ctx):
     cmd = ctx.create_command_buffer()
     cmd.begin()
     cmd.barrier(args, bz.Access.SHADER_WRITE, bz.Access.INDIRECT_READ)
-    with pytest.raises(bz.ResourceError, match="buffer-only"):
+    with pytest.raises(bz.ResourceError, match="apply to buffers only"):
         cmd.barrier(img, bz.Access.SHADER_WRITE, bz.Access.INDIRECT_READ)
     ctx.submit(cmd)
     ctx.wait()

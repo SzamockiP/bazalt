@@ -46,7 +46,8 @@ enum class ValidationMode
 // The async upload machinery, seen from the Context's side. A tiny virtual
 // interface rather than the real class: UploadManager.hpp needs Context.hpp
 // (queues, timeline, deletion queue), so Context can only know it abstractly.
-// main.cpp creates the concrete UploadManager right after Context::create, so
+// bindings/ContextBind.cpp creates the concrete UploadManager right after
+// Context::create, so
 // this is never null and there is one place that counts uploads.
 class UploadManagerBase
 {
@@ -399,7 +400,7 @@ public:
     // The largest patch_control_points this GPU accepts. Read straight off the
     // cached properties rather than re-querying like max_samples() does, because
     // vk-bootstrap already filled them (device_name() below reads the same
-    // struct). NOT bound in main.cpp on purpose: the guaranteed minimum is 32 and
+    // struct). NOT bound for Python on purpose: the guaranteed minimum is 32 and
     // a patch is 3 or 4 vertices in practice, so nobody needs to ask — this exists
     // so the pipeline builder can name the limit in its error instead of letting
     // the validation layers do it.

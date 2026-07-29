@@ -29,7 +29,20 @@ These settle most arguments.
 5. **One minor release = one big feature plus small related additions.** Pay a debt off with
    the feature that really needs it, not in a separate "debt release". One session must be
    able to execute the plan without filling the context.
+
+   **0.20 is the exception, and it is written down here so it stays one.** It has no
+   feature. It splits the binding layer into eight translation units, fixes four bugs and
+   removes one accidental API. What made it legitimate is that the work had no feature to
+   attach to: a build-time restructuring is forced by the *size* of the code, not by
+   anything a user asked for, and the four bugs were found by auditing the binding layer
+   rather than by writing something new. Rule 5's target is a release that collects
+   unrelated debt because the debt is old. This one collects work that is all the same
+   subject. If a future release wants the same exemption, the test is that question: does
+   the work share a subject, or only a mood?
 6. **An API break is acceptable before 1.0, but you batch the breaks into one release.**
+   This is also why 0.20 is not 0.19.1. `CHANGELOG.md` promises that a patch release never
+   breaks the API, and removing `.export_values()` deletes about sixty names that were
+   reachable. Undocumented is not the same as absent.
 
 Rules 4 and 5 have a corollary that the 0.9 to 0.15 sequence confirmed: **the most invasive
 work goes last.** The volk dispatch-table pass touched every `vk*` call. Done early it would
@@ -146,6 +159,89 @@ entry. The release is a label, not the organizing axis.
   point the instance-level globals of a live Context at an instance that disappears a moment
   later.
 
+### The binding layer, and why it is eight files
+
+- **The bindings are split by subject, the core stays header-only** (0.20). Until 0.20 the
+  whole library was one translation unit: `main.cpp` held every binding and included the
+  entire header-only core, so a rebuild used one core of however many the machine has, and
+  0.14 had already needed `/bigobj` because the object file passed COFF's 65,536-section
+  limit. `src/bindings/` now holds one `.cpp` per subject — enums, resources, pipelines,
+  commands, windowing, context, targets — and `main.cpp` is the `PYBIND11_MODULE` plus seven
+  calls.
+
+  The core headers stay headers. They are templated and `inline`, so splitting them into
+  `.hpp` + `.cpp` would be a rewrite.
+
+  **The build-time result is a trade, not a win, and the honest numbers belong here.**
+  Against a same-configuration baseline of 36.6s: a rebuild after editing one binding file
+  is 25.8s (30% faster), and a rebuild after editing a core header is 43.9s (20% slower).
+  Eight translation units each parse the header-only core where one did before.
+
+  The reason the second number could not be rescued is worth recording, because three
+  attempts failed and each looked like it should have worked. `/MP` does nothing here —
+  MSBuild parallelizes across projects, not across the sources inside one, and the flag made
+  both cases marginally worse. `VS_GLOBAL_UseMultiToolTask` did nothing either. The Ninja
+  generator, which parallelizes properly, cannot find `cl.exe` without an MSVC environment,
+  so it would require every build and every CI job to run from a Developer Prompt — a real
+  cost for a build-time gain. Putting the core headers in the PCH moves the binding-edit case
+  to 20.8s and the header-edit case to 45.4s, because the PCH rebuild is then a serial step
+  in front of everything: roughly a wash, so the simpler behaviour wins.
+
+  What this leaves: **the header parse dominates a rebuild, and it always did.** The single
+  translation unit was never slow because `main.cpp` had 3,500 lines of bindings in it; it
+  was slow because it included 15,600 lines of headers. That is why the split cannot beat it
+  on a full rebuild — a full rebuild has to parse those headers at least once no matter how
+  many files there are — and it is the measurement that would justify splitting the core
+  later, if anyone ever wants to pay for it. **The reason to keep the split is the structure,
+  and the release note says so rather than claiming a speed-up it does not have.**
+
+- **`bindings/Common.hpp` is `inline`, not an anonymous namespace** (0.20), and this is the
+  one part of the split that fails silently rather than loudly. The shared helpers were an
+  anonymous namespace in `main.cpp`, which is correct for one translation unit and wrong for
+  eight: an anonymous namespace in a header gives every `.cpp` its own private copy, so
+  `register_exceptions(m)` would fill in `main.cpp`'s copy of the `exc_*` handles and every
+  `raise_error` from any other file would go through a null one. It links, and it crashes at
+  runtime. `inline` gives one definition shared by all of them.
+
+  Two definitions escaped the first mechanical pass because they did not start with the
+  return type: `[[noreturn]] void raise_error` and a `const char*` function whose line the
+  pattern did not match. Those fail at link time, which is the good case.
+
+- **The precompiled header holds third-party headers only** (0.20). No `src/*.hpp` goes in
+  it. The bazalt headers are the ones that change during feature work, and a header inside
+  the PCH means every edit to it rebuilds the PCH first — a serial step in front of a
+  parallel build, for no gain, because a changed bazalt header already rebuilds all eight
+  files anyway. Third-party headers never change, so the PCH survives every rebuild.
+
+  Order inside it is load-bearing: pybind11 before volk. `volk.h` includes `<windows.h>`
+  when `VK_USE_PLATFORM_WIN32_KHR` is defined, `<windows.h>` defines `min` and `max` as
+  macros, and `pybind11/numpy.h` calls `std::min`. `main.cpp` had the right order by luck
+  for twenty releases; the PCH has it on purpose, with the reason next to it.
+
+- **Two registration orders are real, and one that looks real is not** (0.20). `py::arg(x) =
+  SomeEnum::VALUE` casts the default at `.def()` time, so every enum used as a default
+  argument must be registered first — that is why `bind_enums` runs first. `RenderTargetBase`
+  must be registered before `OffscreenTarget` and `SwapchainRenderer`, the module's only two
+  derived registrations — that is why `bind_targets` runs last, and both live in the same
+  file so the constraint cannot be split. `RenderTarget` as a *parameter* type constrains
+  nothing: pybind resolves a caster at the first Python call, not at `.def()` time. The call
+  order in `main.cpp` carries all three reasons, because the order is the only documentation
+  a future binding has.
+
+- **`build-dir` in `pyproject.toml` was the cheapest win in the release** (0.20), and it was
+  not in the plan. scikit-build-core builds in a temporary directory and deletes it unless
+  told otherwise, so every `pip install .` reconfigured CMake and rebuilt glfw, volk and
+  vk-bootstrap from scratch. Two lines of configuration took a rebuild from 66.1s to 36.6s
+  before a single line of C++ moved — a bigger improvement than the restructuring it was
+  measured in preparation for, and it ended up being the release's largest.
+
+  The lesson is about sequencing: **measure the thing you are about to optimize, because the
+  measurement is where you find out that most of it was not the thing you thought.** Of the
+  36.6s that remained, 10.2s was pip and CMake overhead no source change can move, which set
+  the ceiling on what the split could ever be worth. Had the baseline not been taken first,
+  the release would have credited the split with a 66→26s improvement that was mostly a
+  configuration default.
+
 ### Dispatch and volk
 
 - **Every device-level call goes through the per-Context table** (`ctx.vk()`, 0.15). 131
@@ -227,7 +323,7 @@ entry. The release is a label, not the organizing axis.
      everybody.
   3. **MSAA plus preserve is rejected, not supported.** The multisampled image is
      transient and the result lives in the resolve image, which is not what the next pass
-     renders into. The guard lives in `main.cpp` for the same reason as the
+     renders into. The guard lives in the binding layer for the same reason as the
      cross-Context one: it catches a user error, and the recording methods chain.
 
   Not guarded, and documented instead: a recording whose *only* pass preserves reads an
@@ -353,7 +449,7 @@ entry. The release is a label, not the organizing axis.
 
 - **A resource stays with its Context** (0.15). Hand one to the wrong command buffer and you
   get a `ResourceError` that names the mistake, not a driver crash. The guard lives in
-  `main.cpp`, not in the headers: `CommandBuffer` methods return `*this` for chaining and
+  the binding layer, not in the headers: `CommandBuffer` methods return `*this` for chaining and
   have no error channel, and this catches a **user error**, not a C++ invariant, so it
   belongs in the binding layer where the GIL is held and `raise_error` is legal. Every class
   got an `owner()` accessor (not `context()`, because `SwapchainRenderer` already has a
@@ -815,10 +911,96 @@ entry. The release is a label, not the organizing axis.
   exception class through the `unwrap()` helpers. `ShaderError` must be catchable on its
   own, or hot reload is pointless.
 
+- **Which exception a user error gets** (0.20). `ErrorCode` decides which `BazaltError` a
+  *bazalt* failure becomes, and says nothing about the errors the binding layer diagnoses
+  itself. Those had drifted into two answers for one question:
+  `image.read(layer=9)` raised `ResourceError` from the core and `image.update(pixels,
+  layer=9)` raised `ValueError` from the binding lambda. The C-contiguous rule was worse —
+  the *same sentence* arrived as `ResourceError` from `Buffer.update` and as `ValueError`
+  from `Image.update`, and the type stub documented only the first.
+
+  The line is **what had to be consulted to know it was wrong**:
+
+  - **`ValueError`** — the call is malformed on its own. A value outside a fixed range in
+    the signature (`frames_in_flight` is 1..4), a name outside a fixed set
+    (`validation="nonsense"`), a sequence of the wrong length (`region=` is four numbers).
+    No resource, no data, no device enters the decision, and fixing it means editing a
+    literal.
+  - **`BazaltError`, usually `ResourceError`** — the call is well formed and wrong for this
+    resource, this data or this GPU. A layer or mip the image does not have, a dtype or
+    shape its format does not accept, a strided array, a multisampled image being written.
+    Deciding it means asking an object.
+
+  Nine sites moved to `ResourceError` and three keep `ValueError`. The reason the
+  `ValueError` half is not folded into the hierarchy for tidiness: `except
+  bz.InitializationError` is the "fall back to headless" handler, and a typo in a keyword
+  argument must not be caught by it. `except bz.BazaltError` must not either. Python's own
+  answer for "your argument is nonsense" is already `ValueError`, and pybind raises it next
+  door for a failed cast, so this agrees with the language rather than inventing a rule.
+
+  Two things generalize past the fix. **A user error decided in the binding layer needs the
+  rule stated, because `unwrap()` does not reach it** — every one of the eleven was written
+  in isolation and each was locally defensible. And **the drift was invisible to the tests
+  that covered it**: `test_streaming.py` asserted `ValueError` five times and passed, because
+  a test written beside the code inherits the code's assumption. What catches this class is a
+  test that puts the two spellings of one question side by side
+  (`test_read_and_update_agree_on_the_exception_type`).
+
 - **Anything under a released GIL returns `std::expected`** (0.14). A pybind throw
   constructs a Python object, so it needs the GIL, and `raise_error` under
   `py::gil_scoped_release` is an access violation, not an exception. Both submit paths run
   without the GIL, so `unwrap` runs only after the GIL is back.
+
+  0.20 found that `record_frame` had never obeyed this, and the shape of the miss is worth
+  keeping. The rule was written down twice, in `require_same_context` ("the GIL is held
+  here, which is what makes raising legal at all") and in `present_command_buffer` ("a
+  diagnosis has to travel back as an Error and be raised by the caller"), and both comments
+  sit within thirty lines of the function that broke it. `record_frame` raised on a failed
+  `vkBeginCommandBuffer` or `vkEndCommandBuffer`, and both submit paths reach it with the
+  GIL released. **A rule stated in a comment is not enforced by anything.** The audit that
+  found it was not looking for it either: it was checking which functions were free of
+  pybind so they could move to a header, and `record_frame` came back "not free" for a
+  reason that turned out to be the bug. The general form: *when a refactor asks "does this
+  code depend on layer X", a surprising yes is worth reading before it is worked around.*
+
+- **A frame that is acquired and never submitted has to be given back** (0.20), and turning
+  a crash into an exception is what made this reachable. `acquire()` resets the slot's
+  in-flight fence, and only a submit signals it, so `present()` returning an error on a
+  failed `record_frame` left a fence nobody would ever signal — and `acquire()` waits on it
+  with `UINT64_MAX` three frames later. The 0.20 fix therefore replaced a crash with a
+  correct `bz.OutOfMemoryError` **followed by a hang**, which is worse than the crash: the
+  exception says the frame failed, and the traceback for the hang points at an unrelated
+  line in the next iteration of the loop.
+
+  `abandon_frame_()` submits nothing, waits on the acquire semaphore (the next
+  `vkAcquireNextImageKHR` needs it unsignalled) and signals the fence, then recreates the
+  swapchain, because Vulkan releases an acquired image on present or on swapchain
+  destruction and this frame does neither. The lesson is the general one: **every early
+  return between `acquire()` and `end_frame()` owes the slot the same bookkeeping
+  `end_frame` does.** Untested, and honestly so — the trigger is an out-of-memory result
+  from `vkBeginCommandBuffer`, which no test can provoke without an injected allocator.
+
+  The sibling had the same fence and one more failure on top of it: `end_frame` logged a
+  failed `vkQueueSubmit` and **presented anyway**, so `vkQueuePresentKHR` waited on a
+  render-finished semaphore that the failed submit was going to signal. It now skips the
+  present and abandons the frame through the same helper.
+
+  **The reason this looked like a bigger decision than it was is worth keeping, because the
+  reasoning was wrong.** `advance_submit_serial()` reserves a value on the Context timeline
+  under the queue lock, so a failed submit appears to strand it, and stranding a serial
+  looks like it needs either a hand-written signal or a redesign that reserves only after
+  success. Neither: a timeline signal must merely be **greater** than the current value, not
+  the next value, and every wait in bazalt is `>= N`
+  (`wait_for_serial`, `completed_submit_serial() >= upload_serial_`). So the next submit
+  signals a higher number and satisfies every wait on the skipped one. A monotonic counter
+  with `>=` waits absorbs a dropped reservation by construction. **Check what the
+  synchronization primitive actually promises before pricing a fix around it** — the answer
+  here turned a deferred release into four lines.
+
+  What the failed-submit path deliberately does NOT do is raise. `acquire()` already logs
+  and returns `False` on a lost frame, and the windowed path's contract is that a bad frame
+  is skipped rather than fatal. A frame lost to a failed submit is logged as an ERROR and
+  the loop continues, which is the same answer for the same shape of problem.
 
 ---
 
@@ -885,6 +1067,15 @@ permanent ceiling.
 ### Ceilings accepted on purpose
 
 These are not debt to pay, they are limits we chose. Each one names its upgrade path.
+
+- **`Error.hpp`'s `check()` puts the raw `VkResult` name in the message** (0.20). It is the
+  template behind essentially every internal Vulkan failure, so `VK_ERROR_OUT_OF_POOL_MEMORY`
+  reaches a Python user who cannot act on it. The 0.20 audit listed it as the highest-impact
+  message in the codebase and it was left alone on purpose: for a driver-level failure that
+  name is exactly what a bug report needs, and the alternative is either a translation table
+  for a long enum (wrong in both directions, and written from memory) or dropping the one
+  fact that identifies the failure. Upgrade path: none wanted. The messages worth improving
+  are the ones bazalt writes itself, and 0.20 did those.
 
 - **`recreate_swapchain` takes `vkDeviceWaitIdle`** (0.14), so a resize of one window
   stutters the other for a moment. It is correct, it only stutters. Upgrade path: narrow it
@@ -1150,7 +1341,23 @@ says what we did instead.
 - **String keys anywhere the Vulkan primitive is an index or a handle** — return a handle
   and read the result off it (the 0.9 timers).
 - **A separate "debt release"** — rule 5. A debt gets paid by the feature that really needs
-  it.
+  it. 0.20 is the one exception and rule 5 now carries the reason and the test for repeating
+  it. Note what 0.20 was NOT: it did not sweep up the open debt register. Debt #4 (the
+  skipped sync-validation test) and #5 (`supports_multiview`) are still open, because both
+  wait on something outside the release.
+
+- **`.export_values()` on a scoped enum** (0.20). It binds every member a second time as a
+  bare module attribute, so `bz.ShaderStage.VERTEX` had a twin `bz.VERTEX`. Fifteen of
+  twenty-two enums had it and seven did not, which made even the inconsistency invisible:
+  `bz.ALPHA` existed and `bz.RGBA8` did not. Two names collided and the later registration
+  silently won — `bz.VERTEX` resolved to `ShaderStage` and `bz.FLOAT` to `VertexFormat`, so
+  `BufferType.VERTEX` and `DataType.FLOAT` had no bare spelling at all. This is the "a second
+  spelling is not a convenience, it is a fork" lesson arriving through a default nobody
+  chose. The switch exists for unscoped C++98 enums; these are `enum class`.
+
+  Adding it to the other seven was the alternative and it is the wrong direction: it doubles
+  the fork instead of closing it, and it would put `LINEAR`, `NEVER`, `ALWAYS`, `KEEP` and
+  `ZERO` on the top level of the package.
 - **A fifth `ValidationMode` for shader printf** (0.18). The modes are exclusive states of
   how hard the layers check; printf composes with every one of them, and making it a mode
   would mean choosing between prints and sync validation. We took a separate switch.
@@ -1203,8 +1410,9 @@ says what we did instead.
   silent removals.
 - **Every public symbol from `_core.pyi` is touched by a test.** An unexercised binding is
   an unimplemented binding.
-- Add the `KEY_*` and `MOUSE_*` constants to `__all__` in `bazalt/__init__.py`. They work
-  through the star import today, but they are not in `__all__`.
+- ✅ Add the `KEY_*` and `MOUSE_*` constants to `__all__` in `bazalt/__init__.py` — DONE, and
+  it had been done for several releases while this line still asked for it. Found by the 0.20
+  audit. A checklist nothing tests is a checklist that drifts.
 - Performance: a pipeline cache on disk, and descriptor indexing.
 - Indirect draw / GPU-driven work and multi-submit: **ship them, or defer them with an
   explicit note.** Do not leave the question open in 1.0. For a Python library, indirect
@@ -1457,7 +1665,43 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   The size of a field is part of its threading contract.
 
 - **`main.cpp` needs `/bigobj`** (MSVC). Since 0.14 it passes the limit of 65,536 COFF
-  sections, and every pybind lambda is a template instantiation, so this only grows.
+  sections, and every pybind lambda is a template instantiation, so this only grows. 0.20
+  split the bindings into eight files, which is the actual answer to a growth curve a flag
+  can only postpone. The flag stays: any one of the eight can still grow into it.
+
+- **A binding that stores something must say so with `py::keep_alive`, and nothing checks
+  that it did** (0.20). `SwapchainRenderer(window, ctx)` called
+  `window.get_surface_provider()`, which hands back three lambdas capturing the raw
+  `GLFWwindow*` and a pointer to the `Window`'s own resize flag, and the renderer kept them
+  for its whole life. `del window` then left both pointers dangling and the next `present()`
+  read freed memory. There was no `py::keep_alive` anywhere in the module.
+
+  The general shape is worth more than the fix: **a C++ constructor taking `T&` and storing
+  anything derived from it needs `py::keep_alive<1, N>`, and the C++ side gives no hint that
+  it does.** `SurfaceProvider` is a value type holding `std::function`s, so it looks like it
+  owns its contents. Look for what the lambdas captured, not at what the struct is.
+
+  It is testable deterministically, which is not obvious: pybind's `keep_alive` stores a
+  strong reference on the nurse, so `sys.getrefcount(window)` rising by exactly one after
+  the renderer is built is the assertion. Dropping the window and presenting is the second
+  half, and on its own it is only a probabilistic check — freed memory often still reads.
+
+- **`offset + length > size` on unsigned operands is a bypass, not a bounds check** (0.20).
+  Six of them, and the Python boundary hands the offset straight through, so
+  `buffer.update(data, offset=2**64 - 10)` wrapped the sum to a small number, passed, and
+  reached a `memcpy` through a wild pointer. `fits_within(offset, length, size)` in
+  `Error.hpp` subtracts instead (`offset <= size && length <= size - offset`) and all six
+  call it, so they cannot drift apart. Test the near-maximum offset, not just the
+  one-past-the-end one — the latter passes on the broken form too.
+
+  **Five was the count the first sweep found, and the sixth shipped in the same release
+  it was fixed in.** `image.read(layer=)` is `base_layer + layers > array_layers_` on
+  `uint32_t`, so it was the identical shape one grep away, and the sweep had gone looking
+  for `offset` and `size` by name. The lesson is the grep, not the site: search the
+  *arithmetic* (`+` on the left of a comparison against any limit), because the operands
+  of this bug are called `base_layer` and `array_layers_` as readily as `offset` and
+  `size`. It also shows what the bug costs when it is not a `memcpy`: the read returned
+  layer 0's pixels and a validation ERROR, so a silently wrong array is the good case.
 - **Chaining bindings return a `shared_ptr` to self** — a `.def(&...)` returning
   `CommandBuffer&` would try a COPY under the automatic policy.
 - **A deferred lambda captures the `shared_ptr` by value**, and that is the hot-reload
@@ -1495,7 +1739,10 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   that, UINT16 read as UINT32 gave half of the indices.
 - **The macros from `<windows.h>`** arrive through volk with `VK_USE_PLATFORM_WIN32_KHR`.
   `max` and `min` catch qualified calls, so write `(std::ranges::max)(...)`. `ERROR`,
-  `LoadImage`, `CreateSemaphore`, `near` and `far` collide with our names.
+  `LoadImage`, `CreateSemaphore`, `near` and `far` collide with our names. 0.20 hit the same
+  thing from the other side: a precompiled header that put volk before pybind11 broke
+  `pybind11/numpy.h`, which calls `std::min` and has no parenthesis guard. **Include pybind11
+  first.** `main.cpp` did, by accident, for twenty releases.
 - **volk loads `vkCmdBeginRendering` only on 1.3.** On 1.2 only the `...KHR` name exists and
   the core symbol is null, so `alias_dynamic_rendering_entry_points()` substitutes them. The
   timeline semaphore is the same story: core in 1.2, but the feature bit needs an explicit

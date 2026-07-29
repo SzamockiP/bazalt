@@ -10,8 +10,10 @@ up as a validation error.
 
 import gc
 import pathlib
+import sys
 
 import numpy as np
+import pytest
 
 import bazalt as bz
 
@@ -89,3 +91,50 @@ def test_rerecording_a_command_buffer_drops_old_resources_safely(ctx, triangle_s
     record()  # clears the previous recording while nothing else is pending
     ctx.submit(cmd)
     assert target.color[0].read() is not None
+
+
+def test_a_renderer_keeps_its_window_alive(ctx):
+    """A SwapchainRenderer reads the Window on every present, and the Python
+    reference that says so is the caller's alone unless the binding ties them.
+
+    Window.get_surface_provider() hands the renderer three lambdas that capture
+    the raw GLFWwindow* and a pointer to the Window's own resize flag, and the
+    renderer keeps them for its whole life. So `del window` used to leave both
+    pointers dangling and present() read freed memory."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    try:
+        window = bz.Window(64, 64, "bazalt window lifetime")
+    except bz.WindowError:
+        pytest.skip("no display available")
+
+    renderer = None
+    try:
+        before = sys.getrefcount(window)
+        renderer = bz.SwapchainRenderer(window, ctx)
+        assert sys.getrefcount(window) == before + 1, "the renderer holds no reference to the window"
+
+        vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+        frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
+        pipeline = ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag).build(renderer)
+
+        cmd = ctx.create_command_buffer()
+        cmd.begin()
+        cmd.begin_rendering(renderer, clear_color=CLEAR)
+        cmd.bind_pipeline(pipeline)
+        cmd.draw(3)
+        cmd.end_rendering(renderer)
+
+        # The caller drops its only reference. Everything after this reads the
+        # Window through the renderer's captured pointers.
+        window = None
+        gc.collect()
+
+        for _ in range(ctx.frames_in_flight + 2):
+            bz.poll_events()
+            ctx.begin_frame()
+            if renderer.acquire():
+                renderer.present(cmd)
+    finally:
+        renderer = None
+        window = None

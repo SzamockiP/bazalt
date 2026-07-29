@@ -227,10 +227,16 @@ pixels = target.color[0].read()      # numpy (600, 800, 4) uint8
   images, then applies the edits in place. A mistake does not stop the application.
 - **Headless.** Draw into an offscreen target and read the pixels as a NumPy array. You need
   no window and no display.
+- **The window, and what arrives through it.** Keys, the mouse and the scroll wheel, plus
+  files dropped on the window, the clipboard through `bz.get_clipboard()` and
+  `bz.set_clipboard()`, an icon through `window.set_icon()` and the cursor through
+  `window.set_cursor_position()`.
 - **Tools for a picture that looks wrong.** The validation layers report through a Python
   logger. `Context(shader_printf=True)` sends `debugPrintfEXT()` from a shader to that
   logger. `Context(gpu_timing=True)` and `cmd.timer()` measure a frame or one slice of a
-  recording. `cmd.label()` makes a RenderDoc capture readable.
+  recording. `cmd.label()` makes a RenderDoc capture readable. A compiled shader also tells
+  you what bazalt read out of it: `shader.writes`, `shader.writes_unknown` and
+  `shader.prints`.
 - **Wide reach.** Vulkan 1.2 is the baseline and bazalt uses 1.3 where the driver has it. You
   ask for a capability by what it does, never by a version or an extension name.
 - **No ceiling.** `cmd.barrier()`, `raw_extensions` and the Vulkan handles stay open for the

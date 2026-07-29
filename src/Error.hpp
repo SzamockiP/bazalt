@@ -5,12 +5,14 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 // Unified error type for the whole library.
 //
 // Every fallible operation returns std::expected<T, Error>. The ErrorCode maps
-// 1:1 onto a Python exception class at the pybind boundary (see main.cpp), so
+// 1:1 onto a Python exception class at the pybind boundary (see
+// bindings/Common.hpp), so
 // the code a call site picks decides what the user is able to catch.
 //
 // The distinction that matters is *recoverability*: ShaderError must be
@@ -145,6 +147,21 @@ inline std::optional<Error> check(
     error.result = result;
     error.message = std::format("Vulkan: failed to {} ({})", what, vk_result_name(result));
     return error;
+}
+
+// Does [offset, offset + length) fit inside a region of `size` bytes?
+//
+// Every one of these bounds checks used to be written `offset + length > size`, which
+// is a bypass rather than a check: the operands are unsigned, so an offset near the type
+// maximum wraps the sum to a small number and the check passes. The Python boundary hands
+// these straight through, so `buffer.update(data, offset=2**64 - 10)` reached a memcpy.
+// Subtracting instead of adding cannot overflow, because the first test proves
+// `size - offset` does not wrap.
+template <typename T>
+constexpr bool fits_within(T offset, T length, T size)
+{
+    static_assert(std::is_unsigned_v<T>, "fits_within compares sizes, and a size is never negative");
+    return offset <= size && length <= size - offset;
 }
 
 // Constructors for non-Vulkan failures.

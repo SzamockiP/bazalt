@@ -92,8 +92,8 @@ inline DeviceUUID device_uuid(PFN_vkGetPhysicalDeviceProperties2 get_properties2
 // The entry points are fetched through vkGetInstanceProcAddr rather than
 // volkLoadInstance on purpose: volk's loader is global, so binding it to this
 // throwaway instance would silently redirect a live Context's instance-level
-// calls at an instance that is about to be destroyed. Same pattern main.cpp
-// already uses for vkCreateWin32SurfaceKHR.
+// calls at an instance that is about to be destroyed. Same pattern
+// bindings/Targets.cpp already uses for vkCreateWin32SurfaceKHR.
 inline std::expected<std::vector<Device>, Error> list_devices()
 {
     if (auto e = check(volkInitialize(), "initialize volk"))

@@ -24,9 +24,10 @@ def fullscreen_vert(ctx):
 
 
 def test_frames_in_flight_is_validated_before_touching_vulkan():
-    """ValueError, not InitializationError: a bad argument, and it must be
-    raised before any Vulkan work happens (a live session Context exists, and
-    only one Context may be alive per process)."""
+    """ValueError, not InitializationError: the argument is wrong on its own, and
+    `except bz.InitializationError` is the fall-back-to-headless handler, which
+    must not swallow a typo. It must also be refused before any Vulkan work
+    happens, so a rejected Context costs no device."""
     with pytest.raises(ValueError):
         bz.Context(frames_in_flight=0)
     with pytest.raises(ValueError):

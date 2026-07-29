@@ -94,7 +94,12 @@ public:
             if (!glfwInit())
             {
                 window_count_.fetch_sub(1);
-                return std::unexpected(err_window(describe_glfw_failure("Failed to initialize GLFW")));
+                // Framed around what the user hit, not around the C library bazalt
+                // happens to use. describe_glfw_failure appends GLFW's own text when
+                // it has any, and that detail is where the library name belongs.
+                return std::unexpected(err_window(describe_glfw_failure(
+                    "Bazalt cannot start the window system. Usually there is no "
+                    "display attached, or the display drivers are missing")));
             }
         }
 
@@ -108,7 +113,7 @@ public:
             {
                 glfwTerminate();
             }
-            return std::unexpected(err_window(describe_glfw_failure("Failed to create window")));
+            return std::unexpected(err_window(describe_glfw_failure("Bazalt cannot create the window")));
         }
 
         auto window = std::unique_ptr<Window>(new Window(width, height, title));
@@ -719,7 +724,7 @@ inline std::expected<void, Error> poll_events()
     {
         return std::unexpected(err_window(
             "No windows exist, so there is no event queue to drain. poll_events() "
-            "dispatches OS events to the open windows; create a Window first, and "
+            "dispatches OS events to the open windows. Create a Window first, and "
             "stop pumping once the last one is closed."));
     }
     glfwPollEvents();

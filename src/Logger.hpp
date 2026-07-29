@@ -20,7 +20,7 @@ namespace py = pybind11;
 //
 // NOTE: the enumerators are deliberately NOT spelled ERROR/WARNING/INFO —
 // <windows.h> (pulled in by volk via VK_USE_PLATFORM_WIN32_KHR) defines ERROR
-// as a macro. They are exported to Python under the uppercase names in main.cpp.
+// as a macro. bindings/Enums.cpp exports them under the uppercase names.
 enum class Severity
 {
     Info = 0,

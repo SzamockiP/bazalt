@@ -87,7 +87,7 @@ public:
         if (it->second != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
         {
             return std::unexpected(err_resource(
-                std::format("Binding {} is not a sampler binding; use set_buffer() for buffer bindings", binding)));
+                std::format("Binding {} is not a sampler binding. Use set_buffer() for buffer bindings", binding)));
         }
 
         if (!sampler)
@@ -148,7 +148,7 @@ public:
         {
             return std::unexpected(err_resource(
                 std::format(
-                    "Binding {} is not a storage-image binding; declare it with "
+                    "Binding {} is not a storage-image binding. Declare it with "
                     ".storage_image({}) on the pipeline builder",
                     binding,
                     binding)));
@@ -216,7 +216,7 @@ public:
         if (descType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
         {
             return std::unexpected(err_resource(
-                std::format("Binding {} is a sampler binding; use set_image() for image bindings", binding)));
+                std::format("Binding {} is a sampler binding. Use set_image() for image bindings", binding)));
         }
 
         for (size_t i = 0; i < sets_.size(); i++)

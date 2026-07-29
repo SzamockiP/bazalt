@@ -139,6 +139,54 @@ def test_the_verbs_0_18_removed_are_gone():
         assert hasattr(bz.CommandBuffer, pair)
 
 
+def _bound_classes():
+    return [obj for name in bz.__all__
+            if isinstance(obj := getattr(bz, name), type)]
+
+
+def test_every_bound_parameter_has_a_name():
+    """A `.def()` without `py::arg()` registers no parameter name, so only a
+    positional call works — while the stub names the parameter and invites a
+    keyword call that raises TypeError. Ten methods were in that state through
+    0.19, and nothing noticed because the README, the tests and all 28 examples
+    happen to call them positionally.
+
+    pybind11 writes the signature into __doc__ and falls back to `arg0`, `arg1`
+    for unnamed parameters, so the whole class of mistake is one scan. This
+    replaces a list of ten, which would go stale the next time somebody adds a
+    binding in a hurry."""
+    unnamed = re.compile(r"\barg\d+:")
+    offenders = []
+    for cls in _bound_classes():
+        for name, attr in vars(cls).items():
+            # __enter__/__exit__ and the other dunders are called by the
+            # interpreter, always positionally. Naming their parameters would be
+            # decoration nobody can use.
+            if name.startswith("__"):
+                continue
+            doc = getattr(attr, "__doc__", None) or ""
+            for line in doc.splitlines():
+                if unnamed.search(line):
+                    offenders.append(f"{cls.__name__}.{name}: {line.strip()}")
+    assert not offenders, "py::arg() missing, so these take no keyword arguments:\n" + "\n".join(offenders)
+
+
+def test_the_bare_enum_names_are_gone():
+    """0.20 dropped `.export_values()` from all 15 enums that had it.
+
+    It binds every member a SECOND time as a bare module attribute, so
+    `bz.ShaderStage.VERTEX` had a twin `bz.VERTEX` — around 60 of them, none in
+    the stub and none in `__all__`. Two collided outright: `bz.VERTEX` resolved
+    to ShaderStage and `bz.FLOAT` to VertexFormat, because whichever enum bound
+    last silently won. The qualified spelling is the only one."""
+    for bare in ("VERTEX", "FLOAT", "NONE", "ERROR", "INFO", "WARNING", "LINE",
+                 "POINT", "FILL", "ALPHA", "STATIC", "DYNAMIC", "DEVICE",
+                 "SHADER", "WINDOW", "INDEX", "STORAGE", "UNIFORM", "GENERAL",
+                 "COMPUTE", "FRAGMENT", "WINDOWED", "CLOCKWISE"):
+        assert not hasattr(bz, bare), (
+            f"bz.{bare} exists again — some enum got .export_values() back")
+
+
 def test_stub_does_not_reference_an_undefined_buffer_type():
     """The old stub annotated arrays as `buffer`, which is not a Python type.
 

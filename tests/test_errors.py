@@ -167,3 +167,39 @@ def test_dynamic_buffer_in_static_set_is_a_resource_error(ctx, triangle_shaders)
     with pytest.raises(bz.ResourceError) as info:
         static_set.set_buffer(0, dynamic)
     assert "allocate_frame_set" in str(info.value)
+
+
+def test_read_and_update_agree_on_the_exception_type(ctx):
+    """The same mistake on the same object got two different exception types
+    until 0.20: read(layer=) raised bz.ResourceError from the C++ core and
+    update(layer=) raised ValueError from the binding lambda. So did the
+    C-contiguous rule, which Buffer.update reported as ResourceError and
+    Image.update as ValueError."""
+    img = ctx.create_image(np.zeros((4, 4, 4), dtype=np.uint8))
+    pixels = np.zeros((4, 4, 4), dtype=np.uint8)
+
+    with pytest.raises(bz.ResourceError):
+        img.read(layer=3)
+    with pytest.raises(bz.ResourceError):
+        img.update(pixels, layer=3)
+
+    strided = np.zeros((4, 8, 4), dtype=np.uint8)[:, ::2]
+    with pytest.raises(bz.ResourceError):
+        img.update(strided)
+    buf = ctx.create_buffer([0.0] * 8, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+    with pytest.raises(bz.ResourceError):
+        buf.update(np.zeros((2, 4), dtype=np.float32)[:, ::2])
+
+
+def test_a_malformed_argument_is_still_a_ValueError(ctx):
+    """The other half of the rule: an argument wrong on its own stays out of the
+    BazaltError hierarchy, so `except bz.BazaltError` never hides a typo."""
+    img = ctx.create_image(np.zeros((4, 4, 4), dtype=np.uint8))
+
+    with pytest.raises(ValueError):
+        img.update(np.zeros((4, 4, 4), dtype=np.uint8), region=(0, 0, 4))
+    with pytest.raises(ValueError):
+        bz.Context(frames_in_flight=9)
+    with pytest.raises(ValueError):
+        bz.Context(validation="nonsense")
+    assert not issubclass(bz.BazaltError, ValueError)
