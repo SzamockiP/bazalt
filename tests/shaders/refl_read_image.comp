@@ -1,0 +1,7 @@
+#version 450
+// Reads the storage image a graphics pass wrote and copies texel (0,0) into a
+// buffer, so a test can assert on what the fragment shader left behind.
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, rgba8) uniform readonly image2D src;
+layout(std430, set = 0, binding = 1) buffer Out { vec4 sampled; };
+void main() { sampled = imageLoad(src, ivec2(0, 0)); }

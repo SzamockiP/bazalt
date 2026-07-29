@@ -127,6 +127,55 @@ def test_editing_a_fragment_shader_rebuilds_the_pipeline(ctx, tmp_path):
     assert is_green(poll_until(render, is_green))
 
 
+def test_a_reload_replaces_the_shader_reflection(ctx, tmp_path):
+    """0.19: reflection travels with the SPIR-V it describes, through the WATCHER's
+    path and not only through compile_shader.
+
+    Reflection is computed in compile_parts, which is what the watcher calls, and
+    ShaderModule::replace takes it alongside the new words. Computed one level up in
+    compile() instead, every reloaded module would keep its original's answers — so
+    the barrier tracker would order the shader that used to be there, silently and
+    only after an edit.
+
+    The two versions below swap which binding is written, so a stale reflection is
+    not merely out of date but exactly wrong.
+    """
+    src = tmp_path / "swap.comp"
+    reads_a_writes_b = """#version 450
+layout(local_size_x = 1) in;
+layout(std430, set = 0, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, set = 0, binding = 1) buffer B { uint b[]; };
+void main() { b[0] = a[0] + 1u; }
+"""
+    writes_a_reads_b = """#version 450
+layout(local_size_x = 1) in;
+layout(std430, set = 0, binding = 0) buffer A { uint a[]; };
+layout(std430, set = 0, binding = 1) readonly buffer B { uint b[]; };
+void main() { a[0] = b[0] + 1u; }
+"""
+    src.write_text(reads_a_writes_b)
+    module = ctx.compile_shader(str(src), bz.ShaderStage.COMPUTE)
+    assert module.writes == [(0, 1)]
+
+    # A pipeline keeps the module registered with the watcher.
+    pipeline = (ctx.compute_pipeline()
+                .shader(module)
+                .storage_buffer(0, set=0)
+                .storage_buffer(1, set=0)
+                .build())
+    assert pipeline is not None
+
+    touch(src, writes_a_reads_b)
+    # Sleeping between drains is load-bearing: the watcher polls on an interval AND
+    # waits for two consecutive polls to agree on the new mtime, so a tight loop of
+    # submits finishes long before it has looked twice.
+    deadline = time.monotonic() + 5.0
+    while module.writes != [(0, 0)] and time.monotonic() < deadline:
+        time.sleep(POLL * 3)
+        drive_drain(ctx)
+    assert module.writes == [(0, 0)], "the watcher replaced the words but not the reflection"
+
+
 def test_a_reload_keeps_the_include_dirs(ctx, tmp_path):
     """0.16: the watcher holds only the module, so every setting the first
     compile depended on has to live on it.

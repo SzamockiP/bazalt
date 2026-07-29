@@ -117,7 +117,8 @@ public:
                 log_(parts.error());
                 continue; // old module stays; the app keeps rendering
             }
-            module->replace(parts->module, std::move(parts->includes), std::move(parts->spirv));
+            module->replace(
+                parts->module, std::move(parts->includes), std::move(parts->spirv), std::move(parts->reflection));
             replaced.push_back(module.get());
         }
 

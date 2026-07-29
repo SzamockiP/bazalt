@@ -109,6 +109,13 @@ class Feature(IntEnum):
     TESSELLATION = 8
     #: The GEOMETRY stage. Absent on MoltenVK, and slow on modern hardware.
     GEOMETRY_SHADER = 9
+    #: A FRAGMENT shader writing a storage buffer or storage image
+    #: (fragmentStoresAndAtomics). Needed by the graphics storage_image()
+    #: declarator, which shipped in 0.17 without it.
+    FRAGMENT_STORES = 10
+    #: The same for the pre-rasterization stages — vertex, tessellation, geometry
+    #: (vertexPipelineStoresAndAtomics).
+    VERTEX_STAGE_STORES = 11
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -393,6 +400,41 @@ class ShaderModule:
     def spirv(self) -> bytes:
         """The SPIR-V words. `open(p, "wb").write(shader.spirv)` produces a
         file that compile_shader("*.spv", stage) loads back."""
+        ...
+    @property
+    def writes(self) -> list[tuple[int, int]]:
+        """The (set, binding) pairs this shader WRITES, from SPIR-V reflection
+        (0.19). Sorted, and empty when the shader provably writes nothing.
+
+        This is what lets bazalt insert automatic barriers for a storage buffer or
+        storage image written by a graphics shader, which used to need a manual
+        cmd.barrier(). It counts stores, image writes and atomics — a buffer touched
+        only by atomicAdd is written.
+
+        Exposed mainly so the reflection has a referee: it is also the answer to
+        "why is there no barrier here". Reads are not reported; bazalt takes the
+        bindings a shader may read from the pipeline builder's declarators.
+        """
+        ...
+    @property
+    def writes_unknown(self) -> bool:
+        """True when the write scan could not follow something, so every binding is
+        assumed written and no barrier is narrowed (0.19).
+
+        Set for ready SPIR-V (a .spv file or source=bytes), because bazalt only
+        knows the write opcodes its own GLSL and HLSL compile down to. Also set by a
+        descriptor passed into a function or appearing in a pointer phi. The rule is
+        one-directional: the tracker may be pessimistic, never optimistic.
+        """
+        ...
+    @property
+    def prints(self) -> bool:
+        """True when the shader calls debugPrintfEXT (0.19).
+
+        A printf Context compiles only these shaders unoptimized — a print is a
+        non-semantic instruction the optimizer may delete, so it cannot survive -O.
+        Every other shader in that Context is optimized normally.
+        """
         ...
 
 class Image:

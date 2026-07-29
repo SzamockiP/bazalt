@@ -103,6 +103,8 @@ public:
         tracker_.reset();
         bound_graphics_sets_.clear();
         bound_compute_sets_.clear();
+        bound_graphics_pipeline_.reset();
+        bound_compute_pipeline_.reset();
         tracked_writes_ = false;
         in_rendering_ = false;
         rendering_insert_pos_ = 0;
@@ -536,6 +538,26 @@ public:
 
     CommandBuffer& bind_pipeline(std::shared_ptr<Pipeline> pipeline)
     {
+        // Remembered as record-time state, not only pushed as a replay lambda: the
+        // tracker needs the bound pipeline to ask its shaders what they write, and
+        // before 0.19 a draw had no way to find out which pipeline it belonged to.
+        // Keyed on the bind point exactly as bind_descriptor_set already is, so a
+        // compute and a graphics pipeline can be bound at once.
+        //
+        // No lifetime problem: the replay lambda captures the same shared_ptr, and a
+        // CommandBuffer is not owned by the Context, so this is not the "a deferred
+        // lambda holds nothing that indirectly holds the Context" case.
+        if (pipeline)
+        {
+            if (pipeline->bind_point() == VK_PIPELINE_BIND_POINT_COMPUTE)
+            {
+                bound_compute_pipeline_ = pipeline;
+            }
+            else
+            {
+                bound_graphics_pipeline_ = pipeline;
+            }
+        }
         commands_.push_back([pipeline](VkCommandBuffer cmd, const FrameContext& frame)
                             { frame.vk->vkCmdBindPipeline(cmd, pipeline->bind_point(), pipeline->get()); });
         return *this;
@@ -1785,98 +1807,117 @@ private:
         }
     }
 
-    // Storage buffers in graphics shaders are conservatively READS. Writes are
-    // invisible without shader reflection — the documented limit of auto mode;
-    // cmd.barrier() covers that case by hand.
+    // Does the pipeline bound at this bind point write (set, binding)?
     //
-    // The stage mask is the Context's, not a VERTEX|FRAGMENT literal: with
-    // tessellation or geometry enabled a graphics pipeline has stages those two
-    // bits do not name, and a barrier that omits a stage does not cover the read
-    // it was recorded for. Legal by construction — the mask only ever contains
-    // bits whose feature the device enabled.
-    void track_draw_()
+    // Asks each of its shaders' reflection at record time, so a hot-reload
+    // replace() is picked up without invalidating anything. Fail-open on purpose:
+    // with no pipeline bound there is nothing to ask, and the answer has to be the
+    // conservative one — a draw with no pipeline is a bug the layers name precisely,
+    // and guessing "not written" there would silently drop a real barrier.
+    bool pipeline_writes_(const std::shared_ptr<Pipeline>& pipeline, std::uint32_t set, std::uint32_t binding) const
+    {
+        if (!pipeline)
+        {
+            return true;
+        }
+        return std::ranges::any_of(
+            pipeline->shaders(),
+            [&](const std::shared_ptr<ShaderModule>& s) { return s && s->reflection().writes(set, binding); });
+    }
+
+    // The shared body of track_draw_ and track_dispatch_. Before 0.19 these were
+    // two functions that disagreed about the same question: the graphics one called
+    // every storage buffer a READ (so a fragment SSBO write was invisible) and
+    // handled storage images not at all, while the compute one called both
+    // READ+WRITE unconditionally. Now they differ only in their stage mask, which is
+    // the only thing that was ever really different about them.
+    //
+    // What reflection changes in each direction:
+    //
+    //  * Graphics gains the writes it never saw. A fragment imageStore was worse
+    //    than untracked — DescriptorSet::set_storage_image already recorded the
+    //    image as resting in GENERAL, so the layout the descriptor promised and the
+    //    layout the image was in disagreed unless the user wrote a barrier by hand.
+    //  * Compute LOSES barriers it did not need. `use(..., writes=true)` wipes read
+    //    state, so two dispatches that only read the same input SSBO used to get a
+    //    WAW barrier between them, and tracked_writes_ also switched on the
+    //    per-replay memory barrier. A `readonly buffer` shared down a chain of
+    //    passes is the common case, not an exotic one.
+    //
+    // Safe in both directions because of the fail-open invariant in
+    // SpirvReflect.hpp: a barrier only ever disappears on a positive proof that no
+    // store, atomic or imageWrite touches that binding.
+    void track_descriptor_uses_(
+        const std::unordered_map<uint32_t, std::shared_ptr<DescriptorSet>>& sets,
+        const std::shared_ptr<Pipeline>& pipeline,
+        VkPipelineStageFlags stages)
     {
         if (!auto_barriers_)
         {
             return;
         }
-        for (auto& [idx, set] : bound_graphics_sets_)
+        for (const auto& [set_index, set] : sets)
         {
             for (const auto& bb : set->buffers())
             {
                 if (bb.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
                 {
-                    track_use_(bb.buffer, context_->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT, false);
+                    const bool writes = pipeline_writes_(pipeline, set_index, bb.binding);
+                    track_use_(
+                        bb.buffer,
+                        stages,
+                        writes ? (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT) : VK_ACCESS_SHADER_READ_BIT,
+                        writes);
                 }
                 else if (bb.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
                 {
-                    track_use_(bb.buffer, context_->all_shader_stages(), VK_ACCESS_UNIFORM_READ_BIT, false);
+                    // A uniform buffer is read-only by definition, so there is
+                    // nothing for reflection to decide.
+                    track_use_(bb.buffer, stages, VK_ACCESS_UNIFORM_READ_BIT, false);
                 }
             }
-            // A sampled image only needs a barrier if the tracker has already
-            // seen it — i.e. compute wrote it earlier in this recording and it
-            // is still in GENERAL. An uploaded texture the tracker never saw
-            // rests in SHADER_READ_ONLY and is left untouched (the pre-0.9
-            // behaviour), so ordinary texturing pays nothing.
             for (const auto& bi : set->images())
             {
-                if (bi.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && tracker_.tracks(bi.image.get()))
+                if (bi.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                 {
+                    // GENERAL either way: it is the only layout a storage image is
+                    // read or written in, so an unwritten one still needs the
+                    // transition. Only the access mask and the WAW ordering narrow.
+                    const bool writes = pipeline_writes_(pipeline, set_index, bi.binding);
                     track_image_use_(
                         bi.image,
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        context_->all_shader_stages(),
-                        VK_ACCESS_SHADER_READ_BIT,
-                        false);
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        stages,
+                        writes ? (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT) : VK_ACCESS_SHADER_READ_BIT,
+                        writes);
+                }
+                else if (bi.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && tracker_.tracks(bi.image.get()))
+                {
+                    // A sampled image only needs a barrier if the tracker has
+                    // already seen it — i.e. something wrote it earlier in this
+                    // recording and it is still in GENERAL. An uploaded texture the
+                    // tracker never saw rests in SHADER_READ_ONLY and is left
+                    // untouched, so ordinary texturing pays nothing.
+                    track_image_use_(
+                        bi.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, stages, VK_ACCESS_SHADER_READ_BIT, false);
                 }
             }
         }
     }
 
-    // Compute SSBOs are conservatively READ+WRITE: without reflection there is
-    // no telling a `readonly buffer` from a mutated one, and the pessimism
-    // costs one barrier, not correctness.
+    // The stage mask is the Context's, not a VERTEX|FRAGMENT literal: with
+    // tessellation or geometry enabled a graphics pipeline has stages those two bits
+    // do not name, and a barrier that omits a stage does not cover the read it was
+    // recorded for. Legal by construction — the mask only ever holds bits whose
+    // feature the device enabled.
+    void track_draw_()
+    {
+        track_descriptor_uses_(bound_graphics_sets_, bound_graphics_pipeline_, context_->all_shader_stages());
+    }
+
     void track_dispatch_()
     {
-        if (!auto_barriers_)
-        {
-            return;
-        }
-        for (auto& [idx, set] : bound_compute_sets_)
-        {
-            for (const auto& bb : set->buffers())
-            {
-                if (bb.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
-                {
-                    track_use_(
-                        bb.buffer,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                        true);
-                }
-                else if (bb.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
-                {
-                    track_use_(bb.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_UNIFORM_READ_BIT, false);
-                }
-            }
-            // Storage images are conservatively READ+WRITE, like storage
-            // buffers: without reflection a `readonly` image is indistinguishable
-            // from a written one, and GENERAL is the only layout either is
-            // accessed in. The transition to GENERAL (from UNDEFINED on first
-            // use, or from a prior use's layout) rides on this barrier.
-            for (const auto& bi : set->images())
-            {
-                if (bi.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-                {
-                    track_image_use_(
-                        bi.image,
-                        VK_IMAGE_LAYOUT_GENERAL,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                        true);
-                }
-            }
-        }
+        track_descriptor_uses_(bound_compute_sets_, bound_compute_pipeline_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     }
 
     std::shared_ptr<Context> context_;
@@ -1898,6 +1939,10 @@ private:
     std::size_t rendering_insert_pos_ = 0;
     std::unordered_map<uint32_t, std::shared_ptr<DescriptorSet>> bound_graphics_sets_;
     std::unordered_map<uint32_t, std::shared_ptr<DescriptorSet>> bound_compute_sets_;
+    // Record-time state, so the tracker can read the bound shaders' reflection.
+    // Cleared in begin() with the sets, because both describe one recording.
+    std::shared_ptr<Pipeline> bound_graphics_pipeline_;
+    std::shared_ptr<Pipeline> bound_compute_pipeline_;
 
     // ── GPU timers (query pool survives begin(); results read after submit) ──
     VkQueryPool timer_pool_ = VK_NULL_HANDLE;

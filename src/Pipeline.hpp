@@ -418,6 +418,18 @@ public:
         return layout_;
     }
 
+    // Every stage this pipeline was built from, in pipeline order.
+    //
+    // Returned as the live list rather than a precomputed "what does this pipeline
+    // write" map, and that is the point: the tracker asks each module for its
+    // reflection at RECORD time, so a hot-reload replace() is picked up with
+    // nothing to invalidate. It is the same trick desc_.recreate uses for the
+    // handles, applied to what the handles mean.
+    const std::vector<std::shared_ptr<ShaderModule>>& shaders() const
+    {
+        return desc_.shaders;
+    }
+
     // ── Hot reload ────────────────────────────────────────────────────────────
 
     // True when this pipeline was built from `module`. The watcher asks this to
@@ -1121,6 +1133,37 @@ public:
                 {
                     return std::unexpected(e.error());
                 }
+            }
+        }
+        // A graphics shader that WRITES a descriptor needs a feature bit, and which
+        // one depends on its stage. Asked of the reflection rather than of the
+        // declarators, so declaring a storage image and only reading it costs
+        // nothing — the gate fires on what the shader does, not on what the pipeline
+        // could do.
+        //
+        // written_bindings rather than writes(): a module whose scan came out
+        // `writes_unknown` (foreign SPIR-V) claims to write everything, and demanding
+        // the feature for every .spv shader would break callers who never write at
+        // all. Such a module reaching this point behaves as it did before 0.19 — the
+        // layers report it — which is the honest trade for a diagnostic.
+        for (const std::shared_ptr<ShaderModule>* slot :
+             {&vertex_shader_, &tess_control_shader_, &tess_evaluation_shader_, &geometry_shader_, &fragment_shader_})
+        {
+            if (!*slot || (*slot)->reflection().written_bindings.empty())
+            {
+                continue;
+            }
+            const bool fragment = (*slot)->stage() == ShaderStage::FRAGMENT;
+            const Feature needed = fragment ? Feature::FRAGMENT_STORES : Feature::VERTEX_STAGE_STORES;
+            if (!context_.supports(needed))
+            {
+                return std::unexpected(err_shader(
+                    std::format(
+                        "the {} shader writes a storage buffer or image, which requires the {} feature; "
+                        "create the Context with features=[bz.Feature.{}] (or optional=[...])",
+                        ShaderCompiler::stage_name((*slot)->stage()),
+                        feature_name(needed),
+                        feature_name(needed))));
             }
         }
         // The two halves of one statement: a patch has no meaning without stages to

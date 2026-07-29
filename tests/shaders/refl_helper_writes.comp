@@ -1,0 +1,8 @@
+#version 450
+// The fail-open case. The write happens inside a helper, and at -O0 nothing is
+// inlined, so a one-pass walk cannot see what the callee does. The descriptor is
+// passed as an argument, so it must be reported as written anyway.
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, rgba8) uniform image2D img;
+void paint(in ivec2 at) { imageStore(img, at, vec4(0.5)); }
+void main() { paint(ivec2(gl_GlobalInvocationID.xy)); }

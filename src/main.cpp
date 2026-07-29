@@ -1126,6 +1126,8 @@ PYBIND11_MODULE(_core, m)
         .value("INDEPENDENT_BLEND", Feature::INDEPENDENT_BLEND)
         .value("TESSELLATION", Feature::TESSELLATION)
         .value("GEOMETRY_SHADER", Feature::GEOMETRY_SHADER)
+        .value("FRAGMENT_STORES", Feature::FRAGMENT_STORES)
+        .value("VERTEX_STAGE_STORES", Feature::VERTEX_STAGE_STORES)
         .export_values();
 
     py::enum_<BufferType>(m, "BufferType")
@@ -1349,7 +1351,31 @@ PYBIND11_MODULE(_core, m)
             {
                 const auto& words = self.spirv();
                 return py::bytes(reinterpret_cast<const char*>(words.data()), words.size() * sizeof(uint32_t));
-            });
+            })
+        // Which (set, binding) pairs this shader writes, from SPIR-V reflection.
+        //
+        // Bound rather than kept internal for one reason: it is the only way the
+        // parser gets a referee in CI. Sync validation is skipped there (debt #4),
+        // so without this property the atomics path, the access-chain path and the
+        // fail-open cases are checked by nothing that runs on a runner. It is also
+        // the answer to "why is there no barrier here".
+        .def_property_readonly(
+            "writes",
+            [](const ShaderModule& self)
+            {
+                const auto& reflection = self.reflection();
+                py::list out;
+                for (const auto& [set, binding] : reflection.written_bindings)
+                {
+                    out.append(py::make_tuple(set, binding));
+                }
+                return out;
+            })
+        // True when the write scan could not follow something and every binding is
+        // therefore assumed written. See the invariant in SpirvReflect.hpp.
+        .def_property_readonly(
+            "writes_unknown", [](const ShaderModule& self) { return self.reflection().writes_unknown; })
+        .def_property_readonly("prints", [](const ShaderModule& self) { return self.reflection().prints; });
 
     // Image + Sampler replace the old Texture, which fused VkImage, view and a
     // per-texture sampler into one object. Samplers are cached on the Context;

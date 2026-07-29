@@ -1,0 +1,6 @@
+#version 450
+// imageAtomicAdd reaches the image through OpImageTexelPointer. Missing that one
+// alias opcode reports an atomically-incremented image as read-only.
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, r32ui) uniform uimage2D hist;
+void main() { imageAtomicAdd(hist, ivec2(gl_GlobalInvocationID.xy), 1u); }

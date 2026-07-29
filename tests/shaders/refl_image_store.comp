@@ -1,0 +1,5 @@
+#version 450
+// OpImageWrite, whose pointer operand is the image loaded from the variable.
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2D dst;
+void main() { imageStore(dst, ivec2(gl_GlobalInvocationID.xy), vec4(1.0)); }

@@ -23,6 +23,10 @@ public:
     {
         std::shared_ptr<Buffer> buffer;
         VkDescriptorType type;
+        // Which binding it went to. Recorded since 0.19 because shader reflection
+        // answers "is this written?" per (set, binding), and the tracker knows the
+        // set from the map key but had no way to name the binding.
+        std::uint32_t binding;
     };
 
     // Same idea for images: STORAGE_IMAGE (compute read-write, GENERAL layout)
@@ -32,6 +36,7 @@ public:
     {
         std::shared_ptr<Image> image;
         VkDescriptorType type;
+        std::uint32_t binding;
     };
 
     // sets: 1 element (static) or frames_in_flight elements (frame)
@@ -115,7 +120,7 @@ public:
                 .pTexelBufferView = nullptr};
             context_->vk().vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
-        bound_images_.push_back({std::move(image), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER});
+        bound_images_.push_back({std::move(image), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, binding});
         samplers_.push_back(std::move(sampler));
         return {};
     }
@@ -177,7 +182,7 @@ public:
         // blocks before read(), so contents exist by then, and read()'s
         // transition needs the resting layout to be GENERAL, not UNDEFINED.
         image->mark_has_contents(VK_IMAGE_LAYOUT_GENERAL);
-        bound_images_.push_back({std::move(image), VK_DESCRIPTOR_TYPE_STORAGE_IMAGE});
+        bound_images_.push_back({std::move(image), VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, binding});
         return {};
     }
 
@@ -232,7 +237,7 @@ public:
                 .pTexelBufferView = nullptr};
             context_->vk().vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
-        buffers_.push_back({std::move(buffer), descType});
+        buffers_.push_back({std::move(buffer), descType, binding});
         return {};
     }
 
