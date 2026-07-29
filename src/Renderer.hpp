@@ -730,7 +730,8 @@ public:
 
         // The lock ends before recreate_swapchain below: that path takes the
         // device idle, which must not happen while holding the queue mutex.
-        VkResult result;
+        VkResult result = VK_SUCCESS;
+        bool submitted = false;
         {
             std::lock_guard lock(context_->queue_mutex());
 
@@ -767,8 +768,25 @@ public:
                         Source::Device,
                         std::format("Failed to submit draw command buffer ({})", vk_result_name(submit_result)));
             }
+            else
+            {
+                submitted = true;
+                result = context_->vk().vkQueuePresentKHR(present_queue_, &presentInfo);
+            }
+        }
 
-            result = context_->vk().vkQueuePresentKHR(present_queue_, &presentInfo);
+        if (!submitted)
+        {
+            // A submit that fails signals nothing, so presenting would wait on a
+            // render-finished semaphore nobody is going to signal, and the slot's
+            // fence is still as acquire() left it. Give the frame back instead.
+            //
+            // The reserved timeline serial is dropped with it, and that needs no
+            // repair: a timeline signal only has to be GREATER than the current
+            // value, and every wait is "value >= N", so the next submit's higher
+            // signal satisfies anything that was waiting for the skipped one.
+            abandon_frame_();
+            return;
         }
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR ||

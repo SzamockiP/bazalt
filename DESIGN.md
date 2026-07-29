@@ -980,14 +980,27 @@ entry. The release is a label, not the organizing axis.
   `end_frame` does.** Untested, and honestly so — the trigger is an out-of-memory result
   from `vkBeginCommandBuffer`, which no test can provoke without an injected allocator.
 
-  The sibling is **found and not fixed**: `end_frame` logs a failed `vkQueueSubmit` and
-  presents anyway, which waits on a render-finished semaphore that submit was going to
-  signal. The same fence is stranded, so the hang is identical. It is not the same one-line
-  fix, because `advance_submit_serial()` has already reserved a value on the Context
-  timeline that the failed submit was going to signal, and anything waiting for that serial
-  is stranded too. Fixing it is a decision about whether a reserved serial can be signalled
-  by hand or must never be reserved before a submit succeeds — pre-1.0, and it wants its own
-  release rather than a patch at the end of this one.
+  The sibling had the same fence and one more failure on top of it: `end_frame` logged a
+  failed `vkQueueSubmit` and **presented anyway**, so `vkQueuePresentKHR` waited on a
+  render-finished semaphore that the failed submit was going to signal. It now skips the
+  present and abandons the frame through the same helper.
+
+  **The reason this looked like a bigger decision than it was is worth keeping, because the
+  reasoning was wrong.** `advance_submit_serial()` reserves a value on the Context timeline
+  under the queue lock, so a failed submit appears to strand it, and stranding a serial
+  looks like it needs either a hand-written signal or a redesign that reserves only after
+  success. Neither: a timeline signal must merely be **greater** than the current value, not
+  the next value, and every wait in bazalt is `>= N`
+  (`wait_for_serial`, `completed_submit_serial() >= upload_serial_`). So the next submit
+  signals a higher number and satisfies every wait on the skipped one. A monotonic counter
+  with `>=` waits absorbs a dropped reservation by construction. **Check what the
+  synchronization primitive actually promises before pricing a fix around it** — the answer
+  here turned a deferred release into four lines.
+
+  What the failed-submit path deliberately does NOT do is raise. `acquire()` already logs
+  and returns `False` on a lost frame, and the windowed path's contract is that a bad frame
+  is skipped rather than fatal. A frame lost to a failed submit is logged as an ERROR and
+  the loop continues, which is the same answer for the same shape of problem.
 
 ---
 

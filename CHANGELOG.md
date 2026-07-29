@@ -34,6 +34,11 @@ audit: the tests were green the whole time.
   three frames later. The exception is now followed by the frame being released:
   the fence is signalled, the acquire semaphore is consumed and the swapchain is
   recreated.
+- **A failed submit presented anyway.** `present()` logged a `vkQueueSubmit`
+  failure and then called `vkQueuePresentKHR`, which waits on a render-finished
+  semaphore that the failed submit was going to signal. It strands the same frame
+  fence as well. The present is now skipped and the frame is given back, so the
+  window logs the lost frame and carries on with the next one.
 - **`record_frame` raised a Python exception with the GIL released.** A failed
   `vkBeginCommandBuffer` or `vkEndCommandBuffer` took the interpreter down
   instead of raising `bz.DeviceLostError`. Both submit paths reach it without the
