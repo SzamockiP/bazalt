@@ -15,7 +15,12 @@ enum class Access
     SHADER_WRITE,
     VERTEX_READ,
     INDEX_READ,
-    UNIFORM_READ
+    UNIFORM_READ,
+    // The draw or dispatch arguments themselves, read by the command processor
+    // rather than by a shader. Appended, not inserted, because pybind enum values
+    // are API. One entry covers both draw and dispatch: DRAW_INDIRECT is the stage
+    // the spec names for indirect *and* dispatch-indirect data.
+    INDIRECT_READ
 };
 
 struct StageAccess
@@ -49,6 +54,8 @@ inline constexpr StageAccess to_vk(Access access, VkPipelineStageFlags all_shade
             return {VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_INDEX_READ_BIT};
         case Access::UNIFORM_READ:
             return {all_shader_stages, VK_ACCESS_UNIFORM_READ_BIT};
+        case Access::INDIRECT_READ:
+            return {VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT};
     }
     // Not std::unreachable(): pybind enums accept arbitrary ints.
     return {all_shader_stages, VK_ACCESS_SHADER_READ_BIT};

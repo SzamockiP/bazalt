@@ -209,6 +209,9 @@ class Access(IntEnum):
     VERTEX_READ = 2
     INDEX_READ = 3
     UNIFORM_READ = 4
+    #: The draw or dispatch arguments themselves, read by the command processor
+    #: rather than by a shader — the hazard behind cmd.draw_indirect (0.19).
+    INDIRECT_READ = 5
 
 class Format(IntEnum):
     """Pixel formats.
@@ -866,6 +869,45 @@ class CommandBuffer:
         ...
     def dispatch(self, group_count_x: int, group_count_y: int = 1,
                  group_count_z: int = 1) -> CommandBuffer: ...
+
+    def draw_indirect(self, buffer: Buffer, offset: int = 0,
+                      count: int = 1) -> CommandBuffer:
+        """Draw with arguments read out of a buffer, so a compute pass decides what
+        gets drawn and the CPU never learns the answer (0.19).
+
+        `buffer` must be BufferType.STORAGE — the only type carrying the indirect
+        usage flag, and what a compute shader needs anyway. bazalt declares no
+        struct type: the layout is VkDrawIndirectCommand, four uint32s, and numpy
+        writes it directly.
+
+            args = ctx.create_buffer(
+                np.array([vertex_count, instances, 0, 0], dtype=np.uint32),
+                bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+            cmd.draw_indirect(args)
+
+        A std430 GLSL struct of four uints is byte-identical, so a compute shader
+        can zero it with cmd.fill_buffer and accumulate instanceCount atomically.
+        count>1 reads that many consecutive structs and needs
+        Feature.MULTI_DRAW_INDIRECT. To draw nothing, write 0 into instanceCount —
+        count=0 is refused, because only one of the two can be decided on the GPU.
+        """
+        ...
+    def draw_indexed_indirect(self, buffer: Buffer, offset: int = 0,
+                              count: int = 1) -> CommandBuffer:
+        """draw_indirect through the bound index buffer (0.19).
+
+        The struct is VkDrawIndexedIndirectCommand, five words: indexCount,
+        instanceCount, firstIndex, vertexOffset (SIGNED int32), firstInstance.
+        """
+        ...
+    def dispatch_indirect(self, buffer: Buffer, offset: int = 0) -> CommandBuffer:
+        """Dispatch with the group counts read out of a buffer (0.19).
+
+        The struct is VkDispatchIndirectCommand: three uint32s, x/y/z. There is no
+        count — the command takes exactly one. Unlike the draw verbs this needs no
+        feature bit.
+        """
+        ...
 
     def barrier(self, buffer: Buffer, src: Access, dst: Access) -> CommandBuffer:
         """Record a buffer barrier by hand. Required between dependent uses

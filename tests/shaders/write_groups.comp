@@ -1,0 +1,22 @@
+#version 450
+
+// Writes a VkDispatchIndirectCommand — three uints, the group counts — for
+// dispatch_indirect to obey. The GPU deciding how much work the next pass does is
+// the point: no readback between the pass that decides and the one that obeys.
+layout(local_size_x = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer Groups {
+    uint x;
+    uint y;
+    uint z;
+} groups;
+
+layout(push_constant) uniform Push {
+    uint want_x;
+} push;
+
+void main() {
+    groups.x = push.want_x;
+    groups.y = 1;
+    groups.z = 1;
+}

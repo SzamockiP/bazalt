@@ -607,6 +607,85 @@ public:
         return *this;
     }
 
+    // ── Indirect draw and dispatch (0.19) ─────────────────────────────────────
+    //
+    // The arguments come out of a buffer the GPU can write, so a compute pass
+    // decides what gets drawn and the CPU never learns the answer. That is the
+    // whole feature: culling, LOD selection and particle compaction stop needing a
+    // readback between the pass that decides and the draw that obeys.
+    //
+    // Three verbs rather than a buffer= kwarg on draw/draw_indexed/dispatch,
+    // because such a kwarg would invalidate vertex_count and instances in the same
+    // signature — the shape 0.15 rejected for the cross-Context transfer. They
+    // return expected because they have real preconditions, unlike draw().
+    //
+    // bazalt declares no struct type for the arguments. The layout is
+    // VkDrawIndirectCommand and numpy already writes it:
+    //
+    //     np.array([[vertex_count, instance_count, first_vertex, first_instance]],
+    //              dtype=np.uint32)
+    //
+    // A dtype that exists only to be converted fails the scope test's second
+    // question, and a std430 struct in GLSL is byte-identical to the above.
+    std::expected<void, Error> draw_indirect(
+        std::shared_ptr<Buffer> buffer,
+        VkDeviceSize offset = 0,
+        std::uint32_t count = 1)
+    {
+        // 16 bytes: vertexCount, instanceCount, firstVertex, firstInstance.
+        if (auto e = check_indirect_(buffer, offset, count, sizeof(VkDrawIndirectCommand), "draw_indirect"); !e)
+        {
+            return std::unexpected(e.error());
+        }
+        track_indirect_(buffer);
+        track_draw_();
+        commands_.push_back(
+            [buffer = std::move(buffer), offset, count](VkCommandBuffer cmd, const FrameContext& frame)
+            { frame.vk->vkCmdDrawIndirect(cmd, buffer->get(), offset, count, sizeof(VkDrawIndirectCommand)); });
+        return {};
+    }
+
+    std::expected<void, Error> draw_indexed_indirect(
+        std::shared_ptr<Buffer> buffer,
+        VkDeviceSize offset = 0,
+        std::uint32_t count = 1)
+    {
+        // 20 bytes, and note vertexOffset is SIGNED: indexCount, instanceCount,
+        // firstIndex, vertexOffset (int32), firstInstance.
+        if (auto e =
+                check_indirect_(buffer, offset, count, sizeof(VkDrawIndexedIndirectCommand), "draw_indexed_indirect");
+            !e)
+        {
+            return std::unexpected(e.error());
+        }
+        track_indirect_(buffer);
+        track_draw_();
+        commands_.push_back(
+            [buffer = std::move(buffer), offset, count](VkCommandBuffer cmd, const FrameContext& frame)
+            {
+                frame.vk->vkCmdDrawIndexedIndirect(
+                    cmd, buffer->get(), offset, count, sizeof(VkDrawIndexedIndirectCommand));
+            });
+        return {};
+    }
+
+    // No count: vkCmdDispatchIndirect takes exactly one VkDispatchIndirectCommand
+    // (12 bytes, x/y/z group counts), so there is no multi-dispatch to gate.
+    // Deliberately NOT refused inside a rendering scope, because plain dispatch()
+    // is not either — one rule for both.
+    std::expected<void, Error> dispatch_indirect(std::shared_ptr<Buffer> buffer, VkDeviceSize offset = 0)
+    {
+        if (auto e = check_indirect_(buffer, offset, 1, sizeof(VkDispatchIndirectCommand), "dispatch_indirect"); !e)
+        {
+            return std::unexpected(e.error());
+        }
+        track_indirect_(buffer);
+        track_dispatch_();
+        commands_.push_back([buffer = std::move(buffer), offset](VkCommandBuffer cmd, const FrameContext& frame)
+                            { frame.vk->vkCmdDispatchIndirect(cmd, buffer->get(), offset); });
+        return {};
+    }
+
     // Manual-mode barrier (also legal, if redundant, in auto mode). Refused
     // inside a rendering scope: vkCmdPipelineBarrier is invalid there, and in
     // manual mode nothing is hoisted by magic — that would be a second,
@@ -1375,11 +1454,18 @@ public:
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                 .pNext = nullptr,
                 .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                // INDIRECT_COMMAND_READ is in here for the same reason
+                // VERTEX_ATTRIBUTE_READ is (0.19): the canonical indirect chain has
+                // compute writing the draw arguments, so frame N+1's command
+                // processor reads exactly what frame N's dispatch is still writing.
+                // Missing it is invisible without sync validation.
                 .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
-                                 VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT};
+                                 VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
+                                 VK_ACCESS_INDIRECT_COMMAND_READ_BIT};
             // Not constexpr any more: the shader-stage half of this mask depends on
             // which stages the device enabled (see Context::all_shader_stages).
-            const VkPipelineStageFlags stages = context_->all_shader_stages() | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+            const VkPipelineStageFlags stages = context_->all_shader_stages() | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                                                VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
             frame.vk->vkCmdPipelineBarrier(vkCmd, stages, stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
         }
         for (auto& cmd_func : commands_)
@@ -1578,6 +1664,84 @@ private:
         {
             used_buffers_.push_back(buffer);
         }
+    }
+
+    // Everything the three indirect verbs check, in one place so they cannot
+    // disagree about which buffer is legal or what the message says.
+    std::expected<void, Error> check_indirect_(
+        const std::shared_ptr<Buffer>& buffer,
+        VkDeviceSize offset,
+        std::uint32_t count,
+        VkDeviceSize stride,
+        const char* what)
+    {
+        if (!buffer)
+        {
+            return std::unexpected(err_resource(std::format("{}: buffer is null", what)));
+        }
+        // Only BufferType::STORAGE carries VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, so
+        // this names the fix instead of leaving the layers to report a usage flag.
+        if (buffer->buffer_type() != BufferType::STORAGE)
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: the arguments must live in a BufferType.STORAGE buffer, which is the "
+                    "one that carries the indirect usage flag. A compute shader writing the "
+                    "draw arguments needs it to be a storage buffer anyway.",
+                    what)));
+        }
+        // The spec requires a 4-byte-aligned offset, and every argument struct is a
+        // run of 32-bit words, so an unaligned one is always a mistake.
+        if (offset % 4 != 0)
+        {
+            return std::unexpected(
+                err_resource(std::format("{}: offset must be a multiple of 4, got {}", what, offset)));
+        }
+        if (count == 0)
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: count must be at least 1. To draw nothing, write 0 into the "
+                    "instanceCount of the argument struct — that is the GPU-side way to say it.",
+                    what)));
+        }
+        if (offset + static_cast<VkDeviceSize>(count) * stride > buffer->size())
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: {} argument struct(s) of {} bytes at offset {} need {} bytes, but the "
+                    "buffer is {}",
+                    what,
+                    count,
+                    stride,
+                    offset,
+                    offset + static_cast<VkDeviceSize>(count) * stride,
+                    buffer->size())));
+        }
+        // count>1 is multiDrawIndirect, which is NOT free: it is a feature bit, and
+        // this is the release that finally gives Feature.MULTI_DRAW_INDIRECT an API
+        // to be reachable through. Checked at record time rather than in the
+        // binding, so the C++ API is as safe as the Python one.
+        if (count > 1 && !context_->supports(Feature::MULTI_DRAW_INDIRECT))
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: count>1 requires the MULTI_DRAW_INDIRECT feature; create the Context "
+                    "with features=[bz.Feature.MULTI_DRAW_INDIRECT] (or optional=[...]), or "
+                    "issue one call per draw.",
+                    what)));
+        }
+        return {};
+    }
+
+    // The command processor reads the arguments at DRAW_INDIRECT, which is earlier
+    // than any shader stage — so a compute pass that wrote them in this recording
+    // needs the barrier this produces, and hoist_or_push_ lifts it out of a
+    // rendering scope on its own.
+    void track_indirect_(const std::shared_ptr<Buffer>& buffer)
+    {
+        track_use_(buffer, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT, false);
+        record_buffer_use_(buffer);
     }
 
     void track_use_(

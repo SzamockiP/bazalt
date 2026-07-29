@@ -1,0 +1,47 @@
+#version 450
+
+// Writes a VkDrawIndirectCommand for draw_indirect to obey. The std430 layout
+// below is byte-identical to the struct Vulkan reads, which is why bazalt declares
+// no type of its own for it.
+//
+// This is the shape DESIGN.md names as the workaround for having no GPU-side draw
+// COUNT: one draw command whose instanceCount a compute pass accumulates
+// atomically, rather than N commands and vkCmdDrawIndirectCount.
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) buffer DrawArgs {
+    uint vertexCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint firstInstance;
+} args;
+
+layout(std430, set = 0, binding = 1) readonly buffer Candidates {
+    float score[];
+};
+
+layout(push_constant) uniform Push {
+    uint count;
+    float threshold;
+} push;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+
+    // instanceCount is left alone here: cmd.fill_buffer already zeroed the whole
+    // struct, which is the prerequisite that landed in 0.18 for exactly this.
+    // Writing vertexCount from one invocation races nothing — it is a different
+    // word from the one the atomics below touch.
+    if (i == 0) {
+        args.vertexCount = 6;
+        args.firstVertex = 0;
+        args.firstInstance = 0;
+    }
+
+    if (i >= push.count) {
+        return;
+    }
+    if (score[i] > push.threshold) {
+        atomicAdd(args.instanceCount, 1u);
+    }
+}

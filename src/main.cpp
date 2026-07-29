@@ -1176,6 +1176,7 @@ PYBIND11_MODULE(_core, m)
         .value("VERTEX_READ", Access::VERTEX_READ)
         .value("INDEX_READ", Access::INDEX_READ)
         .value("UNIFORM_READ", Access::UNIFORM_READ)
+        .value("INDIRECT_READ", Access::INDIRECT_READ)
         .export_values();
 
     // Pixel formats — the name VertexFormat freed in 0.4.
@@ -1960,6 +1961,48 @@ PYBIND11_MODULE(_core, m)
             py::arg("group_count_x"),
             py::arg("group_count_y") = 1,
             py::arg("group_count_z") = 1)
+        // Indirect draw/dispatch: the arguments come out of a storage buffer the
+        // GPU can write, so a compute pass decides what gets drawn. Chaining is
+        // preserved (return self) even though these are fallible — unwrap raises,
+        // and a successful call keeps reading like every other recording verb.
+        .def(
+            "draw_indirect",
+            [](std::shared_ptr<CommandBuffer> self,
+               std::shared_ptr<Buffer> buffer,
+               VkDeviceSize offset,
+               std::uint32_t count)
+            {
+                require_same_context(self->owner(), buffer->owner(), "draw_indirect");
+                unwrap(self->draw_indirect(std::move(buffer), offset, count), nullptr);
+                return self;
+            },
+            py::arg("buffer"),
+            py::arg("offset") = 0,
+            py::arg("count") = 1)
+        .def(
+            "draw_indexed_indirect",
+            [](std::shared_ptr<CommandBuffer> self,
+               std::shared_ptr<Buffer> buffer,
+               VkDeviceSize offset,
+               std::uint32_t count)
+            {
+                require_same_context(self->owner(), buffer->owner(), "draw_indexed_indirect");
+                unwrap(self->draw_indexed_indirect(std::move(buffer), offset, count), nullptr);
+                return self;
+            },
+            py::arg("buffer"),
+            py::arg("offset") = 0,
+            py::arg("count") = 1)
+        .def(
+            "dispatch_indirect",
+            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, VkDeviceSize offset)
+            {
+                require_same_context(self->owner(), buffer->owner(), "dispatch_indirect");
+                unwrap(self->dispatch_indirect(std::move(buffer), offset), nullptr);
+                return self;
+            },
+            py::arg("buffer"),
+            py::arg("offset") = 0)
         .def(
             "barrier",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, Access src, Access dst)

@@ -105,7 +105,9 @@ def test_renamed_and_new_api_is_declared():
                      "def geometry_shader", "def patch_control_points",
                      "color: Optional[Image | Sequence[Image]]",
                      "def dropped_files", "def set_cursor_position", "def set_icon",
-                     "def get_clipboard", "def set_clipboard"):
+                     "def get_clipboard", "def set_clipboard",
+                     "INDIRECT_READ = 5", "def draw_indirect",
+                     "def draw_indexed_indirect", "def dispatch_indirect"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 

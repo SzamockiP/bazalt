@@ -113,7 +113,15 @@ if(MSVC)
     # /bigobj: main.cpp is the whole binding layer in one translation unit, and
     # 0.14 pushed it past COFF's 65,536-section limit. Every pybind lambda is a
     # template instantiation, so this only ever grows.
-    target_compile_options(_core PRIVATE /Zc:__cplusplus /bigobj)
+    #
+    # /utf-8: the sources ARE UTF-8, but MSVC assumes the system code page for
+    # both the source and the execution charset. Without this an em dash in an
+    # error message reaches Python as a single 0x97 byte, which is not valid
+    # UTF-8 — so the message arrives with a replacement character in it, or (when
+    # it goes through std::format) empty. Eleven user-facing messages were
+    # affected before 0.19. Telling the compiler the truth about the encoding is
+    # the root fix; policing the prose for non-ASCII characters is not.
+    target_compile_options(_core PRIVATE /Zc:__cplusplus /bigobj /utf-8)
 else()
     target_compile_options(_core PRIVATE -Wno-interference-size)
 endif()
