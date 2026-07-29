@@ -44,7 +44,7 @@ inline std::expected<VkSampleCountFlagBits, Error> validate_sample_count(std::ui
     {
         return std::unexpected(err_resource(
             std::format(
-                "samples={} is not a valid MSAA count on this GPU; use a power of two "
+                "samples={} is not a valid MSAA count on this GPU. Use a power of two "
                 "in 1..{} (query it with bz.Context.max_samples())",
                 samples,
                 max)));
@@ -294,7 +294,7 @@ public:
             {
                 return std::unexpected(err_resource(
                     std::format(
-                        "a cube RenderTarget implies 6 layers; drop layers= or pass layers=6, got {}", layers)));
+                        "a cube RenderTarget implies 6 layers. Drop layers= or pass layers=6. Got layers={}", layers)));
             }
             if (width != height)
             {
@@ -305,7 +305,9 @@ public:
         }
         if (layers == 0 || mip_levels == 0)
         {
-            return std::unexpected(err_resource("layers and mip_levels must be >= 1"));
+            return std::unexpected(err_resource(
+                std::format(
+                    "layers and mip_levels must be at least 1. Got layers={}, mip_levels={}", layers, mip_levels)));
         }
         // Cap the mip chain to the dimensions, like create_image: a level count past
         // the full chain fails at vkCreateImage (and trips the validation layer), so
@@ -336,8 +338,8 @@ public:
             {
                 return std::unexpected(err_resource(
                     std::format(
-                        "{} is a depth format and cannot be a colour attachment; "
-                        "pass it as depth= instead",
+                        "{} is a depth format and cannot be a colour attachment. "
+                        "Pass it as depth= instead",
                         format_name(f))));
             }
         }
@@ -345,7 +347,7 @@ public:
         {
             return std::unexpected(err_resource(
                 std::format(
-                    "{} is not a depth format; use bz.Format.D32F, or bz.Format.DEPTH_STENCIL "
+                    "{} is not a depth format. Use bz.Format.D32F, or bz.Format.DEPTH_STENCIL "
                     "when the pass needs a stencil buffer",
                     format_name(*depth))));
         }
@@ -468,7 +470,7 @@ public:
             {
                 return std::unexpected(err_resource(
                     std::format(
-                        "a {} image is a depth attachment and cannot go in color=; pass it as depth=",
+                        "a {} image is a depth attachment and cannot go in color=. Pass it as depth=",
                         format_name(image->format()))));
             }
         }
@@ -476,7 +478,7 @@ public:
         {
             return std::unexpected(err_resource(
                 std::format(
-                    "depth= needs a depth format, got {}; create the image with bz.Format.D32F, "
+                    "depth= needs a depth format, got {}. Create the image with bz.Format.D32F, "
                     "or bz.Format.DEPTH_STENCIL when the pass needs a stencil buffer",
                     format_name(depth->format()))));
         }
@@ -640,7 +642,7 @@ public:
         if (colors_.empty())
         {
             return std::unexpected(
-                err_resource("read_pixels() on a depth-only RenderTarget; read target.depth instead"));
+                err_resource("read_pixels() does not work on a depth-only RenderTarget. Read target.depth instead"));
         }
         return colors_[0]->read();
     }
@@ -1163,12 +1165,12 @@ inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::laye
     if (i >= layers_)
     {
         return std::unexpected(
-            err_resource(std::format("layer {} is out of range; this target has {} layer(s)", i, layers_)));
+            err_resource(std::format("layer {} is out of range. This target has {} layer(s)", i, layers_)));
     }
     if (mip >= mip_levels_)
     {
         return std::unexpected(
-            err_resource(std::format("mip {} is out of range; this target has {} mip level(s)", mip, mip_levels_)));
+            err_resource(std::format("mip {} is out of range. This target has {} mip level(s)", mip, mip_levels_)));
     }
     return std::make_shared<SubresourceTarget>(shared_from_this(), i, mip);
 }
@@ -1183,7 +1185,7 @@ inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::all_
     if (layers_ <= 1)
     {
         return std::unexpected(
-            err_resource("all_layers() needs a layered target (layers>1 or cube); this target has 1 layer"));
+            err_resource("all_layers() needs a layered target (layers>1 or cube). This target has 1 layer"));
     }
     return std::make_shared<MultiviewTarget>(shared_from_this());
 }

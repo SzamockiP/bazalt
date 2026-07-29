@@ -56,8 +56,8 @@ public:
     virtual std::expected<void, Error> update(std::span<const std::byte> /*data*/, size_t /*offset*/ = 0)
     {
         return std::unexpected(err_resource(
-            "update() is only supported on DYNAMIC buffers; "
-            "create the buffer with MemoryUsage.DYNAMIC instead"));
+            "update() is only supported on DYNAMIC buffers. "
+            "Create the buffer with MemoryUsage.DYNAMIC instead"));
     }
 
     // Copies the buffer's contents back to host memory. Buffers carry no

@@ -49,7 +49,7 @@ def test_three_channel_arrays_are_refused_with_a_padding_hint(ctx):
     arr = np.zeros((4, 4, 3), dtype=np.uint8)
     with pytest.raises(bz.ResourceError) as info:
         ctx.create_image(arr)
-    assert "pad" in str(info.value)
+    assert "pad" in str(info.value).lower()
 
 
 def test_strided_arrays_are_refused(ctx):

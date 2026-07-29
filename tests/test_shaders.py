@@ -280,11 +280,11 @@ def test_spirv_bytes_get_the_same_checks_as_a_file(ctx):
     with pytest.raises(bz.ShaderError, match="VERTEX"):
         ctx.compile_shader("mem.frag", bz.ShaderStage.VERTEX, source=frag.spirv)
 
-    with pytest.raises(bz.ShaderError, match="magic number"):
+    with pytest.raises(bz.ShaderError, match="4-byte marker"):
         ctx.compile_shader("junk.frag", bz.ShaderStage.FRAGMENT, source=b"\x00" * 16)
 
     # Not a whole number of 32-bit words: the wrong argument, not a truncated
-    # binary, so the message says so instead of reporting a bad magic number.
+    # binary, so the message says so instead of reporting the missing marker.
     with pytest.raises(bz.ShaderError, match="multiple of 4"):
         ctx.compile_shader("junk.frag", bz.ShaderStage.FRAGMENT, source=b"\x00" * 15)
 

@@ -721,8 +721,8 @@ public:
         if (in_rendering_)
         {
             return std::unexpected(err_resource(
-                "cmd.barrier() is not allowed inside a rendering scope; "
-                "record it before begin_rendering"));
+                "cmd.barrier() is not allowed inside a rendering scope. "
+                "Record it before begin_rendering"));
         }
         const StageAccess s = to_vk(src, context_->all_shader_stages());
         const StageAccess d = to_vk(dst, context_->all_shader_stages());
@@ -749,16 +749,16 @@ public:
         if (in_rendering_)
         {
             return std::unexpected(err_resource(
-                "cmd.barrier() is not allowed inside a rendering scope; "
-                "record it before begin_rendering"));
+                "cmd.barrier() is not allowed inside a rendering scope. "
+                "Record it before begin_rendering"));
         }
         const auto old_layout = image_layout_for(src);
         const auto new_layout = image_layout_for(dst);
         if (!old_layout || !new_layout)
         {
             return std::unexpected(err_resource(
-                "cmd.barrier(image, ...) takes Access.SHADER_WRITE (GENERAL) or "
-                "Access.SHADER_READ (SHADER_READ_ONLY); other accesses are buffer-only"));
+                "cmd.barrier(image, ...) takes Access.SHADER_WRITE or Access.SHADER_READ. "
+                "The other accesses apply to buffers only."));
         }
         const StageAccess s = to_vk(src, context_->all_shader_stages());
         const StageAccess d = to_vk(dst, context_->all_shader_stages());
@@ -793,13 +793,13 @@ public:
         if (in_rendering_)
         {
             return std::unexpected(err_resource(
-                "cmd.generate_mipmaps() is not allowed inside a rendering scope; "
-                "record it before begin_rendering"));
+                "cmd.generate_mipmaps() is not allowed inside a rendering scope. "
+                "Record it before begin_rendering"));
         }
         if (image->mip_levels() <= 1)
         {
             return std::unexpected(err_resource(
-                "generate_mipmaps: image has a single mip level; create it with "
+                "generate_mipmaps: image has a single mip level. Create it with "
                 "mip_levels>1 (empty) or mipmaps=True (from pixels/files)"));
         }
         if (!Image::can_generate_mips(*context_, image->format()))
@@ -858,8 +858,8 @@ public:
         if (in_rendering_)
         {
             return std::unexpected(err_resource(
-                "cmd.copy_image() is not allowed inside a rendering scope; "
-                "record it before begin_rendering"));
+                "cmd.copy_image() is not allowed inside a rendering scope. "
+                "Record it before begin_rendering"));
         }
         if (src->width() != dst->width() || src->height() != dst->height() || src->format() != dst->format() ||
             src->array_layers() != dst->array_layers())
@@ -867,7 +867,7 @@ public:
             return std::unexpected(err_resource(
                 std::format(
                     "copy_image: source and destination must match in size, format and layer "
-                    "count; got {}x{} {} ({} layers) into {}x{} {} ({} layers). A resize or a "
+                    "count. Got {}x{} {} ({} layers) into {}x{} {} ({} layers). A resize or a "
                     "format change is a render pass, not a copy.",
                     src->width(),
                     src->height(),
@@ -881,7 +881,7 @@ public:
         if (src->samples() != 1 || dst->samples() != 1)
         {
             return std::unexpected(err_resource(
-                "copy_image: a multisampled image cannot be copied; render into it and "
+                "copy_image: a multisampled image cannot be copied. Render into it and "
                 "read the resolved attachment"));
         }
         const auto src_layout = image_layout_for(src_access);
@@ -947,19 +947,19 @@ public:
         if (src.get() == dst.get())
         {
             return std::unexpected(err_resource(
-                "blit_image: source and destination are the same image; a blit within one "
+                "blit_image: source and destination are the same image. A blit within one "
                 "image is what generate_mipmaps does"));
         }
         if (in_rendering_)
         {
             return std::unexpected(err_resource(
-                "cmd.blit_image() is not allowed inside a rendering scope; "
-                "record it before begin_rendering"));
+                "cmd.blit_image() is not allowed inside a rendering scope. "
+                "Record it before begin_rendering"));
         }
         if (src->samples() != 1 || dst->samples() != 1)
         {
             return std::unexpected(err_resource(
-                "blit_image: a multisampled image cannot be blitted; render into it and "
+                "blit_image: a multisampled image cannot be blitted. Render into it and "
                 "blit the resolved attachment"));
         }
         // A blit filters, and filtering is a format capability rather than a
@@ -1029,8 +1029,8 @@ public:
         if (in_rendering_)
         {
             return std::unexpected(err_resource(
-                "cmd.copy_buffer() is not allowed inside a rendering scope; "
-                "record it before begin_rendering"));
+                "cmd.copy_buffer() is not allowed inside a rendering scope. "
+                "Record it before begin_rendering"));
         }
         const VkDeviceSize length = size != 0 ? size : (src->size() > src_offset ? src->size() - src_offset : 0);
         if (length == 0)
@@ -1041,7 +1041,7 @@ public:
         {
             return std::unexpected(err_resource(
                 std::format(
-                    "copy_buffer: the region does not fit; {} bytes at offset {} of a {}-byte source "
+                    "copy_buffer: the region does not fit. It is {} bytes at offset {} of a {}-byte source "
                     "into offset {} of a {}-byte destination",
                     length,
                     src_offset,
@@ -1086,15 +1086,15 @@ public:
         if (in_rendering_)
         {
             return std::unexpected(err_resource(
-                "cmd.fill_buffer() is not allowed inside a rendering scope; "
-                "record it before begin_rendering"));
+                "cmd.fill_buffer() is not allowed inside a rendering scope. "
+                "Record it before begin_rendering"));
         }
         if (offset % 4 != 0 || (size != 0 && size % 4 != 0))
         {
             return std::unexpected(err_resource(
                 std::format(
                     "fill_buffer: offset and size must be multiples of 4 (the value is one "
-                    "32-bit word repeated); got offset={}, size={}",
+                    "32-bit word repeated). Got offset={}, size={}",
                     offset,
                     size)));
         }
@@ -1103,7 +1103,7 @@ public:
         {
             return std::unexpected(err_resource(
                 std::format(
-                    "fill_buffer: the region does not fit; {} bytes at offset {} of a {}-byte buffer",
+                    "fill_buffer: the region does not fit. It is {} bytes at offset {} of a {}-byte buffer",
                     length,
                     offset,
                     buffer->size())));
@@ -1130,8 +1130,8 @@ public:
         if (in_rendering_)
         {
             return std::unexpected(err_resource(
-                "cmd.clear_image() is not allowed inside a rendering scope; "
-                "record it before begin_rendering"));
+                "cmd.clear_image() is not allowed inside a rendering scope. "
+                "Record it before begin_rendering"));
         }
         if (format_info(image->format()).depth)
         {
@@ -1751,7 +1751,7 @@ private:
         {
             return std::unexpected(err_resource(
                 std::format(
-                    "{}: count>1 requires the MULTI_DRAW_INDIRECT feature; create the Context "
+                    "{}: count>1 requires the MULTI_DRAW_INDIRECT feature. Create the Context "
                     "with features=[bz.Feature.MULTI_DRAW_INDIRECT] (or optional=[...]), or "
                     "issue one call per draw.",
                     what)));

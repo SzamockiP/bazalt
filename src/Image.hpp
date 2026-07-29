@@ -801,13 +801,13 @@ public:
         if (!has_contents_.load())
         {
             return std::unexpected(err_resource(
-                "read() called on an Image that has no contents yet; upload to it or "
+                "read() called on an Image that has no contents yet. Upload to it or "
                 "render into it first"));
         }
         if (samples_ != VK_SAMPLE_COUNT_1_BIT)
         {
             return std::unexpected(err_resource(
-                "read() called on a multisampled image; read the target's resolved "
+                "read() called on a multisampled image. Read the target's resolved "
                 "single-sample attachment (target.color[i] / target.depth) instead"));
         }
         if (base_layer + layers > array_layers_)

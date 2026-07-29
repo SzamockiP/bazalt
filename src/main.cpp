@@ -209,7 +209,12 @@ namespace
         {
             return int_default;
         }
-        raise_error(err_resource("Could not infer data type from list elements"));
+        raise_error(err_resource(
+            std::format(
+                "Bazalt cannot infer the data type from a list of {}. It reads the first "
+                "element, and it recognises bool, int and float. Pass data_type= to say it, "
+                "for example data_type=bz.DataType.FLOAT.",
+                py::str(py::type::of(list[0])).cast<std::string>())));
     }
 
     // Calls fn(data, nbytes) with the list packed as the requested element type.
@@ -344,8 +349,8 @@ namespace
             if (channels == 3)
             {
                 raise_error(err_resource(
-                    "create_image: 3-channel images have no portable GPU format; "
-                    "pad to 4 channels first, e.g. "
+                    "create_image: 3-channel images have no portable GPU format. "
+                    "Pad to 4 channels first, e.g. "
                     "np.concatenate([arr, np.full_like(arr[..., :1], 255)], axis=-1)"));
             }
             raise_error(err_resource(
@@ -697,7 +702,7 @@ static std::uint32_t spec_constant_bytes(const py::object& value)
     else
     {
         raise_error(err_resource(
-            "A specialization constant must be a bool, an int or a float; those are the "
+            "A specialization constant must be a bool, an int or a float. Those are the "
             "scalar types SPIR-V can specialize"));
     }
     return bytes;
@@ -1412,7 +1417,7 @@ PYBIND11_MODULE(_core, m)
                 if (self->samples() != 1)
                 {
                     throw py::value_error(
-                        "update(): a multisampled image cannot be uploaded to; it is rendered "
+                        "update(): a multisampled image cannot be uploaded to. It is rendered "
                         "into and resolved out");
                 }
                 if (layer >= self->array_layers())
@@ -2308,7 +2313,7 @@ PYBIND11_MODULE(_core, m)
                 {
                     raise_error(err_window(
                         std::format(
-                            "set_icon needs an RGBA8 array of dtype uint8, not {}; convert it with "
+                            "set_icon needs an RGBA8 array of dtype uint8, not {}. Convert it with "
                             "arr.astype(np.uint8)",
                             py::str(array.dtype()).cast<std::string>())));
                 }
@@ -2325,7 +2330,7 @@ PYBIND11_MODULE(_core, m)
                 {
                     raise_error(err_window(
                         std::format(
-                            "set_icon needs 4 channels (RGBA), got {}; an icon has an alpha channel", array.shape(2))));
+                            "set_icon needs 4 channels (RGBA), got {}. An icon has an alpha channel", array.shape(2))));
                 }
                 // memcpy ignores strides, so a view like arr[::2] or arr.T would
                 // copy other bytes. The 0.4 rule, applied again.
@@ -2405,7 +2410,7 @@ PYBIND11_MODULE(_core, m)
         "poll_events",
         []() { unwrap(poll_events(), nullptr); },
         "Drain the OS event queue and dispatch each event to the window it was\n"
-        "addressed to. One call services every window; the per-window distinction\n"
+        "addressed to. One call services every window. The per-window distinction\n"
         "lives in the queries (is_key_pressed, is_open, renderer.acquire).\n"
         "Raises WindowError when no window exists.");
 
@@ -2432,7 +2437,7 @@ PYBIND11_MODULE(_core, m)
             return unwrap(std::move(devices), nullptr);
         },
         "Every GPU on this machine, without creating a Context. Pass one to\n"
-        "Context(device=...) to run on it; the default picks automatically.");
+        "Context(device=...) to run on it. The default picks automatically.");
 
     // Read-only data, so plain attributes: nothing here is a handle and there is
     // nothing to keep alive. Bytes rather than megabytes, because a rounded
@@ -2746,7 +2751,8 @@ PYBIND11_MODULE(_core, m)
                     {
                         raise_error(err_resource(
                             std::format(
-                                "create_image(cube=True) implies 6 layers; drop layers= or pass layers=6, got {}",
+                                "create_image(cube=True) implies 6 layers. Drop layers= or pass layers=6. Got "
+                                "layers={}",
                                 layers)));
                     }
                     if (width != height)
@@ -2850,7 +2856,7 @@ PYBIND11_MODULE(_core, m)
                     else if (s.format != spec->format || s.width != spec->width || s.height != spec->height)
                     {
                         raise_error(err_resource(
-                            std::format("create_image: every layer must share shape and dtype; layer {} differs", i)));
+                            std::format("create_image: every layer must share shape and dtype. Layer {} differs", i)));
                     }
                 }
                 if (cube && spec->width != spec->height)

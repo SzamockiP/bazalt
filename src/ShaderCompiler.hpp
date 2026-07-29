@@ -465,7 +465,7 @@ public:
         }
         return std::unexpected(err_shader(
             std::format(
-                "a {} shader requires the {} feature; create the Context with "
+                "a {} shader requires the {} feature. Create the Context with "
                 "features=[bz.Feature.{}] (or optional=[...])",
                 stage_name(stage),
                 feature_name(*feature),
@@ -687,7 +687,10 @@ private:
         size_t fileSize = static_cast<size_t>(file.tellg());
         if (fileSize % sizeof(uint32_t) != 0)
         {
-            return std::unexpected(err_shader(path + " is not a SPIR-V binary (size is not a multiple of 4)", path));
+            return std::unexpected(err_shader(
+                path + " is not SPIR-V. SPIR-V is a stream of 32-bit words, so its length "
+                       "is always a multiple of 4, and this file's is not.",
+                path));
         }
 
         std::vector<uint32_t> spirv(fileSize / sizeof(uint32_t));
@@ -709,7 +712,14 @@ private:
         constexpr uint32_t spirv_magic = 0x07230203u;
         if (spirv.empty() || spirv[0] != spirv_magic)
         {
-            return std::unexpected(err_shader(tag + " is not a SPIR-V binary (bad magic number)", tag));
+            // Same user error as the size check above, so it gets the same quality of
+            // explanation. "bad magic number" named a binary-format concept and left
+            // the caller to guess which of their files was wrong.
+            return std::unexpected(err_shader(
+                tag + " is not SPIR-V. Every SPIR-V module starts with the same 4-byte "
+                      "marker, and this one does not, so it is a source file or another "
+                      "kind of binary. Compile it first, or pass the path to the .spv.",
+                tag));
         }
 
         // One walk answers the stage question and everything else. This replaces a

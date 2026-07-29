@@ -1047,7 +1047,7 @@ public:
         if (sample_shading_ && !context_.supports(Feature::SAMPLE_RATE_SHADING))
         {
             return std::unexpected(err_shader(
-                "sample_shading requires the SAMPLE_RATE_SHADING feature; create the "
+                "sample_shading requires the SAMPLE_RATE_SHADING feature. Create the "
                 "Context with features=[bz.Feature.SAMPLE_RATE_SHADING] (or optional=[...])"));
         }
         // Anything but FILL is the fillModeNonSolid feature, which desktop
@@ -1057,7 +1057,7 @@ public:
         if (polygon_mode_ != PolygonMode::FILL && !context_.supports(Feature::WIREFRAME))
         {
             return std::unexpected(err_shader(
-                "polygon_mode requires the WIREFRAME feature; create the Context with "
+                "polygon_mode requires the WIREFRAME feature. Create the Context with "
                 "features=[bz.Feature.WIREFRAME] (or optional=[...])"));
         }
         // Attachments that blend differently need independentBlend. It is one
@@ -1073,7 +1073,7 @@ public:
                 {
                     return std::unexpected(err_shader(
                         "blend(attachment=) / color_mask(attachment=) that differs from the "
-                        "pipeline-wide setting requires the INDEPENDENT_BLEND feature; create "
+                        "pipeline-wide setting requires the INDEPENDENT_BLEND feature. Create "
                         "the Context with features=[bz.Feature.INDEPENDENT_BLEND] (or "
                         "optional=[...])"));
                 }
@@ -1085,19 +1085,19 @@ public:
         if (stencil_.enable && !has_stencil(depthFormat))
         {
             return std::unexpected(err_shader(
-                "stencil_test needs a target with a stencil attachment; build the "
+                "stencil_test needs a target with a stencil attachment. Build the "
                 "RenderTarget with depth=bz.Format.DEPTH_STENCIL"));
         }
         if (depth_clamp_ && !context_.supports(Feature::DEPTH_CLAMP))
         {
             return std::unexpected(err_shader(
-                "depth_clamp requires the DEPTH_CLAMP feature; create the Context with "
+                "depth_clamp requires the DEPTH_CLAMP feature. Create the Context with "
                 "features=[bz.Feature.DEPTH_CLAMP] (or optional=[...])"));
         }
         if (line_width_ != 1.0f && !context_.supports(Feature::WIDE_LINES))
         {
             return std::unexpected(err_shader(
-                "line_width other than 1.0 requires the WIDE_LINES feature; create the "
+                "line_width other than 1.0 requires the WIDE_LINES feature. Create the "
                 "Context with features=[bz.Feature.WIDE_LINES] (or optional=[...])"));
         }
         // A fragment shader is optional only when there is nothing to shade:
@@ -1159,8 +1159,8 @@ public:
             {
                 return std::unexpected(err_shader(
                     std::format(
-                        "the {} shader writes a storage buffer or image, which requires the {} feature; "
-                        "create the Context with features=[bz.Feature.{}] (or optional=[...])",
+                        "the {} shader writes a storage buffer or image, which requires the {} feature. "
+                        "Create the Context with features=[bz.Feature.{}] (or optional=[...])",
                         ShaderCompiler::stage_name((*slot)->stage()),
                         feature_name(needed),
                         feature_name(needed))));
@@ -1172,13 +1172,13 @@ public:
         if (tess_control_shader_ && topology_ != Topology::PATCH_LIST)
         {
             return std::unexpected(err_shader(
-                "a tessellation pipeline must draw patches; add "
+                "a tessellation pipeline must draw patches. Add "
                 "topology(bz.Topology.PATCH_LIST) and patch_control_points(n)"));
         }
         if (topology_ == Topology::PATCH_LIST && !tess_control_shader_)
         {
             return std::unexpected(err_shader(
-                "Topology.PATCH_LIST is only valid with tessellation shaders; set "
+                "Topology.PATCH_LIST is only valid with tessellation shaders. Set "
                 "tess_control_shader and tess_evaluation_shader, or pick another topology"));
         }
         if (tess_control_shader_)

@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -211,7 +212,7 @@ public:
             {
                 return std::unexpected(err_resource(
                     std::format(
-                        "load_image: every layer must be the same size; {} is {}x{}, expected {}x{}",
+                        "load_image: every layer must be the same size. {} is {}x{}, expected {}x{}",
                         paths[i],
                         w,
                         h,
@@ -501,7 +502,7 @@ private:
                         Severity::Warning,
                         Source::Upload,
                         std::format(
-                            "Hot reload: {} changed size ({}x{} -> {}x{}); keeping the existing "
+                            "Hot reload: {} changed size ({}x{} -> {}x{}). Bazalt keeps the existing "
                             "image (a resize needs a restart)",
                             job.path,
                             job.image->width(),
@@ -531,17 +532,11 @@ private:
         auto [stagingBuffer, stagingAllocation] = *staging;
 
         // One-shot command buffer from the worker's own pool.
-        VkCommandBufferAllocateInfo allocInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            .pNext = nullptr,
-            .commandPool = pool_,
-            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1};
         VkCommandBuffer cmd = VK_NULL_HANDLE;
-        if (context_.vk().vkAllocateCommandBuffers(context_.device(), &allocInfo, &cmd) != VK_SUCCESS)
+        if (const VkResult r = allocate_cmd_(cmd); r != VK_SUCCESS)
         {
             vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
-            fail_(job, "failed to allocate an upload command buffer");
+            fail_(job, std::format("the GPU upload could not start ({})", vk_result_name(r)));
             return;
         }
 
@@ -582,14 +577,16 @@ private:
                 .pCommandBuffers = &cmd,
                 .signalSemaphoreCount = 1,
                 .pSignalSemaphores = &timeline};
-            if (context_.vk().vkQueueSubmit(context_.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+            if (const VkResult r =
+                    context_.vk().vkQueueSubmit(context_.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE);
+                r != VK_SUCCESS)
             {
                 vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
                 context_.vk().vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
                 if (job.reload)
-                    warn_reload_(job, "failed to submit the upload command buffer");
+                    warn_reload_(job, std::format("the GPU upload was refused ({})", vk_result_name(r)));
                 else
-                    fail_(job, "failed to submit the upload command buffer");
+                    fail_(job, std::format("the GPU upload was refused ({})", vk_result_name(r)));
                 return;
             }
         }
@@ -630,10 +627,10 @@ private:
         auto [stagingBuffer, stagingAllocation] = *staging;
 
         VkCommandBuffer cmd = VK_NULL_HANDLE;
-        if (!allocate_cmd_(cmd))
+        if (const VkResult r = allocate_cmd_(cmd); r != VK_SUCCESS)
         {
             vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
-            fail_update_(job, "failed to allocate an upload command buffer");
+            fail_update_(job, std::format("the GPU upload could not start ({})", vk_result_name(r)));
             return;
         }
 
@@ -671,21 +668,26 @@ private:
     // that are already there stay valid and keep rendering, exactly like a hot
     // reload that could not complete. It still has to leave the batch counters
     // balanced, or upload_progress would never reach 1.0 again.
-    void fail_update_(Job& job, const char* reason)
+    void fail_update_(Job& job, std::string_view reason)
     {
         if (auto logger = context_.logger())
         {
             logger->log(
                 Severity::Error,
                 Source::Upload,
-                std::format("image.update failed ({}); the previous contents are unchanged", reason ? reason : "?"));
+                std::format(
+                    "image.update failed ({}). The previous contents are unchanged",
+                    reason.empty() ? std::string_view("?") : reason));
         }
         std::lock_guard lock(mutex_);
         ++failed_count_;
     }
 
     // One-shot command buffer from the worker's own pool.
-    bool allocate_cmd_(VkCommandBuffer& cmd)
+    // Returns the VkResult rather than a bool, because the caller puts it in the
+    // message. "failed to allocate an upload command buffer" told a Python user
+    // nothing they could act on and threw away the one fact worth reporting.
+    VkResult allocate_cmd_(VkCommandBuffer& cmd)
     {
         VkCommandBufferAllocateInfo allocInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -693,7 +695,7 @@ private:
             .commandPool = pool_,
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
             .commandBufferCount = 1};
-        return context_.vk().vkAllocateCommandBuffers(context_.device(), &allocInfo, &cmd) == VK_SUCCESS;
+        return context_.vk().vkAllocateCommandBuffers(context_.device(), &allocInfo, &cmd);
     }
 
     // The worker's half of a one-shot submit. Context::submit_one_shot does the
@@ -749,17 +751,11 @@ private:
         }
         auto [stagingBuffer, stagingAllocation] = *staging;
 
-        VkCommandBufferAllocateInfo allocInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            .pNext = nullptr,
-            .commandPool = pool_,
-            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1};
         VkCommandBuffer cmd = VK_NULL_HANDLE;
-        if (context_.vk().vkAllocateCommandBuffers(context_.device(), &allocInfo, &cmd) != VK_SUCCESS)
+        if (const VkResult r = allocate_cmd_(cmd); r != VK_SUCCESS)
         {
             vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
-            fail_(job, "failed to allocate an upload command buffer");
+            fail_(job, std::format("the GPU upload could not start ({})", vk_result_name(r)));
             return;
         }
 
@@ -795,11 +791,13 @@ private:
                 .pCommandBuffers = &cmd,
                 .signalSemaphoreCount = 1,
                 .pSignalSemaphores = &timeline};
-            if (context_.vk().vkQueueSubmit(context_.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+            if (const VkResult r =
+                    context_.vk().vkQueueSubmit(context_.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE);
+                r != VK_SUCCESS)
             {
                 vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
                 context_.vk().vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
-                fail_(job, "failed to submit the upload command buffer");
+                fail_(job, std::format("the GPU upload was refused ({})", vk_result_name(r)));
                 return;
             }
         }
@@ -837,10 +835,10 @@ private:
             });
     }
 
-    void fail_(Job& job, const char* reason)
+    void fail_(Job& job, std::string_view reason)
     {
-        const std::string message = reason ? std::format("Failed to load image: {} ({})", job.path, reason)
-                                           : std::format("Failed to load image: {}", job.path);
+        const std::string message = !reason.empty() ? std::format("Failed to load image: {} ({})", job.path, reason)
+                                                    : std::format("Failed to load image: {}", job.path);
         if (auto logger = context_.logger())
         {
             logger->log(Severity::Error, Source::Upload, message);
@@ -856,15 +854,16 @@ private:
     // the image is left exactly as it was — its previous contents keep
     // rendering. Never touches upload state or the batch counters. Symmetry with
     // a shader hot reload: a bad edit can't take the application down.
-    void warn_reload_(Job& job, const char* reason)
+    void warn_reload_(Job& job, std::string_view reason)
     {
         if (auto logger = context_.logger())
         {
             logger->log(
                 Severity::Warning,
                 Source::Upload,
-                reason ? std::format("Hot reload: {} ({}); keeping the previous contents", job.path, reason)
-                       : std::format("Hot reload: {}; keeping the previous contents", job.path));
+                !reason.empty()
+                    ? std::format("Hot reload: {} ({}). Bazalt keeps the previous contents", job.path, reason)
+                    : std::format("Hot reload: {}. Bazalt keeps the previous contents", job.path));
         }
     }
 

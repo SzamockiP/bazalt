@@ -826,7 +826,7 @@ private:
                 l->log(
                     Severity::Info,
                     Source::Device,
-                    "Requested present mode is not supported by this surface; falling back to FIFO (vsync)");
+                    "Requested present mode is not supported by this surface. Bazalt uses FIFO (vsync) instead");
         }
         active_present_mode_ = present_mode;
         auto extent = choose_swap_extent(details.capabilities, width, height);
