@@ -93,6 +93,11 @@ draw count the GPU decides, gamepads, and MSAA into images you already own.
   each frame, which is what DYNAMIC is for — could not be bound and the draw read
   undefined data. The two memory usages computed their flags separately and had
   drifted; they now share one function.
+- **`image.wait()` returned while updates were still queued.** The upload state
+  was one flag, so the worker submitting the FIRST of several updates marked the
+  image done — `wait()` returned and `read()` gave whichever frame had landed. With
+  a queue deeper than the worker can drain it was measurably far off: update 71 of
+  200. The state counts outstanding jobs now.
 - **Two updates of one image could land backwards.** `image.update` promises that
   the call order is the GPU order, and one worker thread submitting in sequence
   does not deliver it: two submits on one queue may overlap unless one waits for

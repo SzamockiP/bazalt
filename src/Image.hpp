@@ -456,9 +456,22 @@ public:
     // Upload state transitions. Pending/Failed are worker-side; Submitted is
     // whoever made the submit — the worker for a decode, the calling thread for
     // create_image(array), which has nothing to decode (see upload_pixels).
+    // Pending counts OUTSTANDING JOBS, it is not a flag (0.21). It was a flag,
+    // and one image with several updates queued is exactly where that breaks: the
+    // worker submitting the FIRST one flipped the state to Submitted, so wait()
+    // stopped waiting while five jobs were still in the queue and read() returned
+    // whichever one had landed. Six updates, the fifth one's pixels.
+    //
+    // Guarded by upload_mutex_ rather than atomic, because the condition variable
+    // predicate has to read it under the same lock that the notify holds.
     void set_upload_pending()
     {
-        upload_state_.store(UploadState::Pending);
+        {
+            std::lock_guard lock(upload_mutex_);
+            ++pending_uploads_;
+            upload_state_.store(UploadState::Pending);
+        }
+        upload_cv_.notify_all();
     }
     // Worker thread. It sets has_contents_ (an atomic) but NOT the layout state:
     // that is a vector the main thread reads without a lock, and since 0.18 it
@@ -472,7 +485,20 @@ public:
             std::lock_guard lock(upload_mutex_);
             upload_serial_.store(serial);
             has_contents_.store(true);
-            upload_state_.store(UploadState::Submitted);
+            // Zero already, and legitimately so, for create_image(array): that
+            // path submits inline on the calling thread and never queues a job,
+            // so there is nothing outstanding to retire.
+            if (pending_uploads_ > 0)
+            {
+                --pending_uploads_;
+            }
+            // Still Pending while anything is queued behind this one. The serial
+            // above is the newest submitted, so a waiter that gets through waits
+            // for the last job rather than for whichever finished first.
+            if (pending_uploads_ == 0 && upload_state_.load() != UploadState::Failed)
+            {
+                upload_state_.store(UploadState::Submitted);
+            }
         }
         upload_cv_.notify_all();
     }
@@ -481,6 +507,15 @@ public:
         {
             std::lock_guard lock(upload_mutex_);
             upload_error_ = std::move(message);
+            // Retires this job like a submit does, so a waiter is not left
+            // counting one that will never arrive. Failed wins over Submitted
+            // while anything is outstanding: a later job succeeding does not make
+            // the earlier failure untrue, and the next set_upload_pending clears
+            // it, which is what it did before it could be one job of several.
+            if (pending_uploads_ > 0)
+            {
+                --pending_uploads_;
+            }
             upload_state_.store(UploadState::Failed);
         }
         upload_cv_.notify_all();
@@ -1321,7 +1356,10 @@ private:
         if (upload_state_.load() == UploadState::Pending || upload_state_.load() == UploadState::Failed)
         {
             std::unique_lock lock(upload_mutex_);
-            upload_cv_.wait(lock, [&] { return upload_state_.load() != UploadState::Pending; });
+            // Every queued job, not just the first to be submitted. The predicate
+            // used to be "the state is no longer Pending", which one worker
+            // submitting the first of several satisfies immediately.
+            upload_cv_.wait(lock, [&] { return pending_uploads_ == 0; });
             if (upload_state_.load() == UploadState::Failed)
             {
                 return std::unexpected(err_resource(upload_error_));
@@ -1524,6 +1562,9 @@ private:
     // backs the GPU-side ones.
     std::atomic<UploadState> upload_state_{UploadState::None};
     std::atomic<std::uint64_t> upload_serial_{0};
+    // How many queued uploads have not been submitted yet. Guarded by
+    // upload_mutex_, which is also what the condition variable waits on.
+    std::uint32_t pending_uploads_ = 0;
     std::mutex upload_mutex_;
     std::condition_variable upload_cv_;
     std::string upload_error_;

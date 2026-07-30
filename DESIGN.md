@@ -723,7 +723,23 @@ entry. The release is a label, not the organizing axis.
   now waits on the previous upload's serial, which costs nothing real — they are
   issued by one thread already, and the work being ordered is a copy.
 
-  Three things are worth keeping. **The promise was three copies of a submit block**,
+  **And ordering the submits was only half of it.** The upload state was one enum,
+  so the worker submitting the FIRST of several queued updates flipped it to
+  Submitted and `wait()` stopped waiting with the rest of the queue untouched. A
+  flag cannot say "five more outstanding", so it is a count now, and the condition
+  variable waits for zero. This is the same shape as the 0.18 entry two paragraphs
+  down — "an asynchronous operation must mark its resource busy BEFORE queueing" —
+  and it shows what that entry did not: **marking is not enough when several
+  operations can be outstanding at once. The mark has to be a count.**
+
+  It also explains why the six-update test passed for three releases and the CI
+  failure looked like a reordering: with two updates the worker is usually only one
+  behind, so the wrong answer and the right one differ by one frame. Two hundred
+  updates make it 71 versus 200, which fails on any machine — **when a race test
+  only sometimes loses, make the queue deeper rather than trusting the driver to
+  lose it for you.**
+
+  Three more things are worth keeping. **The promise was three copies of a submit block**,
   and only one of them went through `submit_one_shot`; the two inline ones kept
   `waitSemaphoreCount = 0` through two releases that both edited this file. **The
   test was right and passed anyway** for three releases, because the desktop driver

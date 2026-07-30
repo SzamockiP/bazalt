@@ -78,15 +78,34 @@ def test_updates_of_one_image_land_in_call_order(ctx):
     sees. That is a guarantee worth pinning: a video decoder that queued two
     frames must not show them backwards.
 
-    Submitting in order is NOT enough to keep it, and this test is how that was
-    found: two submits on one queue may overlap unless one waits for the other,
-    and lavapipe does what the spec allows where a desktop driver happened to
-    serialize. So the referee for this one is CI, not the machine it was written
-    on — which is the argument for running the suite somewhere that reorders.
+    Two things have to be true for it, and both were false. The submits have to
+    be ORDERED against each other, because two on one queue may overlap unless
+    one waits for the other. And wait() has to wait for every QUEUED update, not
+    for the first one the worker happens to submit.
 
-    Six updates rather than two: a race that only sometimes loses is worth more
-    chances to lose."""
+    Six updates is enough to state the promise and not enough to break it — this
+    passed on a desktop driver for three releases. The deep-queue test below is
+    the one that fails deterministically."""
     colors = [RED, GREEN, BLUE, RED, GREEN, BLUE]
+    img = ctx.create_image(rgba(8, 8, BLUE))
+    for color in colors:
+        img.update(rgba(8, 8, color))
+    img.wait()
+
+    assert img.read()[0, 0].tolist() == list(colors[-1])
+
+
+def test_wait_covers_updates_the_worker_has_not_reached(ctx):
+    """The queue deeper than the worker can drain, which is what makes this fail
+    on every machine rather than only on a driver that reorders.
+
+    `upload_state_` used to be one flag, so the worker submitting the FIRST of
+    these flipped it to Submitted and wait() returned with most of the queue
+    untouched — read() then gave whichever frame had landed. Measured before the
+    fix: update 71 of 200. It is a wrong answer and it scales with how far behind
+    the worker is, which is the definition of a test that passes on a fast
+    machine."""
+    colors = [(i % 256, (i * 7) % 256, 200, 255) for i in range(200)]
     img = ctx.create_image(rgba(8, 8, BLUE))
     for color in colors:
         img.update(rgba(8, 8, color))
