@@ -66,9 +66,11 @@ draw count the GPU decides, gamepads, and MSAA into images you already own.
   has it, so `target.all_layers()` needs no opt-in.
 
 ### Changed
-- **A trigger reads 0..1.** GLFW reports a gamepad trigger as -1 released and +1
-  pulled. Bazalt normalizes it, because "how far in is the trigger" is a 0..1
-  question. The sticks keep -1..1.
+- **A gamepad reports what the hand did, not what the hardware sent.** A trigger
+  reads 0 released and 1 pulled, where GLFW reports -1 to +1. A stick pushed UP or
+  RIGHT reads positive, where GLFW's Y is screen space and reads positive downward.
+  So `GamepadAxis.LEFT_Y` and `window.get_mouse_state().dy` point opposite ways on
+  purpose: a mouse delta is a screen measurement and a stick is not.
 
 ### Fixed
 - **A descriptor set kept every image ever written to it.** Writing one binding

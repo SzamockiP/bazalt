@@ -374,7 +374,8 @@ class GamepadButton(IntEnum):
     DPAD_LEFT = 14
 
 class GamepadAxis(IntEnum):
-    """Sticks read -1..1, triggers 0..1 — see Gamepad.axis (0.21)."""
+    """Sticks read -1..1 with UP and RIGHT positive, triggers 0..1 — see
+    Gamepad.axis (0.21)."""
     LEFT_X = 0
     LEFT_Y = 1
     RIGHT_X = 2
@@ -1483,10 +1484,13 @@ class Gamepad:
     def axis(self, axis: GamepadAxis) -> float:
         """A stick axis in -1..1, or a trigger in 0..1.
 
-        GLFW reports a trigger as -1 released and +1 pulled; bazalt normalizes it,
-        because "how far in is the trigger" is a 0..1 question and every caller
-        would otherwise write the same conversion. The sticks keep -1..1, which is
-        the question there. Y is positive DOWNWARD, as GLFW reports it.
+        Both ranges answer "what did the hand do", which GLFW's raw values do not.
+        A trigger reads 0 released and 1 pulled, where GLFW reports -1 to +1. A
+        stick pushed UP or RIGHT reads positive, where GLFW's Y is screen space
+        and reads positive downward.
+
+        So GamepadAxis.LEFT_Y and window.get_mouse_state().dy point opposite ways
+        on purpose: a mouse delta IS a screen measurement, and a stick is not.
         """
         ...
     def button(self, button: GamepadButton) -> bool:

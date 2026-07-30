@@ -46,7 +46,11 @@ def test_an_empty_slot_answers_none_rather_than_raising():
 def test_a_connected_pad_reads_every_control():
     """Skipped without hardware, and here so that a machine WITH a pad checks the
     shape of a real reading: every axis in range, every button a bool, and the
-    triggers normalized to 0..1 rather than GLFW's -1..1."""
+    triggers normalized to 0..1 rather than GLFW's -1..1.
+
+    What it cannot check is DIRECTION — that a stick pushed up reads positive.
+    Nothing can push a stick from here, so that one is verified by running
+    examples/30_gamepad, which prints both stick values in the title bar."""
     window = a_window()
     try:
         bz.poll_events()

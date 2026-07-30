@@ -917,14 +917,31 @@ inline std::expected<std::optional<Gamepad>, Error> get_gamepad(int index, float
         pad.buttons[i] = state.buttons[i];
     }
 
-    // GLFW reports a trigger as -1 released to +1 pressed, which is the hardware
-    // talking rather than the hand: "how far in is the trigger" is a 0..1
-    // question, and every caller would write the same conversion. The sticks keep
-    // their -1..1, because that IS the question there.
+    // Two conversions, and they answer the same question: what did the HAND do?
+    //
+    // A trigger becomes 0..1. GLFW reports -1 released to +1 pressed, which is the
+    // hardware talking: "how far in is the trigger" is a 0..1 question and every
+    // caller would write the same line. A stick keeps -1..1, because that IS the
+    // question there.
     for (auto trigger : {GamepadAxis::LEFT_TRIGGER, GamepadAxis::RIGHT_TRIGGER})
     {
         float& value = pad.axes[static_cast<std::size_t>(trigger)];
         value = (value + 1.0f) * 0.5f;
+    }
+    // A stick pushed UP reads +1. GLFW reports the opposite, and it is right to:
+    // its Y is screen space, where down is positive, and that is what a cursor
+    // position means. A stick has no screen to agree with — it is a thing in a
+    // hand, and every caller would negate it.
+    //
+    // The cost is that window.get_mouse_state().dy and GamepadAxis.LEFT_Y now
+    // disagree about which way is positive, and that is the honest answer rather
+    // than an oversight: the mouse delta IS a screen measurement and the stick is
+    // not. A camera driven by both negates one of them, and it would have had to
+    // negate one of them either way.
+    for (auto stick : {GamepadAxis::LEFT_Y, GamepadAxis::RIGHT_Y})
+    {
+        float& value = pad.axes[static_cast<std::size_t>(stick)];
+        value = -value;
     }
     // Deadzone on the sticks only. A trigger rests at one end of its range, so a
     // dead zone around zero would eat the first part of the pull.

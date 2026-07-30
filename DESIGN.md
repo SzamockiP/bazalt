@@ -171,14 +171,27 @@ entry. The release is a label, not the organizing axis.
   snapshot cannot change halfway through the frame reading it. An empty slot is
   `None`, so "is one connected" needs no second verb.
 
-  Two things the raw GLFW state does not decide, and bazalt does. A trigger is
-  normalized to 0..1, because GLFW reports -1 released and +1 pulled, which is the
-  hardware talking rather than the hand — every caller would write the same
-  conversion, and the sticks keep -1..1 because that IS the question there. And
-  `deadzone=` exists because a real stick reads 0.03 untouched: scaled rather than
-  clipped so the value stays continuous across the edge, applied per axis (a square
-  dead area, and nothing has asked for the difference), and to the sticks only,
-  since a trigger rests at one end of its range.
+  Three things the raw GLFW state does not decide, and bazalt does, all answering
+  the same question — what did the HAND do?
+
+  A trigger is normalized to 0..1, because GLFW reports -1 released and +1 pulled,
+  which is the hardware talking; the sticks keep -1..1 because that IS the question
+  there.
+
+  A stick pushed UP reads +1, where GLFW reports -1. GLFW is right for its own
+  reason: its Y is screen space, and down is positive there because that is what a
+  cursor position means. A stick has no screen to agree with. **The cost is real
+  and it is the interesting part of the decision:** `window.get_mouse_state().dy`
+  and `GamepadAxis.LEFT_Y` now disagree about which way is positive, so a camera
+  driven by both negates one of them. It would have had to negate one of them
+  either way, and the version where the negation is in bazalt is the one where the
+  library's own two answers can each be right about their own device. Found by
+  someone holding a pad, which is the only way this class of thing is found.
+
+  And `deadzone=` exists because a real stick reads 0.03 untouched: scaled rather
+  than clipped so the value stays continuous across the edge, applied per axis (a
+  square dead area, and nothing has asked for the difference), and to the sticks
+  only, since a trigger rests at one end of its range.
 
   **Level state only, and that is a consequence of the 0.16 input decision rather
   than a shortcut.** The edge queries rotate on a per-window generation counter; a
