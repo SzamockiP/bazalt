@@ -5,6 +5,103 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.21.0] — 2026-07-30
+
+"One binding, many textures". A quad that used a different texture from the one
+beside it needed a different descriptor set, so 48 quads with 8 materials were
+48 binds and 48 draws. A descriptor array puts all eight in ONE binding, each
+quad carries the index of the one it wants, and the whole grid is one draw.
+
+Getting there needed the feature table to grow. Bazalt named a GPU capability by
+one boolean in `VkPhysicalDeviceFeatures`, and descriptor indexing does not live
+there — nor do multiview and the GPU-decided draw count. The table now reaches
+all three structs, which pays a debt that had been waiting since 0.18: multiview
+had its own question, `ctx.supports_multiview()`, because there was no row for it
+to sit in.
+
+The rest of the release empties the small additive list before the 1.0 freeze: a
+draw count the GPU decides, gamepads, and MSAA into images you already own.
+
+### Added
+- **Descriptor arrays: `texture(binding, stage, set, count=N)` and
+  `set_image(binding, image, index=i)`.** One binding holding N textures, the
+  shader picking one per draw or per fragment. `count=` is on all four binding
+  declarators of both pipeline builders.
+
+  An index that differs between invocations of one draw needs `nonuniformEXT(i)`
+  and `#extension GL_EXT_nonuniform_qualifier : require` in the shader. Slots you
+  never write are legal as long as nothing samples them, and a slot may be
+  rewritten while an earlier frame still reads the set — swapping a texture at
+  run time is the point.
+
+  Needs `bz.Feature.BINDLESS`.
+- **`bz.Feature.MULTIVIEW`, `bz.Feature.BINDLESS` and
+  `bz.Feature.DRAW_INDIRECT_COUNT`.** Three capabilities the feature table could
+  not name before.
+- **A draw count the GPU decides: `count_buffer=` and `count_offset=` on
+  `cmd.draw_indirect` and `cmd.draw_indexed_indirect`.** `count` becomes the
+  maximum and the 4 bytes at `count_offset` say how many commands to issue, so a
+  compute pass chooses the NUMBER of draws and not only their contents — one
+  command per mesh, or per level of detail. The count buffer must be
+  `BufferType.STORAGE`, like the arguments. Needs
+  `bz.Feature.DRAW_INDIRECT_COUNT`.
+- **`bz.get_gamepad(index=0, deadzone=0.0)`**, with `bz.GamepadButton` and
+  `bz.GamepadAxis`. Returns a reading of that pad, or `None` when the slot is
+  empty. A free function, because a pad belongs to the process and not to any one
+  window — the same reason `bz.poll_events()` is one.
+- **`samples=` on the `RenderTarget` signature that takes images.** MSAA into
+  images you already own: bazalt renders into multisampled attachments and
+  resolves into the images you passed, which stay single-sample and readable.
+- **Examples `29_bindless`** (48 quads, 8 textures, one draw, and a key that
+  swaps a texture while the loop runs) and **`30_gamepad`** (no shaders at all —
+  the window colour follows the sticks).
+
+### Changed (breaking)
+- **`ctx.supports_multiview()` and `device.supports_multiview()` are gone.** Ask
+  `ctx.supports(bz.Feature.MULTIVIEW)` and `device.supports(bz.Feature.MULTIVIEW)`
+  instead. They were a second way to ask one question, and they existed only
+  because the feature table could not reach the struct multiview lives in.
+
+  Nothing else changes: multiview is still enabled by itself wherever the device
+  has it, so `target.all_layers()` needs no opt-in.
+
+### Changed
+- **A trigger reads 0..1.** GLFW reports a gamepad trigger as -1 released and +1
+  pulled. Bazalt normalizes it, because "how far in is the trigger" is a 0..1
+  question. The sticks keep -1..1.
+
+### Fixed
+- **A descriptor set kept every image ever written to it.** Writing one binding
+  twice held the first image alive for the set's whole life, and made the
+  record-time barrier pass walk a list that only grew. Invisible with one
+  descriptor per binding; an unbounded leak for an array rewritten each frame.
+- **Example `29_bindless` drew nothing on the first attempt**, and a clean
+  20-second run did not say so. The quad was wound the obvious way — right along
+  the top first — which is back-facing under the default cull. Only a measured
+  read-back caught it. The same trap `stripe.vert` already carried a comment
+  about.
+
+### Notes
+- **Ask for BINDLESS.** `Context(optional=[bz.Feature.BINDLESS])`, then check
+  `ctx.supports(...)`. `count>1` is refused without it. That is stricter than
+  Vulkan, which allows a fixed-size array with a dynamically uniform index in
+  core: without the feature an unwritten slot and a per-fragment index are both
+  undefined, so the unguarded version works on one machine and returns garbage on
+  the next.
+- **A descriptor array is written before it is read, and can be rewritten after.**
+  Rewriting a PLAIN binding while a submit that uses it is in flight is still
+  undefined behaviour, and the validation layers report it. Only array bindings
+  carry update-after-bind.
+- **A gamepad reports level state only.** There is no `was_button_pressed`: the
+  edge queries rotate on a per-window counter, and a pad has no window to hang
+  one on.
+- **`deadzone=` applies to the sticks, not the triggers.** A trigger rests at one
+  end of its range, so a dead zone around zero would eat the first part of the
+  pull.
+- **MSAA on a borrowed target cannot combine with a mipped image.** A
+  multisampled image has no mip chain, which is the rule the other signature
+  already had.
+
 ## [0.20.0] — 2026-07-30
 
 No new feature. This release splits the binding layer into eight translation

@@ -30,7 +30,22 @@ These settle most arguments.
    the feature that really needs it, not in a separate "debt release". One session must be
    able to execute the plan without filling the context.
 
-   **0.20 is the exception, and it is written down here so it stays one.** It has no
+   **0.21 is the second exception, and it is a different one.** It has a feature —
+   bindless — and then three more additions that share no subject with it: a
+   GPU-decided draw count, gamepads, and MSAA into borrowed images. Rule 5's test
+   ("does the work share a subject, or only a mood?") says no, so the exemption
+   needs its own reason, and it is this: **0.21 is the release that empties the
+   additive proposal list before the 1.0 freeze.** After it, every remaining item in
+   this file is a scope rejection, an escape hatch waiting for a concrete
+   integration, or 1.0 content itself. That is a one-time position in the sequence,
+   not a precedent — the same exemption in 0.23 would be a mood release, because
+   the list it clears would be one somebody had refilled.
+   
+   Two of the three also came free with the feature: `drawIndirectCount` and
+   `Feature.MULTIVIEW` were both waiting on the pNext column that bindless forced,
+   and the debt register had said so since 0.18.
+
+   **0.20 is the first exception, and it is written down here so it stays one.** It has no
    feature. It splits the binding layer into eight translation units, fixes four bugs and
    removes one accidental API. What made it legitimate is that the work had no feature to
    attach to: a build-time restructuring is forced by the *size* of the code, not by
@@ -148,6 +163,27 @@ entry. The release is a label, not the organizing axis.
 
   The callbacks must never rotate. One that did would mark the generation seen halfway
   through a cycle and hide every later event of the same cycle.
+
+- **A gamepad is a free function returning a snapshot** (0.21). `glfwGetGamepadState`
+  takes a joystick id and no window, so a pad belongs to the process — the same
+  fact that makes `poll_events()` and the clipboard free functions. `get_gamepad`
+  returns a value, not a handle: the state is what the last poll left behind, and a
+  snapshot cannot change halfway through the frame reading it. An empty slot is
+  `None`, so "is one connected" needs no second verb.
+
+  Two things the raw GLFW state does not decide, and bazalt does. A trigger is
+  normalized to 0..1, because GLFW reports -1 released and +1 pulled, which is the
+  hardware talking rather than the hand — every caller would write the same
+  conversion, and the sticks keep -1..1 because that IS the question there. And
+  `deadzone=` exists because a real stick reads 0.03 untouched: scaled rather than
+  clipped so the value stays continuous across the edge, applied per axis (a square
+  dead area, and nothing has asked for the difference), and to the sticks only,
+  since a trigger rests at one end of its range.
+
+  **Level state only, and that is a consequence of the 0.16 input decision rather
+  than a shortcut.** The edge queries rotate on a per-window generation counter; a
+  pad has no window to hang one on, and a process-wide edge would need exactly the
+  global registry of live windows that 0.16 rejected.
 
 - **`Device` is dead data** (0.14). `bz.list_devices()` builds a bare VkInstance,
   enumerates, destroys it and returns `list[Device]`. `Context(device=)` then matches on
@@ -277,6 +313,100 @@ entry. The release is a label, not the organizing axis.
   crashes, because a device that never enabled `VK_KHR_dynamic_rendering` has no KHR
   pointers to substitute.
 
+### Descriptors, and the feature table that had to grow first
+
+- **`FeatureInfo` has three columns, one per feature struct** (0.21). It mapped a
+  `Feature` to a `VkBool32 VkPhysicalDeviceFeatures::*` and nothing else, so
+  multiview, descriptor indexing and `drawIndirectCount` had no row to sit in —
+  which is what debt #5 had been waiting for since 0.18. Three optional
+  pointer-to-member columns of which exactly one is set, rather than a union or a
+  variant: the table stays `constexpr`, stays an aggregate initializer, and
+  `feature_info()`'s existing safe fallback still works. A row that sets none
+  answers False forever, which is loud the first time anybody asks for it.
+
+  `query_device_features` came with it and is the more valuable half.
+  `Context::configure_features_` and `list_devices` each hand-built the same
+  `VkPhysicalDeviceFeatures2` chain, which is two chances to ask a different
+  question; the helper is one. It clears the `pNext` links on the way out, because
+  a `Device` is copied into Python and a chain pointing at the members of a
+  temporary is a dangling pointer wearing a struct.
+
+- **A required pNext feature cannot gate device selection, and the reason is
+  vk-bootstrap's** (0.21). `set_required_features_11/12` put a feature struct into
+  the library's own chain, and `DeviceBuilder::build` then refuses a chain that
+  also holds ours
+  (`VkPhysicalDeviceFeatures2_in_pNext_chain_while_using_add_required_extension_features`).
+  Moving every struct into vkb's chain would rewrite the 1.2/1.3 negotiation for a
+  machine that has two GPUs of which only the non-preferred one has descriptor
+  indexing. So a required pNext feature is diagnosed by name in
+  `configure_features_` instead, and `select_physical_device_` carries the reason.
+
+- **`Feature::BINDLESS` keys on `descriptorIndexing`, and then enables the bits one
+  by one** (0.21). The spec says enabling the roll-up "does not imply the other
+  minimum descriptor indexing features are also enabled", so `descriptorIndexing`
+  is the right thing for *availability* — it is a promise about a set — and the
+  wrong thing to stop at. `enable_descriptor_indexing` turns on what the device
+  reports, the same enable-what-is-present shape `enable_features_if_present` has.
+
+  This matters because the guarantee is uneven: `descriptorIndexing` promises
+  partially-bound, runtime arrays, and non-uniform indexing plus update-after-bind
+  for sampled images and storage buffers — but NOT non-uniform indexing for uniform
+  buffers or storage images, and not update-after-bind for uniform buffers. So the
+  layout code asks which bits actually stuck rather than assuming, and a device
+  missing one of them still gets a working texture array.
+
+- **`count=` is a kwarg on the declarator, not a second declarator** (0.21). A
+  bindless texture and a plain one differ by how many there are, which is the
+  definition of a variant (rule 1). It goes on all four declarators of both
+  builders, because it is one parameter through one `add_binding` and leaving it
+  off three of them would make "which declarator can be an array" a second rule
+  to remember — the reasoning that gave DYNAMIC buffers the transfer bits in 0.18.
+
+- **An array binding carries `PARTIALLY_BOUND`, and `UPDATE_AFTER_BIND` where the
+  device has the bit** (0.21). A 500-slot array nobody fills is the normal case,
+  and without the first flag reading the SET at all is undefined rather than
+  reading an unwritten slot. The second is what makes rewriting a slot while an
+  earlier frame still reads it legal
+  (VUID-vkUpdateDescriptorSets-None-03047), and swapping a texture at run time is
+  the prototyping case, so it has to be legal rather than usually working.
+
+  Only array bindings get it. A plain binding keeps the contract it always had,
+  which is deliberate: turning it on for everything would mean that asking for
+  BINDLESS changes what an unrelated descriptor allocates, and a feature flag must
+  not do that — the same argument that kept the debug name out of the sampler
+  cache key in 0.16. The pool flag is gated the same way.
+
+- **`count > 1` requires the feature, which is stricter than the spec** (0.21). A
+  fixed-size array indexed by a dynamically uniform expression is core Vulkan. It
+  is refused anyway, because without descriptorIndexing an unwritten slot is
+  undefined, an index that differs per invocation is undefined, and
+  update-after-bind does not exist: the unguarded version is a texture array that
+  works here and returns garbage on the next machine. `descriptorIndexing` is on
+  every desktop driver since about 2018 and on lavapipe, so rule 3 holds, and the
+  escape hatch is one binding per texture exactly as before.
+
+  The gate lives in `build()` because that is the first place with a Context — the
+  tessellation gate's shape, minus the `compile_shader` half, since a declarator
+  has no SPIR-V to read.
+
+- **Two declarations of one binding merge their stages and refuse to merge their
+  counts** (0.21). Declaring a binding twice is how a resource read by two stages
+  is spelled. Two different counts are not that: the layout holds one number and
+  one of the two is wrong. The builder verbs chain and have no error channel, so
+  the diagnosis is recorded and returned by `build()`.
+
+- **A bound descriptor is identified by `(binding, index)`** (0.21).
+  `DescriptorSet::bound_images_` and `buffers_` appended on every write, so writing
+  one binding twice kept the first image alive for the set's whole life and made
+  `track_descriptor_uses_` walk a list that only grew. Invisible while a binding
+  held one descriptor, an unbounded leak the moment an array is rewritten per
+  frame. The sampler moved into the entry at the same time, for the same reason:
+  it belongs to that descriptor, so it is replaced when the descriptor is.
+
+  General form, and it is the third time this file has recorded a version of it:
+  **a container that only ever grows is a leak with a delay.** The size of the
+  thing being appended is what decides how long the delay is.
+
 ### Render targets and resources
 
 - **Subresource rendering is kwargs plus a view handle, not a new verb** (0.13). `layers=` /
@@ -355,6 +485,21 @@ entry. The release is a label, not the organizing axis.
   `depthWriteEnable` stays gated on `depth_test` as well as on `write`: Vulkan permits
   writing depth with the test off, and `depth_test(False)` has always meant "this pass has
   nothing to do with depth".
+
+- **MSAA on a borrowed target allocates the multisampled attachments, and the
+  borrowed images are the resolve targets** (0.21). `samples=` joins the signature
+  that takes images, matching the one that allocates them and `SwapchainRenderer`.
+  The images handed in become what `colors_`/`depth_` already are on the allocating
+  path — the single-sample, sampleable resolve — so every `*_resolve_*` accessor
+  works unchanged.
+
+  **The ceiling's stated upgrade path was `create_image(samples=)`, and it was
+  wrong.** Handing in a caller-owned multisampled image needs matching resolve
+  images passed alongside it and every resolve accessor taught about them, and it
+  puts a second MSAA idiom in the API: one where bazalt owns the multisampled image
+  and one where the caller does. Second time a ceiling's recorded reason turned out
+  to be worth re-deriving rather than re-reading, after per-subresource layouts in
+  0.18. The lesson section already says so; this is the confirmation.
 
 - **The pipeline infers sample count and formats from its target** (0.12). No parallel knobs
   on the builder. The target is the single source, so the two cannot disagree.
@@ -719,6 +864,24 @@ entry. The release is a label, not the organizing axis.
   writes, byte-identical to a std430 GLSL struct. A dtype declared in bazalt would be a
   type that exists only to be converted, which fails the scope test's second question.
 
+- **A GPU-decided draw COUNT is a kwarg on the two verbs that already exist**
+  (0.21). `count_buffer=` and `count_offset=`, with the existing `count` becoming
+  the maximum. Where the count comes from is one argument of a draw that already
+  exists, and a `draw_indirect_count` name would need a copy of every future
+  argument to `draw_indirect` — the reasoning that made `draw_indexed_instanced`
+  disappear in 0.17, applied to a verb that had not been written yet.
+
+  This is the case the 0.19 ceiling deferred, and the deferral was right at the
+  time: the entry said it needed `drawIndirectCount` and the pNext column, and
+  that is exactly what it waited for. The count buffer takes the same checks the
+  argument buffer takes, because it is read by the same command processor at the
+  same stage, and it goes through `track_indirect_` so a compute pass that wrote
+  it is ordered against the read with no manual barrier.
+
+  `examples/28_gpu_culling` keeps its accumulated `instanceCount` on purpose: one
+  command plus a compacted instance buffer needs no feature bit, and a count
+  buffer is for survivors that need DIFFERENT commands.
+
 - **`BufferType::STORAGE` carries the indirect usage bit unconditionally** (0.19). The
   whole use case is a compute shader writing the arguments, so the type that carries
   `STORAGE_BUFFER` is the type that carries this. A fifth `BufferType` would fragment "can
@@ -1048,8 +1211,23 @@ permanent ceiling.
    should compute a knob, not assert a version.** An assert turns their timetable into your
    red build, and the thing being gated (one skipped test) is strictly less bad than a job
    that refuses to run at all.
-5. **`supports_multiview()` is a second way to ask `supports(Feature)`** — found by the
-   0.18 audit and deliberately left standing, because the honest fix is not a deletion.
+5. ✅ **`supports_multiview()` is a second way to ask `supports(Feature)`** — PAID in
+   0.21. `FeatureInfo` grew the pNext column bindless forced, `Feature::MULTIVIEW`
+   got its row, and both `Context.supports_multiview` and
+   `Device.supports_multiview` are gone. The entry predicted the shape exactly —
+   "the two arrive together or not at all", and they did — and it named the third
+   customer, `drawIndirectCount`, which shipped in the same release.
+
+   What the entry got wrong is worth keeping: it assumed the column would arrive
+   *with* bindless as a shared cost. It arrived **before** it, as the thing that had
+   to exist first, which is why phase 1 of the release was a prerequisite nobody
+   asked for and phase 2 was the feature. When a debt entry says "these arrive
+   together", check whether one of them is actually the other's precondition — the
+   ordering is the part that decides how a release is planned.
+
+   The original entry follows, for the reasoning it recorded:
+
+   *found by the 0.18 audit and deliberately left standing, because the honest fix is not a deletion.*
    `FeatureInfo` maps each `Feature` to a plain `VkPhysicalDeviceFeatures` boolean through
    a pointer-to-member, and multiview lives in `VkPhysicalDeviceVulkan11Features`. So
    `Feature.MULTIVIEW` needs the table to grow a pNext column first — which **bindless
@@ -1174,14 +1352,35 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
   being wrong the SAFE way silently turns the whole feature off while looking like it
   works. Provenance is the thing the parser cannot see and the caller knows for certain.
   Upgrade path: teach the parser more write opcodes, and trust more of them.
-- **A borrowed-image `RenderTarget` is single-sample** (0.19), because `create_image` has
-  no `samples=`. Upgrade path: that kwarg, additive.
-- **The indirect verbs take no `stride=`, and `count` is CPU-side** (0.19). A packed array
-  is the one obvious way and `offset=` covers starting later in the buffer. A GPU-decided
-  draw COUNT needs `vkCmdDrawIndirectCount` and `drawIndirectCount` in
-  `VkPhysicalDeviceVulkan12Features` — the same pNext column debt #5 waits on. The shape to
-  use instead is one command whose `instanceCount` a compute pass accumulates atomically,
-  plus a compacted instance buffer (`examples/28_gpu_culling`).
+- ✅ **A borrowed-image `RenderTarget` is single-sample** (0.19) — CLOSED in 0.21,
+  and not by the `create_image(samples=)` the entry named. See the decision above:
+  `samples=` on the borrowed signature reuses the MSAA machinery that already
+  existed, and the entry's upgrade path would have added a second MSAA idiom.
+- **A multisampled attachment cannot be sampled** (0.21). `usage_for_image` drops
+  `SAMPLED` for `samples > 1` and `read()` refuses, so a custom resolve in a shader
+  (`sampler2DMS`, per-sample edge detection) is out of reach — bazalt's MSAA is
+  render-and-resolve. Upgrade path: a sampleable multisampled image plus a
+  `texture2DMS` declarator, additive, and nothing asks for it yet.
+- ✅ **The indirect verbs' `count` is CPU-side** (0.19) — CLOSED in 0.21 by
+  `count_buffer=`, once the pNext column made `drawIndirectCount` nameable. The
+  entry's own prediction held: it waited on exactly the thing it said it waited on.
+- **The indirect verbs take no `stride=`** (0.19). A packed array is the one obvious
+  way and `offset=` covers starting later in the buffer.
+- **The record-time descriptor walk is per descriptor, not per binding** (0.21). A
+  draw asks the tracker about every bound descriptor, so a 500-texture array is 500
+  hash lookups — at RECORD time only, since replay costs nothing, and a sampled
+  image the tracker never saw stops at `tracker_.tracks()`. Upgrade path: skip the
+  walk for bindings above some declared count and require a manual barrier there,
+  which is a worse API for a cost nobody has measured yet.
+- **Only an array binding carries update-after-bind** (0.21). Rewriting a PLAIN
+  descriptor while a submit that binds the set is in flight is still undefined, and
+  the layers report it. Upgrade path: the flag on every binding when the Context has
+  BINDLESS — refused for now because asking for a feature must not change what an
+  unrelated descriptor allocates.
+- **A gamepad has no edge queries** (0.21). Level state only: `pad.button(...)` says
+  what is down now, and there is no `was_button_pressed`. Upgrade path: the per-cycle
+  rotation the windows use, which needs somewhere process-wide to keep the
+  generation — see the 0.16 rejection of a registry of live windows.
 - **The tracker orders uses within ONE recording** (0.19, and true since 0.6 — written down
   now because indirect draw made it easy to hit). Two CommandBuffers that share a
   GPU-written buffer are ordered by nothing the tracker can see, so the second recording
@@ -1241,10 +1440,14 @@ layer, the stub, tests, an example and the docs.
 - ✅ **Indirect draw and dispatch** — DONE in 0.19, which answers the `What 1.0 means`
   question by shipping rather than deferring. `Feature::MULTI_DRAW_INDIRECT` finally has an
   API behind it after sitting in the table since 0.5.
-- **Bindless / descriptor arrays** (~630 lines). `texture(binding, stage, set, count=N)` and
-  `set_image(binding, image, index=)`: one pipeline and one draw for many materials. Needs
-  `FeatureInfo` to grow a column first — it maps only plain `VkPhysicalDeviceFeatures`
-  members, and descriptor indexing lives in a pNext struct. Already named in the 1.0 list.
+- ✅ **Bindless / descriptor arrays** — DONE in 0.21, in the shape the entry
+  predicted (`count=` on the declarator, `index=` on `set_image`) and needing the
+  column it predicted. The estimate of ~630 lines was close for the feature and
+  missed two things beside it, which is the pattern 0.19 warned about: the column
+  was a prerequisite rather than a shared cost, and the descriptor set's own
+  bookkeeping had a leak that only an array makes visible.
+- ✅ **A GPU-decided draw count** — DONE in 0.21 (`count_buffer=`), the third
+  customer of the same column.
 
 **Escape hatches and integration:**
 
@@ -1265,8 +1468,11 @@ layer, the stub, tests, an example and the docs.
   the key edges, because a drop is the same kind of thing they are: a change that expires
   with the poll cycle. The clipboard became free functions for the reason `poll_events()` is
   one.
-- **Gamepad** (~90 lines) — axes and buttons from GLFW. The weakest ratio of value to API
-  surface on this list.
+- ✅ **Gamepad** — DONE in 0.21. The entry called it the weakest ratio of value to
+  API surface on the list and the estimate of ~90 lines was right, but the two
+  decisions worth having are ones the estimate did not see: normalizing the
+  triggers and where a deadzone may be applied. A thin wrapper is not the same as a
+  wrapper with no decisions in it.
 - ✅ **An async `StaticBuffer`** — DONE in 0.18.0.
 
 ## Rejected, and why
@@ -1413,11 +1619,14 @@ says what we did instead.
 - ✅ Add the `KEY_*` and `MOUSE_*` constants to `__all__` in `bazalt/__init__.py` — DONE, and
   it had been done for several releases while this line still asked for it. Found by the 0.20
   audit. A checklist nothing tests is a checklist that drifts.
-- Performance: a pipeline cache on disk, and descriptor indexing.
-- Indirect draw / GPU-driven work and multi-submit: **ship them, or defer them with an
-  explicit note.** Do not leave the question open in 1.0. For a Python library, indirect
-  draw is a niche, so do not inflate the sequence for its own sake.
-- Close debt #3 and #4, or write them down as accepted ceilings.
+- Performance: a pipeline cache on disk. Descriptor indexing shipped in 0.21.
+- ✅ Indirect draw / GPU-driven work: **ship them, or defer them with an explicit
+  note.** Shipped — the verbs in 0.19 and the GPU-decided count in 0.21. Multi-submit
+  is the half still open, and it is a question rather than a plan: nothing has asked
+  for a second queue.
+- Close debt #4, or write it down as an accepted ceiling. Debt #3 was paid in 0.19
+  and debt #5 in 0.21, so #4 is the only entry left, and it waits on someone else's
+  package.
 - **New capabilities after 1.0 are additive** (rule 3).
 
 ---
@@ -1555,6 +1764,24 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   has to be measured (a closed outline is "zero object pixels adjacent to background", not
   "looks right").
 
+  0.21 found the strongest form of this yet: `29_bindless` **drew nothing at all**,
+  and a clean 20-second run with the validation layers on did not say so. Its quad
+  was wound the obvious way — right along the top first — which is back-facing under
+  the pipeline default, so every triangle was culled. Culling is not an error, a
+  window nobody looked at reports nothing, and the layers have nothing to complain
+  about. What caught it was rendering the example's own shaders into an offscreen
+  target and asserting per quad. Both `fullscreen.vert` and `stripe.vert` already
+  carry a comment about this exact trap, which is the second lesson: **a warning
+  written in one file does not reach the file that needed it.** For a new example
+  the first measurement should be "is anything on the screen", because that is the
+  failure a run hides best.
+
+  The measurement also has to survive the pipeline it is measuring. The first
+  version compared each quad's centre TEXEL against the source texture and failed on
+  8 of 48, because a 64-pixel texture minified into a 43-pixel quad lands wherever
+  the filter puts it. Comparing the mean colour of the quad's interior is the same
+  claim without a dependence on sampling: pick the statistic the effect cannot move.
+
 - **A comment that overstates a use case gets followed** (0.19). `set_cursor_position`'s
   comment called per-frame recentring "the case this exists for". That is the pattern for a
   HIDDEN cursor; with `CURSOR_DISABLED` the mode already hands out unbounded motion and
@@ -1571,6 +1798,24 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   overlap submits. The recording path was already safe (the submit path waits on the
   serial); the readback path had to be told. General form: when a resource stops being
   ready on return, grep every function that reads it.
+
+- **A capability with a roll-up boolean is two questions, not one** (0.21).
+  `VkPhysicalDeviceVulkan12Features::descriptorIndexing` reads like the switch for
+  descriptor indexing and is not: the spec says enabling it "does not imply the
+  other minimum descriptor indexing features are also enabled". It answers "is this
+  set of capabilities available", and every bit still has to be turned on by name.
+  A feature that ships on the roll-up alone compiles, validates, and does nothing.
+  Whenever a feature struct has a member with the same name as the extension, read
+  what the spec says it *indicates*.
+
+- **A container that only ever grows is a leak with a delay** (0.21). Every
+  `set_image` appended to the descriptor set's list of bound images, which is
+  correct-looking and was fine while a binding held one descriptor: rewriting one
+  was rare, and the extra `shared_ptr` was one image. An array rewritten every frame
+  turns the same line into unbounded growth plus a record-time walk that gets slower
+  forever. The fix is to give the entry the identity it always had — here
+  `(binding, index)` — and replace rather than append. Look for this wherever a
+  "bind" or "set" verb records what it was handed.
 
 ### Mechanical refactors
 
@@ -1844,6 +2089,14 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   "zero object pixels adjacent to background" for a closed outline, "pixel-identical with
   culling on and off" for the culled view, "the same count as the CPU computes" for the
   culling itself. Add the measurement, not another look.
+- **A connected gamepad is unverified** (0.21). No test can plug one in, and the
+  machine the release was built on had none, so `examples/30_gamepad` was checked by
+  substituting a fake reading and measuring the frame it produced — the colour
+  follows the sticks, in the direction they moved. What that does NOT cover is
+  whether GLFW's mapping reports a real pad the way the enums claim: the axis
+  ordering, the trigger range, and whether a stick at rest reads near zero. Run the
+  example with a pad before trusting any of it.
+
 - **The headless fallback** (no windowing extensions) still has no coverage. It is a separate
   path from the API version, which CI does cover since 0.15.
 - **The windowed path is verified by running the examples, and that is load-bearing.** The
