@@ -1249,6 +1249,47 @@ entry. The release is a label, not the organizing axis.
   is skipped rather than fatal. A frame lost to a failed submit is logged as an ERROR and
   the loop continues, which is the same answer for the same shape of problem.
 
+### Platforms, and what macOS costs (0.22)
+
+Rule 3 says "run on more than 90% of machines", and until 0.22 the answer to "does bazalt run
+on a Mac" was "nobody has tried". Apple Silicon is too large a slice to leave at that before
+1.0, so 0.22 is the release that opens the platform. Three decisions carry it.
+
+- **The C++ needed one line.** `VK_USE_PLATFORM_METAL_EXT` for volk, the mirror of the WIN32
+  define. Everything a reader expects to find — `VK_KHR_portability_enumeration`, the
+  `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR` flag, `VK_KHR_portability_subset` on the
+  device — **vk-bootstrap already does** (`VkBootstrap.cpp:782-790, 883-886, 1315-1323`), and
+  it already picks the Metal surface extension for the same reason `create_instance_` does not
+  name the Win32 one. The 1.3-or-1.2 negotiation from 0.15 was written with MoltenVK named in
+  its comment and needed no change either. Worth recording because the estimate was wrong in
+  the useful direction: **the platform work was CI, not code.** The library had been portable
+  for several releases and nobody had run it.
+
+- **The wheel ships no loader and no MoltenVK.** Windows and Linux get a loader from the
+  graphics driver; macOS supplies none, so a Mac user installs the LunarG SDK. Bundling
+  MoltenVK inside the wheel would make `pip install bazalt` self-sufficient, and it was
+  rejected for the same reason `CIBW_REPAIR_WHEEL_COMMAND_WINDOWS` is empty: a bundled loader
+  shadows the one the user installed, and here it would also freeze a MoltenVK version inside
+  a wheel that has no way to update it. The validation layers come from the SDK regardless, so
+  a bundle would buy a working `import` and still not a working development setup. What the
+  decision costs is one failure mode, and 0.22 pays it in the message rather than the
+  documentation: `volkInitialize()` fails for exactly one reason, and `err_no_vulkan_loader()`
+  now names the SDK instead of reporting `VK_ERROR_INITIALIZATION_FAILED`. Upgrade path:
+  bundle it, if a user ever asks for a Mac install with no SDK — additive, and reversible.
+
+- **arm64 and macOS 14, both forced rather than chosen.** GitHub retired its x86_64 macOS
+  runners, so an Intel wheel could be cross-compiled and never tested, and an untested wheel
+  is worse than no wheel. The deployment target is the more interesting one: libc++ annotates
+  `<format>` (and the floating-point `std::to_chars` behind it) with availability, so a target
+  below 13.3 fails to compile every binding file. `std::format` is in the error path of most
+  of the library, so this is a hard floor rather than a preference — 14.0 is that floor with
+  room. CMakeLists.txt refuses a lower target with one sentence, because the alternative is a
+  page of "'format' is unavailable" landing on somebody who asked for `pip install bazalt`.
+
+The lesson the release generalizes: **a platform port is mostly the CI to prove it.** The
+first macOS run failed on the installer URL and the archive format, which are not Vulkan
+questions at all. The library part was one define.
+
 ---
 
 ## Technical debt register

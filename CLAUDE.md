@@ -41,18 +41,41 @@ venv/Scripts/python.exe -m pytest tests/test_render_to_layer.py -q -k multiview
 ```
 
 C++ formatting: `.clang-format` at the root (LLVM base, Allman, 120 col,
-`SortIncludes: Never`); clang-format 20 on PATH.
+`SortIncludes: Never`); clang-format 20 on PATH. Since 0.22 CI **gates** on it, so run it
+before pushing — the same command the `format` job runs:
 
-CI (`.github/workflows/build.yml`) builds wheels for cp310–cp313 on Windows + manylinux,
-runs only `test_stubs.py` on each wheel, and runs the full suite on Ubuntu against Mesa
-**lavapipe** — twice, once with `BAZALT_FORCE_VULKAN_1_2=1`, because lavapipe reports 1.3
-and the 1.2 + KHR-alias path would otherwise go untested. That env var is a test knob, not
+```bash
+clang-format --dry-run -Werror src/*.hpp src/*.cpp src/bindings/*.hpp src/bindings/*.cpp
+```
+
+Which public symbols no test touches (0.22, the input to the 1.0 test push). Writes
+`api_coverage.md` and fails on an untouched symbol that is not in
+`tests/api_coverage_baseline.txt`, which is what catches a binding shipped without a test.
+It needs a run with **no skips** — a skipped test is a symbol nobody called on this machine,
+not a symbol nobody tested — so the gate is live on a developer GPU and silent in CI.
+Regenerate the baseline with `BAZALT_WRITE_API_BASELINE=1`:
+
+```bash
+venv/Scripts/python.exe -m pytest -q --api-coverage
+```
+
+CI (`.github/workflows/build.yml`) has eight jobs: `format`, `sdist`, wheels for cp310–cp314
+on manylinux + Windows + macOS arm64, the full suite on Mesa **lavapipe** (Ubuntu) and on
+**MoltenVK** (macos-14, real Apple Silicon), and `publish`. Every wheel runs `test_stubs.py`
+through `CIBW_TEST_COMMAND`; only the two test jobs render anything.
+
+lavapipe runs twice, once with `BAZALT_FORCE_VULKAN_1_2=1`, because lavapipe reports 1.3 and
+the 1.2 + KHR-alias path would otherwise go untested. That env var is a test knob, not
 public API: it makes `Context` negotiate 1.2 wherever 1.3 exists, so the same path is
 reproducible locally on any driver:
 
 ```bash
 BAZALT_FORCE_VULKAN_1_2=1 venv/Scripts/python.exe -m pytest -q
 ```
+
+The macOS SDK install is a composite action (`.github/actions/install-vulkan-sdk-macos`)
+because both macOS jobs need it. macOS has no system Vulkan, so nothing there works without
+the LunarG SDK — that is the platform's contract, not a CI detail.
 
 ## Architecture
 

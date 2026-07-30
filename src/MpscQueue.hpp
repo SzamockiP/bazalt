@@ -5,6 +5,19 @@
 #include <new>
 #include <memory>
 
+// libc++ does not implement P0154R1, so std::hardware_destructive_interference_size
+// does not exist on Apple's toolchain and the two alignas below stop the macOS build
+// dead. The constant only has to be at least a cache line for the padding to do its
+// job — keeping the head and the tail off one another's line — so a fallback per
+// architecture loses nothing. Apple Silicon uses 128-byte lines, x86 uses 64.
+#ifdef __cpp_lib_hardware_interference_size
+inline constexpr std::size_t cache_line_bytes = std::hardware_destructive_interference_size;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+inline constexpr std::size_t cache_line_bytes = 128;
+#else
+inline constexpr std::size_t cache_line_bytes = 64;
+#endif
+
 template <std::move_constructible T>
 class MpscQueue
 {
@@ -75,6 +88,6 @@ private:
         std::optional<T> value;
     };
 
-    alignas(std::hardware_destructive_interference_size) std::atomic<Node*> _head;
-    alignas(std::hardware_destructive_interference_size) std::atomic<Node*> _tail;
+    alignas(cache_line_bytes) std::atomic<Node*> _head;
+    alignas(cache_line_bytes) std::atomic<Node*> _tail;
 };

@@ -231,13 +231,25 @@ jobs:
   # platforms, where the loader comes with the driver — see DESIGN.md.
   wheels_macos:
     name: Wheels · macos ${{ matrix.python }}
-    runs-on: macos-14
+    runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
         python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
     steps:
       - uses: actions/checkout@v7
+
+      # The image's default Xcode is not always its newest, and bazalt needs a
+      # recent one: deducing this (the whole pipeline builder), std::jthread and
+      # the C++23 range algorithms all arrived in AppleClang later than the rest
+      # of C++23. The runner OS does not reach the wheel — the deployment target
+      # below decides that — so taking the newest toolchain costs nothing.
+      - name: Use the newest Xcode on the image
+        run: |
+          NEWEST=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "using $NEWEST"
+          sudo xcode-select -s "$NEWEST"
+          clang --version
 
       # The SDK archive is cached inside the composite action, which both macOS
       # jobs share.
@@ -407,7 +419,7 @@ jobs:
   test_moltenvk:
     name: Tests · MoltenVK (Metal)
     needs: wheels_macos
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
 
