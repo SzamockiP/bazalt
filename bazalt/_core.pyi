@@ -566,15 +566,21 @@ class Pipeline: ...
 
 class DescriptorSet:
     def set_image(self, binding: int, image: Image,
-                  sampler: Optional[Sampler] = None) -> None:
-        """Bind an image (+ sampler; None means linear/repeat/anisotropic)."""
+                  sampler: Optional[Sampler] = None, index: int = 0) -> None:
+        """Bind an image (+ sampler; None means linear/repeat/anisotropic).
+
+        `index` selects the element of a binding declared with count>1, and
+        raises ResourceError outside that count (so index>0 on a plain binding
+        is refused). Writing the same (binding, index) again replaces what was
+        there rather than adding a second reference to it.
+        """
         ...
-    def set_storage_image(self, binding: int, image: Image) -> None:
+    def set_storage_image(self, binding: int, image: Image, index: int = 0) -> None:
         """Bind a storage image (no sampler) to a binding declared with
         .storage_image(). The image is accessed in GENERAL layout; the tracker
         adds the transition and any barrier around the dispatch automatically."""
         ...
-    def set_buffer(self, binding: int, buffer: Buffer) -> None: ...
+    def set_buffer(self, binding: int, buffer: Buffer, index: int = 0) -> None: ...
 
 class DescriptorPool:
     def allocate_set(self, pipeline: Pipeline, set: int) -> DescriptorSet: ...
@@ -805,10 +811,31 @@ class GraphicsPipelineBuilder:
         here."""
         ...
     def push_constant(self, size: int, stage: ShaderStage) -> GraphicsPipelineBuilder: ...
-    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
-    def storage_buffer(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
-    def texture(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
-    def storage_image(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder:
+    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int,
+                       count: int = 1) -> GraphicsPipelineBuilder: ...
+    def storage_buffer(self, binding: int, stage: ShaderStage, set: int,
+                       count: int = 1) -> GraphicsPipelineBuilder: ...
+    def texture(self, binding: int, stage: ShaderStage, set: int,
+                count: int = 1) -> GraphicsPipelineBuilder:
+        """A sampled image binding.
+
+        count > 1 declares a descriptor ARRAY — one binding holding N textures,
+        written with DescriptorSet.set_image(binding, image, index=i) and indexed
+        in the shader (`uniform sampler2D textures[N]`). One pipeline and one
+        draw then serve many materials, and a slot may be rewritten while an
+        earlier frame still reads the set.
+
+        An index that differs between invocations of one draw needs
+        `nonuniformEXT(i)` and `#extension GL_EXT_nonuniform_qualifier : require`
+        in the shader.
+
+        count > 1 needs the BINDLESS feature: create the Context with
+        optional=[Feature.BINDLESS], or build() raises ShaderError. Slots you
+        never write are legal as long as the shader never samples them.
+        """
+        ...
+    def storage_image(self, binding: int, stage: ShaderStage, set: int,
+                      count: int = 1) -> GraphicsPipelineBuilder:
         """A read/write image addressed by coordinate (imageLoad/imageStore) in a
         graphics shader.
 
@@ -834,9 +861,12 @@ class ComputePipelineBuilder:
     """No stage arguments anywhere: compute has exactly one stage."""
 
     def shader(self, shader: ShaderModule) -> ComputePipelineBuilder: ...
-    def uniform_buffer(self, binding: int, set: int = 0) -> ComputePipelineBuilder: ...
-    def storage_buffer(self, binding: int, set: int = 0) -> ComputePipelineBuilder: ...
-    def storage_image(self, binding: int, set: int = 0) -> ComputePipelineBuilder:
+    def uniform_buffer(self, binding: int, set: int = 0, count: int = 1) -> ComputePipelineBuilder: ...
+    def storage_buffer(self, binding: int, set: int = 0, count: int = 1) -> ComputePipelineBuilder:
+        """count > 1 declares a descriptor array — see
+        GraphicsPipelineBuilder.texture for what that means and what it needs."""
+        ...
+    def storage_image(self, binding: int, set: int = 0, count: int = 1) -> ComputePipelineBuilder:
         """A read/write image the compute shader accesses by coordinate
         (imageLoad/imageStore). Bind one with DescriptorSet.set_storage_image;
         the auto-barrier tracker transitions it to GENERAL before the dispatch

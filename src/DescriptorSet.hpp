@@ -1,5 +1,6 @@
 #pragma once
 #include <volk.h>
+#include <algorithm>
 #include <expected>
 #include <format>
 #include <memory>
@@ -27,6 +28,10 @@ public:
         // answers "is this written?" per (set, binding), and the tracker knows the
         // set from the map key but had no way to name the binding.
         std::uint32_t binding;
+        // Which element of that binding, for a count>1 array. Together with
+        // `binding` it is the identity of the descriptor, which is what lets a
+        // rewrite replace the entry instead of appending a second one.
+        std::uint32_t index;
     };
 
     // Same idea for images: STORAGE_IMAGE (compute read-write, GENERAL layout)
@@ -37,6 +42,10 @@ public:
         std::shared_ptr<Image> image;
         VkDescriptorType type;
         std::uint32_t binding;
+        std::uint32_t index;
+        // Kept here rather than in a parallel vector: it belongs to this
+        // descriptor, so it is replaced when the descriptor is.
+        std::shared_ptr<Sampler> sampler;
     };
 
     // sets: 1 element (static) or frames_in_flight elements (frame)
@@ -66,10 +75,14 @@ public:
     // Write an image + sampler to this descriptor set (all copies).
     // sampler == nullptr means "the default": linear, repeat, anisotropic —
     // resolved through the Context's cache, so it costs nothing.
+    //
+    // index selects the element of a count>1 array binding. It defaults to 0, so
+    // a plain binding is the one-element case of the same call.
     std::expected<void, Error> set_image(
         uint32_t binding,
         std::shared_ptr<Image> image,
-        std::shared_ptr<Sampler> sampler = nullptr)
+        std::shared_ptr<Sampler> sampler = nullptr,
+        uint32_t index = 0)
     {
         if (!context_)
             return std::unexpected(err_init("Context destroyed"));
@@ -78,13 +91,12 @@ public:
 
         // A typo in the binding index used to surface only as a validation error
         // at submit time (or not at all with the layers off). Diagnose it here.
-        auto it = binding_types_.find(binding);
-        if (it == binding_types_.end())
+        auto decl = check_binding(binding, index, "set_image");
+        if (!decl)
         {
-            return std::unexpected(
-                err_resource(std::format("Binding {} does not exist in this descriptor set's layout", binding)));
+            return std::unexpected(decl.error());
         }
-        if (it->second != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+        if (decl->type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
         {
             return std::unexpected(err_resource(
                 std::format("Binding {} is not a sampler binding. Use set_buffer() for buffer bindings", binding)));
@@ -112,7 +124,7 @@ public:
                 .pNext = nullptr,
                 .dstSet = set,
                 .dstBinding = binding,
-                .dstArrayElement = 0,
+                .dstArrayElement = index,
                 .descriptorCount = 1,
                 .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                 .pImageInfo = &imageInfo,
@@ -120,8 +132,7 @@ public:
                 .pTexelBufferView = nullptr};
             context_->vk().vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
-        bound_images_.push_back({std::move(image), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, binding});
-        samplers_.push_back(std::move(sampler));
+        record_image_(binding, index, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, std::move(image), std::move(sampler));
         return {};
     }
 
@@ -131,20 +142,19 @@ public:
     // accessed in. The auto-barrier tracker transitions the image to GENERAL
     // before the dispatch, so the recorded layout here is always what the GPU
     // finds at execute time.
-    std::expected<void, Error> set_storage_image(uint32_t binding, std::shared_ptr<Image> image)
+    std::expected<void, Error> set_storage_image(uint32_t binding, std::shared_ptr<Image> image, uint32_t index = 0)
     {
         if (!context_)
             return std::unexpected(err_init("Context destroyed"));
         if (!image)
             return std::unexpected(err_resource("set_storage_image: image is null"));
 
-        auto it = binding_types_.find(binding);
-        if (it == binding_types_.end())
+        auto decl = check_binding(binding, index, "set_storage_image");
+        if (!decl)
         {
-            return std::unexpected(
-                err_resource(std::format("Binding {} does not exist in this descriptor set's layout", binding)));
+            return std::unexpected(decl.error());
         }
-        if (it->second != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+        if (decl->type != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
         {
             return std::unexpected(err_resource(
                 std::format(
@@ -168,7 +178,7 @@ public:
                 .pNext = nullptr,
                 .dstSet = set,
                 .dstBinding = binding,
-                .dstArrayElement = 0,
+                .dstArrayElement = index,
                 .descriptorCount = 1,
                 .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                 .pImageInfo = &imageInfo,
@@ -182,14 +192,14 @@ public:
         // blocks before read(), so contents exist by then, and read()'s
         // transition needs the resting layout to be GENERAL, not UNDEFINED.
         image->mark_has_contents(VK_IMAGE_LAYOUT_GENERAL);
-        bound_images_.push_back({std::move(image), VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, binding});
+        record_image_(binding, index, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, std::move(image), nullptr);
         return {};
     }
 
     // Write a buffer to this descriptor set
     // For frame descriptor sets + DynamicBuffer: writes per-frame buffer to each copy
     // For static descriptor sets + DynamicBuffer: bz.ResourceError
-    std::expected<void, Error> set_buffer(uint32_t binding, std::shared_ptr<Buffer> buffer)
+    std::expected<void, Error> set_buffer(uint32_t binding, std::shared_ptr<Buffer> buffer, uint32_t index = 0)
     {
         if (!context_)
             return std::unexpected(err_init("Context destroyed"));
@@ -206,13 +216,14 @@ public:
         // No silent fallback: an unknown binding used to be *assumed* to be a
         // UNIFORM_BUFFER, so a typo'd index produced a descriptor write the
         // layout never declared — garbage diagnosed (at best) at submit time.
-        auto it = binding_types_.find(binding);
-        if (it == binding_types_.end())
+        // Either buffer type is accepted here, so the declared one is what gets
+        // written and only a sampler binding is refused.
+        auto decl = check_binding(binding, index, "set_buffer");
+        if (!decl)
         {
-            return std::unexpected(
-                err_resource(std::format("Binding {} does not exist in this descriptor set's layout", binding)));
+            return std::unexpected(decl.error());
         }
-        const VkDescriptorType descType = it->second;
+        const VkDescriptorType descType = decl->type;
         if (descType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
         {
             return std::unexpected(err_resource(
@@ -229,7 +240,7 @@ public:
                 .pNext = nullptr,
                 .dstSet = sets_[i],
                 .dstBinding = binding,
-                .dstArrayElement = 0,
+                .dstArrayElement = index,
                 .descriptorCount = 1,
                 .descriptorType = descType,
                 .pImageInfo = nullptr,
@@ -237,7 +248,7 @@ public:
                 .pTexelBufferView = nullptr};
             context_->vk().vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
         }
-        buffers_.push_back({std::move(buffer), descType, binding});
+        replace_or_append_(buffers_, {std::move(buffer), descType, binding, index});
         return {};
     }
 
@@ -271,14 +282,72 @@ public:
         return buffers_;
     }
 
-private:
-public:
     const Context* owner() const
     {
         return context_.get();
     }
 
 private:
+    // What the three setters have to agree about: the binding exists and the array
+    // element is inside the count the layout declared. One function, so a new
+    // setter cannot invent a different answer. The type check stays at the call
+    // sites, because each one has a different sentence to say about it.
+    //
+    // ResourceError rather than ValueError for the index too: the number is only
+    // wrong relative to a layout, and deciding that means asking an object (the
+    // 0.20 rule).
+    std::expected<Pipeline::BindingInfo, Error> check_binding(uint32_t binding, uint32_t index, const char* what) const
+    {
+        auto it = binding_types_.find(binding);
+        if (it == binding_types_.end())
+        {
+            return std::unexpected(
+                err_resource(std::format("Binding {} does not exist in this descriptor set's layout", binding)));
+        }
+        if (index >= it->second.count)
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: index {} is outside binding {}, which was declared with count={}",
+                    what,
+                    index,
+                    binding,
+                    it->second.count)));
+        }
+        return it->second;
+    }
+
+    // Replace the entry for this (binding, index) or append a new one.
+    //
+    // Appending unconditionally is what these vectors used to do, and it was
+    // invisible while a binding held one descriptor: writing the same binding twice
+    // kept the first image alive for the set's whole life and made the record-time
+    // tracker walk a list that only grows. A descriptor array rewritten per frame
+    // turns that into an unbounded leak, so the identity of a descriptor —
+    // (binding, index) — is what the list is keyed on.
+    template <typename T>
+    static void replace_or_append_(std::vector<T>& entries, T entry)
+    {
+        auto it = std::ranges::find_if(
+            entries, [&](const T& e) { return e.binding == entry.binding && e.index == entry.index; });
+        if (it != entries.end())
+        {
+            *it = std::move(entry);
+            return;
+        }
+        entries.push_back(std::move(entry));
+    }
+
+    void record_image_(
+        uint32_t binding,
+        uint32_t index,
+        VkDescriptorType type,
+        std::shared_ptr<Image> image,
+        std::shared_ptr<Sampler> sampler)
+    {
+        replace_or_append_(bound_images_, BoundImage{std::move(image), type, binding, index, std::move(sampler)});
+    }
+
     std::shared_ptr<Context> context_;
     std::shared_ptr<DescriptorPool> pool_; // sets must not outlive their pool
     std::vector<VkDescriptorSet> sets_;
@@ -286,7 +355,6 @@ private:
     bool is_frame_set_;
     // Hold shared_ptrs to prevent resources from being freed
     std::vector<BoundImage> bound_images_;
-    std::vector<std::shared_ptr<Sampler>> samplers_;
     std::vector<BoundBuffer> buffers_;
 };
 
@@ -325,13 +393,24 @@ public:
             return std::unexpected(err_resource("DescriptorPool must have at least one non-zero descriptor count"));
         }
 
+        // A set whose layout has an UPDATE_AFTER_BIND binding may only come from a
+        // pool that says so, and the pool cannot know which layouts it will serve.
+        // Gated on the feature rather than set always, so a Context that never asked
+        // for BINDLESS keeps the descriptor limits it had: update-after-bind
+        // descriptors are counted against a separate, sometimes smaller, budget.
+        VkDescriptorPoolCreateFlags flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        if (context.supports(Feature::BINDLESS))
+        {
+            flags |= VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+        }
+
         VkDescriptorPoolCreateInfo poolInfo{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             .pNext = nullptr,
             // Sets return to the pool when their Python object is collected.
             // Without this flag a pool was strictly one-way: allocate enough
             // times and it fills up forever.
-            .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+            .flags = flags,
             .maxSets = maxSets,
             .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
             .pPoolSizes = poolSizes.data()};
