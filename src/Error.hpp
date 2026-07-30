@@ -157,11 +157,28 @@ inline std::optional<Error> check(
 // these straight through, so `buffer.update(data, offset=2**64 - 10)` reached a memcpy.
 // Subtracting instead of adding cannot overflow, because the first test proves
 // `size - offset` does not wrap.
-template <typename T>
-constexpr bool fits_within(T offset, T length, T size)
+//
+// Three type parameters, not one. The three arguments are naturally a
+// VkDeviceSize, a length and a container's size(), and whether those are the SAME
+// type is a platform accident: on Windows and Linux VkDeviceSize and size_t are
+// spelled by the same underlying type, so one T deduced fine for twenty releases.
+// On macOS size_t is `unsigned long` and VkDeviceSize is `unsigned long long` --
+// same width, different types -- and every call site failed to deduce.
+//
+// A signed argument still cannot slip through: common_type_t of a signed and an
+// unsigned type is unsigned, so a negative offset converts to a huge one and the
+// first test refuses it. Wrong the safe way, which is the only direction a bounds
+// check may be wrong in.
+template <typename T, typename U, typename V>
+constexpr bool fits_within(T offset, U length, V size)
 {
-    static_assert(std::is_unsigned_v<T>, "fits_within compares sizes, and a size is never negative");
-    return offset <= size && length <= size - offset;
+    using Widest = std::common_type_t<T, U, V>;
+    static_assert(std::is_unsigned_v<Widest>, "fits_within compares sizes, and a size is never negative");
+
+    const auto offset_bytes = static_cast<Widest>(offset);
+    const auto length_bytes = static_cast<Widest>(length);
+    const auto size_bytes = static_cast<Widest>(size);
+    return offset_bytes <= size_bytes && length_bytes <= size_bytes - offset_bytes;
 }
 
 // Constructors for non-Vulkan failures.

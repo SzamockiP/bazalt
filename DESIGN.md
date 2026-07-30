@@ -1255,15 +1255,28 @@ Rule 3 says "run on more than 90% of machines", and until 0.22 the answer to "do
 on a Mac" was "nobody has tried". Apple Silicon is too large a slice to leave at that before
 1.0, so 0.22 is the release that opens the platform. Three decisions carry it.
 
-- **The C++ needed one line.** `VK_USE_PLATFORM_METAL_EXT` for volk, the mirror of the WIN32
-  define. Everything a reader expects to find — `VK_KHR_portability_enumeration`, the
+- **The Vulkan needed one line. The C++ needed a compiler.** `VK_USE_PLATFORM_METAL_EXT` for
+  volk, the mirror of the WIN32 define, is the whole graphics-side cost. Everything a reader
+  expects to find — `VK_KHR_portability_enumeration`, the
   `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR` flag, `VK_KHR_portability_subset` on the
   device — **vk-bootstrap already does** (`VkBootstrap.cpp:782-790, 883-886, 1315-1323`), and
   it already picks the Metal surface extension for the same reason `create_instance_` does not
   name the Win32 one. The 1.3-or-1.2 negotiation from 0.15 was written with MoltenVK named in
-  its comment and needed no change either. Worth recording because the estimate was wrong in
-  the useful direction: **the platform work was CI, not code.** The library had been portable
-  for several releases and nobody had run it.
+  its comment and needed no change either.
+
+  What did block the port was **C++23 arriving in AppleClang later than in MSVC and GCC**. The
+  first macOS build produced twenty errors and exactly one was bazalt's: libc++ does not
+  implement P0154R1, so `std::hardware_destructive_interference_size` does not exist there and
+  `MpscQueue`'s padding did not compile. That one is now a per-architecture constant, which is
+  a portability fix worth having anyway — the value only has to be at least a cache line.
+
+  The other nineteen were the toolchain being old: `deducing this` carries the entire pipeline
+  builder, and `std::jthread`, `std::stop_token`, `std::ranges::contains` and
+  `std::ranges::fold_left` are spread over four more files. Rewriting those to a 2020 subset
+  would be a large diff against features the library is built on, so the answer is the newest
+  Xcode on the image instead. **Where a language feature is load-bearing, raise the compiler
+  floor rather than write the feature out** — the alternative here was reimplementing
+  `jthread` and un-deducing forty builder methods to support a compiler nobody has to use.
 
 - **The wheel ships no loader and no MoltenVK.** Windows and Linux get a loader from the
   graphics driver; macOS supplies none, so a Mac user installs the LunarG SDK. Bundling
@@ -1286,9 +1299,10 @@ on a Mac" was "nobody has tried". Apple Silicon is too large a slice to leave at
   room. CMakeLists.txt refuses a lower target with one sentence, because the alternative is a
   page of "'format' is unavailable" landing on somebody who asked for `pip install bazalt`.
 
-The lesson the release generalizes: **a platform port is mostly the CI to prove it.** The
-first macOS run failed on the installer URL and the archive format, which are not Vulkan
-questions at all. The library part was one define.
+The lesson the release generalizes: **a platform port is mostly the CI to prove it, and the
+toolchain to survive it.** The failures came in this order: the installer URL, the archive
+format, then twenty compiler errors. Not one of them is a Vulkan question, and the Vulkan
+part really was one define.
 
 ---
 
@@ -1513,6 +1527,24 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
   needs a manual `cmd.barrier()`. `examples/28_gpu_culling` does exactly that, because the
   compute pass runs in one window's recording and the other window reads its output.
   Upgrade path: Context-level tracking of which serial last wrote a resource.
+- **macOS needs the Vulkan SDK, and the wheel does not carry it** (0.22). See the decision
+  above. Upgrade path: bundle MoltenVK and a loader, which is additive and reversible, if
+  somebody asks for a Mac install with no SDK.
+- **The macOS wheels are arm64 and macOS 14** (0.22). Intel because GitHub retired the
+  x86_64 runners and an untested wheel is worse than none. 14.0 because libc++ carries
+  `<format>` behind an availability annotation and the binding layer formats everywhere.
+  Upgrade path for the first: a cross-compiled wheel plus somebody with the hardware to
+  test it. For the second: none wanted — it moves by itself as the floor rises.
+- **API coverage counts a symbol per NAME, not per (class, name), for the half it cannot
+  call** (0.22). Methods, properties and functions are measured exactly, by wrapping them.
+  Enum members and the key constants are read rather than called, so nothing can wrap them
+  and the report matches their bare name against the identifiers in the test sources. Two
+  enums that share a member name share an answer. Upgrade path: none worth it — the report
+  exists to say what to test next, and it is exact for everything that is called.
+- **A symbol used only by an example counts as untouched** (0.22). Deliberate: the examples
+  are not run by CI, so they prove nothing about a symbol still working. It is also why the
+  untouched list is longer than it looks — 124 of the 127 key constants are in it, and
+  `examples/21_window_modes` presses a good many of them.
 
 ---
 
@@ -1741,7 +1773,17 @@ says what we did instead.
 - **Freeze the API.** Deprecation gets one minor release of warnings, and there are no
   silent removals.
 - **Every public symbol from `_core.pyi` is touched by a test.** An unexercised binding is
-  an unimplemented binding.
+  an unimplemented binding. 0.22 made this measurable rather than aspirational:
+  `pytest --api-coverage` writes `api_coverage.md`, and the answer on the day it was
+  written was **301 of 494** — 129 of 156 methods, 63 of 63 properties, 94 of 136 enum
+  members and 3 of 127 key constants. The untouched list is the 1.0 test plan, and
+  `tests/api_coverage_baseline.txt` is what stops it growing in the meantime.
+
+  Two things the measurement says that the old wording did not. Properties are already at
+  100%, so the gap is not where "unexercised binding" suggested. And the constants are
+  most of the arithmetic: they are read-only integers, so a test that touches all 127
+  proves nothing except that they exist — which `test_stubs.py` already checks. Reading
+  the number as one percentage would put 1.0 behind a pointless test.
 - ✅ Add the `KEY_*` and `MOUSE_*` constants to `__all__` in `bazalt/__init__.py` — DONE, and
   it had been done for several releases while this line still asked for it. Found by the 0.20
   audit. A checklist nothing tests is a checklist that drifts.
@@ -2207,6 +2249,39 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   `vulkan-1.dll` into the wheel and shadow the loader the user's driver installed.
   `CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: ""` turns it off. Everything else bazalt links —
   shaderc, glfw, volk, vk-bootstrap — is static, so there is no repair left to do.
+
+- **Where the build happens decides what can be cached** (0.22). The obvious cache is the
+  CMake build tree, and on Linux it is worthless: cibuildwheel copies the project INTO the
+  container and copies only the wheels back out, so nothing written to `build/` there ever
+  reaches the host to be saved. Linux caches the SDK tarball instead, downloaded on the host
+  and unpacked in the container. Windows and macOS build natively and cache both.
+
+  What the build-tree cache actually saves is worth knowing before anyone measures it and is
+  disappointed: `actions/checkout` stamps every source file with the current time, so bazalt's
+  own translation units recompile on every run regardless. `_deps` arrives with its cached
+  timestamps, so glfw, volk, vma, vk-bootstrap and stb neither re-clone nor rebuild. The key
+  hashes `CMakeLists.txt`, so a pin bump busts it by construction.
+
+- **A format gate belongs in CI, not in a habit** (0.22). Every release through 0.21 ended
+  with a `style(0.N): clang-format over the release's own code` commit, which is the shape of
+  a rule that is enforced by remembering. The job pins the formatter version from PyPI rather
+  than taking apt's, because clang-format changes its output between major versions — an
+  unpinned formatter turns somebody else's release into a red build here, which is tech debt
+  #4's lesson arriving from a different direction.
+
+- **The macOS SDK install is a composite action** (`.github/actions/install-vulkan-sdk-macos`,
+  0.22) because two jobs need it and it is twenty lines of "find the thing, do not spell it".
+  Both halves of that were learned the hard way: the download is a `.zip` and the first
+  attempt guessed `.dmg` (a 404), and the installer app's name and depth inside the archive
+  have moved between SDK releases, so it is found with `find` rather than named. LunarG
+  publishes `https://vulkan.lunarg.com/sdk/files.json`, which answers both questions for any
+  version — check it before bumping `VULKAN_SDK_VERSION`.
+
+- **macOS strips `DYLD_*` when it starts a SIP-protected binary**, and `/bin/bash` is one, so
+  a `DYLD_LIBRARY_PATH` written to `$GITHUB_ENV` does not survive into the next step. The
+  loader is opened with `dlopen` — by volk, and again by GLFW — so it has to be findable
+  without that variable. A symlink into `/usr/local/lib` is what the SDK's own system install
+  writes, and it survives everything.
 
 ---
 
