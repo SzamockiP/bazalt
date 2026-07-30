@@ -49,6 +49,16 @@ draw count the GPU decides, gamepads, and MSAA into images you already own.
   `bz.GamepadAxis`. Returns a reading of that pad, or `None` when the slot is
   empty. A free function, because a pad belongs to the process and not to any one
   window — the same reason `bz.poll_events()` is one.
+- **`update_after_bind=` on every binding declarator.** Whether that binding may
+  be rewritten while a submit that uses the set is still in flight. The default
+  answers per shape — on for an array, off for a single descriptor — because
+  that is what each is for. Name it to override either: `True` on one texture you
+  swap between frames, `False` on a static array you write once. Needs
+  `bz.Feature.BINDLESS`.
+- **`texture()` on the compute pipeline builder.** A compute shader could only
+  reach an image as a storage image, so it had no filtering, no mip selection and
+  no address mode. Nothing downstream was missing — `set_image`, the pool and the
+  barrier tracker already handled a sampler binding on a compute set.
 - **`samples=` on the `RenderTarget` signature that takes images.** MSAA into
   images you already own: bazalt renders into multisampled attachments and
   resolves into the images you passed, which stay single-sample and readable.
@@ -90,10 +100,12 @@ draw count the GPU decides, gamepads, and MSAA into images you already own.
   core: without the feature an unwritten slot and a per-fragment index are both
   undefined, so the unguarded version works on one machine and returns garbage on
   the next.
-- **A descriptor array is written before it is read, and can be rewritten after.**
-  Rewriting a PLAIN binding while a submit that uses it is in flight is still
-  undefined behaviour, and the validation layers report it. Only array bindings
-  carry update-after-bind.
+- **Rewriting a descriptor mid-flight needs `update_after_bind=True` unless it is
+  an array.** An array has it by default and a single descriptor does not, because
+  a plain binding is written once at setup in nearly every program and the flag
+  puts the descriptor in a separate limit budget. Without it, rewriting a
+  descriptor a pending submit reads is undefined behaviour and the validation
+  layers report it.
 - **A gamepad reports level state only.** There is no `was_button_pressed`: the
   edge queries rotate on a per-window counter, and a pad has no window to hang
   one on.

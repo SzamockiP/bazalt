@@ -576,9 +576,14 @@ public:
         VkShaderStageFlags stageFlags,
         VkDescriptorType descriptorType,
         uint32_t setIndex,
-        uint32_t count = 1)
+        uint32_t count = 1,
+        std::optional<bool> update_after_bind = std::nullopt)
     {
         auto& bindings = descriptor_bindings_[setIndex];
+        if (update_after_bind)
+        {
+            update_after_bind_[{setIndex, binding}] = *update_after_bind;
+        }
 
         auto it = std::ranges::find(bindings, binding, &VkDescriptorSetLayoutBinding::binding);
         if (it != bindings.end())
@@ -626,6 +631,13 @@ public:
         return largest;
     }
 
+    // Whether anything asked for update-after-bind by name. Same gate as an
+    // array: the bits behind it only exist on a Context that enabled BINDLESS.
+    bool wants_update_after_bind() const
+    {
+        return std::ranges::any_of(update_after_bind_, [](const auto& e) { return e.second; });
+    }
+
     const std::optional<Error>& error() const
     {
         return error_;
@@ -665,7 +677,7 @@ public:
             VkDescriptorSetLayoutCreateFlags layout_flags = 0;
             if (has_bindings)
             {
-                binding_flags = array_binding_flags(context, it->second);
+                binding_flags = binding_flags_for(context, s, it->second);
                 if (std::ranges::any_of(binding_flags, [](auto f) { return f != 0; }))
                 {
                     flags_info.bindingCount = static_cast<uint32_t>(binding_flags.size());
@@ -739,35 +751,53 @@ public:
     }
 
 private:
-    // The flags an array binding needs, and zero for a plain one. Parallel to the
-    // set's binding list, because that is the shape
-    // VkDescriptorSetLayoutBindingFlagsCreateInfo takes.
+    // The flags each binding of one set needs, parallel to the set's binding list
+    // because that is the shape VkDescriptorSetLayoutBindingFlagsCreateInfo takes.
     //
     // PARTIALLY_BOUND on every array: a slot nobody wrote is the normal case for a
     // 500-texture array, and without the flag reading the SET at all is undefined
     // rather than reading an unwritten slot. descriptorIndexing guarantees it.
     //
-    // UPDATE_AFTER_BIND only where the device enabled the bit for that descriptor
+    // UPDATE_AFTER_BIND is the one the caller can name. The default is "an array
+    // yes, a single descriptor no", because that is what each is FOR: an array
+    // exists to be rewritten while the scene runs, and a plain binding is written
+    // once at setup in nearly every program. Both defaults can be wrong, so both
+    // are overridable — a static 500-texture atlas wants it off, and a single
+    // texture swapped between frames wants it on.
+    //
+    // Off is the cheaper side, which is why it is the default for the common case:
+    // an update-after-bind descriptor is counted against a separate limit
+    // (maxPerStageDescriptorUpdateAfterBind*, usually larger) and some
+    // implementations place it differently. Nothing here is measured, so the knob
+    // exists rather than a claim.
+    //
+    // The flag is only set where the device enabled the bit for that descriptor
     // type. descriptorIndexing guarantees it for sampled images, storage images and
-    // storage buffers, but NOT for uniform buffers, so the answer is read off what
-    // actually stuck rather than assumed. Without it the array is still usable, it
-    // just has to be written before the first frame that binds the set.
-    static std::vector<VkDescriptorBindingFlags> array_binding_flags(
+    // storage buffers, but NOT for uniform buffers, so this reads what actually
+    // stuck rather than assuming. Without it the array is still usable; it just has
+    // to be written before the first frame that binds the set.
+    std::vector<VkDescriptorBindingFlags> binding_flags_for(
         Context& context,
-        const std::vector<VkDescriptorSetLayoutBinding>& bindings)
+        uint32_t setIndex,
+        const std::vector<VkDescriptorSetLayoutBinding>& bindings) const
     {
         const VkPhysicalDeviceVulkan12Features& v12 = context.negotiated_features().v12;
         std::vector<VkDescriptorBindingFlags> flags;
         flags.reserve(bindings.size());
         for (const auto& b : bindings)
         {
-            if (b.descriptorCount <= 1)
+            VkDescriptorBindingFlags f = 0;
+            if (b.descriptorCount > 1)
             {
-                flags.push_back(0);
-                continue;
+                f |= VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
             }
-            VkDescriptorBindingFlags f = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
-            const bool update_after_bind =
+
+            bool wants = b.descriptorCount > 1;
+            if (auto it = update_after_bind_.find({setIndex, b.binding}); it != update_after_bind_.end())
+            {
+                wants = it->second;
+            }
+            const bool device_has =
                 (b.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
                  v12.descriptorBindingSampledImageUpdateAfterBind) ||
                 (b.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE &&
@@ -776,7 +806,7 @@ private:
                  v12.descriptorBindingStorageBufferUpdateAfterBind) ||
                 (b.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &&
                  v12.descriptorBindingUniformBufferUpdateAfterBind);
-            if (update_after_bind)
+            if (wants && device_has)
             {
                 f |= VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
             }
@@ -787,6 +817,10 @@ private:
 
     std::vector<VkPushConstantRange> push_constant_ranges_;
     std::map<uint32_t, std::vector<VkDescriptorSetLayoutBinding>> descriptor_bindings_;
+    // Only the bindings whose caller named it; everything else takes the default
+    // in binding_flags_for. Keyed by (set, binding), because a binding index means
+    // nothing without its set.
+    std::map<std::pair<uint32_t, uint32_t>, bool> update_after_bind_;
     // A user error found by a chaining verb, carried to build(). See add_binding.
     std::optional<Error> error_;
 };
@@ -815,6 +849,17 @@ inline std::expected<void, Error> check_descriptor_arrays(Context& context, cons
             "count > 1 on a binding declarator requires the BINDLESS feature. Create the "
             "Context with optional=[bz.Feature.BINDLESS] and check ctx.supports() before "
             "you declare the array."));
+    }
+    // Same gate, because the descriptorBinding*UpdateAfterBind bits are turned on
+    // only for a Context that asked for BINDLESS. Silently ignoring the request
+    // would leave a caller rewriting descriptors that a submit still reads, which
+    // is the undefined behaviour they asked to be rid of.
+    if (layout.wants_update_after_bind() && !context.supports(Feature::BINDLESS))
+    {
+        return std::unexpected(err_shader(
+            "update_after_bind=True requires the BINDLESS feature. Create the Context with "
+            "optional=[bz.Feature.BINDLESS], or write the descriptor before the first frame "
+            "that binds the set."));
     }
     return {};
 }
@@ -1138,18 +1183,40 @@ public:
     }
 
     template <typename Self>
-    Self&& uniform_buffer(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set, uint32_t count)
+    Self&& uniform_buffer(
+        this Self&& self,
+        uint32_t binding,
+        ShaderStage stage,
+        uint32_t set,
+        uint32_t count,
+        std::optional<bool> update_after_bind)
     {
         self.layout_.add_binding(
-            binding, static_cast<VkShaderStageFlags>(to_vk(stage)), VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, set, count);
+            binding,
+            static_cast<VkShaderStageFlags>(to_vk(stage)),
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            set,
+            count,
+            update_after_bind);
         return std::forward<Self>(self);
     }
 
     template <typename Self>
-    Self&& storage_buffer(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set, uint32_t count)
+    Self&& storage_buffer(
+        this Self&& self,
+        uint32_t binding,
+        ShaderStage stage,
+        uint32_t set,
+        uint32_t count,
+        std::optional<bool> update_after_bind)
     {
         self.layout_.add_binding(
-            binding, static_cast<VkShaderStageFlags>(to_vk(stage)), VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, set, count);
+            binding,
+            static_cast<VkShaderStageFlags>(to_vk(stage)),
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            set,
+            count,
+            update_after_bind);
         return std::forward<Self>(self);
     }
 
@@ -1158,14 +1225,21 @@ public:
     // second declarator because a bindless texture and a plain one differ by how
     // many there are, which is the definition of a variant (rule 1).
     template <typename Self>
-    Self&& texture(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set, uint32_t count)
+    Self&& texture(
+        this Self&& self,
+        uint32_t binding,
+        ShaderStage stage,
+        uint32_t set,
+        uint32_t count,
+        std::optional<bool> update_after_bind)
     {
         self.layout_.add_binding(
             binding,
             static_cast<VkShaderStageFlags>(to_vk(stage)),
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             set,
-            count);
+            count,
+            update_after_bind);
         return std::forward<Self>(self);
     }
 
@@ -1177,10 +1251,21 @@ public:
     // pipeline needs `cmd.barrier(image, ...)` exactly like an SSBO written the
     // same way (tech debt #3).
     template <typename Self>
-    Self&& storage_image(this Self&& self, uint32_t binding, ShaderStage stage, uint32_t set, uint32_t count)
+    Self&& storage_image(
+        this Self&& self,
+        uint32_t binding,
+        ShaderStage stage,
+        uint32_t set,
+        uint32_t count,
+        std::optional<bool> update_after_bind)
     {
         self.layout_.add_binding(
-            binding, static_cast<VkShaderStageFlags>(to_vk(stage)), VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, set, count);
+            binding,
+            static_cast<VkShaderStageFlags>(to_vk(stage)),
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            set,
+            count,
+            update_after_bind);
         return std::forward<Self>(self);
     }
 
@@ -1922,25 +2007,67 @@ public:
     }
 
     template <typename Self>
-    Self&& uniform_buffer(this Self&& self, uint32_t binding, uint32_t set, uint32_t count)
+    Self&& uniform_buffer(
+        this Self&& self,
+        uint32_t binding,
+        uint32_t set,
+        uint32_t count,
+        std::optional<bool> update_after_bind)
     {
-        self.layout_.add_binding(binding, VK_SHADER_STAGE_COMPUTE_BIT, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, set, count);
+        self.layout_.add_binding(
+            binding, VK_SHADER_STAGE_COMPUTE_BIT, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, set, count, update_after_bind);
         return std::forward<Self>(self);
     }
 
     // count > 1 is a descriptor array, same as on the graphics builder.
     template <typename Self>
-    Self&& storage_buffer(this Self&& self, uint32_t binding, uint32_t set, uint32_t count)
+    Self&& storage_buffer(
+        this Self&& self,
+        uint32_t binding,
+        uint32_t set,
+        uint32_t count,
+        std::optional<bool> update_after_bind)
     {
-        self.layout_.add_binding(binding, VK_SHADER_STAGE_COMPUTE_BIT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, set, count);
+        self.layout_.add_binding(
+            binding, VK_SHADER_STAGE_COMPUTE_BIT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, set, count, update_after_bind);
+        return std::forward<Self>(self);
+    }
+
+    // A sampled image in a compute shader. Missing until 0.21 for no reason
+    // anyone wrote down: set_image, the descriptor pool and the barrier tracker
+    // all handled a COMBINED_IMAGE_SAMPLER on a compute set already, so the gap
+    // was the declaration and nothing else. Without it a compute shader could
+    // only reach an image as a storage image -- no filtering, no mip selection,
+    // no address mode.
+    template <typename Self>
+    Self&& texture(
+        this Self&& self,
+        uint32_t binding,
+        uint32_t set,
+        uint32_t count,
+        std::optional<bool> update_after_bind)
+    {
+        self.layout_.add_binding(
+            binding,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            set,
+            count,
+            update_after_bind);
         return std::forward<Self>(self);
     }
 
     // A read/write image the shader accesses by coordinate (imageLoad/imageStore).
     template <typename Self>
-    Self&& storage_image(this Self&& self, uint32_t binding, uint32_t set, uint32_t count)
+    Self&& storage_image(
+        this Self&& self,
+        uint32_t binding,
+        uint32_t set,
+        uint32_t count,
+        std::optional<bool> update_after_bind)
     {
-        self.layout_.add_binding(binding, VK_SHADER_STAGE_COMPUTE_BIT, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, set, count);
+        self.layout_.add_binding(
+            binding, VK_SHADER_STAGE_COMPUTE_BIT, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, set, count, update_after_bind);
         return std::forward<Self>(self);
     }
 

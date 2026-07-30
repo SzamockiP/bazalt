@@ -847,12 +847,12 @@ class GraphicsPipelineBuilder:
         here."""
         ...
     def push_constant(self, size: int, stage: ShaderStage) -> GraphicsPipelineBuilder: ...
-    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int,
-                       count: int = 1) -> GraphicsPipelineBuilder: ...
-    def storage_buffer(self, binding: int, stage: ShaderStage, set: int,
-                       count: int = 1) -> GraphicsPipelineBuilder: ...
-    def texture(self, binding: int, stage: ShaderStage, set: int,
-                count: int = 1) -> GraphicsPipelineBuilder:
+    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+                       update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder: ...
+    def storage_buffer(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+                       update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder: ...
+    def texture(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+                update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder:
         """A sampled image binding.
 
         count > 1 declares a descriptor ARRAY — one binding holding N textures,
@@ -868,10 +868,18 @@ class GraphicsPipelineBuilder:
         count > 1 needs the BINDLESS feature: create the Context with
         optional=[Feature.BINDLESS], or build() raises ShaderError. Slots you
         never write are legal as long as the shader never samples them.
+
+        `update_after_bind` says whether this binding may be rewritten while a
+        submit that uses the set is still in flight. The default answers per
+        shape — on for an array, off for a single descriptor — because that is
+        what each is for. Name it to override either: True on a single texture
+        you swap between frames, False on a static array you write once. It also
+        needs BINDLESS, and the flag puts the descriptor in a separate limit
+        budget, so off is the cheaper side.
         """
         ...
-    def storage_image(self, binding: int, stage: ShaderStage, set: int,
-                      count: int = 1) -> GraphicsPipelineBuilder:
+    def storage_image(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+                      update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder:
         """A read/write image addressed by coordinate (imageLoad/imageStore) in a
         graphics shader.
 
@@ -897,12 +905,26 @@ class ComputePipelineBuilder:
     """No stage arguments anywhere: compute has exactly one stage."""
 
     def shader(self, shader: ShaderModule) -> ComputePipelineBuilder: ...
-    def uniform_buffer(self, binding: int, set: int = 0, count: int = 1) -> ComputePipelineBuilder: ...
-    def storage_buffer(self, binding: int, set: int = 0, count: int = 1) -> ComputePipelineBuilder:
-        """count > 1 declares a descriptor array — see
-        GraphicsPipelineBuilder.texture for what that means and what it needs."""
+    def uniform_buffer(self, binding: int, set: int = 0, count: int = 1,
+                       update_after_bind: Optional[bool] = None) -> ComputePipelineBuilder: ...
+    def storage_buffer(self, binding: int, set: int = 0, count: int = 1,
+                       update_after_bind: Optional[bool] = None) -> ComputePipelineBuilder:
+        """count > 1 declares a descriptor array, and update_after_bind says
+        whether it may be rewritten mid-flight — see
+        GraphicsPipelineBuilder.texture for both."""
         ...
-    def storage_image(self, binding: int, set: int = 0, count: int = 1) -> ComputePipelineBuilder:
+    def texture(self, binding: int, set: int = 0, count: int = 1,
+                update_after_bind: Optional[bool] = None) -> ComputePipelineBuilder:
+        """A sampled image in a compute shader (0.21).
+
+        Bind one with DescriptorSet.set_image, exactly as on the graphics side.
+        The difference from storage_image is what the shader gets: a sampler2D
+        filters, picks a mip and obeys an address mode, where imageLoad reads one
+        texel at an integer coordinate.
+        """
+        ...
+    def storage_image(self, binding: int, set: int = 0, count: int = 1,
+                      update_after_bind: Optional[bool] = None) -> ComputePipelineBuilder:
         """A read/write image the compute shader accesses by coordinate
         (imageLoad/imageStore). Bind one with DescriptorSet.set_storage_image;
         the auto-barrier tracker transitions it to GENERAL before the dispatch

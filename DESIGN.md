@@ -328,6 +328,19 @@ entry. The release is a label, not the organizing axis.
 
 ### Descriptors, and the feature table that had to grow first
 
+- **A compute shader can sample a texture** (0.21). `ComputePipelineBuilder` had
+  `storage_image` and no `texture`, so an image reached a compute shader only as
+  `imageLoad` at an integer coordinate — no filtering, no mip selection, no address
+  mode. Nothing downstream was missing: `set_image` checks the binding type it
+  finds in the layout, the descriptor pool counts samplers, and the tracker's
+  `COMBINED_IMAGE_SAMPLER` branch takes whatever stage mask it is handed. The gap
+  was one declarator, and it survived four releases because the compute examples
+  all happened to want a storage image.
+
+  General form: **an absent verb leaves no trace.** A wrong one is a bug report and
+  a missing one is silence, so the way to find these is to read a builder's list of
+  verbs against its sibling's rather than to wait for someone to miss it.
+
 - **`FeatureInfo` has three columns, one per feature struct** (0.21). It mapped a
   `Feature` to a `VkBool32 VkPhysicalDeviceFeatures::*` and nothing else, so
   multiview, descriptor indexing and `drawIndirectCount` had no row to sit in —
@@ -383,11 +396,27 @@ entry. The release is a label, not the organizing axis.
   (VUID-vkUpdateDescriptorSets-None-03047), and swapping a texture at run time is
   the prototyping case, so it has to be legal rather than usually working.
 
-  Only array bindings get it. A plain binding keeps the contract it always had,
-  which is deliberate: turning it on for everything would mean that asking for
-  BINDLESS changes what an unrelated descriptor allocates, and a feature flag must
-  not do that — the same argument that kept the debug name out of the sampler
-  cache key in 0.16. The pool flag is gated the same way.
+  **The default answers per shape and the caller can override it** (`update_after_bind=`,
+  0.21). On for an array, off for a single descriptor, because that is what each is
+  FOR: an array exists to be rewritten while the scene runs, and a plain binding is
+  written once at setup in nearly every program. Turning it on for everything was
+  the first version and it is wrong for the same reason the debug name stayed out
+  of the sampler cache key in 0.16 — asking for BINDLESS would then change what an
+  unrelated descriptor allocates. Turning it on for nothing but arrays is wrong
+  too, and the user who asked for the knob is the evidence: a single texture
+  swapped between frames is an ordinary thing to want, and it was unreachable.
+
+  One boolean rather than a verb on the builder, because the question belongs to
+  the binding: "may THIS descriptor be rewritten while a frame reads it". A
+  pipeline-wide switch would make a bindless user remember to call it, and
+  forgetting is undefined behaviour rather than an error.
+
+  **Off is the cheaper side, and how much cheaper is not measured.** An
+  update-after-bind descriptor counts against a separate limit
+  (`maxPerStageDescriptorUpdateAfterBind*`, usually larger than the ordinary one)
+  and some implementations place it differently. That is a reason for a knob and a
+  default, not for a claim, and the comment in `binding_flags_for` says so rather
+  than inventing a number.
 
 - **`count > 1` requires the feature, which is stricter than the spec** (0.21). A
   fixed-size array indexed by a dynamically uniform expression is core Vulkan. It
@@ -1385,11 +1414,12 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
   image the tracker never saw stops at `tracker_.tracks()`. Upgrade path: skip the
   walk for bindings above some declared count and require a manual barrier there,
   which is a worse API for a cost nobody has measured yet.
-- **Only an array binding carries update-after-bind** (0.21). Rewriting a PLAIN
-  descriptor while a submit that binds the set is in flight is still undefined, and
-  the layers report it. Upgrade path: the flag on every binding when the Context has
-  BINDLESS — refused for now because asking for a feature must not change what an
-  unrelated descriptor allocates.
+- **A descriptor is rewritable mid-flight only where somebody said so** (0.21).
+  The default is on for an array and off for a single descriptor, and
+  `update_after_bind=` overrides either. Rewriting a descriptor that has neither
+  while a submit reads it is undefined, and the layers report it. Not a ceiling to
+  raise: the alternative is the flag everywhere, which spends the separate limit
+  budget on descriptors nobody rewrites.
 - **A gamepad has no edge queries** (0.21). Level state only: `pad.button(...)` says
   what is down now, and there is no `was_button_pressed`. Upgrade path: the per-cycle
   rotation the windows use, which needs somewhere process-wide to keep the
