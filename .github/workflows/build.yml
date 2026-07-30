@@ -221,6 +221,91 @@ jobs:
           name: wheels-windows-${{ matrix.python }}
           path: ./wheelhouse/*.whl
 
+  # ── macOS wheels ──────────────────────────────────────────────
+  # arm64 only. GitHub's x86_64 macOS runners are retired, so an Intel wheel
+  # could be cross-compiled but never tested, and an untested wheel is worse
+  # than no wheel.
+  #
+  # The wheel ships no loader and no MoltenVK: macOS has no system Vulkan, so
+  # the user installs the SDK. That is the same contract as the other two
+  # platforms, where the loader comes with the driver — see DESIGN.md.
+  wheels_macos:
+    name: Wheels · macos ${{ matrix.python }}
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cache the Vulkan SDK installer
+        uses: actions/cache@v4
+        with:
+          path: .vulkan-sdk
+          key: vulkan-sdk-macos-${{ env.VULKAN_SDK_VERSION }}
+
+      - name: Cache the CMake build tree
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: build-v1-macos-${{ matrix.python }}-${{ hashFiles('CMakeLists.txt', 'pyproject.toml') }}
+          restore-keys: |
+            build-v1-macos-${{ matrix.python }}-
+
+      # The installer app inside the disk image is found, not spelled out: its
+      # name has changed between SDK releases, and the lavapipe job already
+      # pays for that lesson once (see "Locate the lavapipe ICD manifest").
+      # --root puts the SDK under $HOME, so nothing here needs sudo.
+      - name: Install the Vulkan SDK (MoltenVK, layers, shaderc)
+        run: |
+          set -e
+          VERSION="${{ env.VULKAN_SDK_VERSION }}"
+          DMG=".vulkan-sdk/vulkansdk-macos-$VERSION.dmg"
+          mkdir -p .vulkan-sdk
+          test -f "$DMG" || curl -sSfL \
+            "https://sdk.lunarg.com/sdk/download/$VERSION/mac/vulkansdk-macos-$VERSION.dmg" -o "$DMG"
+          hdiutil attach "$DMG" -mountpoint /Volumes/vulkan-sdk -nobrowse -quiet
+          APP=$(ls -d /Volumes/vulkan-sdk/*.app | head -1)
+          test -n "$APP" || { echo "no installer app in the disk image:"; ls -la /Volumes/vulkan-sdk; exit 1; }
+          echo "installer: $APP"
+          "$APP/Contents/MacOS/$(basename "$APP" .app)" \
+            --root "$HOME/VulkanSDK" --accept-licenses --default-answer --confirm-command install
+          hdiutil detach /Volumes/vulkan-sdk -quiet
+          echo "VULKAN_SDK=$HOME/VulkanSDK/macOS" >> "$GITHUB_ENV"
+
+      - uses: pypa/cibuildwheel@v4.1
+        env:
+          CIBW_BUILD: "${{ matrix.python }}-*"
+          CIBW_ARCHS_MACOS: arm64
+
+          # 14.0, because libc++ supplies std::format only from 13.3 and the
+          # binding layer uses it everywhere. CMakeLists.txt refuses anything
+          # lower with that sentence rather than a page of availability errors.
+          CIBW_ENVIRONMENT_MACOS: >
+            MACOSX_DEPLOYMENT_TARGET=14.0
+            VULKAN_SDK=$HOME/VulkanSDK/macOS
+            CMAKE_PREFIX_PATH=$HOME/VulkanSDK/macOS
+
+          # Same rule as the Windows job: bazalt must not ship a Vulkan loader.
+          # volk opens the one the user installed, and a bundled copy would
+          # shadow it. The otool step below reports what the extension really
+          # links, so this stays a fact rather than an assumption.
+          CIBW_REPAIR_WHEEL_COMMAND_MACOS: ""
+
+      - name: Report what the extension links
+        run: |
+          set -e
+          WHEEL=$(ls wheelhouse/*.whl | head -1)
+          rm -rf /tmp/wheel-check && mkdir -p /tmp/wheel-check
+          unzip -q "$WHEEL" -d /tmp/wheel-check
+          otool -L /tmp/wheel-check/bazalt/_core*.so
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-macos-${{ matrix.python }}
+          path: ./wheelhouse/*.whl
+
   # ── Full GPU suite on lavapipe (Mesa software rasterizer) ─────
   # First CI leg that actually renders: deterministic, no GPU runner needed.
   #
@@ -318,7 +403,7 @@ jobs:
 
   # ── Publish to PyPI on release ────────────────────────────────
   publish:
-    needs: [wheels_linux, wheels_windows, sdist]
+    needs: [wheels_linux, wheels_windows, wheels_macos, sdist]
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
     permissions:

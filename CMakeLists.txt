@@ -143,4 +143,23 @@ if(WIN32)
     target_compile_definitions(_core PRIVATE VK_USE_PLATFORM_WIN32_KHR)
 endif()
 
+# The macOS mirror of the line above: it makes volk load vkCreateMetalSurfaceEXT,
+# which is the surface entry point vk-bootstrap enables there. Nothing else about
+# the platform needs code -- vk-bootstrap adds VK_KHR_portability_enumeration and
+# the instance flag by itself, and enables VK_KHR_portability_subset on the device.
+if(APPLE)
+    target_compile_definitions(_core PRIVATE VK_USE_PLATFORM_METAL_EXT)
+
+    # libc++ annotates <format> and the floating-point std::to_chars it calls with
+    # availability, so a deployment target below 13.3 fails to compile every
+    # binding file. Say so in one sentence instead of leaving the reader to find
+    # it in a hundred lines of "'format' is unavailable".
+    if(CMAKE_OSX_DEPLOYMENT_TARGET AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 13.3)
+        message(FATAL_ERROR
+            "bazalt needs a macOS deployment target of 13.3 or later, because libc++ "
+            "supplies std::format from that version. Set MACOSX_DEPLOYMENT_TARGET=14.0 "
+            "(the version the published wheels use).")
+    endif()
+endif()
+
 install(TARGETS _core DESTINATION bazalt)
