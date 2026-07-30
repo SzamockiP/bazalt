@@ -75,8 +75,7 @@ inline DeviceFeatures query_device_features(
 {
     DeviceFeatures features;
     features.v11.pNext = &features.v12;
-    VkPhysicalDeviceFeatures2 features2{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &features.v11};
+    VkPhysicalDeviceFeatures2 features2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &features.v11};
     get_features2(physical_device, &features2);
     features.core = features2.features;
     features.v11.pNext = nullptr;
@@ -118,9 +117,7 @@ inline constexpr auto kFeatureTable = std::to_array<FeatureInfo>({
     {Feature::FRAGMENT_STORES, "FRAGMENT_STORES", &VkPhysicalDeviceFeatures::fragmentStoresAndAtomics},
     {Feature::VERTEX_STAGE_STORES, "VERTEX_STAGE_STORES", &VkPhysicalDeviceFeatures::vertexPipelineStoresAndAtomics},
     {.feature = Feature::MULTIVIEW, .name = "MULTIVIEW", .v11 = &VkPhysicalDeviceVulkan11Features::multiview},
-    {.feature = Feature::BINDLESS,
-     .name = "BINDLESS",
-     .v12 = &VkPhysicalDeviceVulkan12Features::descriptorIndexing},
+    {.feature = Feature::BINDLESS, .name = "BINDLESS", .v12 = &VkPhysicalDeviceVulkan12Features::descriptorIndexing},
     {.feature = Feature::DRAW_INDIRECT_COUNT,
      .name = "DRAW_INDIRECT_COUNT",
      .v12 = &VkPhysicalDeviceVulkan12Features::drawIndirectCount},

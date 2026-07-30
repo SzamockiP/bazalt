@@ -230,8 +230,7 @@ void bind_windowing(py::module_& m)
             }
             if (deadzone < 0.0f || deadzone >= 1.0f)
             {
-                throw py::value_error(
-                    std::format("deadzone must be at least 0.0 and below 1.0, got {}", deadzone));
+                throw py::value_error(std::format("deadzone must be at least 0.0 and below 1.0, got {}", deadzone));
             }
             auto pad = unwrap(get_gamepad(index, deadzone), nullptr);
             return pad ? py::cast(*pad) : py::none();

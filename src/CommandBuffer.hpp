@@ -682,8 +682,7 @@ public:
         track_draw_();
         commands_.push_back(
             [buffer = std::move(buffer), offset, count, count_buffer = std::move(count_buffer), count_offset](
-                VkCommandBuffer cmd,
-                const FrameContext& frame)
+                VkCommandBuffer cmd, const FrameContext& frame)
             {
                 if (count_buffer)
                 {
@@ -729,8 +728,7 @@ public:
         track_draw_();
         commands_.push_back(
             [buffer = std::move(buffer), offset, count, count_buffer = std::move(count_buffer), count_offset](
-                VkCommandBuffer cmd,
-                const FrameContext& frame)
+                VkCommandBuffer cmd, const FrameContext& frame)
             {
                 if (count_buffer)
                 {
@@ -1852,8 +1850,8 @@ private:
         }
         if (count_offset % 4 != 0)
         {
-            return std::unexpected(err_resource(
-                std::format("{}: count_offset must be a multiple of 4, got {}", what, count_offset)));
+            return std::unexpected(
+                err_resource(std::format("{}: count_offset must be a multiple of 4, got {}", what, count_offset)));
         }
         if (!fits_within(count_offset, sizeof(std::uint32_t), count_buffer->size()))
         {

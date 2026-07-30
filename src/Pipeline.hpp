@@ -797,15 +797,14 @@ private:
             {
                 wants = it->second;
             }
-            const bool device_has =
-                (b.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
-                 v12.descriptorBindingSampledImageUpdateAfterBind) ||
-                (b.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE &&
-                 v12.descriptorBindingStorageImageUpdateAfterBind) ||
-                (b.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER &&
-                 v12.descriptorBindingStorageBufferUpdateAfterBind) ||
-                (b.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &&
-                 v12.descriptorBindingUniformBufferUpdateAfterBind);
+            const bool device_has = (b.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
+                                     v12.descriptorBindingSampledImageUpdateAfterBind) ||
+                                    (b.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE &&
+                                     v12.descriptorBindingStorageImageUpdateAfterBind) ||
+                                    (b.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER &&
+                                     v12.descriptorBindingStorageBufferUpdateAfterBind) ||
+                                    (b.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &&
+                                     v12.descriptorBindingUniformBufferUpdateAfterBind);
             if (wants && device_has)
             {
                 f |= VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;

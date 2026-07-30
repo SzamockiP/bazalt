@@ -108,11 +108,7 @@ void bind_targets(py::module_& m)
         // positionals up there and absent here.
         .def(
             py::init(
-                [](Context& context,
-                   py::object color,
-                   py::object depth,
-                   std::uint32_t samples,
-                   const std::string& name)
+                [](Context& context, py::object color, py::object depth, std::uint32_t samples, const std::string& name)
                 {
                     std::vector<std::shared_ptr<Image>> colors;
                     if (!color.is_none())
