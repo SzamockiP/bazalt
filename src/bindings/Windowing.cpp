@@ -204,6 +204,46 @@ void bind_windowing(py::module_& m)
         "Every GPU on this machine, without creating a Context. Pass one to\n"
         "Context(device=...) to run on it. The default picks automatically.");
 
+    // ── Gamepad ──
+    // A snapshot by value: read it, use it for the frame, drop it. The state
+    // itself is refreshed by poll_events().
+    py::class_<Gamepad>(m, "Gamepad")
+        .def_readonly("index", &Gamepad::index)
+        .def_readonly("name", &Gamepad::name)
+        .def("axis", &Gamepad::axis, py::arg("axis"))
+        .def("button", &Gamepad::button, py::arg("button"))
+        .def("__repr__", [](const Gamepad& g) { return std::format("<bazalt.Gamepad {} '{}'>", g.index, g.name); });
+
+    // Free function, not a Window method, for the reason poll_events() is one:
+    // glfwGetGamepadState takes a joystick id and no window.
+    m.def(
+        "get_gamepad",
+        [](int index, float deadzone) -> py::object
+        {
+            // ValueError, not a BazaltError: both are values outside a fixed range
+            // in the signature, so nothing had to be consulted to know they are
+            // wrong. See DESIGN.md on which exception a user error gets.
+            if (index < 0 || index > GLFW_JOYSTICK_LAST)
+            {
+                throw py::value_error(
+                    std::format("gamepad index must be between 0 and {}, got {}", GLFW_JOYSTICK_LAST, index));
+            }
+            if (deadzone < 0.0f || deadzone >= 1.0f)
+            {
+                throw py::value_error(
+                    std::format("deadzone must be at least 0.0 and below 1.0, got {}", deadzone));
+            }
+            auto pad = unwrap(get_gamepad(index, deadzone), nullptr);
+            return pad ? py::cast(*pad) : py::none();
+        },
+        py::arg("index") = 0,
+        py::kw_only(),
+        py::arg("deadzone") = 0.0f,
+        "The gamepad in slot `index`, or None when that slot is empty.\n\n"
+        "Level state only: which buttons are down and where the sticks are, as of\n"
+        "the last poll_events(). Needs at least one live Window, because GLFW is\n"
+        "initialized with the first one.");
+
     // ── Key Constants ──
     m.attr("KEY_SPACE") = GLFW_KEY_SPACE;
     m.attr("KEY_APOSTROPHE") = GLFW_KEY_APOSTROPHE;

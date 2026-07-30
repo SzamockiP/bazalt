@@ -2,13 +2,16 @@
 #include <volk.h>
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <array>
 #include <string>
 #include <stdexcept>
 #include <memory>
 #include <expected>
+#include <optional>
 #include <utility>
 #include <vector>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 #include <atomic>
@@ -769,4 +772,166 @@ inline std::expected<void, Error> set_clipboard(const std::string& text)
     }
     glfwSetClipboardString(nullptr, text.c_str());
     return {};
+}
+
+// ── Gamepads ─────────────────────────────────────────────────────────────────
+//
+// Named after what a hand does, in GLFW's own layout: every pad the mapping
+// database knows is presented as this one shape, whatever the hardware reports
+// underneath. That is the same argument Features.hpp makes — the caller says
+// which control they mean, and the library resolves what this device calls it.
+//
+// The values are GLFW's, so the enums are a rename rather than a translation
+// table that could drift.
+enum class GamepadButton
+{
+    A = GLFW_GAMEPAD_BUTTON_A,
+    B = GLFW_GAMEPAD_BUTTON_B,
+    X = GLFW_GAMEPAD_BUTTON_X,
+    Y = GLFW_GAMEPAD_BUTTON_Y,
+    LEFT_BUMPER = GLFW_GAMEPAD_BUTTON_LEFT_BUMPER,
+    RIGHT_BUMPER = GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER,
+    BACK = GLFW_GAMEPAD_BUTTON_BACK,
+    START = GLFW_GAMEPAD_BUTTON_START,
+    GUIDE = GLFW_GAMEPAD_BUTTON_GUIDE,
+    LEFT_THUMB = GLFW_GAMEPAD_BUTTON_LEFT_THUMB,
+    RIGHT_THUMB = GLFW_GAMEPAD_BUTTON_RIGHT_THUMB,
+    DPAD_UP = GLFW_GAMEPAD_BUTTON_DPAD_UP,
+    DPAD_RIGHT = GLFW_GAMEPAD_BUTTON_DPAD_RIGHT,
+    DPAD_DOWN = GLFW_GAMEPAD_BUTTON_DPAD_DOWN,
+    DPAD_LEFT = GLFW_GAMEPAD_BUTTON_DPAD_LEFT
+};
+
+enum class GamepadAxis
+{
+    LEFT_X = GLFW_GAMEPAD_AXIS_LEFT_X,
+    LEFT_Y = GLFW_GAMEPAD_AXIS_LEFT_Y,
+    RIGHT_X = GLFW_GAMEPAD_AXIS_RIGHT_X,
+    RIGHT_Y = GLFW_GAMEPAD_AXIS_RIGHT_Y,
+    LEFT_TRIGGER = GLFW_GAMEPAD_AXIS_LEFT_TRIGGER,
+    RIGHT_TRIGGER = GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER
+};
+
+// One reading of one pad. A snapshot by value, not a live handle: the state is
+// what the last poll_events() left behind, and holding it means a value that
+// cannot change halfway through the frame that is reading it.
+struct Gamepad
+{
+    int index = 0;
+    std::string name;
+    std::array<float, 6> axes{};
+    std::array<unsigned char, 15> buttons{};
+
+    float axis(GamepadAxis a) const
+    {
+        const auto i = static_cast<std::size_t>(a);
+        return i < axes.size() ? axes[i] : 0.0f;
+    }
+
+    // Not std::unreachable on an out-of-range value: a pybind enum accepts any
+    // int, so a forged one has to land somewhere safe.
+    bool button(GamepadButton b) const
+    {
+        const auto i = static_cast<std::size_t>(b);
+        return i < buttons.size() && buttons[i] != 0;
+    }
+};
+
+// A stick that reads 0.03 when nobody is touching it is what real hardware does,
+// so the knob exists. Scaled rather than clipped, so the value stays continuous
+// as the stick leaves the dead zone instead of jumping to `deadzone`.
+//
+// Per axis, which makes the dead area a square rather than a circle. A radial
+// dead zone needs the two axes of a stick paired up, and nothing has asked for
+// the difference.
+inline constexpr float apply_deadzone(float value, float deadzone)
+{
+    const float magnitude = value < 0.0f ? -value : value;
+    if (magnitude <= deadzone)
+    {
+        return 0.0f;
+    }
+    const float scaled = (magnitude - deadzone) / (1.0f - deadzone);
+    return value < 0.0f ? -scaled : scaled;
+}
+
+// The one piece of arithmetic here, and no test can reach it without a stick in
+// somebody's hand — so it is checked at compile time instead. Full deflection
+// stays full deflection (a dead zone that shortened the range would be felt), the
+// dead area is zero on both sides, and the value is continuous across the edge.
+static_assert(apply_deadzone(1.0f, 0.25f) == 1.0f);
+static_assert(apply_deadzone(-1.0f, 0.25f) == -1.0f);
+static_assert(apply_deadzone(0.2f, 0.25f) == 0.0f);
+static_assert(apply_deadzone(-0.2f, 0.25f) == 0.0f);
+static_assert(apply_deadzone(0.25f, 0.25f) == 0.0f);
+static_assert(apply_deadzone(0.5f, 0.0f) == 0.5f);
+static_assert(apply_deadzone(0.625f, 0.25f) == 0.5f);
+
+// Read one gamepad, or nothing when that slot is empty.
+//
+// A free function for the reason poll_events() is one: a pad belongs to the
+// process, not to a window, and glfwGetGamepadState takes a joystick id and no
+// window. The state itself is refreshed by poll_events(), so this is a read of
+// what the last pump saw.
+//
+// Level state only — which buttons are down now. The edge queries
+// (was_key_pressed and friends) rotate on a per-window generation counter, and a
+// pad has no window to hang that on; 0.16 rejected a process-wide registry of
+// live windows for exactly this, and an edge here would need the global that
+// decision refused.
+// The index and the deadzone are checked in the binding layer and raise
+// ValueError there: both are values outside a fixed range in the signature, which
+// is the half of the 0.20 rule that does not belong to the BazaltError hierarchy.
+// An out-of-range index reaching here is answered by GLFW with "no such pad".
+inline std::expected<std::optional<Gamepad>, Error> get_gamepad(int index, float deadzone)
+{
+    if (Window::window_count_.load() == 0)
+    {
+        return std::unexpected(err_window(
+            "Reading a gamepad needs a window: GLFW is initialized with the first Window "
+            "and shut down with the last, and the pads belong to the process, not to any "
+            "one window."));
+    }
+
+    GLFWgamepadstate state{};
+    // False for an empty slot AND for a stick GLFW has no mapping for, and the
+    // answer is the same either way: bazalt cannot present it as A/B/X/Y, so
+    // there is no gamepad here as far as this API is concerned.
+    if (!glfwGetGamepadState(index, &state))
+    {
+        return std::nullopt;
+    }
+
+    Gamepad pad;
+    pad.index = index;
+    if (const char* name = glfwGetGamepadName(index))
+    {
+        pad.name = name;
+    }
+    for (std::size_t i = 0; i < pad.axes.size(); ++i)
+    {
+        pad.axes[i] = state.axes[i];
+    }
+    for (std::size_t i = 0; i < pad.buttons.size(); ++i)
+    {
+        pad.buttons[i] = state.buttons[i];
+    }
+
+    // GLFW reports a trigger as -1 released to +1 pressed, which is the hardware
+    // talking rather than the hand: "how far in is the trigger" is a 0..1
+    // question, and every caller would write the same conversion. The sticks keep
+    // their -1..1, because that IS the question there.
+    for (auto trigger : {GamepadAxis::LEFT_TRIGGER, GamepadAxis::RIGHT_TRIGGER})
+    {
+        float& value = pad.axes[static_cast<std::size_t>(trigger)];
+        value = (value + 1.0f) * 0.5f;
+    }
+    // Deadzone on the sticks only. A trigger rests at one end of its range, so a
+    // dead zone around zero would eat the first part of the pull.
+    for (auto stick : {GamepadAxis::LEFT_X, GamepadAxis::LEFT_Y, GamepadAxis::RIGHT_X, GamepadAxis::RIGHT_Y})
+    {
+        float& value = pad.axes[static_cast<std::size_t>(stick)];
+        value = apply_deadzone(value, deadzone);
+    }
+    return pad;
 }

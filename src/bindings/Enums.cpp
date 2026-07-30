@@ -38,6 +38,33 @@ void bind_enums(py::module_& m)
         .value("BINDLESS", Feature::BINDLESS)
         .value("DRAW_INDIRECT_COUNT", Feature::DRAW_INDIRECT_COUNT);
 
+    // The gamepad layout GLFW maps every known pad onto, renamed rather than
+    // translated: the values ARE the GLFW ones, so the two cannot drift.
+    py::enum_<GamepadButton>(m, "GamepadButton")
+        .value("A", GamepadButton::A)
+        .value("B", GamepadButton::B)
+        .value("X", GamepadButton::X)
+        .value("Y", GamepadButton::Y)
+        .value("LEFT_BUMPER", GamepadButton::LEFT_BUMPER)
+        .value("RIGHT_BUMPER", GamepadButton::RIGHT_BUMPER)
+        .value("BACK", GamepadButton::BACK)
+        .value("START", GamepadButton::START)
+        .value("GUIDE", GamepadButton::GUIDE)
+        .value("LEFT_THUMB", GamepadButton::LEFT_THUMB)
+        .value("RIGHT_THUMB", GamepadButton::RIGHT_THUMB)
+        .value("DPAD_UP", GamepadButton::DPAD_UP)
+        .value("DPAD_RIGHT", GamepadButton::DPAD_RIGHT)
+        .value("DPAD_DOWN", GamepadButton::DPAD_DOWN)
+        .value("DPAD_LEFT", GamepadButton::DPAD_LEFT);
+
+    py::enum_<GamepadAxis>(m, "GamepadAxis")
+        .value("LEFT_X", GamepadAxis::LEFT_X)
+        .value("LEFT_Y", GamepadAxis::LEFT_Y)
+        .value("RIGHT_X", GamepadAxis::RIGHT_X)
+        .value("RIGHT_Y", GamepadAxis::RIGHT_Y)
+        .value("LEFT_TRIGGER", GamepadAxis::LEFT_TRIGGER)
+        .value("RIGHT_TRIGGER", GamepadAxis::RIGHT_TRIGGER);
+
     py::enum_<BufferType>(m, "BufferType")
         .value("VERTEX", BufferType::VERTEX)
         .value("INDEX", BufferType::INDEX)

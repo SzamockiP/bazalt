@@ -354,6 +354,34 @@ class WindowMode(IntEnum):
     FULLSCREEN = 2
     FULLSCREEN_WINDOWED = 3
 
+class GamepadButton(IntEnum):
+    """The layout GLFW maps every pad it knows onto, named after what the hand
+    does. The values are GLFW's own, so the two cannot drift (0.21)."""
+    A = 0
+    B = 1
+    X = 2
+    Y = 3
+    LEFT_BUMPER = 4
+    RIGHT_BUMPER = 5
+    BACK = 6
+    START = 7
+    GUIDE = 8
+    LEFT_THUMB = 9
+    RIGHT_THUMB = 10
+    DPAD_UP = 11
+    DPAD_RIGHT = 12
+    DPAD_DOWN = 13
+    DPAD_LEFT = 14
+
+class GamepadAxis(IntEnum):
+    """Sticks read -1..1, triggers 0..1 — see Gamepad.axis (0.21)."""
+    LEFT_X = 0
+    LEFT_Y = 1
+    RIGHT_X = 2
+    RIGHT_Y = 3
+    LEFT_TRIGGER = 4
+    RIGHT_TRIGGER = 5
+
 # ── Resources ──────────────────────────────────────────────────────────
 
 class Buffer:
@@ -1436,6 +1464,56 @@ def get_clipboard() -> str:
 
 def set_clipboard(text: str) -> None:
     """Put text on the system clipboard. See get_clipboard (0.19)."""
+    ...
+
+class Gamepad:
+    """One reading of one gamepad (0.21).
+
+    A snapshot by value, not a live handle: it holds what the last poll_events()
+    left behind, so a value cannot change halfway through the frame reading it.
+    """
+
+    @property
+    def index(self) -> int: ...
+    @property
+    def name(self) -> str:
+        """What the mapping database calls this pad, e.g. "Xbox Controller"."""
+        ...
+
+    def axis(self, axis: GamepadAxis) -> float:
+        """A stick axis in -1..1, or a trigger in 0..1.
+
+        GLFW reports a trigger as -1 released and +1 pulled; bazalt normalizes it,
+        because "how far in is the trigger" is a 0..1 question and every caller
+        would otherwise write the same conversion. The sticks keep -1..1, which is
+        the question there. Y is positive DOWNWARD, as GLFW reports it.
+        """
+        ...
+    def button(self, button: GamepadButton) -> bool:
+        """Whether that button is down right now."""
+        ...
+
+def get_gamepad(index: int = 0, *, deadzone: float = 0.0) -> Optional[Gamepad]:
+    """The gamepad in slot `index` (0..15), or None when that slot is empty (0.21).
+
+        pad = bz.get_gamepad(0, deadzone=0.15)
+        if pad and pad.button(bz.GamepadButton.A):
+            jump()
+
+    A free function for the same reason poll_events is one: GLFW's gamepad state
+    takes a joystick id and no window, so a pad belongs to the process. Raises
+    WindowError with no live Window, because GLFW is initialized with the first
+    one, and ValueError for an index or a deadzone outside its range.
+
+    `deadzone` applies to the four stick axes and not to the triggers, which rest
+    at one end of their range rather than in the middle. It is scaled rather than
+    clipped, so the value stays continuous as the stick leaves the dead zone, and
+    it is per axis, which makes the dead area a square.
+
+    Level state only — which buttons are down now. There is no
+    `was_button_pressed`: the edge queries rotate on a per-window counter, and a
+    pad has no window to hang one on.
+    """
     ...
 
 def list_devices() -> list[Device]:
