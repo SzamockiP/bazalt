@@ -11,15 +11,12 @@ import pytest
 
 import bazalt as bz
 
-ALL_FEATURES = [
-    bz.Feature.ANISOTROPIC_FILTERING,
-    bz.Feature.WIREFRAME,
-    bz.Feature.WIDE_LINES,
-    bz.Feature.DEPTH_CLAMP,
-    bz.Feature.SAMPLE_RATE_SHADING,
-    bz.Feature.MULTI_DRAW_INDIRECT,
-    bz.Feature.SHADER_FLOAT64,
-]
+# Read off the enum rather than listed by hand: a hand-written list went stale
+# for four releases running, and this one covers a row the day it is added. It
+# also makes the parametrized test below the referee for the 0.21 pNext column —
+# a Feature whose table row sets no member pointer answers False forever, and
+# nothing else would notice.
+ALL_FEATURES = list(bz.Feature.__members__.values())
 
 
 def test_list_devices_finds_at_least_one_gpu():
@@ -43,7 +40,6 @@ def test_device_reports_readable_properties():
         assert d.type in ("discrete", "integrated", "virtual", "cpu", "other")
         assert d.api_version.count(".") == 2
         assert d.memory_mb >= 0
-        assert isinstance(d.supports_multiview(), bool)
 
 
 @pytest.mark.parametrize("feature", ALL_FEATURES)
@@ -79,4 +75,12 @@ def test_explicit_device_is_honoured(ctx):
     addressable by handle — which is what Context(device=...) consumes."""
     chosen = [d for d in bz.list_devices() if d.name == ctx.device_name]
     assert chosen, "the running Context's GPU must appear in list_devices()"
-    assert chosen[0].supports_multiview() == ctx.supports_multiview()
+    # Both sides read the same feature table through the same query helper, and
+    # this is what keeps them from drifting apart again. The Context answers
+    # "enabled", the Device answers "available", so the Device may say True where
+    # the Context says False — but never the other way round.
+    for feature in ALL_FEATURES:
+        if ctx.supports(feature):
+            assert chosen[0].supports(feature), (
+                f"the Context enabled {feature!r} on a device that reports it missing"
+            )

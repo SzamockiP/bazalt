@@ -33,7 +33,10 @@ void bind_enums(py::module_& m)
         .value("TESSELLATION", Feature::TESSELLATION)
         .value("GEOMETRY_SHADER", Feature::GEOMETRY_SHADER)
         .value("FRAGMENT_STORES", Feature::FRAGMENT_STORES)
-        .value("VERTEX_STAGE_STORES", Feature::VERTEX_STAGE_STORES);
+        .value("VERTEX_STAGE_STORES", Feature::VERTEX_STAGE_STORES)
+        .value("MULTIVIEW", Feature::MULTIVIEW)
+        .value("BINDLESS", Feature::BINDLESS)
+        .value("DRAW_INDIRECT_COUNT", Feature::DRAW_INDIRECT_COUNT);
 
     py::enum_<BufferType>(m, "BufferType")
         .value("VERTEX", BufferType::VERTEX)

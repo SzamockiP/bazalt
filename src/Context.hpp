@@ -347,12 +347,12 @@ public:
         return enabled_features_.contains(feature);
     }
 
-    // Multiview lives in VkPhysicalDeviceVulkan11Features, not the base-feature
-    // table `supports(Feature)` covers, so it has its own query. True means
-    // RenderTarget.all_layers() (one pass into every layer) is available.
-    bool supports_multiview() const
+    // The feature structs this device was created with. Read by the descriptor
+    // layout code, which has to ask which descriptor-indexing bits actually stuck
+    // rather than assume the ones descriptorIndexing guarantees.
+    const DeviceFeatures& negotiated_features() const
     {
-        return multiview_supported_;
+        return negotiated_features_;
     }
 
     // Every pipeline stage that can run a shader ON THIS DEVICE — the stage mask
@@ -1135,12 +1135,21 @@ private:
 
         // Required features must gate *selection*, so a machine with two GPUs picks
         // the one that can do the job rather than failing on the preferred one.
-        VkPhysicalDeviceFeatures required_features{};
+        //
+        // Only the base-feature column can do that, and the reason is vk-bootstrap's
+        // rather than ours: set_required_features_11/12 put a feature struct into the
+        // library's own pNext chain, and build() then refuses a chain that also holds
+        // ours (VkPhysicalDeviceFeatures2_in_pNext_chain_while_using_add_required_
+        // extension_features). Moving every struct into vkb's chain would rewrite the
+        // 1.2/1.3 negotiation for a machine that has two GPUs of which only the
+        // non-preferred one has descriptor indexing. A required pNext feature is
+        // therefore diagnosed in configure_features_ instead, by name.
+        DeviceFeatures required_features{};
         for (Feature feature : config.required)
         {
             enable_feature(required_features, feature);
         }
-        selector.set_required_features(required_features);
+        selector.set_required_features(required_features.core);
 
         // An explicitly chosen GPU still has to pass the same suitability gate —
         // required features and API version are not preferences. select_devices()
@@ -1198,9 +1207,10 @@ private:
         std::uint32_t target_api)
     {
         // vkb::PhysicalDevice::features is documented as the *selected* features,
-        // not the available ones, so ask the driver directly.
-        VkPhysicalDeviceFeatures available{};
-        vkGetPhysicalDeviceFeatures(ctx.vkb_physical_device_.physical_device, &available);
+        // not the available ones, so ask the driver directly. One query for all
+        // three structs, through the same helper list_devices uses.
+        const DeviceFeatures available =
+            query_device_features(vkGetPhysicalDeviceFeatures2, ctx.vkb_physical_device_.physical_device);
 
         // Dynamic rendering: core in 1.3, an extension on 1.2. Same capability,
         // two spellings — resolve it here so nothing else has to care.
@@ -1246,9 +1256,22 @@ private:
 
         // Optional features: enable what this device happens to have, and record
         // what stuck so supports() can answer honestly.
-        VkPhysicalDeviceFeatures enabled_features{};
+        DeviceFeatures& enabled_features = ctx.negotiated_features_;
         for (Feature feature : config.required)
         {
+            // A required feature in a pNext struct could not gate device selection
+            // (see select_physical_device_), so this is where it is caught. The
+            // base-feature ones cannot reach here missing, because the selector
+            // already rejected every device without them.
+            if (!feature_available(available, feature))
+            {
+                return std::unexpected(err_init(
+                    std::format(
+                        "Vulkan: the required feature {} is not supported by this GPU. Pass it as "
+                        "optional and ask ctx.supports() instead, or choose a device whose "
+                        "device.supports() answers True.",
+                        feature_name(feature))));
+            }
             enable_feature(enabled_features, feature);
             ctx.enabled_features_.insert(feature);
         }
@@ -1268,31 +1291,36 @@ private:
             }
         }
 
-        // Anisotropic filtering is on by default when present, because Texture uses
-        // it. It used to be *required*, which turned a nicety into a reach blocker.
-        if (feature_available(available, Feature::ANISOTROPIC_FILTERING))
+        // Two capabilities are on by default when present, because bazalt itself
+        // uses them and asking for them would be a knob with one sensible setting.
+        // ANISOTROPIC_FILTERING used to be *required*, which turned a nicety into a
+        // reach blocker. MULTIVIEW joins it in 0.21: target.all_layers() has offered
+        // it since 0.13 without an opt-in, and making the Feature row the way to ASK
+        // must not also make it a thing to request.
+        for (Feature implicit : {Feature::ANISOTROPIC_FILTERING, Feature::MULTIVIEW})
         {
-            enable_feature(enabled_features, Feature::ANISOTROPIC_FILTERING);
-            ctx.enabled_features_.insert(Feature::ANISOTROPIC_FILTERING);
+            if (feature_available(available, implicit))
+            {
+                enable_feature(enabled_features, implicit);
+                ctx.enabled_features_.insert(implicit);
+            }
+        }
+
+        // descriptorIndexing is a roll-up: the spec says enabling it "does not imply
+        // the other minimum descriptor indexing features are also enabled", so the
+        // bits an array binding actually needs are turned on one by one.
+        if (ctx.enabled_features_.contains(Feature::BINDLESS))
+        {
+            enable_descriptor_indexing(enabled_features, available);
         }
 
         // Timeline semaphores pace the deletion queue and async uploads. They are
         // core in 1.2 (our floor), so the entry points are always loaded — but the
         // feature bit still has to be enabled at device creation, and checking it
-        // here turns a cryptic device-creation error code into a sentence.
-        VkPhysicalDeviceVulkan12Features available12{
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = nullptr};
-        // Multiview (core 1.1): render into every layer of an array/cube attachment
-        // in ONE pass, the shader keying per-view work off gl_ViewIndex. Optional —
-        // enable it if present so RenderTarget.all_layers() can offer it, and record
-        // what stuck. Chained after available12 in the same query.
-        VkPhysicalDeviceVulkan11Features available11{
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &available12};
-        VkPhysicalDeviceFeatures2 available2{
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &available11};
-        vkGetPhysicalDeviceFeatures2(ctx.vkb_physical_device_.physical_device, &available2);
-        ctx.multiview_supported_ = available11.multiview == VK_TRUE;
-        if (!available12.timelineSemaphore)
+        // here turns a cryptic device-creation error code into a sentence. Not a
+        // Feature row: bazalt does not work without it, so there is nothing to ask.
+        enabled_features.v12.timelineSemaphore = VK_TRUE;
+        if (!available.v12.timelineSemaphore)
         {
             return std::unexpected(err_init(
                 "Vulkan: this GPU/driver does not support timeline semaphores, which "
@@ -1315,7 +1343,7 @@ private:
             ctx.all_shader_stages_ |= VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
         }
 
-        ctx.vkb_physical_device_.enable_features_if_present(enabled_features);
+        ctx.vkb_physical_device_.enable_features_if_present(enabled_features.core);
         return {};
     }
 
@@ -1337,20 +1365,14 @@ private:
             .pNext = nullptr,
             .dynamicRendering = VK_TRUE};
 
-        // Core in 1.2, so this rides along on both paths. No KHR aliasing needed,
-        // unlike dynamic rendering: the floor is 1.2, so the core entry points
-        // (vkWaitSemaphores etc.) are always loaded.
-        VkPhysicalDeviceVulkan12Features features12{
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-            .pNext = nullptr,
-            .timelineSemaphore = VK_TRUE};
-
-        // Multiview (core 1.1): enabled only if the device advertised it (queried in
-        // configure_features_). A zero struct is harmless when absent.
-        VkPhysicalDeviceVulkan11Features features11{
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-            .pNext = nullptr,
-            .multiview = ctx.multiview_supported_ ? VK_TRUE : VK_FALSE};
+        // The 1.1 and 1.2 structs come from configure_features_ rather than being
+        // spelled again here: it is the only place that knows what the device
+        // offered and what the caller asked for, and a second literal would be a
+        // second answer. Both rode this path before 0.21 too — timelineSemaphore
+        // (core in 1.2, so no KHR aliasing, unlike dynamic rendering) and multiview
+        // are simply two of the bits in them now.
+        VkPhysicalDeviceVulkan12Features features12 = ctx.negotiated_features_.v12;
+        VkPhysicalDeviceVulkan11Features features11 = ctx.negotiated_features_.v11;
 
         auto dev_builder = vkb::DeviceBuilder{ctx.vkb_physical_device_};
         dev_builder.add_pNext(&features12);
@@ -1598,10 +1620,13 @@ private:
     VolkDeviceTable vk_{};
 
     std::set<Feature> enabled_features_;
+    // The same answer as enabled_features_, in the shape vkCreateDevice wants.
+    // configure_features_ fills it and create_device_ hands it over, so the set
+    // Python asks about and the structs the device was built with cannot drift.
+    DeviceFeatures negotiated_features_;
     bool headless_ = false;
     bool swapchain_supported_ = false;
     bool dynamic_rendering_khr_ = false;
-    bool multiview_supported_ = false;
 
     // Set by configure_features_ from enabled_features_. The default is the mask
     // every conformant device has, so a Context that somehow skipped the

@@ -1177,10 +1177,12 @@ inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::laye
 
 inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::all_layers()
 {
-    if (!context_->supports_multiview())
+    if (!context_->supports(Feature::MULTIVIEW))
     {
-        return std::unexpected(
-            err_resource("all_layers() needs the multiview GPU feature, which this device does not support"));
+        return std::unexpected(err_resource(
+            "all_layers() needs the multiview GPU feature, which this device does not support. "
+            "Ask ctx.supports(bz.Feature.MULTIVIEW) first, and render one layer at a time if it "
+            "answers False."));
     }
     if (layers_ <= 1)
     {

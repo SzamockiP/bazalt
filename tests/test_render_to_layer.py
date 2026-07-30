@@ -188,7 +188,7 @@ def test_multiview_renders_all_layers_in_one_pass(ctx):
     layer coloured by gl_ViewIndex. Sampling each layer proves the draw fanned out
     with the right per-layer index — and the one-pass barrier over the whole array
     is validation-clean."""
-    if not ctx.supports_multiview():
+    if not ctx.supports(bz.Feature.MULTIVIEW):
         pytest.skip("GPU reports no multiview support")
 
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
@@ -213,7 +213,7 @@ def test_multiview_renders_all_layers_in_one_pass(ctx):
 
 
 def test_all_layers_refuses_non_layered(ctx):
-    if not ctx.supports_multiview():
+    if not ctx.supports(bz.Feature.MULTIVIEW):
         pytest.skip("GPU reports no multiview support")
     with pytest.raises(bz.ResourceError):
         bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA8).all_layers()  # 1 layer
@@ -224,7 +224,7 @@ def test_msaa_multiview_resolves_all_layers(ctx):
     each resolving into its own layer of the sampleable array (gl_ViewIndex colours
     each). Sampling the resolved array per layer proves the per-view resolve is
     validation-clean."""
-    if not ctx.supports_multiview():
+    if not ctx.supports(bz.Feature.MULTIVIEW):
         pytest.skip("GPU reports no multiview support")
     samples = min(4, ctx.max_samples())
     if samples < 2:

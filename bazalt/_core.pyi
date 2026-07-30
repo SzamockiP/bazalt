@@ -123,6 +123,18 @@ class Feature(IntEnum):
     #: The same for the pre-rasterization stages — vertex, tessellation, geometry
     #: (vertexPipelineStoresAndAtomics).
     VERTEX_STAGE_STORES = 11
+    #: One pass into every layer of a layered target (RenderTarget.all_layers()).
+    #: Enabled by itself wherever the device has it, so this is a question, not a
+    #: request.
+    MULTIVIEW = 12
+    #: Descriptor arrays: count= on a binding declarator, index= on set_image and
+    #: friends. Also covers indexing the array from a value that differs per
+    #: invocation (nonuniformEXT), and rewriting a descriptor while an earlier
+    #: frame still reads the set.
+    BINDLESS = 13
+    #: A draw count the GPU decides: count_buffer= on draw_indirect and
+    #: draw_indexed_indirect.
+    DRAW_INDIRECT_COUNT = 14
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -660,7 +672,8 @@ class RenderTarget(RenderTargetBase):
         """A multiview view of the whole target: cmd.rendering(target.all_layers())
         renders into EVERY layer in ONE pass instead of a pass per layer. The
         shader selects per-layer work with gl_ViewIndex (e.g. a per-face matrix
-        for cube capture). Needs a layered target and ctx.supports_multiview();
+        for cube capture). Needs a layered target and
+        ctx.supports(Feature.MULTIVIEW);
         composes with MSAA (each view resolves into its own layer). Renders every
         layer, so the result is fully sampleable with no partial-render caveat."""
         ...
@@ -1339,7 +1352,6 @@ class Device:
         """The same question as ctx.supports(), asked before there is a
         Context — so you can pick the card that can do the job."""
         ...
-    def supports_multiview(self) -> bool: ...
 
 def poll_events() -> None:
     """Drain the OS event queue and dispatch each event to the window the OS
@@ -1524,10 +1536,6 @@ class Context:
         ...
 
     def supports(self, feature: Feature) -> bool: ...
-    def supports_multiview(self) -> bool:
-        """Whether this GPU supports multiview — one-pass render into every layer
-        of an array/cube target via RenderTarget.all_layers()."""
-        ...
     def max_samples(self) -> int:
         """The highest MSAA sample count (1/2/4/8/…) this GPU supports for both a
         colour and a depth attachment — the valid ceiling for RenderTarget(...,

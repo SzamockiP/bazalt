@@ -163,7 +163,6 @@ void bind_windowing(py::module_& m)
         .def_property_readonly(
             "memory_mb", [](const Device& d) { return static_cast<std::uint64_t>(d.memory_bytes / (1024 * 1024)); })
         .def("supports", &Device::supports, py::arg("feature"))
-        .def("supports_multiview", [](const Device& d) { return d.multiview; })
         .def(
             "__repr__",
             [](const Device& d)
