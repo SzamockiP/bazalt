@@ -100,13 +100,15 @@ void bind_targets(py::module_& m)
             py::arg("name") = "")
         // A target on images from create_image, instead of attachments the target
         // allocates. A second __init__ rather than optional width/height on the one
-        // above: this signature has no width, height, samples, layers, cube or
-        // mip_levels, because every one of those is a property of the images now.
+        // above: this signature has no width, height, layers, cube or mip_levels,
+        // because every one of those is a property of the images now. samples= stays,
+        // because it is not: it says how many samples to RENDER with, and the images
+        // handed in are the resolve targets.
         // pybind picks between the two on arity — width and height are required
         // positionals up there and absent here.
         .def(
             py::init(
-                [](Context& context, py::object color, py::object depth, const std::string& name)
+                [](Context& context, py::object color, py::object depth, std::uint32_t samples, const std::string& name)
                 {
                     std::vector<std::shared_ptr<Image>> colors;
                     if (!color.is_none())
@@ -157,13 +159,15 @@ void bind_targets(py::module_& m)
                     }
 
                     return unwrap(
-                        OffscreenTarget::create_from_images(context, std::move(colors), std::move(depth_image), name),
+                        OffscreenTarget::create_from_images(
+                            context, std::move(colors), std::move(depth_image), samples, name),
                         context.logger().get());
                 }),
             py::arg("context"),
             py::kw_only(),
             py::arg("color") = py::none(),
             py::arg("depth") = py::none(),
+            py::arg("samples") = 1,
             py::arg("name") = "")
         .def_property_readonly("width", [](const OffscreenTarget& t) { return t.extent().width; })
         .def_property_readonly("height", [](const OffscreenTarget& t) { return t.extent().height; })

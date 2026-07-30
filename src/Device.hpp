@@ -39,8 +39,7 @@ struct Device
     std::uint64_t memory_bytes = 0;
     DeviceUUID uuid{};
 
-    VkPhysicalDeviceFeatures features{};
-    bool multiview = false;
+    DeviceFeatures features{};
 
     // Same question as ctx.supports(), asked before there is a Context — so a
     // caller can pick the card that can do the job instead of finding out at
@@ -173,12 +172,6 @@ inline std::expected<std::vector<Device>, Error> list_devices()
         VkPhysicalDeviceProperties2 props2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &id};
         get_properties2(handle, &props2);
 
-        VkPhysicalDeviceVulkan11Features features11{
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = nullptr};
-        VkPhysicalDeviceFeatures2 features2{
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &features11};
-        get_features2(handle, &features2);
-
         VkPhysicalDeviceMemoryProperties memory{};
         get_memory(handle, &memory);
         std::uint64_t device_local = 0;
@@ -196,8 +189,7 @@ inline std::expected<std::vector<Device>, Error> list_devices()
         device.api_version = props2.properties.apiVersion;
         device.memory_bytes = device_local;
         std::copy(std::begin(id.deviceUUID), std::end(id.deviceUUID), device.uuid.begin());
-        device.features = features2.features;
-        device.multiview = features11.multiview == VK_TRUE;
+        device.features = query_device_features(get_features2, handle);
         devices.push_back(std::move(device));
     }
 

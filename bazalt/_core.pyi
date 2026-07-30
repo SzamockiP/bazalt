@@ -123,6 +123,18 @@ class Feature(IntEnum):
     #: The same for the pre-rasterization stages — vertex, tessellation, geometry
     #: (vertexPipelineStoresAndAtomics).
     VERTEX_STAGE_STORES = 11
+    #: One pass into every layer of a layered target (RenderTarget.all_layers()).
+    #: Enabled by itself wherever the device has it, so this is a question, not a
+    #: request.
+    MULTIVIEW = 12
+    #: Descriptor arrays: count= on a binding declarator, index= on set_image and
+    #: friends. Also covers indexing the array from a value that differs per
+    #: invocation (nonuniformEXT), and rewriting a descriptor while an earlier
+    #: frame still reads the set.
+    BINDLESS = 13
+    #: A draw count the GPU decides: count_buffer= on draw_indirect and
+    #: draw_indexed_indirect.
+    DRAW_INDIRECT_COUNT = 14
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -342,6 +354,35 @@ class WindowMode(IntEnum):
     FULLSCREEN = 2
     FULLSCREEN_WINDOWED = 3
 
+class GamepadButton(IntEnum):
+    """The layout GLFW maps every pad it knows onto, named after what the hand
+    does. The values are GLFW's own, so the two cannot drift (0.21)."""
+    A = 0
+    B = 1
+    X = 2
+    Y = 3
+    LEFT_BUMPER = 4
+    RIGHT_BUMPER = 5
+    BACK = 6
+    START = 7
+    GUIDE = 8
+    LEFT_THUMB = 9
+    RIGHT_THUMB = 10
+    DPAD_UP = 11
+    DPAD_RIGHT = 12
+    DPAD_DOWN = 13
+    DPAD_LEFT = 14
+
+class GamepadAxis(IntEnum):
+    """Sticks read -1..1 with UP and RIGHT positive, triggers 0..1 — see
+    Gamepad.axis (0.21)."""
+    LEFT_X = 0
+    LEFT_Y = 1
+    RIGHT_X = 2
+    RIGHT_Y = 3
+    LEFT_TRIGGER = 4
+    RIGHT_TRIGGER = 5
+
 # ── Resources ──────────────────────────────────────────────────────────
 
 class Buffer:
@@ -554,15 +595,21 @@ class Pipeline: ...
 
 class DescriptorSet:
     def set_image(self, binding: int, image: Image,
-                  sampler: Optional[Sampler] = None) -> None:
-        """Bind an image (+ sampler; None means linear/repeat/anisotropic)."""
+                  sampler: Optional[Sampler] = None, index: int = 0) -> None:
+        """Bind an image (+ sampler; None means linear/repeat/anisotropic).
+
+        `index` selects the element of a binding declared with count>1, and
+        raises ResourceError outside that count (so index>0 on a plain binding
+        is refused). Writing the same (binding, index) again replaces what was
+        there rather than adding a second reference to it.
+        """
         ...
-    def set_storage_image(self, binding: int, image: Image) -> None:
+    def set_storage_image(self, binding: int, image: Image, index: int = 0) -> None:
         """Bind a storage image (no sampler) to a binding declared with
         .storage_image(). The image is accessed in GENERAL layout; the tracker
         adds the transition and any barrier around the dispatch automatically."""
         ...
-    def set_buffer(self, binding: int, buffer: Buffer) -> None: ...
+    def set_buffer(self, binding: int, buffer: Buffer, index: int = 0) -> None: ...
 
 class DescriptorPool:
     def allocate_set(self, pipeline: Pipeline, set: int) -> DescriptorSet: ...
@@ -589,14 +636,15 @@ class RenderTarget(RenderTargetBase):
     Two ways to build one, and they do different jobs. Pass a width and height and
     the target allocates its attachments from pixel formats. Pass images from
     create_image and it renders into those instead — that signature has no size,
-    samples, layers, cube or mip_levels, because the images already answer all of
-    them (0.19).
+    layers, cube or mip_levels, because the images already answer all of them
+    (0.19).
     """
 
     @overload
     def __init__(self, context: Context, *,
                  color: Optional[Image | Sequence[Image]] = None,
-                 depth: Optional[Image] = None, name: str = "") -> None:
+                 depth: Optional[Image] = None, samples: int = 1,
+                 name: str = "") -> None:
         """Render into images you already own, rather than attachments the target
         allocates.
 
@@ -606,10 +654,16 @@ class RenderTarget(RenderTargetBase):
         insisted on owning its attachments.
 
         Every attachment must be the same size with the same layer and mip count;
-        a mismatch is refused rather than intersected. Single-sample only, because
-        create_image has no samples=. The target holds the images, so dropping your
-        reference does not take the attachment with it — and it does write to their
-        layout tracking, which is what leaves the result sampleable.
+        a mismatch is refused rather than intersected. The target holds the images,
+        so dropping your reference does not take the attachment with it — and it
+        does write to their layout tracking, which is what leaves the result
+        sampleable.
+
+        samples>1 works as it does on the other signature (0.21): the target
+        renders into multisampled attachments it allocates and resolves into the
+        images you passed, so those stay single-sample and sampleable. Not
+        available with a mipped attachment, because a multisampled image has no mip
+        chain.
         """
         ...
 
@@ -660,7 +714,8 @@ class RenderTarget(RenderTargetBase):
         """A multiview view of the whole target: cmd.rendering(target.all_layers())
         renders into EVERY layer in ONE pass instead of a pass per layer. The
         shader selects per-layer work with gl_ViewIndex (e.g. a per-face matrix
-        for cube capture). Needs a layered target and ctx.supports_multiview();
+        for cube capture). Needs a layered target and
+        ctx.supports(Feature.MULTIVIEW);
         composes with MSAA (each view resolves into its own layer). Renders every
         layer, so the result is fully sampleable with no partial-render caveat."""
         ...
@@ -792,10 +847,39 @@ class GraphicsPipelineBuilder:
         here."""
         ...
     def push_constant(self, size: int, stage: ShaderStage) -> GraphicsPipelineBuilder: ...
-    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
-    def storage_buffer(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
-    def texture(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder: ...
-    def storage_image(self, binding: int, stage: ShaderStage, set: int) -> GraphicsPipelineBuilder:
+    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+                       update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder: ...
+    def storage_buffer(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+                       update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder: ...
+    def texture(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+                update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder:
+        """A sampled image binding.
+
+        count > 1 declares a descriptor ARRAY — one binding holding N textures,
+        written with DescriptorSet.set_image(binding, image, index=i) and indexed
+        in the shader (`uniform sampler2D textures[N]`). One pipeline and one
+        draw then serve many materials, and a slot may be rewritten while an
+        earlier frame still reads the set.
+
+        An index that differs between invocations of one draw needs
+        `nonuniformEXT(i)` and `#extension GL_EXT_nonuniform_qualifier : require`
+        in the shader.
+
+        count > 1 needs the BINDLESS feature: create the Context with
+        optional=[Feature.BINDLESS], or build() raises ShaderError. Slots you
+        never write are legal as long as the shader never samples them.
+
+        `update_after_bind` says whether this binding may be rewritten while a
+        submit that uses the set is still in flight. The default answers per
+        shape — on for an array, off for a single descriptor — because that is
+        what each is for. Name it to override either: True on a single texture
+        you swap between frames, False on a static array you write once. It also
+        needs BINDLESS, and the flag puts the descriptor in a separate limit
+        budget, so off is the cheaper side.
+        """
+        ...
+    def storage_image(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+                      update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder:
         """A read/write image addressed by coordinate (imageLoad/imageStore) in a
         graphics shader.
 
@@ -821,9 +905,26 @@ class ComputePipelineBuilder:
     """No stage arguments anywhere: compute has exactly one stage."""
 
     def shader(self, shader: ShaderModule) -> ComputePipelineBuilder: ...
-    def uniform_buffer(self, binding: int, set: int = 0) -> ComputePipelineBuilder: ...
-    def storage_buffer(self, binding: int, set: int = 0) -> ComputePipelineBuilder: ...
-    def storage_image(self, binding: int, set: int = 0) -> ComputePipelineBuilder:
+    def uniform_buffer(self, binding: int, set: int = 0, count: int = 1,
+                       update_after_bind: Optional[bool] = None) -> ComputePipelineBuilder: ...
+    def storage_buffer(self, binding: int, set: int = 0, count: int = 1,
+                       update_after_bind: Optional[bool] = None) -> ComputePipelineBuilder:
+        """count > 1 declares a descriptor array, and update_after_bind says
+        whether it may be rewritten mid-flight — see
+        GraphicsPipelineBuilder.texture for both."""
+        ...
+    def texture(self, binding: int, set: int = 0, count: int = 1,
+                update_after_bind: Optional[bool] = None) -> ComputePipelineBuilder:
+        """A sampled image in a compute shader (0.21).
+
+        Bind one with DescriptorSet.set_image, exactly as on the graphics side.
+        The difference from storage_image is what the shader gets: a sampler2D
+        filters, picks a mip and obeys an address mode, where imageLoad reads one
+        texel at an integer coordinate.
+        """
+        ...
+    def storage_image(self, binding: int, set: int = 0, count: int = 1,
+                      update_after_bind: Optional[bool] = None) -> ComputePipelineBuilder:
         """A read/write image the compute shader accesses by coordinate
         (imageLoad/imageStore). Bind one with DescriptorSet.set_storage_image;
         the auto-barrier tracker transitions it to GENERAL before the dispatch
@@ -924,8 +1025,9 @@ class CommandBuffer:
     def dispatch(self, group_count_x: int, group_count_y: int = 1,
                  group_count_z: int = 1) -> CommandBuffer: ...
 
-    def draw_indirect(self, buffer: Buffer, offset: int = 0,
-                      count: int = 1) -> CommandBuffer:
+    def draw_indirect(self, buffer: Buffer, offset: int = 0, count: int = 1,
+                      count_buffer: Optional[Buffer] = None,
+                      count_offset: int = 0) -> CommandBuffer:
         """Draw with arguments read out of a buffer, so a compute pass decides what
         gets drawn and the CPU never learns the answer (0.19).
 
@@ -942,12 +1044,19 @@ class CommandBuffer:
         A std430 GLSL struct of four uints is byte-identical, so a compute shader
         can zero it with cmd.fill_buffer and accumulate instanceCount atomically.
         count>1 reads that many consecutive structs and needs
-        Feature.MULTI_DRAW_INDIRECT. To draw nothing, write 0 into instanceCount —
-        count=0 is refused, because only one of the two can be decided on the GPU.
+        Feature.MULTI_DRAW_INDIRECT.
+
+        `count_buffer` moves the number of draws onto the GPU too (0.21): `count`
+        becomes the maximum, and the 4 bytes at `count_offset` say how many of
+        those commands to issue. It must also be a BufferType.STORAGE buffer, and
+        it needs Feature.DRAW_INDIRECT_COUNT. Without a count buffer the way to
+        draw nothing is to write 0 into instanceCount — count=0 is refused,
+        because only one of the two can be decided on the GPU.
         """
         ...
-    def draw_indexed_indirect(self, buffer: Buffer, offset: int = 0,
-                              count: int = 1) -> CommandBuffer:
+    def draw_indexed_indirect(self, buffer: Buffer, offset: int = 0, count: int = 1,
+                              count_buffer: Optional[Buffer] = None,
+                              count_offset: int = 0) -> CommandBuffer:
         """draw_indirect through the bound index buffer (0.19).
 
         The struct is VkDrawIndexedIndirectCommand, five words: indexCount,
@@ -1339,7 +1448,6 @@ class Device:
         """The same question as ctx.supports(), asked before there is a
         Context — so you can pick the card that can do the job."""
         ...
-    def supports_multiview(self) -> bool: ...
 
 def poll_events() -> None:
     """Drain the OS event queue and dispatch each event to the window the OS
@@ -1379,6 +1487,59 @@ def get_clipboard() -> str:
 
 def set_clipboard(text: str) -> None:
     """Put text on the system clipboard. See get_clipboard (0.19)."""
+    ...
+
+class Gamepad:
+    """One reading of one gamepad (0.21).
+
+    A snapshot by value, not a live handle: it holds what the last poll_events()
+    left behind, so a value cannot change halfway through the frame reading it.
+    """
+
+    @property
+    def index(self) -> int: ...
+    @property
+    def name(self) -> str:
+        """What the mapping database calls this pad, e.g. "Xbox Controller"."""
+        ...
+
+    def axis(self, axis: GamepadAxis) -> float:
+        """A stick axis in -1..1, or a trigger in 0..1.
+
+        Both ranges answer "what did the hand do", which GLFW's raw values do not.
+        A trigger reads 0 released and 1 pulled, where GLFW reports -1 to +1. A
+        stick pushed UP or RIGHT reads positive, where GLFW's Y is screen space
+        and reads positive downward.
+
+        So GamepadAxis.LEFT_Y and window.get_mouse_state().dy point opposite ways
+        on purpose: a mouse delta IS a screen measurement, and a stick is not.
+        """
+        ...
+    def button(self, button: GamepadButton) -> bool:
+        """Whether that button is down right now."""
+        ...
+
+def get_gamepad(index: int = 0, *, deadzone: float = 0.0) -> Optional[Gamepad]:
+    """The gamepad in slot `index` (0..15), or None when that slot is empty (0.21).
+
+        pad = bz.get_gamepad(0, deadzone=0.15)
+        if pad and pad.button(bz.GamepadButton.A):
+            jump()
+
+    A free function for the same reason poll_events is one: GLFW's gamepad state
+    takes a joystick id and no window, so a pad belongs to the process. Raises
+    WindowError with no live Window, because GLFW is initialized with the first
+    one, and ValueError for an index or a deadzone outside its range.
+
+    `deadzone` applies to the four stick axes and not to the triggers, which rest
+    at one end of their range rather than in the middle. It is scaled rather than
+    clipped, so the value stays continuous as the stick leaves the dead zone, and
+    it is per axis, which makes the dead area a square.
+
+    Level state only — which buttons are down now. There is no
+    `was_button_pressed`: the edge queries rotate on a per-window counter, and a
+    pad has no window to hang one on.
+    """
     ...
 
 def list_devices() -> list[Device]:
@@ -1524,10 +1685,6 @@ class Context:
         ...
 
     def supports(self, feature: Feature) -> bool: ...
-    def supports_multiview(self) -> bool:
-        """Whether this GPU supports multiview — one-pass render into every layer
-        of an array/cube target via RenderTarget.all_layers()."""
-        ...
     def max_samples(self) -> int:
         """The highest MSAA sample count (1/2/4/8/…) this GPU supports for both a
         colour and a depth attachment — the valid ceiling for RenderTarget(...,

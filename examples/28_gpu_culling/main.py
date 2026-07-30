@@ -32,9 +32,13 @@ Each frame:
 The CPU never learns the count. That is what makes it different from culling on the
 host: no readback, and no per-instance buffer to size.
 
-One draw command whose instanceCount the GPU accumulates, rather than N commands,
-because a GPU-decided draw COUNT needs vkCmdDrawIndexedIndirectCount and a feature
-bit in a pNext struct bazalt's feature table cannot reach yet.
+One draw command whose instanceCount the GPU accumulates, rather than N commands.
+0.21 added the other route — `draw_indexed_indirect(args, count=N,
+count_buffer=...)` with Feature.DRAW_INDIRECT_COUNT — and this example keeps the
+first one on purpose: a compacted instance buffer plus one command needs no
+feature bit at all, and it is the shape to reach for when every survivor draws the
+same mesh. Use a count buffer when the survivors need DIFFERENT commands, e.g. one
+per mesh or per LOD.
 
 Keys: WASD + QE move the observer, hold RIGHT MOUSE to look, SPACE pauses the
 culling camera, C toggles culling off. Close either window to exit.

@@ -113,7 +113,6 @@ void bind_context(py::module_& m)
         .def_property_readonly("frame_index", &Context::frame_index)
         .def_property_readonly("logger", &Context::logger)
         .def("supports", &Context::supports, py::arg("feature"))
-        .def("supports_multiview", &Context::supports_multiview)
         .def("max_samples", &Context::max_samples)
         .def_property_readonly("device_name", &Context::device_name)
         .def_property_readonly(

@@ -7,7 +7,7 @@ with gl_ViewIndex. Same result as the six-pass loop, fewer submissions and less
 CPU — the whole point of multiview.
 
 The new API is just:
-  * ctx.supports_multiview()  → is it available on this GPU
+  * ctx.supports(bz.Feature.MULTIVIEW)  → is it available on this GPU
   * env.all_layers()          → a render target covering every layer at once
   * gl_ViewIndex in the shader → which layer this invocation is drawing
 
@@ -77,7 +77,7 @@ ctx = bz.Context(logger)
 renderer = bz.SwapchainRenderer(window, ctx)
 window.set_cursor_mode(bz.CURSOR_DISABLED)  # mouse-look
 
-if not ctx.supports_multiview():
+if not ctx.supports(bz.Feature.MULTIVIEW):
     print("This GPU does not support multiview; see example 16 for the six-pass version.")
     sys.exit(0)
 

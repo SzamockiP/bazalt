@@ -555,40 +555,15 @@ private:
         context_.vk().vkEndCommandBuffer(cmd);
 
         std::uint64_t serial = 0;
+        if (!submit_(cmd, serial, job.image->upload_serial()))
         {
-            std::lock_guard lock(context_.queue_mutex());
-            serial = context_.advance_submit_serial();
-
-            VkSemaphore timeline = context_.submit_timeline();
-            VkTimelineSemaphoreSubmitInfo timelineInfo{
-                .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
-                .pNext = nullptr,
-                .waitSemaphoreValueCount = 0,
-                .pWaitSemaphoreValues = nullptr,
-                .signalSemaphoreValueCount = 1,
-                .pSignalSemaphoreValues = &serial};
-            VkSubmitInfo submitInfo{
-                .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                .pNext = &timelineInfo,
-                .waitSemaphoreCount = 0,
-                .pWaitSemaphores = nullptr,
-                .pWaitDstStageMask = nullptr,
-                .commandBufferCount = 1,
-                .pCommandBuffers = &cmd,
-                .signalSemaphoreCount = 1,
-                .pSignalSemaphores = &timeline};
-            if (const VkResult r =
-                    context_.vk().vkQueueSubmit(context_.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE);
-                r != VK_SUCCESS)
-            {
-                vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
-                context_.vk().vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
-                if (job.reload)
-                    warn_reload_(job, std::format("the GPU upload was refused ({})", vk_result_name(r)));
-                else
-                    fail_(job, std::format("the GPU upload was refused ({})", vk_result_name(r)));
-                return;
-            }
+            vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
+            context_.vk().vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
+            if (job.reload)
+                warn_reload_(job, "the GPU upload was refused");
+            else
+                fail_(job, "the GPU upload was refused");
+            return;
         }
 
         // The staging buffer retires through the shared deletion queue (VMA is
@@ -645,7 +620,7 @@ private:
         context_.vk().vkEndCommandBuffer(cmd);
 
         std::uint64_t serial = 0;
-        if (!submit_(cmd, serial))
+        if (!submit_(cmd, serial, job.image->upload_serial()))
         {
             vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
             context_.vk().vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
@@ -698,17 +673,38 @@ private:
         return context_.vk().vkAllocateCommandBuffers(context_.device(), &allocInfo, &cmd);
     }
 
-    // The worker's half of a one-shot submit. Context::submit_one_shot does the
-    // Vulkan part; the worker keeps only what is its own — freeing the command
-    // buffer back into pool_ from this thread (see retired_).
-    bool submit_(VkCommandBuffer cmd, std::uint64_t& serial)
+    // The worker's half of a one-shot submit, and the only place this thread
+    // submits from. Context::submit_one_shot does the Vulkan part; the worker
+    // keeps what is its own — freeing the command buffer back into pool_ from this
+    // thread (see retired_), and the ORDER.
+    //
+    // The order is the point. "One worker, one queue, so the call order IS the GPU
+    // order" is a promise this file makes (see the class comment and DESIGN.md),
+    // and submitting in sequence does not keep it: two submits on one queue may
+    // overlap or reorder unless one waits for the other. Two image.update() calls
+    // therefore raced, and the second could land first — a video decoder showing
+    // frames backwards, and a wrong answer rather than a slow one.
+    //
+    // Chaining every upload behind the previous one costs nothing real: they are
+    // already issued by a single thread, and the work they order is a memcpy-shaped
+    // copy. It was three copies of the submit block before this, which is how the
+    // two inline ones came to have waitSemaphoreCount = 0 and stay that way.
+    //
+    // `after` is the image's own last upload, which is NOT always in this
+    // worker's chain: create_image(array) has nothing to decode, so it submits
+    // inline on the calling thread. Without it, the very first update of such an
+    // image races the copy that created it, and losing that race leaves the
+    // image holding what it was created with — the first test in
+    // test_streaming.py, passing on every driver that happens to serialize.
+    bool submit_(VkCommandBuffer cmd, std::uint64_t& serial, std::uint64_t after = 0)
     {
-        auto submitted = context_.submit_one_shot(cmd);
+        auto submitted = context_.submit_one_shot(cmd, (std::ranges::max)(last_upload_serial_, after));
         if (!submitted)
         {
             return false;
         }
         serial = *submitted;
+        last_upload_serial_ = serial;
         return true;
     }
 
@@ -769,37 +765,12 @@ private:
         context_.vk().vkEndCommandBuffer(cmd);
 
         std::uint64_t serial = 0;
+        if (!submit_(cmd, serial, job.image->upload_serial()))
         {
-            std::lock_guard lock(context_.queue_mutex());
-            serial = context_.advance_submit_serial();
-
-            VkSemaphore timeline = context_.submit_timeline();
-            VkTimelineSemaphoreSubmitInfo timelineInfo{
-                .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
-                .pNext = nullptr,
-                .waitSemaphoreValueCount = 0,
-                .pWaitSemaphoreValues = nullptr,
-                .signalSemaphoreValueCount = 1,
-                .pSignalSemaphoreValues = &serial};
-            VkSubmitInfo submitInfo{
-                .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                .pNext = &timelineInfo,
-                .waitSemaphoreCount = 0,
-                .pWaitSemaphores = nullptr,
-                .pWaitDstStageMask = nullptr,
-                .commandBufferCount = 1,
-                .pCommandBuffers = &cmd,
-                .signalSemaphoreCount = 1,
-                .pSignalSemaphores = &timeline};
-            if (const VkResult r =
-                    context_.vk().vkQueueSubmit(context_.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE);
-                r != VK_SUCCESS)
-            {
-                vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
-                context_.vk().vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
-                fail_(job, std::format("the GPU upload was refused ({})", vk_result_name(r)));
-                return;
-            }
+            vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
+            context_.vk().vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
+            fail_(job, "the GPU upload was refused");
+            return;
         }
 
         context_.defer_destroy([allocator = context_.allocator(), stagingBuffer, stagingAllocation]
@@ -879,6 +850,11 @@ private:
     std::uint64_t batch_started_ = 0;
     std::uint64_t failed_count_ = 0;
     std::vector<std::uint64_t> submitted_serials_;
+
+    // The serial of the last upload this worker submitted, so the next one can be
+    // ordered behind it. Touched only by the worker thread, which is the same
+    // thread that owns retired_ and pool_.
+    std::uint64_t last_upload_serial_ = 0;
 
     std::jthread worker_; // last member: joins before the rest tears down
 };

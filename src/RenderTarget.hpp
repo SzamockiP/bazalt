@@ -448,10 +448,19 @@ public:
     // Note that the target does WRITE to a borrowed image's layout tracking
     // (mark_rendered / record_even_out) — that is the point, since final_layout()
     // leaves the result sampleable.
+    //
+    // samples>1 works here exactly as it does on create(): bazalt allocates the
+    // multisampled attachments and the images handed in become their resolve
+    // targets, which is what they already are on the allocating path. The
+    // alternative — the caller creating a multisampled image and handing THAT in —
+    // would need matching resolve images passed alongside it and would put a second
+    // MSAA idiom in the API, one where bazalt owns the multisampled image and one
+    // where the caller does.
     static std::expected<std::shared_ptr<OffscreenTarget>, Error> create_from_images(
         Context& context,
         std::vector<std::shared_ptr<Image>> colors,
         std::shared_ptr<Image> depth,
+        std::uint32_t samples = 1,
         const std::string& name = "")
     {
         if (colors.empty() && !depth)
@@ -504,16 +513,81 @@ public:
             }
         }
 
+        auto vk_samples = validate_sample_count(samples, context);
+        if (!vk_samples)
+        {
+            return std::unexpected(vk_samples.error());
+        }
+        const bool msaa = *vk_samples != VK_SAMPLE_COUNT_1_BIT;
+        // Same rule as create(): a multisampled image has no mip chain, so a
+        // multisampled pass cannot resolve into a chosen level of one.
+        if (msaa && first->mip_levels() > 1)
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "samples>1 cannot combine with a mipped attachment: a multisampled image has "
+                    "no mip chain, and this image has {} levels",
+                    first->mip_levels())));
+        }
+
         auto target = std::shared_ptr<OffscreenTarget>(new OffscreenTarget(context.shared_from_this()));
         target->extent_ = {first->width(), first->height()};
-        // Single-sample only, and not an oversight: create_image has no samples=,
-        // so no image the caller can hand over is multisampled. MSAA therefore has
-        // no resolve pair to set up here, and msaa_colors_/msaa_depth_ stay empty.
-        target->samples_ = VK_SAMPLE_COUNT_1_BIT;
+        target->samples_ = *vk_samples;
         target->layers_ = first->array_layers();
         target->mip_levels_ = first->mip_levels();
         target->colors_ = std::move(colors);
         target->depth_ = std::move(depth);
+
+        // The borrowed images are the resolve targets; the multisampled
+        // attachments beside them are allocated here and owned by the target,
+        // exactly as on the allocating path. Layer count comes from the image, and
+        // never cube: a multisampled attachment is a plain layered image that
+        // resolves per layer.
+        if (msaa)
+        {
+            for (std::size_t i = 0; i < target->colors_.size(); ++i)
+            {
+                auto ms = Image::create_empty(
+                    context,
+                    target->extent_.width,
+                    target->extent_.height,
+                    target->colors_[i]->format(),
+                    1,
+                    target->layers_,
+                    false,
+                    *vk_samples);
+                if (!ms)
+                {
+                    return std::unexpected(ms.error());
+                }
+                context.set_debug_name(
+                    VK_OBJECT_TYPE_IMAGE,
+                    reinterpret_cast<std::uint64_t>((*ms)->vk_image()),
+                    name.empty() ? "" : std::format("{} msaa color[{}]", name, i));
+                target->msaa_colors_.push_back(std::move(*ms));
+            }
+            if (target->depth_)
+            {
+                auto ms = Image::create_empty(
+                    context,
+                    target->extent_.width,
+                    target->extent_.height,
+                    target->depth_->format(),
+                    1,
+                    target->layers_,
+                    false,
+                    *vk_samples);
+                if (!ms)
+                {
+                    return std::unexpected(ms.error());
+                }
+                context.set_debug_name(
+                    VK_OBJECT_TYPE_IMAGE,
+                    reinterpret_cast<std::uint64_t>((*ms)->vk_image()),
+                    name.empty() ? "" : std::format("{} msaa depth", name));
+                target->msaa_depth_ = std::move(*ms);
+            }
+        }
 
         if (!name.empty())
         {
@@ -1177,10 +1251,12 @@ inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::laye
 
 inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::all_layers()
 {
-    if (!context_->supports_multiview())
+    if (!context_->supports(Feature::MULTIVIEW))
     {
-        return std::unexpected(
-            err_resource("all_layers() needs the multiview GPU feature, which this device does not support"));
+        return std::unexpected(err_resource(
+            "all_layers() needs the multiview GPU feature, which this device does not support. "
+            "Ask ctx.supports(bz.Feature.MULTIVIEW) first, and render one layer at a time if it "
+            "answers False."));
     }
     if (layers_ <= 1)
     {

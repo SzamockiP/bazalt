@@ -3,7 +3,7 @@
 from bazalt import _core
 from bazalt._core import *  # noqa: F401, F403
 
-__version__ = "0.20.0"
+__version__ = "0.21.0"
 
 __all__ = [
     # Core
@@ -18,6 +18,9 @@ __all__ = [
     # Process-wide, like poll_events: the clipboard is not per window.
     "get_clipboard",
     "set_clipboard",
+    # Same reason again: a gamepad belongs to the process, not to a window.
+    "get_gamepad",
+    "Gamepad",
     "Logger",
     "LogMessage",
     # Resources
@@ -60,6 +63,8 @@ __all__ = [
     "Severity",
     "Source",
     "Feature",
+    "GamepadButton",
+    "GamepadAxis",
     # Errors — the type is the recoverability contract
     "BazaltError",
     "InitializationError",

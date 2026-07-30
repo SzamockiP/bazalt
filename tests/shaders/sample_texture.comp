@@ -1,0 +1,22 @@
+#version 450
+
+// A compute shader that SAMPLES, rather than reading a storage image by
+// coordinate: the point of a sampler2D here is the filtering and the mip
+// selection an imageLoad has none of.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D src;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D dst;
+
+void main() {
+    ivec2 at = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(dst);
+    if (at.x >= size.x || at.y >= size.y) {
+        return;
+    }
+    // Sampled at the pixel centre, so a 2x2 source magnified into a larger
+    // destination is interpolated rather than repeated.
+    vec2 uv = (vec2(at) + 0.5) / vec2(size);
+    imageStore(dst, at, texture(src, uv));
+}

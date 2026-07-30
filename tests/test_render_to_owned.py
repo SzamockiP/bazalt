@@ -288,3 +288,118 @@ def test_a_depth_attachment_from_an_owned_image_works(ctx, fullscreen_vert):
     assert colour.read()[32, 32, 0] == 255
     # The depth image is sampleable afterwards, so it really was transitioned.
     assert depth.read().shape[:2] == (64, 64)
+
+
+# ── MSAA into an image you own (0.21) ─────────────────────────────────────────
+
+
+def _white_triangle(ctx):
+    vertices = [
+        +0.0, -0.5, 0.0, 1.0, 1.0, 1.0,
+        -0.5, +0.5, 0.0, 1.0, 1.0, 1.0,
+        +0.5, +0.5, 0.0, 1.0, 1.0, 1.0,
+    ]
+    vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    ibuf = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
+    return vbuf, ibuf
+
+
+def _borrowed_triangle(ctx, samples):
+    """The solid-white triangle rendered into an image the CALLER owns, at the
+    given sample count. Returns the borrowed image's pixels."""
+    vert = ctx.compile_shader(str(SHADER_DIR / "triangle.vert"), bz.ShaderStage.VERTEX)
+    frag = ctx.compile_shader(str(SHADER_DIR / "triangle.frag"), bz.ShaderStage.FRAGMENT)
+    vbuf, ibuf = _white_triangle(ctx)
+
+    mine = ctx.create_image(64, 64, bz.Format.RGBA8)
+    target = bz.RenderTarget(ctx, color=[mine], samples=samples)
+    pipe = (ctx.graphics_pipeline()
+            .vertex_shader(vert).fragment_shader(frag)
+            .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+            .build(target))
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
+        c.bind_pipeline(pipe).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
+    ctx.submit(cmd)
+    # The image the caller passed in, not something the target owns.
+    return mine.read()
+
+
+def _grey_edge_pixels(pixels):
+    r = pixels[:, :, 0].astype(np.int32)
+    return int(np.count_nonzero((r > 20) & (r < 235)))
+
+
+def test_msaa_resolves_into_the_borrowed_image(ctx):
+    """Two-sided: the same triangle into the same kind of owned image, at 1 and N
+    samples. A samples= that silently did nothing would pass a one-sided test.
+
+    The image handed in is the RESOLVE target — it stays single-sample and
+    readable, which is the whole reason this shape was chosen over handing in a
+    multisampled image."""
+    n = min(4, ctx.max_samples())
+    if n < 2:
+        pytest.skip("GPU reports no MSAA support (max_samples == 1)")
+
+    one = _borrowed_triangle(ctx, samples=1)
+    many = _borrowed_triangle(ctx, samples=n)
+
+    assert _grey_edge_pixels(one) == 0, "samples=1 must have no partial-coverage pixels"
+    assert _grey_edge_pixels(many) > 0, "MSAA must produce partial-coverage edge pixels"
+    assert list(many[32, 32]) == [255, 255, 255, 255], "the interior stays solid white"
+    assert list(many[2, 2]) == [0, 0, 0, 255], "a corner stays the clear colour"
+
+
+def test_a_borrowed_msaa_target_resolves_depth_too(ctx):
+    """Both attachments borrowed and both multisampled: the depth resolve pair is
+    set up here as well, and the depth image stays readable afterwards. Without
+    the depth half the pass renders into a single-sample depth buffer beside a
+    multisampled colour one, which the layers reject outright."""
+    n = min(4, ctx.max_samples())
+    if n < 2:
+        pytest.skip("GPU reports no MSAA support (max_samples == 1)")
+
+    vert = ctx.compile_shader(str(SHADER_DIR / "triangle.vert"), bz.ShaderStage.VERTEX)
+    frag = ctx.compile_shader(str(SHADER_DIR / "triangle.frag"), bz.ShaderStage.FRAGMENT)
+    vbuf, ibuf = _white_triangle(ctx)
+
+    color = ctx.create_image(64, 64, bz.Format.RGBA8)
+    depth = ctx.create_image(64, 64, bz.Format.D32F)
+    target = bz.RenderTarget(ctx, color=[color], depth=depth, samples=n)
+    pipe = (ctx.graphics_pipeline()
+            .vertex_shader(vert).fragment_shader(frag)
+            .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+            .depth_test(True)
+            .build(target))
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
+        c.bind_pipeline(pipe).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
+    ctx.submit(cmd)
+
+    assert _grey_edge_pixels(color.read()) > 0
+    # The depth resolve wrote the triangle's depth where the triangle is and left
+    # the cleared value everywhere else.
+    z = depth.read()
+    assert z[32, 32] < z[2, 2]
+
+
+def test_msaa_on_a_mipped_borrowed_image_is_refused(ctx):
+    """A multisampled image has no mip chain, so there is no level for the pass to
+    resolve into. Same rule the allocating signature has, and the message says the
+    same thing."""
+    n = min(4, ctx.max_samples())
+    if n < 2:
+        pytest.skip("GPU reports no MSAA support (max_samples == 1)")
+    mipped = ctx.create_image(32, 32, bz.Format.RGBA8, mip_levels=3)
+    with pytest.raises(bz.ResourceError, match="mip chain"):
+        bz.RenderTarget(ctx, color=[mipped], samples=n)
+
+
+def test_too_many_samples_is_refused(ctx):
+    mine = ctx.create_image(32, 32, bz.Format.RGBA8)
+    with pytest.raises(bz.ResourceError):
+        bz.RenderTarget(ctx, color=[mine], samples=ctx.max_samples() * 2)

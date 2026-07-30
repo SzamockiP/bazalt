@@ -34,6 +34,73 @@ enum class MemoryUsage
     DYNAMIC
 };
 
+inline constexpr const char* buffer_type_name(BufferType type)
+{
+    switch (type)
+    {
+        case BufferType::VERTEX:
+            return "vertex";
+        case BufferType::INDEX:
+            return "index";
+        case BufferType::UNIFORM:
+            return "uniform";
+        case BufferType::STORAGE:
+            return "storage";
+    }
+    // Not std::unreachable: a pybind enum accepts any int.
+    return "unknown";
+}
+
+// What a buffer of this type must be able to do. One function for both memory
+// usages, because the answer is a property of the TYPE and nothing else — and
+// because the two had drifted: StaticBuffer switched on the type while
+// DynamicBuffer asked "is it STORAGE?" and called everything else a uniform
+// buffer. A DYNAMIC vertex buffer — geometry rebuilt every frame, which is what
+// DYNAMIC is for — therefore had no VERTEX_BUFFER bit and failed at bind time
+// (VUID-vkCmdBindVertexBuffers-pBuffers-00627). Found by running
+// examples/28_gpu_culling, not by a test: nothing in the suite made one.
+//
+// The transfer bits ride along on both, so cmd.copy_buffer / cmd.fill_buffer work
+// on either (0.18). Refusing them on host-visible memory would make "which
+// buffers can the GPU copy into" a second rule to remember, for nothing.
+inline constexpr VkBufferUsageFlags buffer_usage_for(BufferType type)
+{
+    // TRANSFER_SRC so read() can copy the contents back out.
+    VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    switch (type)
+    {
+        case BufferType::VERTEX:
+            usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+            break;
+        case BufferType::INDEX:
+            usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+            break;
+        // VERTEX also: a compute shader writing vertices into an SSBO that
+        // the graphics pipeline then consumes via bind_vertex_buffer is the
+        // canonical compute->graphics hand-off (examples/11_particles).
+        //
+        // INDIRECT too, and unconditionally (0.19). The whole point of an
+        // indirect draw is a compute shader writing the draw arguments, so the
+        // type that carries STORAGE_BUFFER is the type that carries this.
+        // Gating it behind a fifth BufferType would make "which buffers can be
+        // indirect" a second rule to remember for a usage bit that costs
+        // nothing — the same reasoning that gave DYNAMIC buffers the transfer
+        // bits in 0.18. It matters for a DYNAMIC storage buffer too: draw
+        // arguments the CPU rewrites every frame are exactly that.
+        case BufferType::STORAGE:
+            usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                     VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+            break;
+        // Constant data that never changes (e.g. baked matrices) is a legitimate
+        // STATIC uniform buffer. Without this the buffer was created with only
+        // TRANSFER usage and failed at bind time with a cryptic validation error.
+        case BufferType::UNIFORM:
+            usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+            break;
+    }
+    return usage;
+}
+
 class Buffer
 {
 public:
@@ -247,40 +314,7 @@ public:
         size_t data_size,
         BufferType type)
     {
-        // TRANSFER_SRC so read() can copy the contents back out.
-        VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        switch (type)
-        {
-            case BufferType::VERTEX:
-                usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-                break;
-            case BufferType::INDEX:
-                usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-                break;
-            // VERTEX also: a compute shader writing vertices into an SSBO that
-            // the graphics pipeline then consumes via bind_vertex_buffer is the
-            // canonical compute->graphics hand-off (examples/11_particles).
-            //
-            // INDIRECT too, and unconditionally (0.19). The whole point of an
-            // indirect draw is a compute shader writing the draw arguments, so the
-            // type that carries STORAGE_BUFFER is the type that carries this.
-            // Gating it behind a fifth BufferType would make "which buffers can be
-            // indirect" a second rule to remember for a usage bit that costs
-            // nothing — the same reasoning that gave DYNAMIC buffers the transfer
-            // bits in 0.18.
-            case BufferType::STORAGE:
-                usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                         VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
-                break;
-            // Constant data that never changes (e.g. baked matrices) is a legitimate
-            // STATIC uniform buffer. Without this the buffer was created with only
-            // TRANSFER usage and failed at bind time with a cryptic validation error.
-            case BufferType::UNIFORM:
-                usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-                break;
-            default:
-                break;
-        }
+        const VkBufferUsageFlags usage = buffer_usage_for(type);
 
         auto staging_pair = create_staging_buffer(context, data_size, Staging::Upload, data);
         if (!staging_pair)
@@ -468,21 +502,7 @@ public:
         size_t data_size,
         BufferType type)
     {
-        // The transfer bits ride along so cmd.copy_buffer / cmd.fill_buffer work
-        // on a DYNAMIC buffer too (0.18). A STATIC buffer has carried both since
-        // it was written, and refusing them here would make "which buffers can
-        // the GPU copy into" a second rule to remember for no gain: transfer
-        // usage costs nothing on memory that is already host-visible.
-        VkBufferUsageFlags usage = (type == BufferType::STORAGE) ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                                 : VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-        usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        // Indirect for the same reason a STATIC storage buffer gets it (0.19), and
-        // it matters here too: draw arguments the CPU rewrites every frame are a
-        // DYNAMIC buffer, and that is the case where the count is not GPU-derived.
-        if (type == BufferType::STORAGE)
-        {
-            usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
-        }
+        const VkBufferUsageFlags usage = buffer_usage_for(type);
 
         VmaAllocationCreateInfo allocInfo{};
         allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
@@ -507,7 +527,7 @@ public:
             if (auto e = check(
                     vmaCreateBuffer(
                         context.allocator(), &bufferInfo, &allocInfo, &buffers[i], &allocations[i], nullptr),
-                    std::string("create ") + (type == BufferType::STORAGE ? "storage" : "uniform") + " buffer",
+                    std::string("create dynamic ") + buffer_type_name(type) + " buffer",
                     ErrorCode::Resource))
             {
                 for (size_t j = 0; j < i; ++j)

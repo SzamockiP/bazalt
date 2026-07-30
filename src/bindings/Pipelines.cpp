@@ -158,32 +158,62 @@ void bind_pipelines(py::module_& m)
             py::arg("stage"))
         .def(
             "uniform_buffer",
-            [](GraphicsPipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set)
-                -> GraphicsPipelineBuilder& { return self.uniform_buffer(binding, stage, set); },
+            [](GraphicsPipelineBuilder& self,
+               uint32_t binding,
+               ShaderStage stage,
+               uint32_t set,
+               uint32_t count,
+               std::optional<bool> update_after_bind) -> GraphicsPipelineBuilder&
+            { return self.uniform_buffer(binding, stage, set, count, update_after_bind); },
             py::arg("binding"),
             py::arg("stage"),
-            py::arg("set"))
+            py::arg("set"),
+            py::arg("count") = 1,
+            py::arg("update_after_bind") = py::none())
         .def(
             "storage_buffer",
-            [](GraphicsPipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set)
-                -> GraphicsPipelineBuilder& { return self.storage_buffer(binding, stage, set); },
+            [](GraphicsPipelineBuilder& self,
+               uint32_t binding,
+               ShaderStage stage,
+               uint32_t set,
+               uint32_t count,
+               std::optional<bool> update_after_bind) -> GraphicsPipelineBuilder&
+            { return self.storage_buffer(binding, stage, set, count, update_after_bind); },
             py::arg("binding"),
             py::arg("stage"),
-            py::arg("set"))
+            py::arg("set"),
+            py::arg("count") = 1,
+            py::arg("update_after_bind") = py::none())
+        // count>1 declares a descriptor array: one binding holding N textures,
+        // written with set_image(..., index=i) and indexed in the shader.
         .def(
             "texture",
-            [](GraphicsPipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set)
-                -> GraphicsPipelineBuilder& { return self.texture(binding, stage, set); },
+            [](GraphicsPipelineBuilder& self,
+               uint32_t binding,
+               ShaderStage stage,
+               uint32_t set,
+               uint32_t count,
+               std::optional<bool> update_after_bind) -> GraphicsPipelineBuilder&
+            { return self.texture(binding, stage, set, count, update_after_bind); },
             py::arg("binding"),
             py::arg("stage"),
-            py::arg("set"))
+            py::arg("set"),
+            py::arg("count") = 1,
+            py::arg("update_after_bind") = py::none())
         .def(
             "storage_image",
-            [](GraphicsPipelineBuilder& self, uint32_t binding, ShaderStage stage, uint32_t set)
-                -> GraphicsPipelineBuilder& { return self.storage_image(binding, stage, set); },
+            [](GraphicsPipelineBuilder& self,
+               uint32_t binding,
+               ShaderStage stage,
+               uint32_t set,
+               uint32_t count,
+               std::optional<bool> update_after_bind) -> GraphicsPipelineBuilder&
+            { return self.storage_image(binding, stage, set, count, update_after_bind); },
             py::arg("binding"),
             py::arg("stage"),
-            py::arg("set"))
+            py::arg("set"),
+            py::arg("count") = 1,
+            py::arg("update_after_bind") = py::none())
         // Takes any RenderTarget. A SwapchainRenderer *is* one, so windowed code
         // reads the same as offscreen code — build(renderer) still works, it just
         // isn't a special case any more.
@@ -217,22 +247,55 @@ void bind_pipelines(py::module_& m)
             py::arg("shader"))
         .def(
             "uniform_buffer",
-            [](ComputePipelineBuilder& self, uint32_t binding, uint32_t set) -> ComputePipelineBuilder&
-            { return self.uniform_buffer(binding, set); },
+            [](ComputePipelineBuilder& self,
+               uint32_t binding,
+               uint32_t set,
+               uint32_t count,
+               std::optional<bool> update_after_bind) -> ComputePipelineBuilder&
+            { return self.uniform_buffer(binding, set, count, update_after_bind); },
             py::arg("binding"),
-            py::arg("set") = 0)
+            py::arg("set") = 0,
+            py::arg("count") = 1,
+            py::arg("update_after_bind") = py::none())
         .def(
             "storage_buffer",
-            [](ComputePipelineBuilder& self, uint32_t binding, uint32_t set) -> ComputePipelineBuilder&
-            { return self.storage_buffer(binding, set); },
+            [](ComputePipelineBuilder& self,
+               uint32_t binding,
+               uint32_t set,
+               uint32_t count,
+               std::optional<bool> update_after_bind) -> ComputePipelineBuilder&
+            { return self.storage_buffer(binding, set, count, update_after_bind); },
             py::arg("binding"),
-            py::arg("set") = 0)
+            py::arg("set") = 0,
+            py::arg("count") = 1,
+            py::arg("update_after_bind") = py::none())
+        // A sampled image in a compute shader: filtering, mips and address modes,
+        // which a storage image has none of. The declarator was simply missing
+        // until 0.21 -- everything downstream already handled it.
+        .def(
+            "texture",
+            [](ComputePipelineBuilder& self,
+               uint32_t binding,
+               uint32_t set,
+               uint32_t count,
+               std::optional<bool> update_after_bind) -> ComputePipelineBuilder&
+            { return self.texture(binding, set, count, update_after_bind); },
+            py::arg("binding"),
+            py::arg("set") = 0,
+            py::arg("count") = 1,
+            py::arg("update_after_bind") = py::none())
         .def(
             "storage_image",
-            [](ComputePipelineBuilder& self, uint32_t binding, uint32_t set) -> ComputePipelineBuilder&
-            { return self.storage_image(binding, set); },
+            [](ComputePipelineBuilder& self,
+               uint32_t binding,
+               uint32_t set,
+               uint32_t count,
+               std::optional<bool> update_after_bind) -> ComputePipelineBuilder&
+            { return self.storage_image(binding, set, count, update_after_bind); },
             py::arg("binding"),
-            py::arg("set") = 0)
+            py::arg("set") = 0,
+            py::arg("count") = 1,
+            py::arg("update_after_bind") = py::none())
         .def(
             "push_constant",
             [](ComputePipelineBuilder& self, uint32_t size) -> ComputePipelineBuilder&
@@ -260,34 +323,43 @@ void bind_pipelines(py::module_& m)
             });
 
     py::class_<DescriptorSet, std::shared_ptr<DescriptorSet>>(m, "DescriptorSet")
+        // index= picks the element of a count>1 array binding. Writing the same
+        // (binding, index) again replaces what was there.
         .def(
             "set_image",
-            [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Image> image, std::shared_ptr<Sampler> sampler)
+            [](DescriptorSet& self,
+               uint32_t binding,
+               std::shared_ptr<Image> image,
+               std::shared_ptr<Sampler> sampler,
+               uint32_t index)
             {
                 require_same_context(self.owner(), image->owner(), "set_image");
-                unwrap(self.set_image(binding, std::move(image), std::move(sampler)), nullptr);
+                unwrap(self.set_image(binding, std::move(image), std::move(sampler), index), nullptr);
             },
             py::arg("binding"),
             py::arg("image"),
-            py::arg("sampler") = py::none())
+            py::arg("sampler") = py::none(),
+            py::arg("index") = 0)
         .def(
             "set_storage_image",
-            [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Image> image)
+            [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Image> image, uint32_t index)
             {
                 require_same_context(self.owner(), image->owner(), "set_storage_image");
-                unwrap(self.set_storage_image(binding, std::move(image)), nullptr);
+                unwrap(self.set_storage_image(binding, std::move(image), index), nullptr);
             },
             py::arg("binding"),
-            py::arg("image"))
+            py::arg("image"),
+            py::arg("index") = 0)
         .def(
             "set_buffer",
-            [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Buffer> buffer)
+            [](DescriptorSet& self, uint32_t binding, std::shared_ptr<Buffer> buffer, uint32_t index)
             {
                 require_same_context(self.owner(), buffer->owner(), "set_buffer");
-                unwrap(self.set_buffer(binding, std::move(buffer)), nullptr);
+                unwrap(self.set_buffer(binding, std::move(buffer), index), nullptr);
             },
             py::arg("binding"),
-            py::arg("buffer"));
+            py::arg("buffer"),
+            py::arg("index") = 0);
 
     py::class_<DescriptorPool, std::shared_ptr<DescriptorPool>>(m, "DescriptorPool")
         .def(
