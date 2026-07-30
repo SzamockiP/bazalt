@@ -98,6 +98,11 @@ draw count the GPU decides, gamepads, and MSAA into images you already own.
   image done — `wait()` returned and `read()` gave whichever frame had landed. With
   a queue deeper than the worker can drain it was measurably far off: update 71 of
   200. The state counts outstanding jobs now.
+- **The first update of an image made with `create_image(array)` raced the copy
+  that created it.** That copy is submitted inline on the calling thread, so the
+  upload worker's ordering did not cover it, and losing the race left the image
+  holding what it was created with. Every queued upload now waits for whatever the
+  image already has in flight, whichever thread submitted it.
 - **Two updates of one image could land backwards.** `image.update` promises that
   the call order is the GPU order, and one worker thread submitting in sequence
   does not deliver it: two submits on one queue may overlap unless one waits for

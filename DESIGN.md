@@ -739,6 +739,16 @@ entry. The release is a label, not the organizing axis.
   only sometimes loses, make the queue deeper rather than trusting the driver to
   lose it for you.**
 
+  **And the chain had a hole where the threads meet.** `create_image(array)` has
+  nothing to decode, so it submits its copy inline on the calling thread (0.18.0) —
+  which the worker's own chain knows nothing about. The first `update` of such an
+  image therefore raced the copy that created it, and losing meant the image kept
+  its original pixels. A queued upload now waits on the maximum of the worker's
+  last serial and the image's own, so "whichever thread submitted it" stops being a
+  question. General form: **a chain is only as long as the set of submitters it
+  knows about, and an optimization that moves one submit off the worker moves it
+  out of the chain.**
+
   Three more things are worth keeping. **The promise was three copies of a submit block**,
   and only one of them went through `submit_one_shot`; the two inline ones kept
   `waitSemaphoreCount = 0` through two releases that both edited this file. **The

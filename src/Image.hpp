@@ -453,6 +453,15 @@ public:
         return upload_serial_.load();
     }
 
+    // The last upload submitted for this image, or 0. Read by the upload worker
+    // so a queued job can be ordered behind an upload some OTHER thread made:
+    // create_image(array) submits inline on the calling thread, so the worker's
+    // own chain does not know about it.
+    std::uint64_t upload_serial() const
+    {
+        return upload_serial_.load();
+    }
+
     // Upload state transitions. Pending/Failed are worker-side; Submitted is
     // whoever made the submit — the worker for a decode, the calling thread for
     // create_image(array), which has nothing to decode (see upload_pixels).
