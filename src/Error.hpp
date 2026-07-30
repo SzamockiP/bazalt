@@ -171,6 +171,28 @@ inline Error err_init(std::string message)
     return {ErrorCode::Initialization, std::move(message)};
 }
 
+// volkInitialize() fails for exactly one reason: it could not open the Vulkan
+// loader. `check()` would report that as "failed to initialize volk
+// (VK_ERROR_INITIALIZATION_FAILED)", which names a library the caller did not
+// install and no action at all.
+//
+// Windows and Linux get the loader from the graphics driver. macOS supplies no
+// Vulkan at all, so this is the first thing a new Mac user meets, and the fix
+// belongs in the message rather than in the documentation they are not reading
+// yet.
+inline Error err_no_vulkan_loader()
+{
+    return err_init(
+        "Vulkan: no Vulkan loader is installed on this machine. "
+#ifdef __APPLE__
+        "macOS supplies no Vulkan, so install the Vulkan SDK from LunarG. It gives you the loader and "
+        "MoltenVK, which runs Vulkan on Metal."
+#else
+        "Install a graphics driver that supports Vulkan."
+#endif
+    );
+}
+
 inline Error err_window(std::string message)
 {
     return {ErrorCode::Window, std::move(message)};

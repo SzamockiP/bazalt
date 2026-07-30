@@ -957,9 +957,9 @@ private:
         const ContextConfig& config,
         const std::shared_ptr<Logger>& logger)
     {
-        if (auto e = check(volkInitialize(), "initialize volk"))
+        if (volkInitialize() != VK_SUCCESS)
         {
-            return std::unexpected(*e);
+            return std::unexpected(err_no_vulkan_loader());
         }
 
         // printf is implemented by the validation layers, so the two settings

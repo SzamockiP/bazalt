@@ -95,9 +95,9 @@ inline DeviceUUID device_uuid(PFN_vkGetPhysicalDeviceProperties2 get_properties2
 // bindings/Targets.cpp already uses for vkCreateWin32SurfaceKHR.
 inline std::expected<std::vector<Device>, Error> list_devices()
 {
-    if (auto e = check(volkInitialize(), "initialize volk"))
+    if (volkInitialize() != VK_SUCCESS)
     {
-        return std::unexpected(*e);
+        return std::unexpected(err_no_vulkan_loader());
     }
 
     // 1.2 is bazalt's baseline anyway, and it is what makes the Properties2 /
