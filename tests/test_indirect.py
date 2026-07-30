@@ -351,3 +351,177 @@ def test_indirect_read_is_a_manual_barrier_access(ctx):
         cmd.barrier(img, bz.Access.SHADER_WRITE, bz.Access.INDIRECT_READ)
     ctx.submit(cmd)
     ctx.wait()
+
+
+# ── a GPU-decided draw COUNT (0.21) ───────────────────────────────────────────
+
+
+def count_context(extra_context):
+    """Both features: the count buffer needs DRAW_INDIRECT_COUNT, and `count`
+    becomes maxDrawCount, which is still multiDrawIndirect when it is above 1."""
+    ctx = extra_context(optional=[bz.Feature.DRAW_INDIRECT_COUNT,
+                                  bz.Feature.MULTI_DRAW_INDIRECT])
+    if not ctx.supports(bz.Feature.DRAW_INDIRECT_COUNT):
+        pytest.skip("GPU reports no drawIndirectCount")
+    if not ctx.supports(bz.Feature.MULTI_DRAW_INDIRECT):
+        pytest.skip("GPU reports no multiDrawIndirect")
+    return ctx
+
+
+def stripe_pipeline(ctx, target):
+    vert = ctx.compile_shader(str(SHADER_DIR / "stripe.vert"), bz.ShaderStage.VERTEX)
+    frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
+    return (ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
+            .push_constant(4, bz.ShaderStage.VERTEX).build(target))
+
+
+def one_stripe_each(ctx, commands):
+    """`commands` argument structs, command i painting stripe i alone.
+
+    firstInstance is what separates them: gl_InstanceIndex counts from it, so
+    command i draws exactly stripe i and the painted area is proportional to how
+    many commands ran — which is the number under test."""
+    words = []
+    for i in range(commands):
+        words += [6, 1, 0, i]  # vertexCount, instanceCount, firstVertex, firstInstance
+    return ctx.create_buffer(np.array(words, dtype=np.uint32),
+                             bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+
+
+def count_buffer(ctx, value):
+    return ctx.create_buffer(np.array([value], dtype=np.uint32),
+                             bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+
+
+@pytest.mark.parametrize("issued", [1, 3])
+def test_the_count_buffer_decides_how_many_commands_run(extra_context, issued):
+    """Two-sided by parametrization: the same four argument structs and the same
+    maxDrawCount, differing only in the number sitting in the count buffer. A
+    draw that ignored the buffer would paint four stripes both times."""
+    ctx = count_context(extra_context)
+    target = bz.RenderTarget(ctx, TARGET, TARGET)
+    draw = stripe_pipeline(ctx, target)
+    args = one_stripe_each(ctx, 4)
+    counts = count_buffer(ctx, issued)
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
+        c.bind_pipeline(draw)
+        c.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
+        c.draw_indirect(args, count=4, count_buffer=counts)
+    ctx.submit(cmd)
+    ctx.wait()
+
+    assert painted(target) == issued * STRIPE_PIXELS
+
+
+def test_the_count_is_clamped_to_the_maximum(extra_context):
+    """The buffer says 4 and maxDrawCount says 2, so two commands run. The spec
+    clamps rather than reading past the arguments the caller sized for, which is
+    also why check_indirect_ bounds-checks against `count` and not against the
+    number in the buffer — the CPU never learns that one."""
+    ctx = count_context(extra_context)
+    target = bz.RenderTarget(ctx, TARGET, TARGET)
+    draw = stripe_pipeline(ctx, target)
+    args = one_stripe_each(ctx, 4)
+    counts = count_buffer(ctx, 4)
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
+        c.bind_pipeline(draw)
+        c.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
+        c.draw_indirect(args, count=2, count_buffer=counts)
+    ctx.submit(cmd)
+    ctx.wait()
+
+    assert painted(target) == 2 * STRIPE_PIXELS
+
+
+def test_compute_writes_the_count(extra_context):
+    """The point of the feature: nothing on the CPU knows how many draws happen.
+    The same cull_args.comp accumulates a counter, and this time the counter IS
+    the draw count rather than an instance count.
+
+    No cmd.barrier(): the compute write and the command processor's read of the
+    COUNT buffer are ordered by the tracker, which had to learn that the count
+    buffer is read at DRAW_INDIRECT like the arguments are."""
+    scores = np.array([0.9, 0.1, 0.8, 0.7, 0.05, 0.95, 0.2, 0.6], dtype=np.float32)
+    threshold = 0.5
+    expected = int((scores > threshold).sum())
+
+    ctx = count_context(extra_context)
+    counts = ctx.create_buffer(DRAW_ARGS_BYTES, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    candidates = ctx.create_buffer(scores, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+
+    comp = ctx.compile_shader(str(SHADER_DIR / "cull_args.comp"), bz.ShaderStage.COMPUTE)
+    cull = (ctx.compute_pipeline().shader(comp)
+            .storage_buffer(0, set=0).storage_buffer(1, set=0)
+            .push_constant(8).build())
+    pool = ctx.create_descriptor_pool(max_sets=2, storage_buffers=4)
+    dset = pool.allocate_set(cull, set=0)
+    dset.set_buffer(0, counts)
+    dset.set_buffer(1, candidates)
+
+    target = bz.RenderTarget(ctx, TARGET, TARGET)
+    draw = stripe_pipeline(ctx, target)
+    args = one_stripe_each(ctx, TOTAL_STRIPES)
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.fill_buffer(counts, 0)
+    cmd.bind_pipeline(cull)
+    cmd.bind_descriptor_set(dset, cull, set=0)
+    cmd.push_constants(cull, 0, struct.pack("If", len(scores), threshold))
+    cmd.dispatch(1)
+    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
+        c.bind_pipeline(draw)
+        c.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
+        # cull_args.comp accumulates into word 1 (instanceCount), so the count the
+        # draw reads sits 4 bytes in.
+        c.draw_indirect(args, count=TOTAL_STRIPES, count_buffer=counts, count_offset=4)
+    ctx.submit(cmd)
+    ctx.wait()
+
+    assert painted(target) == expected * STRIPE_PIXELS
+
+
+# ── refusals ──────────────────────────────────────────────────────────────────
+
+
+def test_a_count_buffer_needs_its_feature(ctx):
+    if ctx.supports(bz.Feature.DRAW_INDIRECT_COUNT):
+        pytest.skip("the session Context has DRAW_INDIRECT_COUNT, so it cannot refuse")
+    args = args_buffer(ctx)
+    counts = args_buffer(ctx)
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with pytest.raises(bz.ResourceError, match="DRAW_INDIRECT_COUNT"):
+        cmd.draw_indirect(args, count_buffer=counts)
+
+
+def test_a_count_buffer_must_be_a_storage_buffer(extra_context):
+    ctx = count_context(extra_context)
+    args = ctx.create_buffer(DRAW_ARGS_BYTES, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    wrong = ctx.create_buffer(16, bz.BufferType.UNIFORM, bz.MemoryUsage.STATIC)
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with pytest.raises(bz.ResourceError, match="STORAGE"):
+        cmd.draw_indirect(args, count_buffer=wrong)
+
+
+def test_a_count_offset_must_be_aligned_and_inside_the_buffer(extra_context):
+    ctx = count_context(extra_context)
+    args = ctx.create_buffer(DRAW_ARGS_BYTES, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    counts = ctx.create_buffer(8, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with pytest.raises(bz.ResourceError, match="multiple of 4"):
+        cmd.draw_indirect(args, count_buffer=counts, count_offset=2)
+    # 4 bytes at offset 8 need 12, and the buffer is 8. The near-maximum offset
+    # is the one that catches an unsigned overflow rather than an off-by-one.
+    with pytest.raises(bz.ResourceError, match="count buffer is 8"):
+        cmd.draw_indirect(args, count_buffer=counts, count_offset=8)
+    with pytest.raises(bz.ResourceError, match="count buffer is 8"):
+        cmd.draw_indirect(args, count_buffer=counts, count_offset=2**64 - 4)

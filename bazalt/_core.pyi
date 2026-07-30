@@ -967,8 +967,9 @@ class CommandBuffer:
     def dispatch(self, group_count_x: int, group_count_y: int = 1,
                  group_count_z: int = 1) -> CommandBuffer: ...
 
-    def draw_indirect(self, buffer: Buffer, offset: int = 0,
-                      count: int = 1) -> CommandBuffer:
+    def draw_indirect(self, buffer: Buffer, offset: int = 0, count: int = 1,
+                      count_buffer: Optional[Buffer] = None,
+                      count_offset: int = 0) -> CommandBuffer:
         """Draw with arguments read out of a buffer, so a compute pass decides what
         gets drawn and the CPU never learns the answer (0.19).
 
@@ -985,12 +986,19 @@ class CommandBuffer:
         A std430 GLSL struct of four uints is byte-identical, so a compute shader
         can zero it with cmd.fill_buffer and accumulate instanceCount atomically.
         count>1 reads that many consecutive structs and needs
-        Feature.MULTI_DRAW_INDIRECT. To draw nothing, write 0 into instanceCount —
-        count=0 is refused, because only one of the two can be decided on the GPU.
+        Feature.MULTI_DRAW_INDIRECT.
+
+        `count_buffer` moves the number of draws onto the GPU too (0.21): `count`
+        becomes the maximum, and the 4 bytes at `count_offset` say how many of
+        those commands to issue. It must also be a BufferType.STORAGE buffer, and
+        it needs Feature.DRAW_INDIRECT_COUNT. Without a count buffer the way to
+        draw nothing is to write 0 into instanceCount — count=0 is refused,
+        because only one of the two can be decided on the GPU.
         """
         ...
-    def draw_indexed_indirect(self, buffer: Buffer, offset: int = 0,
-                              count: int = 1) -> CommandBuffer:
+    def draw_indexed_indirect(self, buffer: Buffer, offset: int = 0, count: int = 1,
+                              count_buffer: Optional[Buffer] = None,
+                              count_offset: int = 0) -> CommandBuffer:
         """draw_indirect through the bound index buffer (0.19).
 
         The struct is VkDrawIndexedIndirectCommand, five words: indexCount,

@@ -211,29 +211,50 @@ void bind_commands(py::module_& m)
             [](std::shared_ptr<CommandBuffer> self,
                std::shared_ptr<Buffer> buffer,
                VkDeviceSize offset,
-               std::uint32_t count)
+               std::uint32_t count,
+               std::shared_ptr<Buffer> count_buffer,
+               VkDeviceSize count_offset)
             {
                 require_same_context(self->owner(), buffer->owner(), "draw_indirect");
-                unwrap(self->draw_indirect(std::move(buffer), offset, count), nullptr);
+                if (count_buffer)
+                {
+                    require_same_context(self->owner(), count_buffer->owner(), "draw_indirect");
+                }
+                unwrap(
+                    self->draw_indirect(std::move(buffer), offset, count, std::move(count_buffer), count_offset),
+                    nullptr);
                 return self;
             },
             py::arg("buffer"),
             py::arg("offset") = 0,
-            py::arg("count") = 1)
+            py::arg("count") = 1,
+            py::arg("count_buffer") = py::none(),
+            py::arg("count_offset") = 0)
         .def(
             "draw_indexed_indirect",
             [](std::shared_ptr<CommandBuffer> self,
                std::shared_ptr<Buffer> buffer,
                VkDeviceSize offset,
-               std::uint32_t count)
+               std::uint32_t count,
+               std::shared_ptr<Buffer> count_buffer,
+               VkDeviceSize count_offset)
             {
                 require_same_context(self->owner(), buffer->owner(), "draw_indexed_indirect");
-                unwrap(self->draw_indexed_indirect(std::move(buffer), offset, count), nullptr);
+                if (count_buffer)
+                {
+                    require_same_context(self->owner(), count_buffer->owner(), "draw_indexed_indirect");
+                }
+                unwrap(
+                    self->draw_indexed_indirect(
+                        std::move(buffer), offset, count, std::move(count_buffer), count_offset),
+                    nullptr);
                 return self;
             },
             py::arg("buffer"),
             py::arg("offset") = 0,
-            py::arg("count") = 1)
+            py::arg("count") = 1,
+            py::arg("count_buffer") = py::none(),
+            py::arg("count_offset") = 0)
         .def(
             "dispatch_indirect",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, VkDeviceSize offset)

@@ -649,28 +649,65 @@ public:
     //
     // A dtype that exists only to be converted fails the scope test's second
     // question, and a std430 struct in GLSL is byte-identical to the above.
+    // count_buffer moves the last CPU-side number onto the GPU: with one, `count`
+    // becomes the MAXIMUM and the 4 bytes at count_offset say how many of those
+    // commands to issue. A compute pass then decides the number of draws, not only
+    // their contents.
+    //
+    // A kwarg on the verb rather than a fourth verb: where the count comes from is
+    // one argument of a draw that already exists, and a draw_indirect_count name
+    // would need a copy of every future argument to draw_indirect — the reasoning
+    // that made draw_indexed_instanced disappear in 0.17.
     std::expected<void, Error> draw_indirect(
         std::shared_ptr<Buffer> buffer,
         VkDeviceSize offset = 0,
-        std::uint32_t count = 1)
+        std::uint32_t count = 1,
+        std::shared_ptr<Buffer> count_buffer = nullptr,
+        VkDeviceSize count_offset = 0)
     {
         // 16 bytes: vertexCount, instanceCount, firstVertex, firstInstance.
         if (auto e = check_indirect_(buffer, offset, count, sizeof(VkDrawIndirectCommand), "draw_indirect"); !e)
         {
             return std::unexpected(e.error());
         }
+        if (auto e = check_count_buffer_(count_buffer, count_offset, "draw_indirect"); !e)
+        {
+            return std::unexpected(e.error());
+        }
         track_indirect_(buffer);
+        if (count_buffer)
+        {
+            track_indirect_(count_buffer);
+        }
         track_draw_();
         commands_.push_back(
-            [buffer = std::move(buffer), offset, count](VkCommandBuffer cmd, const FrameContext& frame)
-            { frame.vk->vkCmdDrawIndirect(cmd, buffer->get(), offset, count, sizeof(VkDrawIndirectCommand)); });
+            [buffer = std::move(buffer), offset, count, count_buffer = std::move(count_buffer), count_offset](
+                VkCommandBuffer cmd,
+                const FrameContext& frame)
+            {
+                if (count_buffer)
+                {
+                    frame.vk->vkCmdDrawIndirectCount(
+                        cmd,
+                        buffer->get(),
+                        offset,
+                        count_buffer->get(),
+                        count_offset,
+                        count,
+                        sizeof(VkDrawIndirectCommand));
+                    return;
+                }
+                frame.vk->vkCmdDrawIndirect(cmd, buffer->get(), offset, count, sizeof(VkDrawIndirectCommand));
+            });
         return {};
     }
 
     std::expected<void, Error> draw_indexed_indirect(
         std::shared_ptr<Buffer> buffer,
         VkDeviceSize offset = 0,
-        std::uint32_t count = 1)
+        std::uint32_t count = 1,
+        std::shared_ptr<Buffer> count_buffer = nullptr,
+        VkDeviceSize count_offset = 0)
     {
         // 20 bytes, and note vertexOffset is SIGNED: indexCount, instanceCount,
         // firstIndex, vertexOffset (int32), firstInstance.
@@ -680,11 +717,33 @@ public:
         {
             return std::unexpected(e.error());
         }
+        if (auto e = check_count_buffer_(count_buffer, count_offset, "draw_indexed_indirect"); !e)
+        {
+            return std::unexpected(e.error());
+        }
         track_indirect_(buffer);
+        if (count_buffer)
+        {
+            track_indirect_(count_buffer);
+        }
         track_draw_();
         commands_.push_back(
-            [buffer = std::move(buffer), offset, count](VkCommandBuffer cmd, const FrameContext& frame)
+            [buffer = std::move(buffer), offset, count, count_buffer = std::move(count_buffer), count_offset](
+                VkCommandBuffer cmd,
+                const FrameContext& frame)
             {
+                if (count_buffer)
+                {
+                    frame.vk->vkCmdDrawIndexedIndirectCount(
+                        cmd,
+                        buffer->get(),
+                        offset,
+                        count_buffer->get(),
+                        count_offset,
+                        count,
+                        sizeof(VkDrawIndexedIndirectCommand));
+                    return;
+                }
                 frame.vk->vkCmdDrawIndexedIndirect(
                     cmd, buffer->get(), offset, count, sizeof(VkDrawIndexedIndirectCommand));
             });
@@ -1755,6 +1814,55 @@ private:
                     "with features=[bz.Feature.MULTI_DRAW_INDIRECT] (or optional=[...]), or "
                     "issue one call per draw.",
                     what)));
+        }
+        return {};
+    }
+
+    // The count buffer gets the same three checks the argument buffer gets — it is
+    // read by the same command processor at the same stage, and 4 bytes is a
+    // VkDeviceSize past the end just as readily as 16 are. The feature is the one
+    // thing that differs: drawIndirectCount is optional, and without it the entry
+    // point is a null pointer in the dispatch table rather than a diagnostic.
+    std::expected<void, Error> check_count_buffer_(
+        const std::shared_ptr<Buffer>& count_buffer,
+        VkDeviceSize count_offset,
+        const char* what)
+    {
+        if (!count_buffer)
+        {
+            return {};
+        }
+        if (!context_->supports(Feature::DRAW_INDIRECT_COUNT))
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: count_buffer requires the DRAW_INDIRECT_COUNT feature. Create the "
+                    "Context with optional=[bz.Feature.DRAW_INDIRECT_COUNT], or write 0 into "
+                    "the instanceCount of the commands you do not want.",
+                    what)));
+        }
+        if (count_buffer->buffer_type() != BufferType::STORAGE)
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: the count must live in a BufferType.STORAGE buffer, which is the one "
+                    "that carries the indirect usage flag. A compute shader writing the count "
+                    "needs it to be a storage buffer anyway.",
+                    what)));
+        }
+        if (count_offset % 4 != 0)
+        {
+            return std::unexpected(err_resource(
+                std::format("{}: count_offset must be a multiple of 4, got {}", what, count_offset)));
+        }
+        if (!fits_within(count_offset, sizeof(std::uint32_t), count_buffer->size()))
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: the count is 4 bytes at offset {}, but the count buffer is {}",
+                    what,
+                    count_offset,
+                    count_buffer->size())));
         }
         return {};
     }
