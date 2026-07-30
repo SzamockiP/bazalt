@@ -87,6 +87,18 @@ draw count the GPU decides, gamepads, and MSAA into images you already own.
   twice held the first image alive for the set's whole life, and made the
   record-time barrier pass walk a list that only grew. Invisible with one
   descriptor per binding; an unbounded leak for an array rewritten each frame.
+- **A DYNAMIC vertex or index buffer had the wrong usage flags.** Only STORAGE
+  was recognised; every other type got uniform-buffer usage, so
+  `create_buffer(n, BufferType.VERTEX, MemoryUsage.DYNAMIC)` — geometry rebuilt
+  each frame, which is what DYNAMIC is for — could not be bound and the draw read
+  undefined data. The two memory usages computed their flags separately and had
+  drifted; they now share one function.
+- **Two updates of one image could land backwards.** `image.update` promises that
+  the call order is the GPU order, and one worker thread submitting in sequence
+  does not deliver it: two submits on one queue may overlap unless one waits for
+  the other. Each upload now waits for the previous one. A video decoder that
+  queued two frames could show them in the wrong order, on drivers that take the
+  freedom the spec gives them.
 - **Example `29_bindless` drew nothing on the first attempt**, and a clean
   20-second run did not say so. The quad was wound the obvious way — right along
   the top first — which is back-facing under the default cull. Only a measured

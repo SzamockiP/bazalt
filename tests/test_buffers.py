@@ -5,6 +5,8 @@ import pytest
 
 import bazalt as bz
 
+from conftest import SHADER_DIR
+
 
 def test_contiguous_array_uploads(ctx):
     data = np.arange(12, dtype=np.float32)
@@ -113,3 +115,56 @@ def test_read_dtype_is_respected(ctx):
     out = buf.read(np.uint32)
     assert out.dtype == np.uint32
     np.testing.assert_array_equal(out, data)
+
+
+# ── every type is usable in both memory usages (0.21) ─────────────────────────
+
+
+@pytest.mark.parametrize("memory", [bz.MemoryUsage.STATIC, bz.MemoryUsage.DYNAMIC])
+def test_a_vertex_buffer_binds_in_either_memory_usage(ctx, memory):
+    """A DYNAMIC vertex buffer is geometry rebuilt every frame, which is what
+    DYNAMIC is FOR — and it did not work: DynamicBuffer asked "is it STORAGE?"
+    and gave everything else uniform-buffer usage, so binding one was
+    VUID-vkCmdBindVertexBuffers-pBuffers-00627 and the draw read undefined data.
+
+    Parametrized over both usages rather than testing the broken one alone,
+    because the bug was the two paths disagreeing. The referee is the
+    validation-as-assert fixture: a missing usage bit is an error there, not a
+    wrong pixel."""
+    vertices = np.array([
+        -0.5, -0.5, 0.0, 1.0, 0.0, 0.0,
+        -0.5, +0.5, 0.0, 0.0, 1.0, 0.0,
+        +0.5, +0.5, 0.0, 0.0, 0.0, 1.0,
+    ], dtype=np.float32)
+    vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, memory)
+    ibuf = ctx.create_buffer(np.array([0, 1, 2], dtype=np.uint32), bz.BufferType.INDEX, memory)
+
+    vert = ctx.compile_shader(str(SHADER_DIR / "triangle.vert"), bz.ShaderStage.VERTEX)
+    frag = ctx.compile_shader(str(SHADER_DIR / "triangle.frag"), bz.ShaderStage.FRAGMENT)
+    target = bz.RenderTarget(ctx, 32, 32)
+    pipe = (ctx.graphics_pipeline()
+            .vertex_shader(vert).fragment_shader(frag)
+            .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+            .build(target))
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
+        c.bind_pipeline(pipe).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
+    ctx.submit(cmd)
+
+    painted = int(np.count_nonzero(target.color[0].read()[:, :, :3].any(axis=2)))
+    assert painted > 100, f"{memory} vertex buffer drew {painted} pixels"
+
+
+@pytest.mark.parametrize("buffer_type", [bz.BufferType.VERTEX, bz.BufferType.INDEX,
+                                         bz.BufferType.UNIFORM, bz.BufferType.STORAGE])
+def test_both_memory_usages_accept_every_buffer_type(ctx, buffer_type):
+    """The creation half of the same rule: no combination of type and memory
+    usage is refused or silently given the wrong usage flags."""
+    data = np.arange(16, dtype=np.uint32)
+    for memory in (bz.MemoryUsage.STATIC, bz.MemoryUsage.DYNAMIC):
+        buf = ctx.create_buffer(data, buffer_type, memory)
+        # Read back rather than merely constructed: TRANSFER_SRC is part of the
+        # usage every type gets, and a missing bit shows up here.
+        assert buf.read(np.uint32).tolist() == data.tolist()

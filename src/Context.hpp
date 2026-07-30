@@ -606,25 +606,36 @@ public:
     // Who frees the command buffer afterwards is the caller's business, and it
     // differs: the main thread parks it in the deletion queue, while the worker
     // must free it back into its own pool from its own thread.
-    std::expected<std::uint64_t, Error> submit_one_shot(VkCommandBuffer cmd)
+    // after: a serial this work must not start before, or 0 for "no ordering".
+    //
+    // Submitting in order does NOT execute in order: two submits on one queue
+    // overlap unless something says otherwise, and the spec is explicit about it.
+    // That is what `after` is for — the upload worker promises that two updates of
+    // one image land in call order, and one thread submitting them in sequence is
+    // not enough to keep the promise.
+    std::expected<std::uint64_t, Error> submit_one_shot(VkCommandBuffer cmd, std::uint64_t after = 0)
     {
         std::lock_guard lock(queue_mutex_);
         const std::uint64_t serial = advance_submit_serial();
 
         VkSemaphore timeline = submit_timeline_;
+        // TRANSFER, not TOP_OF_PIPE: an upload's first real work is a copy, and
+        // there is nothing before it worth letting run early.
+        const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        const bool ordered = after != 0;
         VkTimelineSemaphoreSubmitInfo timelineInfo{
             .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
             .pNext = nullptr,
-            .waitSemaphoreValueCount = 0,
-            .pWaitSemaphoreValues = nullptr,
+            .waitSemaphoreValueCount = ordered ? 1u : 0u,
+            .pWaitSemaphoreValues = ordered ? &after : nullptr,
             .signalSemaphoreValueCount = 1,
             .pSignalSemaphoreValues = &serial};
         VkSubmitInfo submitInfo{
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .pNext = &timelineInfo,
-            .waitSemaphoreCount = 0,
-            .pWaitSemaphores = nullptr,
-            .pWaitDstStageMask = nullptr,
+            .waitSemaphoreCount = ordered ? 1u : 0u,
+            .pWaitSemaphores = ordered ? &timeline : nullptr,
+            .pWaitDstStageMask = ordered ? &wait_stage : nullptr,
             .commandBufferCount = 1,
             .pCommandBuffers = &cmd,
             .signalSemaphoreCount = 1,

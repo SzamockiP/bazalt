@@ -717,6 +717,22 @@ entry. The release is a label, not the organizing axis.
   the call order IS the GPU order. Writing it down is what stops a future thread pool
   from silently breaking a video decoder.
 
+  **And writing it down did not make it true** (0.21). One thread submitting in
+  sequence gives submission order, not execution order: two submits on one queue may
+  overlap unless one waits for the other, and the spec says so plainly. Every upload
+  now waits on the previous upload's serial, which costs nothing real — they are
+  issued by one thread already, and the work being ordered is a copy.
+
+  Three things are worth keeping. **The promise was three copies of a submit block**,
+  and only one of them went through `submit_one_shot`; the two inline ones kept
+  `waitSemaphoreCount = 0` through two releases that both edited this file. **The
+  test was right and passed anyway** for three releases, because the desktop driver
+  it ran on serialized what the spec lets it overlap — lavapipe in CI is what failed
+  it, which is the argument for running the suite somewhere that takes the freedom
+  the spec gives. And it is "dropping a wait means auditing every reader" seen from
+  the other end: **a guarantee about ORDER needs a mechanism, and a comment is not
+  one.**
+
 - **Every user error in `update` is decided in the binding, on the main thread** (0.18).
   The worker cannot raise — it holds no GIL, by the invariant `UploadManager` was built
   on — so a bad dtype, a wrong shape or a strided array has to be caught before the job
@@ -1859,6 +1875,20 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   forever. The fix is to give the entry the identity it always had — here
   `(binding, index)` — and replace rather than append. Look for this wherever a
   "bind" or "set" verb records what it was handed.
+
+- **The same question answered in two places will be answered differently**
+  (0.21). `StaticBuffer::create` switched on `BufferType` to pick usage flags;
+  `DynamicBuffer::create` asked "is it STORAGE?" and called everything else a
+  uniform buffer. So a DYNAMIC vertex buffer — geometry rebuilt every frame, which
+  is the whole point of DYNAMIC — had no `VERTEX_BUFFER` bit, and binding one was a
+  validation error with a draw reading undefined data behind it. Neither half looks
+  wrong on its own, which is why it survived: the bug is the pair.
+
+  What found it was running `examples/28_gpu_culling`, the only code in the repo
+  that ever made one. Nothing in the suite did, and the parametrized test that now
+  covers every (type, memory usage) pair is four lines. **When two constructors
+  answer one question, the cheap test is the cross product, not another case of the
+  path you were looking at.**
 
 ### Mechanical refactors
 

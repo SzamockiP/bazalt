@@ -76,13 +76,23 @@ def test_update_region_at_an_offset(ctx):
 def test_updates_of_one_image_land_in_call_order(ctx):
     """One FIFO worker, so the order the calls were made in is the order the GPU
     sees. That is a guarantee worth pinning: a video decoder that queued two
-    frames must not show them backwards."""
+    frames must not show them backwards.
+
+    Submitting in order is NOT enough to keep it, and this test is how that was
+    found: two submits on one queue may overlap unless one waits for the other,
+    and lavapipe does what the spec allows where a desktop driver happened to
+    serialize. So the referee for this one is CI, not the machine it was written
+    on — which is the argument for running the suite somewhere that reorders.
+
+    Six updates rather than two: a race that only sometimes loses is worth more
+    chances to lose."""
+    colors = [RED, GREEN, BLUE, RED, GREEN, BLUE]
     img = ctx.create_image(rgba(8, 8, BLUE))
-    img.update(rgba(8, 8, RED))
-    img.update(rgba(8, 8, GREEN))
+    for color in colors:
+        img.update(rgba(8, 8, color))
     img.wait()
 
-    assert img.read()[0, 0].tolist() == list(GREEN)
+    assert img.read()[0, 0].tolist() == list(colors[-1])
 
 
 def test_update_one_layer_of_an_array(ctx):
