@@ -22,6 +22,78 @@ import bazalt as bz
 SHADER_DIR = pathlib.Path(__file__).parent / "shaders"
 
 
+# ── API coverage (opt in with --api-coverage) ────────────────────────────
+# Off by default: it replaces every public callable with a recording wrapper,
+# and the suite has no business running against a patched module when the
+# question is not being asked. See tests/api_coverage.py.
+
+_recorder = None
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--api-coverage",
+        action="store_true",
+        help="report which public symbols the suite touches, into api_coverage.md")
+
+
+def pytest_configure(config):
+    global _recorder
+    if not config.getoption("--api-coverage"):
+        return
+    import api_coverage
+
+    _recorder = api_coverage.Recorder()
+    _recorder.install(api_coverage.public_surface())
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Write the report, and fail on a symbol that is untouched and unexpected.
+
+    The measurement is only meaningful for a whole, passing run: a failed test
+    stops calling things, `-k` never reaches most of the API, and a SKIPPED test
+    is a symbol nobody called on this machine rather than a symbol nobody
+    tested. All three write the report and skip the gate, so the number is never
+    read as a regression when it is really a partial run.
+
+    The skip rule is what lets CI ask for the report at all: lavapipe has no
+    display and not every feature, so it always skips something, while a
+    developer GPU runs the suite with no skips and gets the gate.
+    """
+    if _recorder is None:
+        return
+    import api_coverage
+
+    surface = api_coverage.public_surface()
+    missing = api_coverage.untouched(
+        surface, _recorder.used, api_coverage.names_in_tests(pathlib.Path(__file__).parent))
+    api_coverage.write_report(api_coverage._REPORT, surface, missing)
+
+    if os.environ.get("BAZALT_WRITE_API_BASELINE") == "1":
+        api_coverage.write_baseline(missing)
+        return
+
+    # A named file or node id is a subset by definition; the directory CI passes
+    # is not. -k and -m are subsets whatever they select.
+    selected_files = any(
+        argument.endswith(".py") or "::" in argument
+        for argument in session.config.invocation_params.args)
+    reporter = session.config.pluginmanager.getplugin("terminalreporter")
+    skipped = len(reporter.stats.get("skipped", ())) if reporter else 0
+    if (exitstatus != 0 or skipped or selected_files
+            or session.config.option.keyword or session.config.option.markexpr):
+        return
+
+    new = sorted(key for key, _ in missing if key not in api_coverage.read_baseline())
+    if new:
+        session.exitstatus = 1
+        print("\nAPI coverage: these public symbols are untouched by any test and are not in")
+        print("tests/api_coverage_baseline.txt — add a test, or accept them into the baseline")
+        print("with BAZALT_WRITE_API_BASELINE=1:")
+        for key in new:
+            print(f"  {key}")
+
+
 @pytest.fixture(scope="session")
 def _session_context():
     """One Context for the whole run.
