@@ -607,14 +607,15 @@ class RenderTarget(RenderTargetBase):
     Two ways to build one, and they do different jobs. Pass a width and height and
     the target allocates its attachments from pixel formats. Pass images from
     create_image and it renders into those instead — that signature has no size,
-    samples, layers, cube or mip_levels, because the images already answer all of
-    them (0.19).
+    layers, cube or mip_levels, because the images already answer all of them
+    (0.19).
     """
 
     @overload
     def __init__(self, context: Context, *,
                  color: Optional[Image | Sequence[Image]] = None,
-                 depth: Optional[Image] = None, name: str = "") -> None:
+                 depth: Optional[Image] = None, samples: int = 1,
+                 name: str = "") -> None:
         """Render into images you already own, rather than attachments the target
         allocates.
 
@@ -624,10 +625,16 @@ class RenderTarget(RenderTargetBase):
         insisted on owning its attachments.
 
         Every attachment must be the same size with the same layer and mip count;
-        a mismatch is refused rather than intersected. Single-sample only, because
-        create_image has no samples=. The target holds the images, so dropping your
-        reference does not take the attachment with it — and it does write to their
-        layout tracking, which is what leaves the result sampleable.
+        a mismatch is refused rather than intersected. The target holds the images,
+        so dropping your reference does not take the attachment with it — and it
+        does write to their layout tracking, which is what leaves the result
+        sampleable.
+
+        samples>1 works as it does on the other signature (0.21): the target
+        renders into multisampled attachments it allocates and resolves into the
+        images you passed, so those stay single-sample and sampleable. Not
+        available with a mipped attachment, because a multisampled image has no mip
+        chain.
         """
         ...
 
