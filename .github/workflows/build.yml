@@ -239,12 +239,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Cache the Vulkan SDK installer
-        uses: actions/cache@v4
-        with:
-          path: .vulkan-sdk
-          key: vulkan-sdk-macos-${{ env.VULKAN_SDK_VERSION }}
-
+      # The SDK archive is cached inside the composite action, which both macOS
+      # jobs share.
       - name: Cache the CMake build tree
         uses: actions/cache@v4
         with:
@@ -253,26 +249,10 @@ jobs:
           restore-keys: |
             build-v1-macos-${{ matrix.python }}-
 
-      # The installer app inside the disk image is found, not spelled out: its
-      # name has changed between SDK releases, and the lavapipe job already
-      # pays for that lesson once (see "Locate the lavapipe ICD manifest").
-      # --root puts the SDK under $HOME, so nothing here needs sudo.
       - name: Install the Vulkan SDK (MoltenVK, layers, shaderc)
-        run: |
-          set -e
-          VERSION="${{ env.VULKAN_SDK_VERSION }}"
-          DMG=".vulkan-sdk/vulkansdk-macos-$VERSION.dmg"
-          mkdir -p .vulkan-sdk
-          test -f "$DMG" || curl -sSfL \
-            "https://sdk.lunarg.com/sdk/download/$VERSION/mac/vulkansdk-macos-$VERSION.dmg" -o "$DMG"
-          hdiutil attach "$DMG" -mountpoint /Volumes/vulkan-sdk -nobrowse -quiet
-          APP=$(ls -d /Volumes/vulkan-sdk/*.app | head -1)
-          test -n "$APP" || { echo "no installer app in the disk image:"; ls -la /Volumes/vulkan-sdk; exit 1; }
-          echo "installer: $APP"
-          "$APP/Contents/MacOS/$(basename "$APP" .app)" \
-            --root "$HOME/VulkanSDK" --accept-licenses --default-answer --confirm-command install
-          hdiutil detach /Volumes/vulkan-sdk -quiet
-          echo "VULKAN_SDK=$HOME/VulkanSDK/macOS" >> "$GITHUB_ENV"
+        uses: ./.github/actions/install-vulkan-sdk-macos
+        with:
+          version: ${{ env.VULKAN_SDK_VERSION }}
 
       - uses: pypa/cibuildwheel@v4.1
         env:
@@ -412,6 +392,62 @@ jobs:
         with:
           name: api-coverage
           path: ${{ runner.temp }}/api_coverage.md
+
+  # ── Full GPU suite on MoltenVK (Metal, real hardware) ─────────
+  # The acceptance test for 0.22: the release claims bazalt runs on macOS, and
+  # this is what makes the claim a fact rather than a wheel that builds. The
+  # runner is Apple Silicon, so unlike lavapipe this leg is a real GPU.
+  #
+  # One leg, not two. lavapipe already runs the 1.2 negotiation on its own leg,
+  # and a second one here would buy a slower pipeline and no new path.
+  #
+  # Expect skips rather than failures where Metal has nothing to offer: no
+  # geometry shaders, no wide lines, no shaderFloat64. Every one of those is
+  # behind Feature negotiation already, and the tests skip themselves.
+  test_moltenvk:
+    name: Tests · MoltenVK (Metal)
+    needs: wheels_macos
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheels-macos-cp312
+          path: wheelhouse
+
+      - name: Install the Vulkan SDK (MoltenVK, layers, shaderc)
+        uses: ./.github/actions/install-vulkan-sdk-macos
+        with:
+          version: ${{ env.VULKAN_SDK_VERSION }}
+
+      # Asked of the SDK, not hardcoded, for the reason the lavapipe job gives.
+      - name: Locate the MoltenVK ICD manifest and the layers
+        run: |
+          ICD=$(find "$VULKAN_SDK/share/vulkan/icd.d" -name "*.json" | head -1)
+          test -n "$ICD" || { echo "no ICD manifest in the SDK:"; ls -R "$VULKAN_SDK/share/vulkan"; exit 1; }
+          echo "MoltenVK ICD: $ICD"
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          echo "VK_DRIVER_FILES=$ICD" >> "$GITHUB_ENV"
+          echo "VK_LAYER_PATH=$VULKAN_SDK/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+
+      # Proves a real Metal device answered, rather than the job passing because
+      # every GPU test skipped itself.
+      - name: Report the Vulkan device CI actually sees
+        run: "$VULKAN_SDK/bin/vulkaninfo --summary"
+
+      - name: Install wheel + test deps
+        run: pip install wheelhouse/bazalt-*-cp312-*macosx*.whl pytest numpy
+
+      # cwd is OUTSIDE the repo for the reason the lavapipe job gives: the
+      # source tree's bazalt/ has no _core and would shadow the wheel.
+      - name: Run test suite
+        working-directory: ${{ runner.temp }}
+        run: python -m pytest ${{ github.workspace }}/tests -q
 
   # ── Publish to PyPI on release ────────────────────────────────
   publish:
