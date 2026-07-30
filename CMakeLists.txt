@@ -63,10 +63,14 @@ if(TARGET vk-bootstrap)
 endif()
 
 #stb
+# A commit, not a branch. stb publishes no tags, so `master` used to be the only
+# spelling available -- and it made an upstream push able to break a build here
+# with no local change, which is the one failure nobody can reproduce. GitHub
+# serves a shallow fetch of an explicit SHA, so pinning costs no clone time.
 FetchContent_Declare(
     stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
-    GIT_TAG master
+    GIT_TAG 31c1ad37456438565541f4919958214b6e762fb4
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(stb)

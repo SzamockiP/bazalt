@@ -4,6 +4,9 @@ out/
 build/
 examples/assets/San_Miguel/
 
+# CI: the Vulkan SDK installer, cached between runs (see .github/workflows/build.yml)
+.vulkan-sdk/
+
 CMakeSettings.json
 
 # Python

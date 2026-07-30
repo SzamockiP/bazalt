@@ -14,6 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # One place, three jobs and every cache key. A bump here re-downloads the SDK
+  # on all platforms and invalidates nothing else.
+  VULKAN_SDK_VERSION: "1.4.309.0"
+
   CIBW_SKIP: "*-musllinux* *-win32 *-manylinux_i686"
 
   # Smoke test on every built wheel: the module imports and the .pyi stub
@@ -23,6 +27,52 @@ env:
   CIBW_TEST_COMMAND: python -c "import bazalt" && python -m pytest {project}/tests/test_stubs.py -q
 
 jobs:
+  # ── C++ formatting ────────────────────────────────────────────
+  # The cheapest job in the file and the only one with no build. Until 0.22 the
+  # .clang-format at the root was enforced by remembering to run it, so a release
+  # ended with a "style(0.N): clang-format over the release's own code" commit.
+  #
+  # The version is pinned and comes from PyPI, not apt: clang-format changes its
+  # output between major versions, so an unpinned formatter turns somebody else's
+  # release into a red build here (the same lesson as tech debt #4).
+  format:
+    name: Format · clang-format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - run: pipx install "clang-format==20.1.*"
+
+      - name: Report the formatter version
+        run: clang-format --version
+
+      - name: Check src/ against .clang-format
+        run: clang-format --dry-run -Werror src/*.hpp src/*.cpp src/bindings/*.hpp src/bindings/*.cpp
+
+  # ── Source distribution ───────────────────────────────────────
+  # Published beside the wheels, so `pip install bazalt` on a platform with no
+  # wheel builds from source instead of failing with "no matching distribution".
+  # There is no separate "does the sdist build" check: wheels_linux builds the
+  # same sources from a clean checkout, which is the same proof.
+  sdist:
+    name: sdist
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - run: pipx run build --sdist
+
+      - run: pipx run twine check dist/*.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
   # ── Linux wheels ──────────────────────────────────────────────
   # A job of its own, not a leg of a shared matrix, because test_lavapipe needs
   # only this wheel. Both platforms in one job made the tests wait for Windows
@@ -36,16 +86,35 @@ jobs:
   #
   # A branch push builds the one interpreter the lavapipe legs install. Every
   # event that gates something — a pull request before merge, a release before
-  # publish, a manual run — builds all four.
+  # publish, a manual run — builds all five.
   wheels_linux:
     name: Wheels · linux ${{ matrix.python }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313"]') }}
+        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
     steps:
       - uses: actions/checkout@v7
+
+      # The SDK is downloaded on the HOST and unpacked in the container, which
+      # is what makes it cacheable at all: cibuildwheel copies the project into
+      # the container and copies only the wheels back out, so anything the
+      # container downloads for itself dies with the container.
+      - name: Cache the Vulkan SDK download
+        uses: actions/cache@v4
+        with:
+          path: .vulkan-sdk
+          key: vulkan-sdk-linux-${{ env.VULKAN_SDK_VERSION }}
+
+      - name: Download the Vulkan SDK
+        env:
+          TARBALL: vulkansdk-linux-x86_64-${{ env.VULKAN_SDK_VERSION }}.tar.xz
+        run: |
+          mkdir -p .vulkan-sdk
+          test -f ".vulkan-sdk/$TARBALL" || \
+            wget -q "https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/linux/$TARBALL" \
+              -O ".vulkan-sdk/$TARBALL"
 
       - uses: pypa/cibuildwheel@v4.1
         env:
@@ -53,20 +122,18 @@ jobs:
           CIBW_ARCHS_LINUX: x86_64
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
 
-          # Install the Vulkan SDK tarball + X11/Wayland deps inside the
-          # manylinux Docker container (not the host).
+          # Unpack the SDK tarball + install the X11/Wayland deps inside the
+          # manylinux Docker container (not the host). The cwd is the project,
+          # so the tarball the host cached is right there.
           CIBW_BEFORE_ALL_LINUX: |
             set -e
-            VULKAN_VERSION=1.4.309.0
-            yum install -y wget tar xz \
+            yum install -y tar xz \
               libX11-devel libXrandr-devel libXinerama-devel \
               libXcursor-devel libXi-devel \
               wayland-devel libxkbcommon-devel
-            wget -q "https://sdk.lunarg.com/sdk/download/${VULKAN_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz" \
-              -O /tmp/vulkansdk.tar.xz
             mkdir -p /opt/vulkan-sdk
-            tar xf /tmp/vulkansdk.tar.xz -C /opt/vulkan-sdk --strip-components=1
-            rm /tmp/vulkansdk.tar.xz
+            tar xf ".vulkan-sdk/vulkansdk-linux-x86_64-${{ env.VULKAN_SDK_VERSION }}.tar.xz" \
+              -C /opt/vulkan-sdk --strip-components=1
 
           CIBW_ENVIRONMENT_LINUX: >
             VULKAN_SDK=/opt/vulkan-sdk/x86_64
@@ -86,19 +153,53 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313"]') }}
+        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
     steps:
       - uses: actions/checkout@v7
+
+      # The installer, not the installed tree: the download is what costs
+      # minutes, the install itself is fast, and C:\VulkanSDK is far too large
+      # to move in and out of the cache every run.
+      - name: Cache the Vulkan SDK installer
+        uses: actions/cache@v4
+        with:
+          path: .vulkan-sdk
+          key: vulkan-sdk-windows-${{ env.VULKAN_SDK_VERSION }}
+
+      # `build-dir = "build/{wheel_tag}"` in pyproject.toml already makes a local
+      # rebuild incremental; caching that tree extends it across runs. What it
+      # saves is the dependencies, not bazalt: actions/checkout stamps every
+      # source file with the current time, so the eight binding TUs recompile
+      # regardless, while _deps (glfw, volk, vma, vk-bootstrap, stb) arrives with
+      # its cached timestamps and neither re-clones nor rebuilds.
+      #
+      # Only on the runners that build natively. The Linux wheels are built in a
+      # container that cibuildwheel copies the project INTO and copies only the
+      # wheels back out of, so nothing written to build/ there ever reaches the
+      # host to be saved.
+      #
+      # The key carries CMakeLists.txt, so any dependency pin bump busts it, and
+      # a v-prefix to bust it by hand.
+      - name: Cache the CMake build tree
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: build-v1-windows-${{ matrix.python }}-${{ hashFiles('CMakeLists.txt', 'pyproject.toml') }}
+          restore-keys: |
+            build-v1-windows-${{ matrix.python }}-
 
       - name: Install Vulkan SDK
         shell: pwsh
         run: |
-          $VERSION = "1.4.309.0"
-          $INSTALLER = "VulkanSDK-$VERSION-Installer.exe"
-          Invoke-WebRequest `
-            -Uri "https://sdk.lunarg.com/sdk/download/$VERSION/windows/$INSTALLER" `
-            -OutFile $INSTALLER
-          Start-Process -FilePath ".\$INSTALLER" `
+          $VERSION = "${{ env.VULKAN_SDK_VERSION }}"
+          New-Item -ItemType Directory -Force .vulkan-sdk | Out-Null
+          $INSTALLER = Join-Path $PWD ".vulkan-sdk\VulkanSDK-$VERSION-Installer.exe"
+          if (-not (Test-Path $INSTALLER)) {
+            Invoke-WebRequest `
+              -Uri "https://sdk.lunarg.com/sdk/download/$VERSION/windows/VulkanSDK-$VERSION-Installer.exe" `
+              -OutFile $INSTALLER
+          }
+          Start-Process -FilePath $INSTALLER `
             -ArgumentList "--accept-licenses --default-answer --confirm-command install" `
             -Wait
           echo "VULKAN_SDK=C:\VulkanSDK\$VERSION" >> $env:GITHUB_ENV
@@ -217,7 +318,7 @@ jobs:
 
   # ── Publish to PyPI on release ────────────────────────────────
   publish:
-    needs: [wheels_linux, wheels_windows]
+    needs: [wheels_linux, wheels_windows, sdist]
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
     permissions:
