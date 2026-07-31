@@ -152,7 +152,7 @@ public:
         {
             return std::unexpected(target_api.error());
         }
-        if (auto r = select_physical_device_(*context, config, *target_api); !r)
+        if (auto r = select_physical_device_(*context, config); !r)
         {
             return std::unexpected(r.error());
         }
@@ -1129,18 +1129,25 @@ private:
         return target_api;
     }
 
-    static std::expected<void, Error> select_physical_device_(
-        Context& ctx,
-        const ContextConfig& config,
-        std::uint32_t target_api)
+    static std::expected<void, Error> select_physical_device_(Context& ctx, const ContextConfig& config)
     {
         // Nothing is required here beyond the API version: swapchain support used to
         // be a required extension, which rejected headless-only GPUs outright and
         // made the require_present(false) on the next line pointless. Optional bits
         // are enabled per-device in configure_features_, once we know what this
         // device actually has.
+        //
+        // The minimum is the BASELINE, not the version the instance negotiated, and
+        // the difference is a real machine rather than a hypothetical one. A device
+        // may be older than its loader: on macOS the LunarG loader reports 1.4 while
+        // MoltenVK's device reports 1.2. Selecting with the instance's version — which
+        // vk-bootstrap also does by default — rejected that device outright, and 0.22
+        // found the whole macOS suite failing with "no suitable GPU found". Only the
+        // DEVICE version may decide the 1.3-or-KHR path, and configure_features_ has
+        // always read it off the device (`device_has_1_3`). This one line was asking
+        // the wrong object.
         auto selector = vkb::PhysicalDeviceSelector{ctx.vkb_instance_}
-                            .set_minimum_version(VK_API_VERSION_MAJOR(target_api), VK_API_VERSION_MINOR(target_api))
+                            .set_minimum_version(1, 2)
                             .prefer_gpu_device_type(vkb::PreferredDeviceType::discrete)
                             .require_present(false);
 

@@ -274,8 +274,16 @@ jobs:
           # 14.0, because libc++ supplies std::format only from 13.3 and the
           # binding layer uses it everywhere. CMakeLists.txt refuses anything
           # lower with that sentence rather than a page of availability errors.
+          #
+          # Here rather than in CIBW_ENVIRONMENT_MACOS, and the difference is not
+          # cosmetic: CIBW_ENVIRONMENT reaches the compiler but not cibuildwheel
+          # itself, which computes the WHEEL TAG from its own environment. Set
+          # only there, the first macOS wheel compiled against 14.0 and shipped
+          # as macosx_11_0_arm64 — a wheel that installs on macOS 11 and then
+          # fails to load.
+          MACOSX_DEPLOYMENT_TARGET: "14.0"
+
           CIBW_ENVIRONMENT_MACOS: >
-            MACOSX_DEPLOYMENT_TARGET=14.0
             VULKAN_SDK=$HOME/VulkanSDK/macOS
             CMAKE_PREFIX_PATH=$HOME/VulkanSDK/macOS
 
@@ -469,9 +477,17 @@ jobs:
     permissions:
       id-token: write
     steps:
+      # By pattern, not everything: the run also carries api_coverage.md, and a
+      # markdown file in dist/ is a file the upload has no idea what to do with.
       - uses: actions/download-artifact@v8
         with:
+          pattern: wheels-*
           path: dist
           merge-multiple: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: sdist
+          path: dist
 
       - uses: pypa/gh-action-pypi-publish@release/v1

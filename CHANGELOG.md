@@ -5,6 +5,68 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.22.0] — 2026-07-31
+
+"It runs on a Mac". Bazalt supplies macOS wheels now, and the full test suite
+runs on Apple Silicon against MoltenVK in CI. The Vulkan side cost one line:
+vk-bootstrap already asks for the portability extensions, and the 1.2 baseline
+already covered a driver that does not report 1.3. What the port really cost was
+the toolchain and the CI to prove it.
+
+The rest of the release is the infrastructure a 1.0 needs. CI gates on
+clang-format, builds a source distribution, caches what it downloads, and adds
+Python 3.14 wheels. A new report answers a question nothing could answer before:
+which public symbols does no test touch.
+
+### Added
+- **macOS wheels, for Apple Silicon.** `pip install bazalt` works on macOS 14 or
+  later. You must install the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home)
+  as well: macOS supplies no Vulkan loader, and the SDK gives you the loader and
+  MoltenVK. The wheel carries neither, for the same reason the Windows wheel
+  carries no `vulkan-1.dll` — a bundled loader hides the one you installed.
+
+  Metal has no geometry shaders and no 64-bit floats, so
+  `ctx.supports(bz.Feature.GEOMETRY_SHADER)` and `SHADER_FLOAT64` answer False
+  there. Ask for a capability and read the answer, which is what `Feature` is
+  for.
+- **Python 3.14 wheels**, on all three platforms.
+- **A source distribution on PyPI.** A platform with no wheel builds from source
+  now, instead of failing with "no matching distribution".
+- **`pytest --api-coverage`.** Writes `api_coverage.md`, which lists every public
+  symbol no test touches. Methods, properties and functions are measured by
+  running them, so the report separates `Buffer.update` from `Image.update`. The
+  first measurement reads 301 of 494 symbols. The list is the test plan for 1.0.
+
+### Changed
+- **The message for a missing Vulkan loader names the fix.** It said "failed to
+  initialize volk (VK_ERROR_INITIALIZATION_FAILED)", which named a library you
+  did not install and no action. It now tells you to install the Vulkan SDK on
+  macOS, or a driver with Vulkan support elsewhere.
+- **CI gates on `clang-format`.** The formatter version is pinned, so a new
+  clang-format release cannot fail the build by itself.
+- **CI caches the Vulkan SDK download and the CMake build tree**, and pins stb to
+  a commit. The stb dependency tracked `master`, so an upstream push could break
+  a build with no local change.
+
+### Fixed
+- **`fits_within` refused to compile on macOS.** It took one deduced type for
+  three arguments — an offset, a length and a size. Windows and Linux spell
+  `VkDeviceSize` and `size_t` with the same underlying type and macOS does not,
+  so every bounds check in `CommandBuffer` failed to build there. The check
+  itself is unchanged.
+- **`MpscQueue` used `std::hardware_destructive_interference_size`**, which
+  libc++ does not supply. The padding now falls back to the cache line size of
+  the architecture.
+
+### Notes
+- The macOS wheels need macOS 14 or later, because libc++ supplies `std::format`
+  from 13.3 and bazalt formats its messages everywhere.
+- To build bazalt from source on macOS you need a recent Apple Clang. The
+  pipeline builder uses "deducing this", and the library uses `std::jthread` and
+  the C++23 range algorithms.
+- There are no Intel macOS wheels. Bazalt does not publish a wheel it cannot
+  test, and the x86_64 macOS runners are gone.
+
 ## [0.21.0] — 2026-07-30
 
 "One binding, many textures". A quad that used a different texture from the one

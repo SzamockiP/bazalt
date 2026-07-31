@@ -15,8 +15,9 @@ On macOS you must also install the [Vulkan SDK](https://vulkan.lunarg.com/sdk/ho
 system supplies no Vulkan loader, and the SDK gives you the loader and MoltenVK, which runs
 Vulkan on Metal. The macOS wheels are for Apple Silicon and need macOS 14 or later.
 
-To build from source, you need a C++23 compiler (GCC 14+, MSVC 19.36+ from Visual Studio
-17.6, or Apple Clang 15+) and the Vulkan SDK.
+To build from source, you need a C++23 compiler (GCC 14+, or MSVC 19.36+ from Visual Studio
+17.6) and the Vulkan SDK. On macOS, use the newest Xcode you have: bazalt uses C++23 features
+that Apple Clang received late.
 
 ## A triangle
 
