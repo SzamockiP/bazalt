@@ -21,71 +21,8 @@ void bind_targets(py::module_& m)
                    std::uint32_t mip_levels,
                    const std::string& name)
                 {
-                    std::vector<Format> colors;
-                    if (!color.is_none())
-                    {
-                        if (py::isinstance<Format>(color))
-                        {
-                            colors.push_back(color.cast<Format>());
-                        }
-                        else if (py::isinstance<py::sequence>(color) && !py::isinstance<py::str>(color))
-                        {
-                            for (auto item : color.cast<py::sequence>())
-                            {
-                                // Images here mean the caller wants the borrowed-attachment
-                                // overload below but also passed width/height, which that
-                                // overload does not take. pybind cannot fall through to it
-                                // once this signature has matched, so say so rather than
-                                // letting item.cast<Format>() report a cast error about a
-                                // type mismatch the caller did not make.
-                                if (py::isinstance<Image>(item))
-                                {
-                                    raise_error(err_resource(
-                                        "to render into images you already own, drop width and height: "
-                                        "bz.RenderTarget(ctx, color=[image]) — the size, layers and mip "
-                                        "levels come off the images"));
-                                }
-                                colors.push_back(item.cast<Format>());
-                            }
-                        }
-                        else if (py::isinstance<Image>(color))
-                        {
-                            raise_error(err_resource(
-                                "to render into an image you already own, drop width and height: "
-                                "bz.RenderTarget(ctx, color=[image]) — the size, layers and mip "
-                                "levels come off the images"));
-                        }
-                        else
-                        {
-                            raise_error(err_resource("color must be a bz.Format, a list of them, or None"));
-                        }
-                    }
-
-                    std::optional<Format> depth_format;
-                    if (!depth.is_none())
-                    {
-                        if (py::isinstance<py::bool_>(depth))
-                        {
-                            raise_error(err_resource(
-                                "depth is a pixel format now: pass depth=bz.Format.D32F "
-                                "instead of depth=True"));
-                        }
-                        depth_format = depth.cast<Format>();
-                    }
-
-                    return unwrap(
-                        OffscreenTarget::create(
-                            context,
-                            width,
-                            height,
-                            std::move(colors),
-                            depth_format,
-                            samples,
-                            layers,
-                            cube,
-                            mip_levels,
-                            name),
-                        context.logger().get());
+                    return make_offscreen_target(
+                        context, width, height, color, depth, samples, layers, cube, mip_levels, name);
                 }),
             py::arg("context"),
             py::arg("width"),
@@ -109,60 +46,7 @@ void bind_targets(py::module_& m)
         .def(
             py::init(
                 [](Context& context, py::object color, py::object depth, std::uint32_t samples, const std::string& name)
-                {
-                    std::vector<std::shared_ptr<Image>> colors;
-                    if (!color.is_none())
-                    {
-                        if (py::isinstance<Image>(color))
-                        {
-                            colors.push_back(color.cast<std::shared_ptr<Image>>());
-                        }
-                        else if (py::isinstance<py::sequence>(color) && !py::isinstance<py::str>(color))
-                        {
-                            for (auto item : color.cast<py::sequence>())
-                            {
-                                if (py::isinstance<Format>(item))
-                                {
-                                    raise_error(err_resource(
-                                        "color has pixel formats but no width and height. Pass the size "
-                                        "to have the target allocate its attachments — "
-                                        "bz.RenderTarget(ctx, 512, 512, color=bz.Format.RGBA8) — or pass "
-                                        "images from ctx.create_image to render into those."));
-                                }
-                                colors.push_back(item.cast<std::shared_ptr<Image>>());
-                            }
-                        }
-                        else
-                        {
-                            raise_error(err_resource(
-                                "color must be an Image, a list of them, or None. To have the target "
-                                "allocate its own attachments, pass a width and height with a bz.Format."));
-                        }
-                    }
-
-                    std::shared_ptr<Image> depth_image;
-                    if (!depth.is_none())
-                    {
-                        depth_image = depth.cast<std::shared_ptr<Image>>();
-                    }
-
-                    // The cross-Context guard belongs in the binding layer, as it does
-                    // for every other resource: this catches a user mistake, not a C++
-                    // invariant, and the GIL is held here.
-                    for (const auto& image : colors)
-                    {
-                        require_same_context(&context, image->owner(), "RenderTarget(color=)");
-                    }
-                    if (depth_image)
-                    {
-                        require_same_context(&context, depth_image->owner(), "RenderTarget(depth=)");
-                    }
-
-                    return unwrap(
-                        OffscreenTarget::create_from_images(
-                            context, std::move(colors), std::move(depth_image), samples, name),
-                        context.logger().get());
-                }),
+                { return make_offscreen_target_from_images(context, color, depth, samples, name); }),
             py::arg("context"),
             py::kw_only(),
             py::arg("color") = py::none(),
@@ -198,6 +82,14 @@ void bind_targets(py::module_& m)
             py::arg("mip") = 0)
         // Multiview: one pass into every layer (the shader uses gl_ViewIndex).
         .def("all_layers", [](std::shared_ptr<OffscreenTarget> self) { return unwrap(self->all_layers(), nullptr); });
+
+    // Registered so pybind's automatic downcasting (the base is polymorphic)
+    // returns a NAMED type from layer() / all_layers() above — until 0.23 both
+    // came back as opaque RenderTargetBase, so nothing could be said about them
+    // in the stub. No methods: each is a view that exists to be handed to
+    // cmd.rendering(...), and the parent keeps every knob.
+    py::class_<SubresourceTarget, RenderTarget, std::shared_ptr<SubresourceTarget>>(m, "SubresourceTarget");
+    py::class_<MultiviewTarget, RenderTarget, std::shared_ptr<MultiviewTarget>>(m, "MultiviewTarget");
 
     py::class_<SwapchainRenderer, RenderTarget, std::shared_ptr<SwapchainRenderer>>(m, "SwapchainRenderer")
         .def(

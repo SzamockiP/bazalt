@@ -221,3 +221,43 @@ def test_color_attachment_samples_as_a_texture(ctx, triangle_shaders, triangle_b
     ctx.submit(cmd2)
 
     np.testing.assert_array_equal(second.color[0].read(), first.color[0].read())
+
+
+# ── the factory and the named views (0.23) ────────────────────────────────
+
+
+def test_create_render_target_is_the_constructor_from_the_context(ctx):
+    """Both spellings share one implementation, so a clear through either
+    reads back the same. The factory exists because every other resource
+    comes from a create_* verb on the Context."""
+    made = ctx.create_render_target(8, 8)
+    built = bz.RenderTarget(ctx, 8, 8)
+    for target in (made, built):
+        cmd = ctx.create_command_buffer()
+        cmd.begin()
+        cmd.begin_rendering(target, clear_color=[1, 0, 0, 1])
+        cmd.end_rendering(target)
+        ctx.submit(cmd)
+    np.testing.assert_array_equal(made.color[0].read(), built.color[0].read())
+
+
+def test_create_render_target_takes_borrowed_images(ctx):
+    mine = ctx.create_image(8, 8, bz.Format.RGBA8)
+    target = ctx.create_render_target(color=[mine])
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.begin_rendering(target, clear_color=[0, 1, 0, 1])
+    cmd.end_rendering(target)
+    ctx.submit(cmd)
+    assert np.all(mine.read()[:, :, 1] == 255)
+
+
+def test_the_views_come_back_as_named_types(ctx):
+    """layer() and all_layers() used to return opaque RenderTargetBase, so the
+    stub could say nothing about them. pybind downcasts a polymorphic base to
+    the registered derived type — registration alone is the feature."""
+    target = ctx.create_render_target(8, 8, layers=2)
+    assert type(target.layer(0)).__name__ == "SubresourceTarget"
+    if ctx.supports(bz.Feature.MULTIVIEW):
+        assert type(target.all_layers()).__name__ == "MultiviewTarget"
+    assert isinstance(target.layer(1), bz.RenderTargetBase)

@@ -575,6 +575,46 @@ void bind_context(py::module_& m)
             py::arg("source"),
             py::kw_only(),
             py::arg("name") = "")
+        // The same two bodies as the RenderTarget constructor, spelled from the
+        // Context (0.23): everything else the Context creates comes from a
+        // create_* verb, and the target was one of two stragglers — remembering
+        // which convention each type uses was a coin flip. The class stays; both
+        // spellings share one helper, so they cannot drift.
+        .def(
+            "create_render_target",
+            [](Context& self,
+               std::uint32_t width,
+               std::uint32_t height,
+               py::object color,
+               py::object depth,
+               std::uint32_t samples,
+               std::uint32_t layers,
+               bool cube,
+               std::uint32_t mip_levels,
+               const std::string& name)
+            {
+                return make_offscreen_target(
+                    self, width, height, color, depth, samples, layers, cube, mip_levels, name);
+            },
+            py::arg("width"),
+            py::arg("height"),
+            py::arg("color") = Format::RGBA8,
+            py::arg("depth") = py::none(),
+            py::arg("samples") = 1,
+            py::kw_only(),
+            py::arg("layers") = 1,
+            py::arg("cube") = false,
+            py::arg("mip_levels") = 1,
+            py::arg("name") = "")
+        .def(
+            "create_render_target",
+            [](Context& self, py::object color, py::object depth, std::uint32_t samples, const std::string& name)
+            { return make_offscreen_target_from_images(self, color, depth, samples, name); },
+            py::kw_only(),
+            py::arg("color") = py::none(),
+            py::arg("depth") = py::none(),
+            py::arg("samples") = 1,
+            py::arg("name") = "")
         .def(
             "create_sampler",
             [](Context& self,

@@ -121,7 +121,10 @@ def test_renamed_and_new_api_is_declared():
                      "W = 87", "ESCAPE = 256", "MIDDLE = 2", "DISABLED = 212995",
                      "key: Key | int", "mode: CursorMode | int",
                      # 0.23 — 3D textures.
-                     "IMAGE_VIEW_2D_ON_3D = 18", "def depth"):
+                     "IMAGE_VIEW_2D_ON_3D = 18", "def depth",
+                     # 0.23 — the target factory and the named target views.
+                     "def create_render_target", "class SubresourceTarget(",
+                     "class MultiviewTarget(", "def create_descriptor_pool"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 

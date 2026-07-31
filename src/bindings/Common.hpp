@@ -203,6 +203,145 @@ inline void require_preservable(const RenderTarget& target, bool preserve, const
     }
 }
 
+// The two bodies of RenderTarget.__init__, shared verbatim by
+// ctx.create_render_target (0.23): buffers, images, samplers, pools and
+// pipelines already come from the Context, and the target was one of two
+// stragglers. One implementation, two spellings — the factory and the
+// constructor cannot drift apart because they are the same call.
+
+// Allocating form: the target creates its attachments from formats.
+inline std::shared_ptr<OffscreenTarget> make_offscreen_target(
+    Context& context,
+    std::uint32_t width,
+    std::uint32_t height,
+    const py::object& color,
+    const py::object& depth,
+    std::uint32_t samples,
+    std::uint32_t layers,
+    bool cube,
+    std::uint32_t mip_levels,
+    const std::string& name)
+{
+    std::vector<Format> colors;
+    if (!color.is_none())
+    {
+        if (py::isinstance<Format>(color))
+        {
+            colors.push_back(color.cast<Format>());
+        }
+        else if (py::isinstance<py::sequence>(color) && !py::isinstance<py::str>(color))
+        {
+            for (auto item : color.cast<py::sequence>())
+            {
+                // Images here mean the caller wants the borrowed-attachment
+                // overload but also passed width/height, which that overload
+                // does not take. pybind cannot fall through once this signature
+                // has matched, so say so rather than letting item.cast<Format>()
+                // report a cast error about a type mismatch the caller did not
+                // make.
+                if (py::isinstance<Image>(item))
+                {
+                    raise_error(err_resource(
+                        "to render into images you already own, drop width and height: "
+                        "bz.RenderTarget(ctx, color=[image]) — the size, layers and mip "
+                        "levels come off the images"));
+                }
+                colors.push_back(item.cast<Format>());
+            }
+        }
+        else if (py::isinstance<Image>(color))
+        {
+            raise_error(err_resource(
+                "to render into an image you already own, drop width and height: "
+                "bz.RenderTarget(ctx, color=[image]) — the size, layers and mip "
+                "levels come off the images"));
+        }
+        else
+        {
+            raise_error(err_resource("color must be a bz.Format, a list of them, or None"));
+        }
+    }
+
+    std::optional<Format> depth_format;
+    if (!depth.is_none())
+    {
+        if (py::isinstance<py::bool_>(depth))
+        {
+            raise_error(err_resource(
+                "depth is a pixel format now: pass depth=bz.Format.D32F "
+                "instead of depth=True"));
+        }
+        depth_format = depth.cast<Format>();
+    }
+
+    return unwrap(
+        OffscreenTarget::create(
+            context, width, height, std::move(colors), depth_format, samples, layers, cube, mip_levels, name),
+        context.logger().get());
+}
+
+// Borrowed-images form: the caller's Images become the attachments (with MSAA
+// they become the resolve targets).
+inline std::shared_ptr<OffscreenTarget> make_offscreen_target_from_images(
+    Context& context,
+    const py::object& color,
+    const py::object& depth,
+    std::uint32_t samples,
+    const std::string& name)
+{
+    std::vector<std::shared_ptr<Image>> colors;
+    if (!color.is_none())
+    {
+        if (py::isinstance<Image>(color))
+        {
+            colors.push_back(color.cast<std::shared_ptr<Image>>());
+        }
+        else if (py::isinstance<py::sequence>(color) && !py::isinstance<py::str>(color))
+        {
+            for (auto item : color.cast<py::sequence>())
+            {
+                if (py::isinstance<Format>(item))
+                {
+                    raise_error(err_resource(
+                        "color has pixel formats but no width and height. Pass the size "
+                        "to have the target allocate its attachments — "
+                        "bz.RenderTarget(ctx, 512, 512, color=bz.Format.RGBA8) — or pass "
+                        "images from ctx.create_image to render into those."));
+                }
+                colors.push_back(item.cast<std::shared_ptr<Image>>());
+            }
+        }
+        else
+        {
+            raise_error(err_resource(
+                "color must be an Image, a list of them, or None. To have the target "
+                "allocate its own attachments, pass a width and height with a bz.Format."));
+        }
+    }
+
+    std::shared_ptr<Image> depth_image;
+    if (!depth.is_none())
+    {
+        depth_image = depth.cast<std::shared_ptr<Image>>();
+    }
+
+    // The cross-Context guard belongs in the binding layer, as it does for
+    // every other resource: this catches a user mistake, not a C++ invariant,
+    // and the GIL is held here.
+    for (const auto& image : colors)
+    {
+        require_same_context(&context, image->owner(), "RenderTarget(color=)");
+    }
+    if (depth_image)
+    {
+        require_same_context(&context, depth_image->owner(), "RenderTarget(depth=)");
+    }
+
+    return unwrap(
+        OffscreenTarget::create_from_images(context, std::move(colors), std::move(depth_image), samples, name),
+        context.logger().get());
+}
+
 // A 3D target is rendered one Z slice at a time: its whole-target view is a 3D
 // view, which Vulkan does not accept as an attachment, so the mistake is
 // refused with the fix rather than surfacing as a validation error naming a

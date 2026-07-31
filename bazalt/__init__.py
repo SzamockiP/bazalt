@@ -10,6 +10,8 @@ __all__ = [
     "Context",
     "RenderTarget",
     "RenderTargetBase",
+    "SubresourceTarget",
+    "MultiviewTarget",
     "SwapchainRenderer",
     "Window",
     "Device",

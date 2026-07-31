@@ -909,24 +909,43 @@ class RenderTarget(RenderTargetBase):
     @property
     def height(self) -> int: ...
 
-    def layer(self, index: int, mip: int = 0) -> RenderTargetBase:
+    def layer(self, index: int, mip: int = 0) -> SubresourceTarget:
         """A view of one array layer / cube face (and optionally one mip) of this
         target, to render into with cmd.rendering(target.layer(i)). `mip=` selects
         a level for a layered AND mipped target (e.g. a mipped cube for prefiltered
         reflections). Cube face i == layer i, Vulkan order +X, -X, +Y, -Y, +Z, -Z.
         Render every layer you intend to sample before sampling target.color /
-        target.depth."""
+        target.depth.
+
+        On a target over a 3D image (0.23) the index is the Z SLICE, and it
+        shrinks with the mip: level 1 of a depth-4 volume has 2 slices. Needs
+        ctx.supports(Feature.IMAGE_VIEW_2D_ON_3D), which is True everywhere but
+        a portability driver such as MoltenVK."""
         ...
 
-    def all_layers(self) -> RenderTargetBase:
+    def all_layers(self) -> MultiviewTarget:
         """A multiview view of the whole target: cmd.rendering(target.all_layers())
         renders into EVERY layer in ONE pass instead of a pass per layer. The
         shader selects per-layer work with gl_ViewIndex (e.g. a per-face matrix
         for cube capture). Needs a layered target and
         ctx.supports(Feature.MULTIVIEW);
         composes with MSAA (each view resolves into its own layer). Renders every
-        layer, so the result is fully sampleable with no partial-render caveat."""
+        layer, so the result is fully sampleable with no partial-render caveat.
+        Refused on a 3D target: a volume has one array layer, so there is
+        nothing for a view mask to light up — use layer(z) per slice."""
         ...
+
+class SubresourceTarget(RenderTargetBase):
+    """One (layer, mip) of a RenderTarget — or one Z slice of a 3D one — as a
+    drawable view. Comes from target.layer(); owns nothing; hand it straight to
+    cmd.rendering(...). The parent keeps every attachment and knob (0.23:
+    named, so the stub can say so — it used to come back as RenderTargetBase)."""
+    ...
+
+class MultiviewTarget(RenderTargetBase):
+    """Every layer of a RenderTarget as one multiview drawable. Comes from
+    target.all_layers(); owns nothing; hand it straight to cmd.rendering(...)."""
+    ...
 
 class GraphicsPipelineBuilder:
     def vertex_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder: ...
@@ -2020,6 +2039,24 @@ class Context:
         Covers both kinds: the load_image decodes on the worker, and the
         one-shot copies of create_buffer and create_image(array), which have
         nothing to decode and join the batch already submitted."""
+        ...
+    def create_render_target(self, width: int, height: int,
+                             color: Format | Sequence[Format] | None = Format.RGBA8,
+                             depth: Optional[Format] = None, samples: int = 1, *,
+                             layers: int = 1, cube: bool = False,
+                             mip_levels: int = 1, name: str = "") -> RenderTarget: ...
+    def create_render_target(self, *, color: Image | Sequence[Image] | None = None,
+                             depth: Optional[Image] = None, samples: int = 1,
+                             name: str = "") -> RenderTarget:
+        """The RenderTarget constructor, spelled from the Context (0.23).
+
+        Same two forms, same arguments, one implementation: pass a width and
+        height and the target allocates its attachments from formats; pass
+        images from create_image and it renders into those. The class
+        constructor stays — this exists because everything else the Context
+        creates comes from a create_* verb, and remembering which types use
+        which convention was a coin flip.
+        """
         ...
     def create_image(self, width: int, height: int,
                      format: Format = Format.RGBA8, *, depth: int = 1,
