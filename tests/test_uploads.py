@@ -86,7 +86,7 @@ def test_sampling_without_wait_renders_correctly(ctx, fullscreen_and_textured, t
                 .texture(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(target))
 
-    pool = ctx.create_descriptor_pool(max_sets=4, samplers=4)
+    pool = ctx.create_descriptor_pool(max_sets=4, textures=4)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_image(0, tex)
 

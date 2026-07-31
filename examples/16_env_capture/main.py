@@ -117,7 +117,7 @@ reflect_pipe = (ctx.graphics_pipeline()
                 .texture(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(renderer))
 
-pool = ctx.create_descriptor_pool(max_sets=2, samplers=2)
+pool = ctx.create_descriptor_pool(max_sets=2, textures=2)
 reflect_set = pool.allocate_set(reflect_pipe, set=0)
 reflect_set.set_image(0, env.color[0], sampler=ctx.create_sampler(filter=bz.Filter.LINEAR))
 

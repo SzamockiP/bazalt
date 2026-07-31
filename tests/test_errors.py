@@ -191,7 +191,7 @@ def test_set_buffer_on_image_binding_points_to_set_image(ctx, triangle_shaders):
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                 .texture(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(target))
-    pool = ctx.create_descriptor_pool(max_sets=4, samplers=4)
+    pool = ctx.create_descriptor_pool(max_sets=4, textures=4)
     dset = pool.allocate_set(pipeline, set=0)
     ubuf = ctx.create_buffer([0.0] * 4, bz.BufferType.UNIFORM, bz.MemoryUsage.STATIC)
 

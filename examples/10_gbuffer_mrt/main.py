@@ -72,7 +72,7 @@ ibuf = ctx.create_buffer(np.array(idx, dtype=np.uint32),
 ubuf = ctx.create_buffer(np.zeros(32, dtype=np.float32),
                          bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
-pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4, samplers=8)
+pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4, textures=8)
 
 gbuf_set = pool.allocate_frame_set(gbuf_pipe, set=0)
 gbuf_set.set_buffer(0, ubuf)

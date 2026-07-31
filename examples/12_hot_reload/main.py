@@ -40,7 +40,7 @@ pipeline = (ctx.graphics_pipeline()
             .name("hot_reload_pipeline")
             .build(renderer))
 
-pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
 desc_set = pool.allocate_set(pipeline, set=0)
 # The descriptor set keeps pointing at the same image/view across reloads —
 # an image reload re-uploads in place, so this never needs rewriting.

@@ -145,7 +145,7 @@ def test_a_compute_shader_can_sample_a_texture(ctx):
             .storage_image(1, set=0)
             .build())
 
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1, storage_images=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1, storage_images=1)
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, src, sampler=ctx.create_sampler(filter=bz.Filter.LINEAR,
                                                       address_mode=bz.AddressMode.CLAMP))
@@ -195,7 +195,7 @@ def test_update_after_bind_on_a_plain_binding(extra_context):
             .texture(0, bz.ShaderStage.FRAGMENT, set=0, update_after_bind=True)
             .build(target))
 
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=4)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=4)
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, solid((255, 0, 0)))
 

@@ -66,7 +66,7 @@ def test_generate_mipmaps_fills_the_chain(ctx):
               .build(target))
 
     img = ctx.create_image(16, 16, bz.Format.RGBA8, mip_levels=5)
-    pool = ctx.create_descriptor_pool(max_sets=2, storage_images=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=2, storage_images=1, textures=1)
     fill_set = pool.allocate_set(fill, set=0)
     fill_set.set_storage_image(0, img)
     sample_set = pool.allocate_set(sample, set=0)

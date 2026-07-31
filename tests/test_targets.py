@@ -98,7 +98,7 @@ def test_depth_only_pass_writes_sampleable_depth(ctx, triangle_shaders, triangle
                  .texture(0, bz.ShaderStage.FRAGMENT, set=0)
                  .build(screen))
 
-    pool = ctx.create_descriptor_pool(max_sets=4, samplers=4)
+    pool = ctx.create_descriptor_pool(max_sets=4, textures=4)
     dset = pool.allocate_set(view_pipe, set=0)
     # NEAREST: linear filtering of depth formats is not universally supported.
     dset.set_image(0, shadow.depth, sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
@@ -207,7 +207,7 @@ def test_color_attachment_samples_as_a_texture(ctx, triangle_shaders, triangle_b
              .texture(0, bz.ShaderStage.FRAGMENT, set=0)
              .build(second))
 
-    pool = ctx.create_descriptor_pool(max_sets=4, samplers=4)
+    pool = ctx.create_descriptor_pool(max_sets=4, textures=4)
     dset = pool.allocate_set(pipe2, set=0)
     dset.set_image(0, first.color[0])
 

@@ -215,7 +215,7 @@ def test_fragment_shader_samples_the_right_slice(ctx):
             .build(target))
 
     sampler = ctx.create_sampler(filter=bz.Filter.NEAREST)
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, vol, sampler)
 

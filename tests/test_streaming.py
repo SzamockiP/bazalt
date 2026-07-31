@@ -184,7 +184,7 @@ def test_an_updated_image_is_still_sampleable(ctx):
             .fragment_shader(frag)
             .texture(0, bz.ShaderStage.FRAGMENT, set=0)
             .build(screen))
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, img, sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 

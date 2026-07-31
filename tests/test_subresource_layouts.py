@@ -75,7 +75,7 @@ def test_sampling_a_partially_rendered_layered_target(ctx):
             .push_constant(4, bz.ShaderStage.FRAGMENT)
             .build(screen))
 
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, target.color[0], sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
@@ -127,7 +127,7 @@ def test_render_one_mip_then_read_it_back_through_a_sample(ctx):
             .push_constant(4, bz.ShaderStage.FRAGMENT)
             .build(screen))
 
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, target.color[0], sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 

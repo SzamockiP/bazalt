@@ -42,7 +42,7 @@ indices = [0, 3, 2, 2, 1, 0]
 ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
 
 # Descriptors
-pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
 desc_set = pool.allocate_set(pipeline, set=0)
 desc_set.set_image(0, texture)
 

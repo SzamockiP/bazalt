@@ -125,7 +125,7 @@ present = (ctx.graphics_pipeline()
 # One image, bound two ways: written as a storage image, read as a texture.
 image = ctx.create_image(W, H, bz.Format.RGBA8)
 
-pool = ctx.create_descriptor_pool(max_sets=2, samplers=1, storage_images=1)
+pool = ctx.create_descriptor_pool(max_sets=2, textures=1, storage_images=1)
 write_set = pool.allocate_set(generate, set=0)
 write_set.set_storage_image(0, image)
 read_set = pool.allocate_set(present, set=0)

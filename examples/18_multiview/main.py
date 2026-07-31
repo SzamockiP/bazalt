@@ -186,7 +186,7 @@ for d, u in zip(FACE_DIRS, FACE_UPS):
 faces_ubo = ctx.create_buffer(np.frombuffer(face_bytes, np.float32).copy(),
                               bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
-pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4, samplers=2)
+pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4, textures=2)
 capture_set = pool.allocate_frame_set(capture_pipe, set=0)
 capture_set.set_buffer(0, faces_ubo)
 reflect_set = pool.allocate_set(reflect_pipe, set=0)

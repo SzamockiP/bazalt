@@ -89,7 +89,7 @@ def make_texture(seed):
 
 
 # One binding of eight, so the pool needs eight sampler descriptors for one set.
-pool = ctx.create_descriptor_pool(max_sets=1, samplers=TEXTURE_COUNT)
+pool = ctx.create_descriptor_pool(max_sets=1, textures=TEXTURE_COUNT)
 desc_set = pool.allocate_set(pipeline, set=0)
 textures = [make_texture(i) for i in range(TEXTURE_COUNT)]
 for i, image in enumerate(textures):

@@ -269,7 +269,7 @@ def test_texture_is_sampled(ctx, fullscreen_vert, tmp_path):
                 .texture(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(target))
 
-    pool = ctx.create_descriptor_pool(max_sets=8, samplers=8)
+    pool = ctx.create_descriptor_pool(max_sets=8, textures=8)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_image(0, tex)
 

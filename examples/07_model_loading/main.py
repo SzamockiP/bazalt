@@ -197,7 +197,7 @@ class DemoApp:
         self.pool = self.ctx.create_descriptor_pool(
             max_sets=3 + len(self.loaded_textures), 
             uniform_buffers=2, 
-            samplers=1 + len(self.loaded_textures)
+            textures=1 + len(self.loaded_textures)
         )
         self.frame_set = self.pool.allocate_frame_set(self.pipeline, set=0)
         self.frame_set.set_buffer(0, self.ubuf)

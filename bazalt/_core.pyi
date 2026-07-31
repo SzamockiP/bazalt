@@ -2107,10 +2107,29 @@ class Context:
         calls that differ only by name give one object named "a + b", which
         `sampler.name` reports."""
         ...
-    def create_descriptor_pool(self, max_sets: int, samplers: int = 0,
-                               uniform_buffers: int = 0,
-                               storage_buffers: int = 0,
-                               storage_images: int = 0) -> DescriptorPool: ...
+    def create_descriptor_pool(self, max_sets: Optional[int] = None,
+                               textures: Optional[int] = None,
+                               uniform_buffers: Optional[int] = None,
+                               storage_buffers: Optional[int] = None,
+                               storage_images: Optional[int] = None) -> DescriptorPool:
+        """A pool to allocate descriptor sets from.
+
+        With no arguments (0.23) the pool is AUTOMATIC: it grows a new
+        VkDescriptorPool block whenever one fills, each sized from the layout
+        being served, so a whole count=N array always fits. Before that, the
+        correct sizes depended on ctx.frames_in_flight (allocate_frame_set
+        consumes frames x N descriptors), a number the call never mentioned —
+        guessing with headroom was the only strategy.
+
+        Explicit sizes keep the old behavior: one fixed block, exhaustion is a
+        ResourceError. That is the escape hatch for a hand-budgeted pool.
+
+        `textures=` counts COMBINED_IMAGE_SAMPLER descriptors — the ones the
+        builder declares with .texture() and the set fills with set_image().
+        It was called `samplers=` before 0.23: three names for one descriptor
+        type, and the builder's name won.
+        """
+        ...
 
     def create_command_buffer(self, auto_barriers: Optional[bool] = None) -> CommandBuffer:
         """Command buffers are a device resource, so they come from the Context —

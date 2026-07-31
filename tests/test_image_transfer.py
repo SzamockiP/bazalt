@@ -154,7 +154,7 @@ def test_the_border_colour_is_what_a_sample_outside_the_image_reads(ctx):
                 .build(target))
 
     def run(sampler):
-        pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+        pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
         dset = pool.allocate_set(pipeline, set=0)
         dset.set_image(0, texture, sampler)
         cmd = ctx.create_command_buffer()

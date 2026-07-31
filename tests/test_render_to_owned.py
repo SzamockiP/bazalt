@@ -69,7 +69,7 @@ def test_a_pass_samples_what_the_previous_pass_drew(ctx, fullscreen_vert):
     copy = textured_pipeline(ctx, target_b, fullscreen_vert)
 
     sampler = ctx.create_sampler()
-    pool = ctx.create_descriptor_pool(max_sets=4, samplers=4)
+    pool = ctx.create_descriptor_pool(max_sets=4, textures=4)
     dset = pool.allocate_set(copy, set=0)
     dset.set_image(0, a, sampler)
 

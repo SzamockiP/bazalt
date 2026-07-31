@@ -52,7 +52,7 @@ skybox = (ctx.graphics_pipeline()
           .build(renderer))
 
 # One image, bound two ways: storage (written) and sampled (read).
-pool = ctx.create_descriptor_pool(max_sets=4, storage_images=4, samplers=4)
+pool = ctx.create_descriptor_pool(max_sets=4, storage_images=4, textures=4)
 gen_set = pool.allocate_set(generate, set=0)
 gen_set.set_storage_image(0, cubemap)
 sky_set = pool.allocate_set(skybox, set=0)

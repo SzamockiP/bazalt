@@ -49,7 +49,7 @@ pipeline = (ctx.graphics_pipeline()
             .build(renderer))
 
 sampler = ctx.create_sampler()
-pool = ctx.create_descriptor_pool(max_sets=4, samplers=4)
+pool = ctx.create_descriptor_pool(max_sets=4, textures=4)
 desc_set = pool.allocate_set(pipeline, set=0)
 
 # A checkerboard until something is dropped, so there is always a texture bound.

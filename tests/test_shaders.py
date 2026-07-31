@@ -471,7 +471,7 @@ def test_shadow_compare_matches_manual_compare(ctx, triangle_shaders, triangle_b
                     .fragment_shader(frag)
                     .texture(0, bz.ShaderStage.FRAGMENT, set=0)
                     .build(screen))
-        pool = ctx.create_descriptor_pool(max_sets=4, samplers=4)
+        pool = ctx.create_descriptor_pool(max_sets=4, textures=4)
         dset = pool.allocate_set(pipeline, set=0)
         dset.set_image(0, shadow.depth, sampler=sampler)
 

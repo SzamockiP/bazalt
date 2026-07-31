@@ -105,7 +105,7 @@ vbuf = viewer.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATI
 ibuf = viewer.create_buffer([0, 3, 2, 2, 1, 0], bz.BufferType.INDEX,
                             bz.MemoryUsage.STATIC, bz.DataType.UINT32)
 
-pool = viewer.create_descriptor_pool(max_sets=1, samplers=1)
+pool = viewer.create_descriptor_pool(max_sets=1, textures=1)
 dset = pool.allocate_set(pipeline, set=0)
 dset.set_image(0, texture)
 

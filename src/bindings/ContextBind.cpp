@@ -604,21 +604,47 @@ void bind_context(py::module_& m)
         .def(
             "create_descriptor_pool",
             [](Context& self,
-               uint32_t maxSets,
-               uint32_t samplers,
-               uint32_t uniformBuffers,
-               uint32_t storageBuffers,
-               uint32_t storageImages) -> py::object
+               std::optional<uint32_t> maxSets,
+               std::optional<uint32_t> textures,
+               std::optional<uint32_t> uniformBuffers,
+               std::optional<uint32_t> storageBuffers,
+               std::optional<uint32_t> storageImages) -> py::object
             {
+                // No sizes at all is the automatic pool (0.23): it grows a block
+                // whenever one fills, each sized from the layout being served,
+                // so the caller stops doing arithmetic that depended on
+                // frames_in_flight — a number the old call never mentioned. Any
+                // explicit size is the fixed single pool, the escape hatch.
+                if (!maxSets && !textures && !uniformBuffers && !storageBuffers && !storageImages)
+                {
+                    return py::cast(unwrap(DescriptorPool::create_auto(self), self.logger().get()));
+                }
+                if (!maxSets)
+                {
+                    // Sized pools always named max_sets; a half-specified pool
+                    // has no sensible reading.
+                    throw py::value_error(
+                        "create_descriptor_pool: pass max_sets together with the descriptor counts "
+                        "for a fixed-size pool, or no arguments at all for the automatic one");
+                }
                 return py::cast(unwrap(
-                    DescriptorPool::create(self, maxSets, samplers, uniformBuffers, storageBuffers, storageImages),
+                    DescriptorPool::create(
+                        self,
+                        *maxSets,
+                        textures.value_or(0),
+                        uniformBuffers.value_or(0),
+                        storageBuffers.value_or(0),
+                        storageImages.value_or(0)),
                     self.logger().get()));
             },
-            py::arg("max_sets"),
-            py::arg("samplers") = 0,
-            py::arg("uniform_buffers") = 0,
-            py::arg("storage_buffers") = 0,
-            py::arg("storage_images") = 0)
+            py::arg("max_sets") = py::none(),
+            // textures=, not samplers=: the builder declarator is .texture()
+            // and all three name VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER —
+            // one name per thing (0.23, breaking).
+            py::arg("textures") = py::none(),
+            py::arg("uniform_buffers") = py::none(),
+            py::arg("storage_buffers") = py::none(),
+            py::arg("storage_images") = py::none())
         // Command buffers come from the Context, not a renderer: they are a device
         // resource, and a headless Context has no renderer to ask.
         .def(

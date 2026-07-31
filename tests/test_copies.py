@@ -203,7 +203,7 @@ def test_copy_image_copies_the_whole_mip_chain(ctx):
             .push_constant(4, bz.ShaderStage.FRAGMENT)
             .build(screen))
 
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, dst, sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 

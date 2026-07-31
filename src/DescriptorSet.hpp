@@ -48,15 +48,20 @@ public:
         std::shared_ptr<Sampler> sampler;
     };
 
-    // sets: 1 element (static) or frames_in_flight elements (frame)
+    // sets: 1 element (static) or frames_in_flight elements (frame). `block` is
+    // the VkDescriptorPool the sets came from: an auto pool owns several, and a
+    // free must go back to the one that allocated — the shared_ptr alone cannot
+    // say which.
     DescriptorSet(
         std::shared_ptr<Context> context,
         std::shared_ptr<DescriptorPool> pool,
+        VkDescriptorPool block,
         std::vector<VkDescriptorSet> sets,
         Pipeline::BindingTypeMap bindingTypes,
         bool isFrameSet)
         : context_(context),
           pool_(std::move(pool)),
+          block_(block),
           sets_(std::move(sets)),
           binding_types_(std::move(bindingTypes)),
           is_frame_set_(isFrameSet)
@@ -349,7 +354,8 @@ private:
     }
 
     std::shared_ptr<Context> context_;
-    std::shared_ptr<DescriptorPool> pool_; // sets must not outlive their pool
+    std::shared_ptr<DescriptorPool> pool_;    // sets must not outlive their pool
+    VkDescriptorPool block_ = VK_NULL_HANDLE; // the block the sets free back into
     std::vector<VkDescriptorSet> sets_;
     Pipeline::BindingTypeMap binding_types_;
     bool is_frame_set_;
@@ -361,6 +367,9 @@ private:
 class DescriptorPool : public std::enable_shared_from_this<DescriptorPool>
 {
 public:
+    // Fixed mode: one VkDescriptorPool of exactly these sizes, and exhaustion
+    // is an error. The escape hatch for anyone who wants to budget descriptors
+    // by hand; create_auto below is the default story.
     static std::expected<std::shared_ptr<DescriptorPool>, Error> create(
         Context& context,
         uint32_t maxSets,
@@ -393,6 +402,180 @@ public:
             return std::unexpected(err_resource("DescriptorPool must have at least one non-zero descriptor count"));
         }
 
+        auto block = create_block_(context, maxSets, poolSizes);
+        if (!block)
+        {
+            return std::unexpected(block.error());
+        }
+        auto pool = std::shared_ptr<DescriptorPool>(new DescriptorPool(context.shared_from_this(), false));
+        pool->blocks_.push_back(*block);
+        return pool;
+    }
+
+    // Auto mode (0.23): no sizes at all. Blocks are allocated as sets are, each
+    // sized from the layout being served, so the caller stops doing Vulkan's
+    // arithmetic — which depended on frames_in_flight, a number that never
+    // appeared in the old call. A whole count=N array must fit its block
+    // (MoltenVK refuses a partial fit, 0.22), and sizing from the layout is
+    // what guarantees it.
+    static std::expected<std::shared_ptr<DescriptorPool>, Error> create_auto(Context& context)
+    {
+        return std::shared_ptr<DescriptorPool>(new DescriptorPool(context.shared_from_this(), true));
+    }
+
+    // Deferred, so it lands in the queue after every set's free (sets hold the
+    // pool, so their destructors necessarily run first).
+    ~DescriptorPool()
+    {
+        if (!blocks_.empty() && context_)
+        {
+            context_->defer_destroy(
+                [vk = &context_->vk(), device = context_->device(), blocks = std::move(blocks_)]
+                {
+                    for (VkDescriptorPool block : blocks)
+                    {
+                        vk->vkDestroyDescriptorPool(device, block, nullptr);
+                    }
+                });
+        }
+    }
+
+    DescriptorPool(const DescriptorPool&) = delete;
+    DescriptorPool& operator=(const DescriptorPool&) = delete;
+
+    // Allocate a static descriptor set (1 VkDescriptorSet)
+    std::expected<std::shared_ptr<DescriptorSet>, Error> allocate_descriptor_set(
+        std::shared_ptr<Pipeline> pipeline,
+        uint32_t setIndex)
+    {
+        return allocate_(std::move(pipeline), setIndex, /*frame_set=*/false);
+    }
+
+    // Allocate a frame descriptor set (frames_in_flight VkDescriptorSets)
+    std::expected<std::shared_ptr<DescriptorSet>, Error> allocate_frame_descriptor_set(
+        std::shared_ptr<Pipeline> pipeline,
+        uint32_t setIndex)
+    {
+        return allocate_(std::move(pipeline), setIndex, /*frame_set=*/true);
+    }
+
+    std::shared_ptr<Logger> logger() const
+    {
+        return context_ ? context_->logger() : nullptr;
+    }
+
+private:
+    DescriptorPool(std::shared_ptr<Context> context, bool grows)
+        : context_(std::move(context)),
+          grows_(grows)
+    {
+    }
+
+    // One body for both set kinds: they differ only by how many sets one call
+    // allocates, and the two used to disagree about nothing but their strings.
+    std::expected<std::shared_ptr<DescriptorSet>, Error> allocate_(
+        std::shared_ptr<Pipeline> pipeline,
+        uint32_t setIndex,
+        bool frame_set)
+    {
+        if (!context_)
+            return std::unexpected(err_init("Context destroyed"));
+
+        VkDescriptorSetLayout layout = pipeline->descriptor_set_layout(setIndex);
+        if (layout == VK_NULL_HANDLE)
+        {
+            return std::unexpected(
+                err_resource("Pipeline has no descriptor set layout at set index " + std::to_string(setIndex)));
+        }
+
+        const uint32_t count = frame_set ? context_->frames_in_flight() : 1;
+        std::vector<VkDescriptorSetLayout> layouts(count, layout);
+
+        std::vector<VkDescriptorSet> sets(count);
+        VkResult result = VK_ERROR_OUT_OF_POOL_MEMORY; // "no block yet" allocates one
+        VkDescriptorPool from = VK_NULL_HANDLE;
+        if (!blocks_.empty())
+        {
+            from = blocks_.back();
+            result = try_allocate_(from, layouts, sets);
+        }
+        // Growth, auto mode only: a full block is the expected state of a pool
+        // that sizes itself, so a fresh block — sized from THIS request's
+        // layout, so even a count=500 array fits — is allocated and the request
+        // retried once. Everything else (device OOM, a fixed pool filling up)
+        // stays an error.
+        if (grows_ && (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL))
+        {
+            auto grown = grow_for_(*pipeline, setIndex, count);
+            if (!grown)
+            {
+                return std::unexpected(grown.error());
+            }
+            from = *grown;
+            result = try_allocate_(from, layouts, sets);
+        }
+        if (auto e = check(result, "allocate descriptor set from pool (pool may be full)", ErrorCode::Resource))
+        {
+            return std::unexpected(*e);
+        }
+
+        return std::make_shared<DescriptorSet>(
+            context_, shared_from_this(), from, std::move(sets), pipeline->binding_types(setIndex), frame_set);
+    }
+
+    VkResult try_allocate_(
+        VkDescriptorPool from,
+        const std::vector<VkDescriptorSetLayout>& layouts,
+        std::vector<VkDescriptorSet>& sets)
+    {
+        VkDescriptorSetAllocateInfo allocInfo{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .descriptorPool = from,
+            .descriptorSetCount = static_cast<uint32_t>(layouts.size()),
+            .pSetLayouts = layouts.data()};
+        return context_->vk().vkAllocateDescriptorSets(context_->device(), &allocInfo, sets.data());
+    }
+
+    // A new auto-mode block. Sized max(default, this request) per descriptor
+    // type: the default keeps small sets from each costing a VkDescriptorPool,
+    // and the request half is what lets one bindless array larger than any
+    // default land in a block of its own.
+    std::expected<VkDescriptorPool, Error> grow_for_(const Pipeline& pipeline, uint32_t setIndex, uint32_t set_count)
+    {
+        constexpr uint32_t kDefaultSets = 64;
+        constexpr uint32_t kDefaultDescriptors = 64;
+
+        std::unordered_map<VkDescriptorType, uint32_t> needed;
+        for (const auto& [binding, info] : pipeline.binding_types(setIndex))
+        {
+            needed[info.type] += info.count * set_count;
+        }
+        std::vector<VkDescriptorPoolSize> sizes;
+        for (VkDescriptorType type :
+             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+              VK_DESCRIPTOR_TYPE_STORAGE_IMAGE})
+        {
+            const auto it = needed.find(type);
+            const uint32_t requested = it == needed.end() ? 0 : it->second;
+            sizes.push_back({.type = type, .descriptorCount = (std::ranges::max)(kDefaultDescriptors, requested)});
+        }
+        auto block = create_block_(*context_, (std::ranges::max)(kDefaultSets, set_count), sizes);
+        if (!block)
+        {
+            return std::unexpected(block.error());
+        }
+        blocks_.push_back(*block);
+        return *block;
+    }
+
+    static std::expected<VkDescriptorPool, Error> create_block_(
+        Context& context,
+        uint32_t maxSets,
+        const std::vector<VkDescriptorPoolSize>& poolSizes)
+    {
         // A set whose layout has an UPDATE_AFTER_BIND binding may only come from a
         // pool that says so, and the pool cannot know which layouts it will serve.
         // Gated on the feature rather than set always, so a Context that never asked
@@ -423,111 +606,7 @@ public:
         {
             return std::unexpected(*e);
         }
-
-        return std::shared_ptr<DescriptorPool>(new DescriptorPool(context.shared_from_this(), pool));
-    }
-
-    // Deferred, so it lands in the queue after every set's free (sets hold the
-    // pool, so their destructors necessarily run first).
-    ~DescriptorPool()
-    {
-        if (pool_ != VK_NULL_HANDLE && context_)
-        {
-            context_->defer_destroy([vk = &context_->vk(), device = context_->device(), pool = pool_]
-                                    { vk->vkDestroyDescriptorPool(device, pool, nullptr); });
-        }
-    }
-
-    VkDescriptorPool get() const
-    {
-        return pool_;
-    }
-
-    DescriptorPool(const DescriptorPool&) = delete;
-    DescriptorPool& operator=(const DescriptorPool&) = delete;
-
-    // Allocate a static descriptor set (1 VkDescriptorSet)
-    std::expected<std::shared_ptr<DescriptorSet>, Error> allocate_descriptor_set(
-        std::shared_ptr<Pipeline> pipeline,
-        uint32_t setIndex)
-    {
-        if (!context_)
-            return std::unexpected(err_init("Context destroyed"));
-
-        VkDescriptorSetLayout layout = pipeline->descriptor_set_layout(setIndex);
-        if (layout == VK_NULL_HANDLE)
-        {
-            return std::unexpected(
-                err_resource("Pipeline has no descriptor set layout at set index " + std::to_string(setIndex)));
-        }
-
-        VkDescriptorSetAllocateInfo allocInfo{
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            .pNext = nullptr,
-            .descriptorPool = pool_,
-            .descriptorSetCount = 1,
-            .pSetLayouts = &layout};
-
-        VkDescriptorSet set;
-        if (auto e = check(
-                context_->vk().vkAllocateDescriptorSets(context_->device(), &allocInfo, &set),
-                "allocate descriptor set from pool (pool may be full)",
-                ErrorCode::Resource))
-        {
-            return std::unexpected(*e);
-        }
-
-        return std::make_shared<DescriptorSet>(
-            context_, shared_from_this(), std::vector<VkDescriptorSet>{set}, pipeline->binding_types(setIndex), false);
-    }
-
-    // Allocate a frame descriptor set (frames_in_flight VkDescriptorSets)
-    std::expected<std::shared_ptr<DescriptorSet>, Error> allocate_frame_descriptor_set(
-        std::shared_ptr<Pipeline> pipeline,
-        uint32_t setIndex)
-    {
-        if (!context_)
-            return std::unexpected(err_init("Context destroyed"));
-
-        VkDescriptorSetLayout layout = pipeline->descriptor_set_layout(setIndex);
-        if (layout == VK_NULL_HANDLE)
-        {
-            return std::unexpected(
-                err_resource("Pipeline has no descriptor set layout at set index " + std::to_string(setIndex)));
-        }
-
-        const uint32_t frames = context_->frames_in_flight();
-        std::vector<VkDescriptorSetLayout> layouts(frames, layout);
-        VkDescriptorSetAllocateInfo allocInfo{
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            .pNext = nullptr,
-            .descriptorPool = pool_,
-            .descriptorSetCount = frames,
-            .pSetLayouts = layouts.data()};
-
-        std::vector<VkDescriptorSet> sets(frames);
-        if (auto e = check(
-                context_->vk().vkAllocateDescriptorSets(context_->device(), &allocInfo, sets.data()),
-                "allocate frame descriptor sets from pool (pool may be full)",
-                ErrorCode::Resource))
-        {
-            return std::unexpected(*e);
-        }
-
-        return std::make_shared<DescriptorSet>(
-            context_, shared_from_this(), std::move(sets), pipeline->binding_types(setIndex), true);
-    }
-
-    std::shared_ptr<Logger> logger() const
-    {
-        return context_ ? context_->logger() : nullptr;
-    }
-
-private:
-    DescriptorPool(std::shared_ptr<Context> context, VkDescriptorPool pool)
-        : context_(context),
-          pool_(pool)
-    {
+        return pool;
     }
 
 public:
@@ -538,16 +617,22 @@ public:
 
 private:
     std::shared_ptr<Context> context_;
-    VkDescriptorPool pool_ = VK_NULL_HANDLE;
+    // Every VkDescriptorPool this object owns. Fixed mode holds exactly one and
+    // never grows; auto mode appends. Sets free back into the block that
+    // allocated them (DescriptorSet::block_), so a block is never emptied by a
+    // free aimed at a sibling.
+    std::vector<VkDescriptorPool> blocks_;
+    bool grows_ = false;
 };
 
-// Out of line: needs DescriptorPool to be complete for pool_->get().
+// Out of line only for symmetry with its history; the free names block_, the
+// exact VkDescriptorPool that allocated these sets — an auto pool owns several.
 inline DescriptorSet::~DescriptorSet()
 {
-    if (context_ && pool_ && !sets_.empty())
+    if (context_ && pool_ && block_ != VK_NULL_HANDLE && !sets_.empty())
     {
         context_->defer_destroy(
-            [vk = &context_->vk(), device = context_->device(), pool = pool_->get(), sets = std::move(sets_)]
+            [vk = &context_->vk(), device = context_->device(), pool = block_, sets = std::move(sets_)]
             { vk->vkFreeDescriptorSets(device, pool, static_cast<uint32_t>(sets.size()), sets.data()); });
     }
 }

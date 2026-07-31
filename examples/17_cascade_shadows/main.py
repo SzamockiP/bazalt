@@ -130,7 +130,7 @@ cascade_blob = (b"".join(bytes(glm.transpose(vp)) for vp in LIGHT_VP)
 cascade_ubo = ctx.create_buffer(np.frombuffer(cascade_blob, np.float32).copy(),
                                 bz.BufferType.UNIFORM, bz.MemoryUsage.STATIC)
 
-pool = ctx.create_descriptor_pool(max_sets=2, uniform_buffers=2, samplers=2)
+pool = ctx.create_descriptor_pool(max_sets=2, uniform_buffers=2, textures=2)
 scene_set = pool.allocate_set(scene_pipe, set=0)
 scene_set.set_buffer(0, cascade_ubo)
 scene_set.set_image(1, shadow.depth, sampler=ctx.create_sampler(

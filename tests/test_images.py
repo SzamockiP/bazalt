@@ -144,7 +144,7 @@ def test_sampling_with_an_explicit_nearest_sampler(ctx, tmp_path):
                 .texture(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(target))
 
-    pool = ctx.create_descriptor_pool(max_sets=4, samplers=4)
+    pool = ctx.create_descriptor_pool(max_sets=4, textures=4)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_image(0, tex, sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 

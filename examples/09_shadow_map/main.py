@@ -89,7 +89,7 @@ index_count = len(idx)
 ubuf = ctx.create_buffer(np.zeros(32, dtype=np.float32),
                          bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
-pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=8, samplers=4)
+pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=8, textures=4)
 
 shadow_set = pool.allocate_frame_set(shadow_pipe, set=0)
 shadow_set.set_buffer(0, ubuf)

@@ -32,7 +32,7 @@ def _sample_depth_layer(ctx, target, layer):
             .push_constant(4, bz.ShaderStage.FRAGMENT)
             .build(screen))
 
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, target.depth, sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
@@ -60,7 +60,7 @@ def _sample_color_layer(ctx, target, layer):
             .texture(0, bz.ShaderStage.FRAGMENT, set=0)
             .push_constant(4, bz.ShaderStage.FRAGMENT)
             .build(screen))
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, target.color[0], sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
@@ -143,7 +143,7 @@ def test_render_into_mip(ctx):
             .texture(0, bz.ShaderStage.FRAGMENT, set=0)
             .push_constant(4, bz.ShaderStage.FRAGMENT)
             .build(screen))
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, target.color[0], sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
