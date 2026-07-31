@@ -428,6 +428,157 @@ class GamepadAxis(IntEnum):
     LEFT_TRIGGER = 4
     RIGHT_TRIGGER = 5
 
+class Key(IntEnum):
+    """The keyboard, the gamepad's way (0.23): the values are GLFW's own.
+
+    The bare KEY_* module ints stay valid — every query takes either. D0..D9
+    are the top-row digits (a name cannot start with one); the keypad is
+    KP_*. There is no LAST member: that is GLFW's array-size sentinel, and
+    the KEY_LAST int remains for anyone who wants it.
+    """
+    SPACE = 32
+    APOSTROPHE = 39
+    COMMA = 44
+    MINUS = 45
+    PERIOD = 46
+    SLASH = 47
+    D0 = 48
+    D1 = 49
+    D2 = 50
+    D3 = 51
+    D4 = 52
+    D5 = 53
+    D6 = 54
+    D7 = 55
+    D8 = 56
+    D9 = 57
+    SEMICOLON = 59
+    EQUAL = 61
+    A = 65
+    B = 66
+    C = 67
+    D = 68
+    E = 69
+    F = 70
+    G = 71
+    H = 72
+    I = 73
+    J = 74
+    K = 75
+    L = 76
+    M = 77
+    N = 78
+    O = 79
+    P = 80
+    Q = 81
+    R = 82
+    S = 83
+    T = 84
+    U = 85
+    V = 86
+    W = 87
+    X = 88
+    Y = 89
+    Z = 90
+    LEFT_BRACKET = 91
+    BACKSLASH = 92
+    RIGHT_BRACKET = 93
+    GRAVE_ACCENT = 96
+    WORLD_1 = 161
+    WORLD_2 = 162
+    ESCAPE = 256
+    ENTER = 257
+    TAB = 258
+    BACKSPACE = 259
+    INSERT = 260
+    DELETE = 261
+    RIGHT = 262
+    LEFT = 263
+    DOWN = 264
+    UP = 265
+    PAGE_UP = 266
+    PAGE_DOWN = 267
+    HOME = 268
+    END = 269
+    CAPS_LOCK = 280
+    SCROLL_LOCK = 281
+    NUM_LOCK = 282
+    PRINT_SCREEN = 283
+    PAUSE = 284
+    F1 = 290
+    F2 = 291
+    F3 = 292
+    F4 = 293
+    F5 = 294
+    F6 = 295
+    F7 = 296
+    F8 = 297
+    F9 = 298
+    F10 = 299
+    F11 = 300
+    F12 = 301
+    F13 = 302
+    F14 = 303
+    F15 = 304
+    F16 = 305
+    F17 = 306
+    F18 = 307
+    F19 = 308
+    F20 = 309
+    F21 = 310
+    F22 = 311
+    F23 = 312
+    F24 = 313
+    F25 = 314
+    KP_0 = 320
+    KP_1 = 321
+    KP_2 = 322
+    KP_3 = 323
+    KP_4 = 324
+    KP_5 = 325
+    KP_6 = 326
+    KP_7 = 327
+    KP_8 = 328
+    KP_9 = 329
+    KP_DECIMAL = 330
+    KP_DIVIDE = 331
+    KP_MULTIPLY = 332
+    KP_SUBTRACT = 333
+    KP_ADD = 334
+    KP_ENTER = 335
+    KP_EQUAL = 336
+    LEFT_SHIFT = 340
+    LEFT_CONTROL = 341
+    LEFT_ALT = 342
+    LEFT_SUPER = 343
+    RIGHT_SHIFT = 344
+    RIGHT_CONTROL = 345
+    RIGHT_ALT = 346
+    RIGHT_SUPER = 347
+    MENU = 348
+
+class MouseButton(IntEnum):
+    """Mouse buttons by name; the MOUSE_BUTTON_* ints stay valid (0.23)."""
+    LEFT = 0
+    RIGHT = 1
+    MIDDLE = 2
+    BUTTON_4 = 3
+    BUTTON_5 = 4
+    BUTTON_6 = 5
+    BUTTON_7 = 6
+    BUTTON_8 = 7
+
+class CursorMode(IntEnum):
+    """What set_cursor_mode takes; the CURSOR_* ints stay valid (0.23).
+
+    NORMAL shows the cursor. HIDDEN hides it while it is over the window.
+    DISABLED locks it to the window and hands out unbounded motion — the
+    first-person camera mode.
+    """
+    NORMAL = 212993
+    HIDDEN = 212994
+    DISABLED = 212995
+
 # ── Resources ──────────────────────────────────────────────────────────
 
 class Buffer:
@@ -1363,9 +1514,9 @@ class Window:
         """
         ...
     def is_open(self) -> bool: ...
-    def is_key_pressed(self, key: int) -> bool: ...
-    def is_mouse_button_pressed(self, button: int) -> bool: ...
-    def was_key_pressed(self, key: int) -> bool:
+    def is_key_pressed(self, key: Key | int) -> bool: ...
+    def is_mouse_button_pressed(self, button: MouseButton | int) -> bool: ...
+    def was_key_pressed(self, key: Key | int) -> bool:
         """True when the key went down during the last poll_events() cycle.
 
         The edge, where is_key_pressed is the level. Use it for a toggle, and
@@ -1373,7 +1524,7 @@ class Window:
         count as an edge.
         """
         ...
-    def was_mouse_button_pressed(self, button: int) -> bool: ...
+    def was_mouse_button_pressed(self, button: MouseButton | int) -> bool: ...
     def dropped_files(self) -> list[str]:
         """Paths dropped onto the window during the last poll cycle (0.19).
 
@@ -1382,7 +1533,7 @@ class Window:
         inside one frame and does not consume: two readers both see the drop.
         """
         ...
-    def set_cursor_mode(self, mode: int) -> None: ...
+    def set_cursor_mode(self, mode: CursorMode | int) -> None: ...
     def set_cursor_position(self, x: float, y: float) -> None:
         """Move the cursor, without the move reading as the user moving it (0.19).
 

@@ -295,6 +295,40 @@ def test_an_untouched_key_is_not_an_edge(ctx):
         window = None
 
 
+def test_the_input_enums_agree_with_the_bare_ints():
+    """0.23: Key, MouseButton and CursorMode are renames of the GLFW values,
+    exactly as GamepadButton is, so each member equals its old module int.
+    Needs no window — the values are the whole claim."""
+    assert int(bz.Key.W) == bz.KEY_W == 87
+    assert int(bz.Key.ESCAPE) == bz.KEY_ESCAPE
+    assert int(bz.Key.D0) == bz.KEY_0
+    assert int(bz.Key.KP_0) == bz.KEY_KP_0
+    assert int(bz.MouseButton.LEFT) == bz.MOUSE_BUTTON_LEFT
+    assert int(bz.MouseButton.MIDDLE) == bz.MOUSE_BUTTON_MIDDLE
+    assert int(bz.CursorMode.NORMAL) == bz.CURSOR_NORMAL
+    assert int(bz.CursorMode.HIDDEN) == bz.CURSOR_HIDDEN
+    assert int(bz.CursorMode.DISABLED) == bz.CURSOR_DISABLED
+
+
+def test_an_enum_key_queries_like_its_int(ctx):
+    """The queries keep their int signatures and the enum converts through its
+    value, so both spellings must answer the same — this is the conversion
+    smoke test the 0.23 design named."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    try:
+        bz.poll_events()
+        assert window.is_key_pressed(bz.Key.W) == window.is_key_pressed(bz.KEY_W)
+        assert window.was_key_pressed(bz.Key.F11) == window.was_key_pressed(bz.KEY_F11)
+        assert (window.is_mouse_button_pressed(bz.MouseButton.LEFT)
+                == window.is_mouse_button_pressed(bz.MOUSE_BUTTON_LEFT))
+        window.set_cursor_mode(bz.CursorMode.HIDDEN)
+        window.set_cursor_mode(bz.CursorMode.NORMAL)
+    finally:
+        window = None
+
+
 # ── window extras (0.19) ──────────────────────────────────────────────────
 #
 # A drop and an icon cannot be provoked from here: no OS input, and no way to ask

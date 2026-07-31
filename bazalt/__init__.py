@@ -65,6 +65,9 @@ __all__ = [
     "Feature",
     "GamepadButton",
     "GamepadAxis",
+    "Key",
+    "MouseButton",
+    "CursorMode",
     # Errors — the type is the recoverability contract
     "BazaltError",
     "InitializationError",
