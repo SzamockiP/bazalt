@@ -32,7 +32,9 @@ Repository = "https://github.com/SzamockiP/bazalt"
 
 [project.optional-dependencies]
 examples = ["PyGLM"]
-test = ["pytest", "numpy"]
+# pillow encodes a PNG in memory for the load_image(bytes) test. Without it
+# that test skipped in every CI leg, which is a path nobody was covering.
+test = ["pytest", "numpy", "pillow"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

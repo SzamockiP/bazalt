@@ -384,7 +384,7 @@ jobs:
         run: vulkaninfo --summary
 
       - name: Install wheel + test deps
-        run: pip install wheelhouse/bazalt-*-cp312-*manylinux*.whl pytest numpy
+        run: pip install wheelhouse/bazalt-*-cp312-*manylinux*.whl pytest numpy pillow
 
       # cwd is OUTSIDE the repo on purpose: the source tree's bazalt/ package
       # has no _core and would shadow the installed wheel on sys.path.
@@ -468,7 +468,7 @@ jobs:
         run: "$VULKAN_SDK/bin/vulkaninfo --summary"
 
       - name: Install wheel + test deps
-        run: pip install wheelhouse/bazalt-*-cp312-*macosx*.whl pytest numpy
+        run: pip install wheelhouse/bazalt-*-cp312-*macosx*.whl pytest numpy pillow
 
       # Computed from the SDK version, not written down: the shader-access sync
       # hazards the negative test needs are reported from layer 1.4.350, and the
