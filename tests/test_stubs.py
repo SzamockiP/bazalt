@@ -124,7 +124,9 @@ def test_renamed_and_new_api_is_declared():
                      "IMAGE_VIEW_2D_ON_3D = 18", "def depth",
                      # 0.23 — the target factory and the named target views.
                      "def create_render_target", "class SubresourceTarget(",
-                     "class MultiviewTarget(", "def create_descriptor_pool"):
+                     "class MultiviewTarget(", "def create_descriptor_pool",
+                     # 0.23 — small additions.
+                     "MULTIPLY = 3", "UINT4 = 8", "UBYTE4_UINT = 9"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 

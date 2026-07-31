@@ -95,6 +95,24 @@ def test_premultiplied_does_not_scale_the_source(ctx, fullscreen_push):
                        [64, 0, 64], atol=3)
 
 
+def test_multiply_darkens_where_alpha_replaces(ctx, fullscreen_push):
+    """Half-grey over half-red: MULTIPLY scales the framebuffer by the
+    fragment (0.5 * 0.5 = 0.25 red), where ALPHA with an opaque source just
+    replaces it. Two-sided, per the pixel-test rule — a mode that silently
+    fell back to ALPHA would fail the first assertion."""
+    target = bz.RenderTarget(ctx, 64, 64)
+    half_red = [0.5, 0.0, 0.0, 1.0]
+    half_grey = [0.5, 0.5, 0.5, 1.0]
+
+    multiply = fullscreen_push(target, blend=bz.BlendMode.MULTIPLY)
+    assert np.allclose(draw_over(ctx, target, multiply, half_red, half_grey)[:3],
+                       [64, 0, 0], atol=3)
+
+    alpha = fullscreen_push(target, blend=bz.BlendMode.ALPHA)
+    assert np.allclose(draw_over(ctx, target, alpha, half_red, half_grey)[:3],
+                       [128, 128, 128], atol=3)
+
+
 def test_blend_off_ignores_the_mode(ctx, fullscreen_push):
     """blend(False, mode=ADDITIVE) must still replace, not add."""
     target = bz.RenderTarget(ctx, 64, 64)

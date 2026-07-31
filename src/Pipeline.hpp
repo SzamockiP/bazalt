@@ -35,6 +35,13 @@ enum class VertexFormat
     // An unsigned integer attribute (`in uint` in GLSL, no conversion). A
     // material index or an object id carried per instance.
     UINT,
+    // Integer vectors (`in uvecN`, no conversion). UINT4 is what skinning joint
+    // indices need — UBYTE4_NORM carried the weights and nothing carried the
+    // indices (0.23). UBYTE4_UINT is the same four joints in a quarter the size.
+    UINT2,
+    UINT3,
+    UINT4,
+    UBYTE4_UINT,
 };
 
 // The Vulkan format and the byte size of one attribute. One table instead of a
@@ -63,6 +70,14 @@ inline constexpr VertexFormatInfo vertex_format_info(VertexFormat format)
             return {VK_FORMAT_R8G8B8A8_UNORM, 4};
         case VertexFormat::UINT:
             return {VK_FORMAT_R32_UINT, 4};
+        case VertexFormat::UINT2:
+            return {VK_FORMAT_R32G32_UINT, 8};
+        case VertexFormat::UINT3:
+            return {VK_FORMAT_R32G32B32_UINT, 12};
+        case VertexFormat::UINT4:
+            return {VK_FORMAT_R32G32B32A32_UINT, 16};
+        case VertexFormat::UBYTE4_UINT:
+            return {VK_FORMAT_R8G8B8A8_UINT, 4};
     }
     // Not std::unreachable(): pybind enums accept arbitrary ints.
     return {VK_FORMAT_R32G32B32_SFLOAT, 12};
@@ -113,7 +128,10 @@ enum class BlendMode
     ADDITIVE,
     // src + (1 - src.a) * dst, for colours that already carry their alpha —
     // what a composited texture or a text atlas wants.
-    PREMULTIPLIED
+    PREMULTIPLIED,
+    // src * dst. Darkening overlays: ambient occlusion, baked shadows, tinted
+    // glass. The one common mode the first three could not spell (0.23).
+    MULTIPLY
 };
 
 // What happens to a stencil value when a fragment arrives. 1:1 with VkStencilOp.
@@ -1914,6 +1932,15 @@ private:
                     src_color = VK_BLEND_FACTOR_ONE;
                     dst_color = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
                     dst_alpha = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                    break;
+                case BlendMode::MULTIPLY:
+                    // dst * src + 0: the framebuffer is scaled by the fragment.
+                    // White leaves it alone, black removes it — an AO or shadow
+                    // overlay. Alpha keeps the destination's coverage.
+                    src_color = VK_BLEND_FACTOR_DST_COLOR;
+                    dst_color = VK_BLEND_FACTOR_ZERO;
+                    src_alpha = VK_BLEND_FACTOR_ZERO;
+                    dst_alpha = VK_BLEND_FACTOR_ONE;
                     break;
             }
         }

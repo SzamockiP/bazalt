@@ -238,7 +238,11 @@ void bind_enums(py::module_& m)
         .value("FLOAT4", VertexFormat::FLOAT4)
         .value("FLOAT", VertexFormat::FLOAT)
         .value("UBYTE4_NORM", VertexFormat::UBYTE4_NORM)
-        .value("UINT", VertexFormat::UINT);
+        .value("UINT", VertexFormat::UINT)
+        .value("UINT2", VertexFormat::UINT2)
+        .value("UINT3", VertexFormat::UINT3)
+        .value("UINT4", VertexFormat::UINT4)
+        .value("UBYTE4_UINT", VertexFormat::UBYTE4_UINT);
 
     py::enum_<Topology>(m, "Topology")
         .value("TRIANGLE_LIST", Topology::TRIANGLE_LIST)
@@ -308,7 +312,8 @@ void bind_enums(py::module_& m)
     py::enum_<BlendMode>(m, "BlendMode")
         .value("ALPHA", BlendMode::ALPHA)
         .value("ADDITIVE", BlendMode::ADDITIVE)
-        .value("PREMULTIPLIED", BlendMode::PREMULTIPLIED);
+        .value("PREMULTIPLIED", BlendMode::PREMULTIPLIED)
+        .value("MULTIPLY", BlendMode::MULTIPLY);
 
     py::enum_<PolygonMode>(m, "PolygonMode")
         .value("FILL", PolygonMode::FILL)

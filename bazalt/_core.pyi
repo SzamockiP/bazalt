@@ -228,6 +228,12 @@ class VertexFormat(IntEnum):
     UBYTE4_NORM = 4
     #: An unsigned integer attribute (`in uint`), e.g. a material index.
     UINT = 5
+    #: Integer vectors (`in uvecN`, no conversion). UINT4 carries skinning
+    #: joint indices; UBYTE4_UINT is the same four joints in a quarter the size.
+    UINT2 = 6
+    UINT3 = 7
+    UINT4 = 8
+    UBYTE4_UINT = 9
 
 class Topology(IntEnum):
     """Primitive topology for graphics pipelines. TRIANGLE_LIST is the default.
@@ -249,12 +255,15 @@ class BlendMode(IntEnum):
     """How a fragment combines with what the attachment already holds.
 
     Read only when blend() is enabled. ALPHA is ordinary transparency,
-    ADDITIVE is order-independent accumulation (particles, glow), and
-    PREMULTIPLIED is for colours that already carry their alpha.
+    ADDITIVE is order-independent accumulation (particles, glow),
+    PREMULTIPLIED is for colours that already carry their alpha, and
+    MULTIPLY scales the framebuffer by the fragment — a darkening overlay
+    such as ambient occlusion or baked shadows (0.23).
     """
     ALPHA = 0
     ADDITIVE = 1
     PREMULTIPLIED = 2
+    MULTIPLY = 3
 
 class PolygonMode(IntEnum):
     """Fill triangles, or draw only their edges (the wireframe view) or

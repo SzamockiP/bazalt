@@ -308,3 +308,40 @@ def test_the_cache_changes_no_result(ctx):
                 .build(target))
 
     assert np.array_equal(draw(ctx, target, build()), draw(ctx, target, build()))
+
+
+# ── integer vertex attributes (0.23) ──────────────────────────────────────
+
+
+def test_uint4_attribute_arrives_unconverted(ctx):
+    """The skinning layout: FLOAT2 position + UINT4 joint indices. The vertex
+    shader turns the uvec4 into a colour, so the readback proves the integers
+    crossed the vertex input unconverted — UBYTE4_NORM carried the weights and
+    nothing could carry the indices before UINT4 existed."""
+    vert = ctx.compile_shader(str(SHADER_DIR / "joints.vert"), bz.ShaderStage.VERTEX)
+    frag = ctx.compile_shader(str(SHADER_DIR / "vertex_color.frag"), bz.ShaderStage.FRAGMENT)
+    target = bz.RenderTarget(ctx, 16, 16)
+    pipe = (ctx.graphics_pipeline()
+            .vertex_shader(vert)
+            .fragment_shader(frag)
+            .vertex_format([bz.VertexFormat.FLOAT2, bz.VertexFormat.UINT4])
+            .build(target))
+
+    vertex = np.dtype([("pos", np.float32, 2), ("joints", np.uint32, 4)])
+    data = np.zeros(3, dtype=vertex)
+    # Winding matches fullscreen.vert: front-facing under the pipeline default
+    # (cull BACK, COUNTER_CLOCKWISE) — the trap 29_bindless documented.
+    data["pos"] = [(-1, -1), (-1, 3), (3, -1)]
+    data["joints"] = (10, 20, 30, 255)
+    vbuf = ctx.create_buffer(data, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.begin_rendering(target, clear_color=[0, 0, 0, 0])
+    cmd.bind_pipeline(pipe)
+    cmd.bind_vertex_buffer(vbuf)
+    cmd.draw(3)
+    cmd.end_rendering(target)
+    ctx.submit(cmd)
+
+    assert np.allclose(target.color[0].read()[8, 8], [10, 20, 30, 255], atol=1)
