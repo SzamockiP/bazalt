@@ -180,6 +180,10 @@ class Feature(IntEnum):
     #: a portability subset may answer False, because Metal has no multisampled
     #: texture array.
     MULTISAMPLE_ARRAYS = 17
+    #: Rendering into one Z slice of a 3D image (target.layer(z)). True on every
+    #: full Vulkan driver; MoltenVK answers False. Where it is False, fill the
+    #: volume with a compute shader through a storage image instead.
+    IMAGE_VIEW_2D_ON_3D = 18
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -683,13 +687,18 @@ class ShaderModule:
 
 class Image:
     """A GPU image: pixels + format. May be 2D, a texture array (array_layers >
-    1) or a cubemap (is_cube). The sampler it used to be fused with is a
-    separate (cached) object — see Context.create_sampler."""
+    1), a cubemap (is_cube) or a 3D volume (depth > 1). The sampler it used to
+    be fused with is a separate (cached) object — see Context.create_sampler."""
 
     @property
     def width(self) -> int: ...
     @property
     def height(self) -> int: ...
+    @property
+    def depth(self) -> int:
+        """The Z extent: 1 for every 2D image, >1 for a 3D volume
+        (create_image(depth=)). Not the depth ATTACHMENT — that is a format."""
+        ...
     @property
     def format(self) -> Format: ...
     @property
@@ -731,8 +740,9 @@ class Image:
         """Copy one subresource back to host memory as a numpy array.
 
         Shape is (height, width, channels) — or (height, width) for
-        single-channel formats — and the dtype follows the format (uint8,
-        float16 or float32). Blocking; a debugging and test path.
+        single-channel formats, with a leading depth axis for a 3D image:
+        (depth, height, width[, channels]) — and the dtype follows the format
+        (uint8, float16 or float32). Blocking; a debugging and test path.
 
         layer picks a cube face or array slice, mip picks a level, and the shape
         follows the MIP: level 2 of a 64x64 texture reads back 16x16. Before
@@ -761,12 +771,14 @@ class Image:
 
         Raises ResourceError for all of those, and for a layer, a mip or a region
         this image does not have — the image decides each one, so it is the same
-        exception read() raises for the same question. A region= that is not four
-        numbers is a ValueError, because no image is needed to say so.
+        exception read() raises for the same question. A region= of the wrong
+        length is a ValueError, because no image is needed to say so.
 
         region=(x, y, width, height) writes a rectangle and leaves the rest
-        alone — what painting and a sprite atlas need. Omitted, the whole level
-        is replaced.
+        alone — what painting and a sprite atlas need. On a 3D image the region
+        is (x, y, z, width, height, depth) and the array is shaped
+        (depth, height, width[, channels]). Omitted, the whole level is
+        replaced.
 
         ASYNCHRONOUS, like load_image: it returns at once and the copy runs on
         the upload worker, because the case this exists for is a video frame at
@@ -2010,22 +2022,28 @@ class Context:
         nothing to decode and join the batch already submitted."""
         ...
     def create_image(self, width: int, height: int,
-                     format: Format = Format.RGBA8, *, layers: int = 1,
-                     cube: bool = False, mip_levels: int = 1, name: str = "") -> Image:
+                     format: Format = Format.RGBA8, *, depth: int = 1,
+                     layers: int = 1, cube: bool = False, mip_levels: int = 1,
+                     name: str = "") -> Image:
         """Empty image on the GPU. `layers > 1` makes a texture array (view
-        2D_ARRAY); `cube=True` makes a cubemap (6 square faces, view CUBE). An
-        empty layered image is filled by rendering into it or by a compute
-        storage image (procedural skyboxes/arrays); the data forms below upload
+        2D_ARRAY); `cube=True` makes a cubemap (6 square faces, view CUBE);
+        `depth > 1` makes a 3D image (view 3D — `sampler3D` / `image3D` in the
+        shader). A volume has exactly one array layer, so depth= does not
+        combine with layers= or cube=. An empty image is filled by rendering
+        into it or by a compute storage image; the data forms below upload
         pixels instead.
 
         `mip_levels > 1` allocates a mip chain (1..full chain for the size); the
         extra levels start empty — write mip 0 (compute / a render pass) then
-        `cmd.generate_mipmaps(img)` to fill the rest."""
+        `cmd.generate_mipmaps(img)` to fill the rest. Depth counts toward the
+        chain: a 1x1x64 volume has 7 levels."""
         ...
     def create_image(self, array: Any, *, mipmaps: bool = False,
                      cube: bool = False, name: str = "") -> Image:
-        """From one numpy array → a 2D image; shape + dtype pick the format
-        (UNORM — arrays are data, files are pictures). One level by default;
+        """From one numpy array; shape + dtype pick the format (UNORM — arrays
+        are data, files are pictures). (h, w) or (h, w, channels) makes a 2D
+        image; a 4-dimensional (depth, h, w, channels) array makes a 3D image —
+        a single-channel volume is `arr[..., None]`. One level by default;
         `mipmaps=True` generates the full chain (arrays stay 1-level unless asked,
         so a data texture gets no surprise filtering). (h, w, 3) has no portable
         GPU format and raises ResourceError with a padding hint. `cube=True` here

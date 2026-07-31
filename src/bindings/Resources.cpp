@@ -119,6 +119,7 @@ void bind_resources(py::module_& m)
     py::class_<Image, std::shared_ptr<Image>>(m, "Image")
         .def_property_readonly("width", &Image::width)
         .def_property_readonly("height", &Image::height)
+        .def_property_readonly("depth", &Image::depth)
         .def_property_readonly("format", &Image::format)
         .def_property_readonly("mip_levels", &Image::mip_levels)
         .def_property_readonly("array_layers", &Image::array_layers)
@@ -181,36 +182,62 @@ void bind_resources(py::module_& m)
 
                 const std::uint32_t level_w = mip_extent(self->width(), mip);
                 const std::uint32_t level_h = mip_extent(self->height(), mip);
-                std::uint32_t x = 0, y = 0, w = level_w, h = level_h;
+                const std::uint32_t level_d = mip_extent(self->depth(), mip);
+                std::uint32_t x = 0, y = 0, z = 0, w = level_w, h = level_h, d = level_d;
                 if (!region.is_none())
                 {
                     py::sequence seq = py::cast<py::sequence>(region);
-                    // ValueError, unlike the rest of them: a 3-tuple is malformed on
-                    // its own, and no image has to be consulted to say so.
-                    if (py::len(seq) != 4)
+                    // ValueError, unlike the rest of them: a wrong-length tuple is
+                    // malformed on its own, and no image has to be consulted to say
+                    // so. A 2D image takes 4 numbers, a volume takes 6 — the
+                    // dimension count of the image decides which, exactly as the
+                    // array shape does on create_image.
+                    const bool volume = self->is_3d();
+                    const size_t expected_len = volume ? 6 : 4;
+                    if (py::len(seq) != expected_len)
                     {
-                        throw py::value_error("update(region=): expected (x, y, width, height)");
+                        throw py::value_error(
+                            volume ? "update(region=): a 3D image expects (x, y, z, width, height, depth)"
+                                   : "update(region=): expected (x, y, width, height)");
                     }
-                    x = py::cast<std::uint32_t>(seq[0]);
-                    y = py::cast<std::uint32_t>(seq[1]);
-                    w = py::cast<std::uint32_t>(seq[2]);
-                    h = py::cast<std::uint32_t>(seq[3]);
-                    if (w == 0 || h == 0 || !fits_within(x, w, level_w) || !fits_within(y, h, level_h))
+                    if (volume)
+                    {
+                        x = py::cast<std::uint32_t>(seq[0]);
+                        y = py::cast<std::uint32_t>(seq[1]);
+                        z = py::cast<std::uint32_t>(seq[2]);
+                        w = py::cast<std::uint32_t>(seq[3]);
+                        h = py::cast<std::uint32_t>(seq[4]);
+                        d = py::cast<std::uint32_t>(seq[5]);
+                    }
+                    else
+                    {
+                        x = py::cast<std::uint32_t>(seq[0]);
+                        y = py::cast<std::uint32_t>(seq[1]);
+                        w = py::cast<std::uint32_t>(seq[2]);
+                        h = py::cast<std::uint32_t>(seq[3]);
+                        d = 1;
+                    }
+                    if (w == 0 || h == 0 || d == 0 || !fits_within(x, w, level_w) || !fits_within(y, h, level_h) ||
+                        !fits_within(z, d, level_d))
                     {
                         raise_error(err_resource(
                             std::format(
-                                "update(region=({}, {}, {}, {})): does not fit in the {}x{} of mip {}",
-                                x,
-                                y,
+                                "update(region=): the {}x{}x{} region at ({}, {}, {}) does not fit in the "
+                                "{}x{}x{} of mip {}",
                                 w,
                                 h,
+                                d,
+                                x,
+                                y,
+                                z,
                                 level_w,
                                 level_h,
+                                level_d,
                                 mip)));
                     }
                 }
 
-                std::vector<std::byte> pixels = update_pixels_from_numpy(*self, array, w, h);
+                std::vector<std::byte> pixels = update_pixels_from_numpy(*self, array, w, h, d);
 
                 auto* manager = static_cast<UploadManager*>(context->upload_manager());
                 manager->update(
@@ -218,8 +245,9 @@ void bind_resources(py::module_& m)
                     std::move(pixels),
                     layer,
                     mip,
-                    VkOffset2D{static_cast<std::int32_t>(x), static_cast<std::int32_t>(y)},
-                    VkExtent2D{w, h});
+                    VkOffset3D{
+                        static_cast<std::int32_t>(x), static_cast<std::int32_t>(y), static_cast<std::int32_t>(z)},
+                    VkExtent3D{w, h, d});
             },
             py::arg("array"),
             py::kw_only(),

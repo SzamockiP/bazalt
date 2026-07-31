@@ -2,6 +2,7 @@
 #include <volk.h>
 #include <vk_mem_alloc.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -223,7 +224,8 @@ public:
         std::uint32_t array_layers = 1,
         bool cube = false,
         VkImageView storage_view = VK_NULL_HANDLE,
-        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT)
+        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT,
+        std::uint32_t depth = 1)
         : context_(std::move(context)),
           image_(image),
           allocation_(allocation),
@@ -232,6 +234,7 @@ public:
           format_(format),
           width_(width),
           height_(height),
+          depth_(depth),
           mip_levels_(mip_levels),
           array_layers_(array_layers),
           cube_(cube),
@@ -314,6 +317,17 @@ public:
     std::uint32_t height() const
     {
         return height_;
+    }
+    // The Z extent. 1 for every 2D image; >1 only for a volume created with
+    // create_image(depth=). A volume always has exactly one array layer —
+    // Vulkan's own rule — so depth and layers can never both be >1.
+    std::uint32_t depth() const
+    {
+        return depth_;
+    }
+    bool is_3d() const
+    {
+        return depth_ > 1;
     }
     std::uint32_t mip_levels() const
     {
@@ -618,10 +632,13 @@ public:
                (dst_props.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) != 0;
     }
 
-    static std::uint32_t full_mip_count(std::uint32_t width, std::uint32_t height)
+    // The chain length Vulkan derives from an extent: floor(log2(max axis)) + 1.
+    // Depth participates for a volume — a 1x1x64 image has 7 levels — and
+    // defaults to 1 so every 2D caller reads as before.
+    static std::uint32_t full_mip_count(std::uint32_t width, std::uint32_t height, std::uint32_t depth = 1)
     {
         std::uint32_t mips = 1;
-        std::uint32_t size = width > height ? width : height;
+        std::uint32_t size = (std::ranges::max)({width, height, depth});
         while (size > 1)
         {
             size /= 2;
@@ -633,7 +650,8 @@ public:
     // An empty image: no contents, layout UNDEFINED. The building block for
     // render-target attachments and array/cubemap uploads. `array_layers > 1`
     // makes it a texture array (view 2D_ARRAY); `cube` makes it a cubemap (6
-    // layers, view CUBE + a second 2D_ARRAY view for storage-image writes).
+    // layers, view CUBE + a second 2D_ARRAY view for storage-image writes);
+    // `depth > 1` makes it a VK_IMAGE_TYPE_3D volume (view 3D, one layer).
     static std::expected<std::shared_ptr<Image>, Error> create_empty(
         Context& context,
         std::uint32_t width,
@@ -642,12 +660,27 @@ public:
         std::uint32_t mip_levels = 1,
         std::uint32_t array_layers = 1,
         bool cube = false,
-        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT)
+        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT,
+        std::uint32_t depth = 1)
     {
-        if (width == 0 || height == 0)
+        if (width == 0 || height == 0 || depth == 0)
         {
             return std::unexpected(
-                err_resource(std::format("Image dimensions must be non-zero, got {}x{}", width, height)));
+                err_resource(std::format("Image dimensions must be non-zero, got {}x{}x{}", width, height, depth)));
+        }
+        // Vulkan's own rule: a 3D image has exactly one array layer, so a
+        // layered or cube volume is not a combination that exists. Multisampled
+        // 3D images do not exist either (VUID-VkImageCreateInfo-samples-02257).
+        if (depth > 1 && (array_layers > 1 || cube))
+        {
+            return std::unexpected(err_resource(
+                "A 3D image (depth>1) cannot have layers or be a cubemap: Vulkan gives a "
+                "volume exactly one array layer. Use depth= alone, or layers=/cube= on a "
+                "2D image."));
+        }
+        if (depth > 1 && samples != VK_SAMPLE_COUNT_1_BIT)
+        {
+            return std::unexpected(err_resource("A 3D image (depth>1) cannot be multisampled"));
         }
         // A multisampled image is an MSAA attachment and nothing else. It can be a
         // layered attachment (MSAA render-to-layer resolves per layer), but it can't
@@ -678,16 +711,28 @@ public:
                 err_unsupported(std::format("This device supports no {} format", format_name(format))));
         }
         const VkImageAspectFlags aspect = aspect_mask_for(vk_fmt);
-        const VkImageViewType view_type =
-            cube ? VK_IMAGE_VIEW_TYPE_CUBE : (array_layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D);
+        const VkImageViewType view_type = depth > 1 ? VK_IMAGE_VIEW_TYPE_3D
+                                          : cube    ? VK_IMAGE_VIEW_TYPE_CUBE
+                                                    : (array_layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                                                                        : VK_IMAGE_VIEW_TYPE_2D);
+
+        // 2D_ARRAY_COMPATIBLE is what later lets a 2D view select one Z slice
+        // of the volume as a render-target attachment. It costs nothing where
+        // legal, and a portability driver that lacks imageView2DOn3DImage would
+        // reject the flag itself — so it is set only where the feature answers.
+        VkImageCreateFlags flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
+        if (depth > 1 && context.supports(Feature::IMAGE_VIEW_2D_ON_3D))
+        {
+            flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
+        }
 
         VkImageCreateInfo imageInfo{
             .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
             .pNext = nullptr,
-            .flags = static_cast<VkImageCreateFlags>(cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0),
-            .imageType = VK_IMAGE_TYPE_2D,
+            .flags = flags,
+            .imageType = depth > 1 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D,
             .format = vk_fmt,
-            .extent = {width, height, 1},
+            .extent = {width, height, depth},
             .mipLevels = mip_levels,
             .arrayLayers = array_layers,
             .samples = samples,
@@ -765,24 +810,29 @@ public:
             array_layers,
             cube,
             storage_view,
-            samples);
+            samples,
+            depth);
     }
 
     // From caller-provided pixels (numpy arrays land here). UNORM by default at
     // the binding layer: arrays are data, files are pictures. One mip by default
     // — data images don't want surprise filtering — but `mipmaps` opts a numpy
     // texture into the full chain (falling back to one level when the format
-    // can't be blitted, exactly like load_from_file).
+    // can't be blitted, exactly like load_from_file). `depth > 1` makes it a
+    // volume: the pixels are `depth` slices of width×height back to back, which
+    // is exactly what a C-contiguous (d, h, w, c) numpy array is.
     static std::expected<std::shared_ptr<Image>, Error> create_from_pixels(
         Context& context,
         const void* pixels,
         std::uint32_t width,
         std::uint32_t height,
         Format format,
-        bool mipmaps = false)
+        bool mipmaps = false,
+        std::uint32_t depth = 1)
     {
-        const std::uint32_t mips = mipmaps && can_generate_mips(context, format) ? full_mip_count(width, height) : 1;
-        auto image = create_empty(context, width, height, format, mips);
+        const std::uint32_t mips = mipmaps && can_generate_mips(context, format) ? full_mip_count(width, height, depth)
+                                                                                 : 1;
+        auto image = create_empty(context, width, height, format, mips, 1, false, VK_SAMPLE_COUNT_1_BIT, depth);
         if (!image)
         {
             return image;
@@ -892,7 +942,9 @@ public:
         }
         const std::uint32_t mip_width = mip_extent(width_, mip);
         const std::uint32_t mip_height = mip_extent(height_, mip);
-        const VkDeviceSize size = static_cast<VkDeviceSize>(mip_width) * mip_height * info.bytes_per_pixel * layers;
+        const std::uint32_t mip_depth = mip_extent(depth_, mip);
+        const VkDeviceSize size = static_cast<VkDeviceSize>(mip_width) * mip_height * mip_depth * info.bytes_per_pixel *
+                                  layers;
         const VkImageAspectFlags aspect = aspect_mask_for(vk_format());
 
         auto staging_pair = create_staging_buffer(*context_, size, Staging::Readback);
@@ -940,7 +992,7 @@ public:
                     .bufferImageHeight = 0,
                     .imageSubresource = {aspect, mip, base_layer, layers},
                     .imageOffset = {0, 0, 0},
-                    .imageExtent = {mip_width, mip_height, 1}};
+                    .imageExtent = {mip_width, mip_height, mip_depth}};
                 context_->vk().vkCmdCopyImageToBuffer(
                     cmd, image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
 
@@ -1057,13 +1109,15 @@ public:
     //
     // Only the named subresource is transitioned, so an update to one cube face
     // leaves the other five alone.
+    // Offsets and extents are 3D since 0.23: for a 2D image z is 0 and the depth
+    // is 1, for a volume they select the Z range the update writes.
     void record_update_commands(
         VkCommandBuffer cmd,
         VkBuffer staging,
         std::uint32_t layer,
         std::uint32_t mip,
-        VkOffset2D offset,
-        VkExtent2D extent,
+        VkOffset3D offset,
+        VkExtent3D extent,
         VkImageLayout from)
     {
         const VkImageAspectFlags aspect = aspect_mask_for(vk_format());
@@ -1092,8 +1146,8 @@ public:
             .bufferRowLength = 0,
             .bufferImageHeight = 0,
             .imageSubresource = {aspect, mip, layer, 1},
-            .imageOffset = {offset.x, offset.y, 0},
-            .imageExtent = {extent.width, extent.height, 1}};
+            .imageOffset = offset,
+            .imageExtent = extent};
         context_->vk().vkCmdCopyBufferToImage(cmd, staging, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
         record_image_transition(
@@ -1162,19 +1216,24 @@ public:
 
         std::int32_t mip_width = static_cast<std::int32_t>(width_);
         std::int32_t mip_height = static_cast<std::int32_t>(height_);
+        // Depth halves alongside width and height for a volume (it is 1 and
+        // stays 1 for everything else), so the loop terminates exactly where
+        // full_mip_count says the chain ends.
+        std::int32_t mip_depth = static_cast<std::int32_t>(depth_);
 
         for (std::uint32_t i = 1; i < mip_levels_; ++i)
         {
             const std::int32_t next_width = mip_width > 1 ? mip_width / 2 : 1;
             const std::int32_t next_height = mip_height > 1 ? mip_height / 2 : 1;
+            const std::int32_t next_depth = mip_depth > 1 ? mip_depth / 2 : 1;
 
             // One blit with layerCount = array_layers_ fills level i for every
             // face/layer at once (they share mip dimensions).
             VkImageBlit blit{
                 .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 0, array_layers_},
-                .srcOffsets = {{0, 0, 0}, {mip_width, mip_height, 1}},
+                .srcOffsets = {{0, 0, 0}, {mip_width, mip_height, mip_depth}},
                 .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, array_layers_},
-                .dstOffsets = {{0, 0, 0}, {next_width, next_height, 1}}};
+                .dstOffsets = {{0, 0, 0}, {next_width, next_height, next_depth}}};
             context_->vk().vkCmdBlitImage(
                 cmd,
                 image_,
@@ -1240,6 +1299,7 @@ public:
 
             mip_width = next_width;
             mip_height = next_height;
+            mip_depth = next_depth;
         }
     }
 
@@ -1249,7 +1309,10 @@ public:
     std::expected<std::pair<VkBuffer, VmaAllocation>, Error> create_filled_staging(Context& context, const void* pixels)
     {
         const FormatInfo info = format_info(format_);
-        const VkDeviceSize size = static_cast<VkDeviceSize>(width_) * height_ * info.bytes_per_pixel * array_layers_;
+        // Layers and depth are never both >1 (create_empty refuses it), so one
+        // multiply chain covers the array case and the volume case.
+        const VkDeviceSize size = static_cast<VkDeviceSize>(width_) * height_ * info.bytes_per_pixel * array_layers_ *
+                                  depth_;
         return create_staging_buffer(context, size, Staging::Upload, pixels);
     }
 
@@ -1437,12 +1500,12 @@ private:
             .bufferImageHeight = 0,
             .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, array_layers_},
             .imageOffset = {0, 0, 0},
-            .imageExtent = {width_, height_, 1}};
+            .imageExtent = {width_, height_, depth_}};
         context_->vk().vkCmdCopyBufferToImage(cmd, staging, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
         if (mips > 1)
         {
-            record_mip_generation(context_->vk(), cmd, image_, width_, height_, mips, array_layers_);
+            record_mip_generation(context_->vk(), cmd, image_, width_, height_, mips, array_layers_, depth_);
         }
         else
         {
@@ -1474,10 +1537,12 @@ private:
         std::uint32_t width,
         std::uint32_t height,
         std::uint32_t mips,
-        std::uint32_t layers = 1)
+        std::uint32_t layers = 1,
+        std::uint32_t depth = 1)
     {
         std::int32_t mip_width = static_cast<std::int32_t>(width);
         std::int32_t mip_height = static_cast<std::int32_t>(height);
+        std::int32_t mip_depth = static_cast<std::int32_t>(depth);
 
         // Every layer shares mip dimensions, so one blit with layerCount = layers
         // generates the whole level for all faces/layers at once.
@@ -1500,12 +1565,13 @@ private:
 
             const std::int32_t next_width = mip_width > 1 ? mip_width / 2 : 1;
             const std::int32_t next_height = mip_height > 1 ? mip_height / 2 : 1;
+            const std::int32_t next_depth = mip_depth > 1 ? mip_depth / 2 : 1;
 
             VkImageBlit blit{
                 .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 0, layers},
-                .srcOffsets = {{0, 0, 0}, {mip_width, mip_height, 1}},
+                .srcOffsets = {{0, 0, 0}, {mip_width, mip_height, mip_depth}},
                 .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, layers},
-                .dstOffsets = {{0, 0, 0}, {next_width, next_height, 1}}};
+                .dstOffsets = {{0, 0, 0}, {next_width, next_height, next_depth}}};
             vk.vkCmdBlitImage(
                 cmd,
                 image,
@@ -1533,6 +1599,7 @@ private:
 
             mip_width = next_width;
             mip_height = next_height;
+            mip_depth = next_depth;
         }
 
         record_image_transition(
@@ -1570,6 +1637,7 @@ private:
     Format format_ = Format::RGBA8;
     std::uint32_t width_ = 0;
     std::uint32_t height_ = 0;
+    std::uint32_t depth_ = 1; // Z extent; >1 makes this a VK_IMAGE_TYPE_3D volume
     std::uint32_t mip_levels_ = 1;
     std::uint32_t array_layers_ = 1;
     bool cube_ = false;
@@ -1654,9 +1722,11 @@ inline void record_image_copy(
     for (std::uint32_t mip = 0; mip < mips; ++mip)
     {
         // Level dimensions floor at 1, which is what the mip chain of a
-        // non-square image does on its short axis before the long one.
+        // non-square image does on its short axis before the long one. Depth
+        // participates for a volume and is 1 everywhere else.
         const std::uint32_t w = (std::ranges::max)(src.width() >> mip, 1u);
         const std::uint32_t h = (std::ranges::max)(src.height() >> mip, 1u);
+        const std::uint32_t d = (std::ranges::max)(src.depth() >> mip, 1u);
         regions.push_back(
             VkImageCopy{
                 .srcSubresource =
@@ -1665,7 +1735,7 @@ inline void record_image_copy(
                 .dstSubresource =
                     {.aspectMask = dst.aspect(), .mipLevel = mip, .baseArrayLayer = 0, .layerCount = layers},
                 .dstOffset = {0, 0, 0},
-                .extent = {w, h, 1}});
+                .extent = {w, h, d}});
     }
     vk.vkCmdCopyImage(
         cmd,
@@ -1749,10 +1819,17 @@ inline void record_image_blit(
 
     VkImageBlit region{
         .srcSubresource = {.aspectMask = src.aspect(), .mipLevel = 0, .baseArrayLayer = 0, .layerCount = layers},
-        .srcOffsets = {{0, 0, 0}, {static_cast<std::int32_t>(src.width()), static_cast<std::int32_t>(src.height()), 1}},
+        .srcOffsets =
+            {{0, 0, 0},
+             {static_cast<std::int32_t>(src.width()),
+              static_cast<std::int32_t>(src.height()),
+              static_cast<std::int32_t>(src.depth())}},
         .dstSubresource = {.aspectMask = dst.aspect(), .mipLevel = 0, .baseArrayLayer = 0, .layerCount = layers},
         .dstOffsets = {
-            {0, 0, 0}, {static_cast<std::int32_t>(dst.width()), static_cast<std::int32_t>(dst.height()), 1}}};
+            {0, 0, 0},
+            {static_cast<std::int32_t>(dst.width()),
+             static_cast<std::int32_t>(dst.height()),
+             static_cast<std::int32_t>(dst.depth())}}};
     vk.vkCmdBlitImage(
         cmd,
         src.vk_image(),

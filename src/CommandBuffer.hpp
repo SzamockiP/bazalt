@@ -918,20 +918,22 @@ public:
                 "cmd.copy_image() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
-        if (src->width() != dst->width() || src->height() != dst->height() || src->format() != dst->format() ||
-            src->array_layers() != dst->array_layers())
+        if (src->width() != dst->width() || src->height() != dst->height() || src->depth() != dst->depth() ||
+            src->format() != dst->format() || src->array_layers() != dst->array_layers())
         {
             return std::unexpected(err_resource(
                 std::format(
                     "copy_image: source and destination must match in size, format and layer "
-                    "count. Got {}x{} {} ({} layers) into {}x{} {} ({} layers). A resize or a "
-                    "format change is a render pass, not a copy.",
+                    "count. Got {}x{}x{} {} ({} layers) into {}x{}x{} {} ({} layers). A resize "
+                    "or a format change is a render pass, not a copy.",
                     src->width(),
                     src->height(),
+                    src->depth(),
                     format_name(src->format()),
                     src->array_layers(),
                     dst->width(),
                     dst->height(),
+                    dst->depth(),
                     format_name(dst->format()),
                     dst->array_layers())));
         }
@@ -1018,6 +1020,15 @@ public:
             return std::unexpected(err_resource(
                 "blit_image: a multisampled image cannot be blitted. Render into it and "
                 "blit the resolved attachment"));
+        }
+        // Vulkan requires both ends of a blit to be the same image type, so a
+        // volume scales into a volume — resampling a volume into a 2D image is a
+        // shader's job (sample the slice you want).
+        if (src->is_3d() != dst->is_3d())
+        {
+            return std::unexpected(err_resource(
+                "blit_image: a 3D image can only be blitted into another 3D image. To "
+                "flatten a volume, sample it in a shader."));
         }
         // A blit filters, and filtering is a format capability rather than a
         // given. Checking here names the format; letting it through produces a

@@ -41,7 +41,8 @@ void bind_enums(py::module_& m)
         // restrictions only a portability subset applies. See Features.hpp.
         .value("COMPARISON_SAMPLER", Feature::COMPARISON_SAMPLER)
         .value("SAMPLER_MIP_LOD_BIAS", Feature::SAMPLER_MIP_LOD_BIAS)
-        .value("MULTISAMPLE_ARRAYS", Feature::MULTISAMPLE_ARRAYS);
+        .value("MULTISAMPLE_ARRAYS", Feature::MULTISAMPLE_ARRAYS)
+        .value("IMAGE_VIEW_2D_ON_3D", Feature::IMAGE_VIEW_2D_ON_3D);
 
     // The gamepad layout GLFW maps every known pad onto, renamed rather than
     // translated: the values ARE the GLFW ones, so the two cannot drift.

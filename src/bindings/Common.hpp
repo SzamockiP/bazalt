@@ -310,26 +310,37 @@ inline size_t contiguous_nbytes(const py::buffer_info& info, const char* what)
     return static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
 }
 
-// One (h, w) or (h, w, channels) array → its GPU Format + dimensions. UNORM,
-// never sRGB (arrays are data, files are pictures). Raises a ResourceError on
-// an unsupported dtype/shape. Shared by the single-image and layered
-// (texture array / cubemap) create_image paths.
+// One (h, w), (h, w, channels) or (d, h, w, channels) array → its GPU Format +
+// dimensions. UNORM, never sRGB (arrays are data, files are pictures). Raises a
+// ResourceError on an unsupported dtype/shape. Shared by the single-image and
+// layered (texture array / cubemap) create_image paths.
+//
+// The dimension count IS the disambiguation: ndim 3 stays (h, w, channels) as
+// it always was, and a volume is ndim 4 — a single-channel volume is one
+// arr[..., None] away. A depth= kwarg on the array overload would be a
+// validation-only argument, which is the shape the design notes condemn.
 struct ArrayImageSpec
 {
     Format format;
     uint32_t width;
     uint32_t height;
+    uint32_t depth = 1;
 };
 inline ArrayImageSpec array_image_spec(const py::buffer_info& info)
 {
-    if (info.ndim != 2 && info.ndim != 3)
+    if (info.ndim != 2 && info.ndim != 3 && info.ndim != 4)
     {
         raise_error(err_resource(
-            std::format("create_image expects a (h, w) or (h, w, channels) array, got {} dimensions", info.ndim)));
+            std::format(
+                "create_image expects a (h, w) or (h, w, channels) array — or (d, h, w, "
+                "channels) for a 3D image — got {} dimensions",
+                info.ndim)));
     }
-    const auto height = static_cast<uint32_t>(info.shape[0]);
-    const auto width = static_cast<uint32_t>(info.shape[1]);
-    const py::ssize_t channels = info.ndim == 3 ? info.shape[2] : 1;
+    const bool volume = info.ndim == 4;
+    const auto depth = volume ? static_cast<uint32_t>(info.shape[0]) : 1u;
+    const auto height = static_cast<uint32_t>(info.shape[volume ? 1 : 0]);
+    const auto width = static_cast<uint32_t>(info.shape[volume ? 2 : 1]);
+    const py::ssize_t channels = volume ? info.shape[3] : (info.ndim == 3 ? info.shape[2] : 1);
 
     std::optional<Format> format;
     if (info.format == "B")
@@ -365,14 +376,19 @@ inline ArrayImageSpec array_image_spec(const py::buffer_info& info)
                 "Pad to 4 channels first, e.g. "
                 "np.concatenate([arr, np.full_like(arr[..., :1], 255)], axis=-1)"));
         }
+        // A raw (d, h, w) float volume lands here with its whole depth read as
+        // channels, so the message must teach the 4-dim rule or the caller
+        // cannot find it.
         raise_error(err_resource(
             std::format(
                 "create_image: unsupported dtype/shape (dtype '{}', {} channel(s)). "
-                "Supported: uint8 x 1/2/4 channels, float16 x 1/4, float32 x 1/4",
+                "Supported: uint8 x 1/2/4 channels, float16 x 1/4, float32 x 1/4. "
+                "For a 3D image pass (depth, h, w, channels) — a single-channel "
+                "volume is arr[..., None].",
                 info.format,
                 channels)));
     }
-    return {*format, width, height};
+    return {*format, width, height, depth};
 }
 
 inline const char* severity_name(Severity severity)
@@ -765,8 +781,9 @@ struct OcclusionQuery
 };
 
 // Readback shaped for numpy: (h, w, channels) — or (h, w) for single-channel
-// formats — with the dtype the format table dictates. Shared by Image.read and
-// RenderTarget.read_pixels.
+// formats, with a leading depth axis for a volume — with the dtype the format
+// table dictates. Shared by Image.read and RenderTarget.read_pixels. Mirrors
+// the create_image convention: a volume reads back as (d, h, w[, channels]).
 inline py::array image_to_numpy(Image& image, std::uint32_t layer = 0, std::uint32_t mip = 0)
 {
     auto bytes = unwrap(image.read(/*all_layers=*/false, layer, mip), nullptr);
@@ -776,15 +793,20 @@ inline py::array image_to_numpy(Image& image, std::uint32_t layer = 0, std::uint
     // shape the caller has to correct for.
     const auto h = static_cast<py::ssize_t>(mip_extent(image.height(), mip));
     const auto w = static_cast<py::ssize_t>(mip_extent(image.width(), mip));
+    const auto d = static_cast<py::ssize_t>(mip_extent(image.depth(), mip));
 
     std::vector<py::ssize_t> shape;
-    if (info.channels == 1)
+    if (image.is_3d())
     {
-        shape = {h, w};
+        shape = {d, h, w};
     }
     else
     {
-        shape = {h, w, static_cast<py::ssize_t>(info.channels)};
+        shape = {h, w};
+    }
+    if (info.channels != 1)
+    {
+        shape.push_back(static_cast<py::ssize_t>(info.channels));
     }
 
     py::array out(py::dtype(info.numpy_dtype), shape);
@@ -807,7 +829,8 @@ inline std::vector<std::byte> update_pixels_from_numpy(
     Image& image,
     const py::array& array,
     std::uint32_t width,
-    std::uint32_t height)
+    std::uint32_t height,
+    std::uint32_t depth = 1)
 {
     const FormatInfo info = format_info(image.format());
     if (info.numpy_dtype[0] == '\0')
@@ -836,13 +859,26 @@ inline std::vector<std::byte> update_pixels_from_numpy(
 
     const py::ssize_t expected_h = static_cast<py::ssize_t>(height);
     const py::ssize_t expected_w = static_cast<py::ssize_t>(width);
+    const py::ssize_t expected_d = static_cast<py::ssize_t>(depth);
     const py::ssize_t ndim = array.ndim();
-    const bool shape_ok =
-        info.channels == 1
-            ? ((ndim == 2 && array.shape(0) == expected_h && array.shape(1) == expected_w) ||
-               (ndim == 3 && array.shape(0) == expected_h && array.shape(1) == expected_w && array.shape(2) == 1))
-            : (ndim == 3 && array.shape(0) == expected_h && array.shape(1) == expected_w &&
-               array.shape(2) == static_cast<py::ssize_t>(info.channels));
+    bool shape_ok = false;
+    if (depth > 1)
+    {
+        // A volume region takes the create_image convention: (d, h, w) for one
+        // channel — with a trailing 1 accepted — or (d, h, w, channels).
+        const bool dhw = ndim >= 3 && array.shape(0) == expected_d && array.shape(1) == expected_h &&
+                         array.shape(2) == expected_w;
+        shape_ok = info.channels == 1 ? (dhw && (ndim == 3 || (ndim == 4 && array.shape(3) == 1)))
+                                      : (dhw && ndim == 4 && array.shape(3) == static_cast<py::ssize_t>(info.channels));
+    }
+    else
+    {
+        shape_ok = info.channels == 1 ? ((ndim == 2 && array.shape(0) == expected_h && array.shape(1) == expected_w) ||
+                                         (ndim == 3 && array.shape(0) == expected_h && array.shape(1) == expected_w &&
+                                          array.shape(2) == 1))
+                                      : (ndim == 3 && array.shape(0) == expected_h && array.shape(1) == expected_w &&
+                                         array.shape(2) == static_cast<py::ssize_t>(info.channels));
+    }
     if (!shape_ok)
     {
         std::string got;
@@ -850,18 +886,17 @@ inline std::vector<std::byte> update_pixels_from_numpy(
         {
             got += (i ? ", " : "") + std::to_string(array.shape(i));
         }
+        std::string expected = depth > 1 ? std::format("({}, {}, {}, {})", depth, height, width, info.channels)
+                                         : std::format("({}, {}, {})", height, width, info.channels);
         raise_error(err_resource(
             std::format(
-                "update(): expected an array of shape ({}, {}, {}) for a {} region of a {} image, got ({})",
-                height,
-                width,
-                info.channels,
-                format_name(image.format()),
+                "update(): expected an array of shape {} for this region of a {} image, got ({})",
+                expected,
                 format_name(image.format()),
                 got)));
     }
 
-    const std::size_t size = static_cast<std::size_t>(width) * height * info.bytes_per_pixel;
+    const std::size_t size = static_cast<std::size_t>(width) * height * depth * info.bytes_per_pixel;
     std::vector<std::byte> out(size);
     std::memcpy(out.data(), array.data(), size);
     return out;

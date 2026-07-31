@@ -307,11 +307,21 @@ void bind_context(py::module_& m)
                uint32_t width,
                uint32_t height,
                Format format,
+               uint32_t depth,
                uint32_t layers,
                bool cube,
                uint32_t mip_levels,
                const std::string& name) -> py::object
             {
+                // depth= is the Z extent of a 3D image, and Vulkan gives a
+                // volume exactly one array layer — so the combinations are
+                // refused here with the fix, before create_empty re-guards.
+                if (depth > 1 && (layers != 1 || cube))
+                {
+                    raise_error(err_resource(
+                        "create_image(depth=): a 3D image cannot have layers or be a cubemap. "
+                        "Use depth= alone for a volume, or layers=/cube= on a 2D image."));
+                }
                 if (cube)
                 {
                     if (layers != 1 && layers != 6)
@@ -333,22 +343,25 @@ void bind_context(py::module_& m)
                 // An empty mipped image allocates the chain; the levels start empty,
                 // to be filled by rendering / compute into mip 0 then
                 // cmd.generate_mipmaps(). Cap at the dimensions' full chain.
-                if (width > 0 && height > 0)
+                if (width > 0 && height > 0 && depth > 0)
                 {
-                    const uint32_t max_mips = Image::full_mip_count(width, height);
+                    const uint32_t max_mips = Image::full_mip_count(width, height, depth);
                     if (mip_levels < 1 || mip_levels > max_mips)
                     {
                         raise_error(err_resource(
                             std::format(
-                                "create_image: mip_levels must be 1..{} for a {}x{} image, got {}",
+                                "create_image: mip_levels must be 1..{} for a {}x{}x{} image, got {}",
                                 max_mips,
                                 width,
                                 height,
+                                depth,
                                 mip_levels)));
                     }
                 }
                 auto image = unwrap(
-                    Image::create_empty(self, width, height, format, mip_levels, layers, cube), self.logger().get());
+                    Image::create_empty(
+                        self, width, height, format, mip_levels, layers, cube, VK_SAMPLE_COUNT_1_BIT, depth),
+                    self.logger().get());
                 name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
                 return py::cast(image);
             },
@@ -356,6 +369,7 @@ void bind_context(py::module_& m)
             py::arg("height"),
             py::arg("format") = Format::RGBA8,
             py::kw_only(),
+            py::arg("depth") = 1,
             py::arg("layers") = 1,
             py::arg("cube") = false,
             py::arg("mip_levels") = 1,
@@ -374,9 +388,11 @@ void bind_context(py::module_& m)
                 }
                 py::buffer_info info = b.request();
                 contiguous_nbytes(info, "create_image");
+                // A 4-dim (d, h, w, c) array makes a volume; spec.depth carries it.
                 const ArrayImageSpec spec = array_image_spec(info);
                 auto image = unwrap(
-                    Image::create_from_pixels(self, info.ptr, spec.width, spec.height, spec.format, mipmaps),
+                    Image::create_from_pixels(
+                        self, info.ptr, spec.width, spec.height, spec.format, mipmaps, spec.depth),
                     self.logger().get());
                 name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
                 return py::cast(image);
@@ -416,6 +432,12 @@ void bind_context(py::module_& m)
                 {
                     contiguous_nbytes(infos[i], "create_image");
                     const ArrayImageSpec s = array_image_spec(infos[i]);
+                    if (s.depth > 1)
+                    {
+                        raise_error(err_resource(
+                            "create_image: a list of volumes has no meaning. A layer is a (h, w[, c]) "
+                            "array; a 3D image is ONE (d, h, w, c) array."));
+                    }
                     if (!spec)
                     {
                         spec = s;
@@ -488,23 +510,27 @@ void bind_context(py::module_& m)
                 }
                 std::vector<std::byte> pixels = unwrap(std::move(bytes), self.logger().get());
 
-                auto image =
-                    layers > 1
-                        ? unwrap(
-                              Image::create_layered_from_pixels(
-                                  self,
-                                  pixels.data(),
-                                  source->width(),
-                                  source->height(),
-                                  layers,
-                                  source->is_cube(),
-                                  source->format(),
-                                  mipmaps),
-                              self.logger().get())
-                        : unwrap(
-                              Image::create_from_pixels(
-                                  self, pixels.data(), source->width(), source->height(), source->format(), mipmaps),
-                              self.logger().get());
+                auto image = layers > 1 ? unwrap(
+                                              Image::create_layered_from_pixels(
+                                                  self,
+                                                  pixels.data(),
+                                                  source->width(),
+                                                  source->height(),
+                                                  layers,
+                                                  source->is_cube(),
+                                                  source->format(),
+                                                  mipmaps),
+                                              self.logger().get())
+                                        : unwrap(
+                                              Image::create_from_pixels(
+                                                  self,
+                                                  pixels.data(),
+                                                  source->width(),
+                                                  source->height(),
+                                                  source->format(),
+                                                  mipmaps,
+                                                  source->depth()),
+                                              self.logger().get());
 
                 // Levels above 0 arrive from the SOURCE rather than being
                 // regenerated here. 0.15 shipped the regenerating version and
@@ -525,6 +551,7 @@ void bind_context(py::module_& m)
                     {
                         const std::uint32_t w = mip_extent(source->width(), mip);
                         const std::uint32_t h = mip_extent(source->height(), mip);
+                        const std::uint32_t d = mip_extent(source->depth(), mip);
                         for (std::uint32_t layer = 0; layer < layers; ++layer)
                         {
                             std::expected<std::vector<std::byte>, Error> level;
@@ -537,8 +564,8 @@ void bind_context(py::module_& m)
                                 unwrap(std::move(level), self.logger().get()),
                                 layer,
                                 mip,
-                                VkOffset2D{0, 0},
-                                VkExtent2D{w, h});
+                                VkOffset3D{0, 0, 0},
+                                VkExtent3D{w, h, d});
                         }
                     }
                 }

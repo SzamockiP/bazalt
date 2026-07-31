@@ -56,7 +56,8 @@ enum class Feature
     // restrictions, so these read TRUE there by construction (0.22).
     COMPARISON_SAMPLER,   // mutableComparisonSamplers — create_sampler(compare=)
     SAMPLER_MIP_LOD_BIAS, // samplerMipLodBias — create_sampler(mip_lod_bias=)
-    MULTISAMPLE_ARRAYS    // multisampleArrayImage — samples > 1 together with layers > 1
+    MULTISAMPLE_ARRAYS,   // multisampleArrayImage — samples > 1 together with layers > 1
+    IMAGE_VIEW_2D_ON_3D   // imageView2DOn3DImage — target.layer(z) on a 3D image
 };
 
 // The feature structs bazalt reads, as one value with no pNext links between the
@@ -157,6 +158,9 @@ inline constexpr auto kFeatureTable = std::to_array<FeatureInfo>({
     {.feature = Feature::MULTISAMPLE_ARRAYS,
      .name = "MULTISAMPLE_ARRAYS",
      .portability = &VkPhysicalDevicePortabilitySubsetFeaturesKHR::multisampleArrayImage},
+    {.feature = Feature::IMAGE_VIEW_2D_ON_3D,
+     .name = "IMAGE_VIEW_2D_ON_3D",
+     .portability = &VkPhysicalDevicePortabilitySubsetFeaturesKHR::imageView2DOn3DImage},
 });
 
 inline constexpr const FeatureInfo& feature_info(Feature feature)

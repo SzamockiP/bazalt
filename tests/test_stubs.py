@@ -119,7 +119,9 @@ def test_renamed_and_new_api_is_declared():
                      # 0.23 — the keyboard follows the gamepad: values are GLFW's.
                      "class Key(", "class MouseButton(", "class CursorMode(",
                      "W = 87", "ESCAPE = 256", "MIDDLE = 2", "DISABLED = 212995",
-                     "key: Key | int", "mode: CursorMode | int"):
+                     "key: Key | int", "mode: CursorMode | int",
+                     # 0.23 — 3D textures.
+                     "IMAGE_VIEW_2D_ON_3D = 18", "def depth"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 
