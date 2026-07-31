@@ -46,9 +46,17 @@ enum class Feature
     // The three rows below live in a pNext struct rather than in
     // VkPhysicalDeviceFeatures, which is why the table has three columns as of
     // 0.21 and had one before.
-    MULTIVIEW,          // VkPhysicalDeviceVulkan11Features::multiview — target.all_layers()
-    BINDLESS,           // VkPhysicalDeviceVulkan12Features::descriptorIndexing — count= arrays
-    DRAW_INDIRECT_COUNT // VkPhysicalDeviceVulkan12Features::drawIndirectCount — count_buffer=
+    MULTIVIEW,           // VkPhysicalDeviceVulkan11Features::multiview — target.all_layers()
+    BINDLESS,            // VkPhysicalDeviceVulkan12Features::descriptorIndexing — count= arrays
+    DRAW_INDIRECT_COUNT, // VkPhysicalDeviceVulkan12Features::drawIndirectCount — count_buffer=
+    // The three rows below are the OPPOSITE shape of every row above: they name
+    // things full Vulkan always has and a portability driver may not. Metal has
+    // no Vulkan of its own, so MoltenVK reports VK_KHR_portability_subset and
+    // every restriction it applies. A device without that extension has no
+    // restrictions, so these read TRUE there by construction (0.22).
+    COMPARISON_SAMPLER,   // mutableComparisonSamplers — create_sampler(compare=)
+    SAMPLER_MIP_LOD_BIAS, // samplerMipLodBias — create_sampler(mip_lod_bias=)
+    MULTISAMPLE_ARRAYS    // multisampleArrayImage — samples > 1 together with layers > 1
 };
 
 // The feature structs bazalt reads, as one value with no pNext links between the
@@ -60,6 +68,13 @@ struct DeviceFeatures
     VkPhysicalDeviceFeatures core{};
     VkPhysicalDeviceVulkan11Features v11{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
     VkPhysicalDeviceVulkan12Features v12{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+
+    // Only meaningful when the device reports VK_KHR_portability_subset, and the
+    // flag says whether it did. Reading the struct on a full Vulkan driver would
+    // report every restriction as ON, which is backwards — see feature_available.
+    VkPhysicalDevicePortabilitySubsetFeaturesKHR portability{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR};
+    bool portability_subset = false;
 };
 
 // One query for all three structs. Both callers used to build this chain by hand
@@ -69,16 +84,27 @@ struct DeviceFeatures
 // The entry point is a parameter because the two callers reach it differently:
 // the Context uses volk's instance-level global, and list_devices holds its own
 // pointer from a throwaway instance it must not bind volk to.
+// portability_subset must come from the caller: a pNext struct for an extension
+// the device does not have is not a question the driver has to answer, and
+// asking anyway is how you read a garbage struct as "every restriction applies".
 inline DeviceFeatures query_device_features(
     PFN_vkGetPhysicalDeviceFeatures2 get_features2,
-    VkPhysicalDevice physical_device)
+    VkPhysicalDevice physical_device,
+    bool portability_subset = false)
 {
     DeviceFeatures features;
+    features.portability_subset = portability_subset;
     features.v11.pNext = &features.v12;
+    if (portability_subset)
+    {
+        features.v12.pNext = &features.portability;
+    }
     VkPhysicalDeviceFeatures2 features2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &features.v11};
     get_features2(physical_device, &features2);
     features.core = features2.features;
     features.v11.pNext = nullptr;
+    features.v12.pNext = nullptr;
+    features.portability.pNext = nullptr;
     return features;
 }
 
@@ -98,6 +124,7 @@ struct FeatureInfo
     VkBool32 VkPhysicalDeviceFeatures::* core = nullptr;
     VkBool32 VkPhysicalDeviceVulkan11Features::* v11 = nullptr;
     VkBool32 VkPhysicalDeviceVulkan12Features::* v12 = nullptr;
+    VkBool32 VkPhysicalDevicePortabilitySubsetFeaturesKHR::* portability = nullptr;
 };
 
 // std::to_array, not std::array<FeatureInfo, N>: the extent was a hardcoded 8 and
@@ -121,6 +148,15 @@ inline constexpr auto kFeatureTable = std::to_array<FeatureInfo>({
     {.feature = Feature::DRAW_INDIRECT_COUNT,
      .name = "DRAW_INDIRECT_COUNT",
      .v12 = &VkPhysicalDeviceVulkan12Features::drawIndirectCount},
+    {.feature = Feature::COMPARISON_SAMPLER,
+     .name = "COMPARISON_SAMPLER",
+     .portability = &VkPhysicalDevicePortabilitySubsetFeaturesKHR::mutableComparisonSamplers},
+    {.feature = Feature::SAMPLER_MIP_LOD_BIAS,
+     .name = "SAMPLER_MIP_LOD_BIAS",
+     .portability = &VkPhysicalDevicePortabilitySubsetFeaturesKHR::samplerMipLodBias},
+    {.feature = Feature::MULTISAMPLE_ARRAYS,
+     .name = "MULTISAMPLE_ARRAYS",
+     .portability = &VkPhysicalDevicePortabilitySubsetFeaturesKHR::multisampleArrayImage},
 });
 
 inline constexpr const FeatureInfo& feature_info(Feature feature)
@@ -148,7 +184,18 @@ inline constexpr bool feature_available(const DeviceFeatures& available, Feature
     {
         return available.v11.*(info.v11) == VK_TRUE;
     }
-    return info.v12 && available.v12.*(info.v12) == VK_TRUE;
+    if (info.v12)
+    {
+        return available.v12.*(info.v12) == VK_TRUE;
+    }
+    if (info.portability)
+    {
+        // Absent extension, no restriction. A portability row asks "may this
+        // device still do the thing full Vulkan always does", so a driver that
+        // never claimed to be a subset answers yes without being asked.
+        return !available.portability_subset || available.portability.*(info.portability) == VK_TRUE;
+    }
+    return false;
 }
 
 inline constexpr void enable_feature(DeviceFeatures& features, Feature feature)
@@ -165,6 +212,10 @@ inline constexpr void enable_feature(DeviceFeatures& features, Feature feature)
     else if (info.v12)
     {
         features.v12.*(info.v12) = VK_TRUE;
+    }
+    else if (info.portability)
+    {
+        features.portability.*(info.portability) = VK_TRUE;
     }
 }
 

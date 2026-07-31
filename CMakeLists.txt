@@ -121,6 +121,13 @@ set_source_files_properties(src/vma_impl.cpp src/stb_impl.cpp
     PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 set_target_properties(_core PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}" SUFFIX "${PYTHON_MODULE_EXTENSION}")
 
+# VK_KHR_portability_subset lives in vulkan_beta.h, so its feature struct is
+# invisible without this. Defined on every platform, not only Apple: the code that
+# reads it is the same everywhere and only the runtime answer differs, and a struct
+# that exists on one platform and not another is how you get a header that compiles
+# in CI and not on a contributor's machine.
+target_compile_definitions(_core PRIVATE VK_ENABLE_BETA_EXTENSIONS)
+
 target_compile_features(_core PRIVATE cxx_std_23)
 if(MSVC)
     # /bigobj: every pybind lambda is a template instantiation, and 0.14 pushed

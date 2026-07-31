@@ -772,6 +772,25 @@ public:
     // descriptor space is a handful of combinations, never worth evicting.
     std::expected<std::shared_ptr<Sampler>, Error> get_sampler(const SamplerDesc& desc, const std::string& name = {})
     {
+        // Full Vulkan always allows both of these, so they are questions only on a
+        // portability driver — and there the layers report a sampler the driver
+        // then ignores. Refusing here turns "the shadows look wrong on a Mac" into
+        // a sentence naming the capability to ask about (0.22).
+        if (desc.compare && !supports(Feature::COMPARISON_SAMPLER))
+        {
+            return std::unexpected(err_resource(
+                "create_sampler(compare=) needs the COMPARISON_SAMPLER feature, which this driver does not "
+                "offer. Ask ctx.supports(bz.Feature.COMPARISON_SAMPLER) and sample the depth texture "
+                "yourself where it answers False."));
+        }
+        if (desc.mip_lod_bias != 0.0f && !supports(Feature::SAMPLER_MIP_LOD_BIAS))
+        {
+            return std::unexpected(err_resource(
+                "create_sampler(mip_lod_bias=) needs the SAMPLER_MIP_LOD_BIAS feature, which this driver does "
+                "not offer. Ask ctx.supports(bz.Feature.SAMPLER_MIP_LOD_BIAS), or bias the level in the "
+                "shader with textureLod()."));
+        }
+
         const std::uint32_t key = sampler_cache_key(desc);
         // The key hashes a float, so equality of keys is not equality of
         // descriptions: compare the description before handing the handle back.
@@ -1227,8 +1246,12 @@ private:
         // vkb::PhysicalDevice::features is documented as the *selected* features,
         // not the available ones, so ask the driver directly. One query for all
         // three structs, through the same helper list_devices uses.
-        const DeviceFeatures available =
-            query_device_features(vkGetPhysicalDeviceFeatures2, ctx.vkb_physical_device_.physical_device);
+        // vk-bootstrap enables VK_KHR_portability_subset by default when the device
+        // reports it, so the struct is legal to ask for exactly when this is true.
+        ctx.portability_subset_ =
+            ctx.vkb_physical_device_.is_extension_present(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+        const DeviceFeatures available = query_device_features(
+            vkGetPhysicalDeviceFeatures2, ctx.vkb_physical_device_.physical_device, ctx.portability_subset_);
 
         // Dynamic rendering: core in 1.3, an extension on 1.2. Same capability,
         // two spellings — resolve it here so nothing else has to care.
@@ -1324,6 +1347,34 @@ private:
             }
         }
 
+        // The portability rows are lifted restrictions, not opt-in capabilities, so
+        // they go on whenever the device has them. Nobody would ask for "samplers
+        // may compare" — full Vulkan never made it a question — and leaving one off
+        // is how a comparison sampler becomes a validation error on a driver that
+        // could have done it. Enabling costs nothing: the bit is the driver's own
+        // statement that the restriction does not apply.
+        //
+        // The set is recorded either way (see the loop condition), so supports()
+        // answers True on every non-portability driver without a struct to read.
+        for (Feature portability :
+             {Feature::COMPARISON_SAMPLER, Feature::SAMPLER_MIP_LOD_BIAS, Feature::MULTISAMPLE_ARRAYS})
+        {
+            if (feature_available(available, portability))
+            {
+                enable_feature(enabled_features, portability);
+                ctx.enabled_features_.insert(portability);
+            }
+            else if (logger)
+            {
+                logger->log(
+                    Severity::Info,
+                    Source::General,
+                    std::format(
+                        "Vulkan: this driver is a Vulkan portability subset and does not offer {}",
+                        feature_name(portability)));
+            }
+        }
+
         // descriptorIndexing is a roll-up: the spec says enabling it "does not imply
         // the other minimum descriptor indexing features are also enabled", so the
         // bits an array binding actually needs are turned on one by one.
@@ -1391,10 +1442,20 @@ private:
         // are simply two of the bits in them now.
         VkPhysicalDeviceVulkan12Features features12 = ctx.negotiated_features_.v12;
         VkPhysicalDeviceVulkan11Features features11 = ctx.negotiated_features_.v11;
+        VkPhysicalDevicePortabilitySubsetFeaturesKHR portability = ctx.negotiated_features_.portability;
 
         auto dev_builder = vkb::DeviceBuilder{ctx.vkb_physical_device_};
         dev_builder.add_pNext(&features12);
         dev_builder.add_pNext(&features11);
+        // Only when the device claims the extension. Chaining it otherwise is a
+        // struct for an extension nobody enabled, and the layers say so. When the
+        // device DOES claim it, this chain is the whole point: an unlisted
+        // portability feature defaults to off, so a driver that supports comparison
+        // samplers still refuses them if nobody asked.
+        if (ctx.portability_subset_)
+        {
+            dev_builder.add_pNext(&portability);
+        }
         if (ctx.dynamic_rendering_khr_)
         {
             dev_builder.add_pNext(&dynamic_rendering_khr);
@@ -1645,6 +1706,10 @@ private:
     bool headless_ = false;
     bool swapchain_supported_ = false;
     bool dynamic_rendering_khr_ = false;
+    // Whether the device is a Vulkan portability subset (MoltenVK on macOS is the
+    // one that exists). Decides whether the portability feature struct may be read
+    // and whether it must be chained at device creation.
+    bool portability_subset_ = false;
 
     // Set by configure_features_ from enabled_features_. The default is the mask
     // every conformant device has, so a Context that somehow skipped the

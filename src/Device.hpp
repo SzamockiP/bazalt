@@ -150,6 +150,8 @@ inline std::expected<std::vector<Device>, Error> list_devices()
     auto get_properties2 = (PFN_vkGetPhysicalDeviceProperties2)load("vkGetPhysicalDeviceProperties2");
     auto get_features2 = (PFN_vkGetPhysicalDeviceFeatures2)load("vkGetPhysicalDeviceFeatures2");
     auto get_memory = (PFN_vkGetPhysicalDeviceMemoryProperties)load("vkGetPhysicalDeviceMemoryProperties");
+    auto enumerate_device_extensions =
+        (PFN_vkEnumerateDeviceExtensionProperties)load("vkEnumerateDeviceExtensionProperties");
 
     ScopeGuard cleanup(
         [&]
@@ -207,7 +209,23 @@ inline std::expected<std::vector<Device>, Error> list_devices()
         device.api_version = props2.properties.apiVersion;
         device.memory_bytes = device_local;
         std::copy(std::begin(id.deviceUUID), std::end(id.deviceUUID), device.uuid.begin());
-        device.features = query_device_features(get_features2, handle);
+        // Asked per device, because the portability rows read the opposite way for
+        // a device that is a subset and one that is not (see feature_available).
+        // A loader too old to expose the entry point simply reports no subset,
+        // which is what every non-portability driver reports anyway.
+        bool portability_subset = false;
+        if (enumerate_device_extensions)
+        {
+            std::uint32_t device_extension_count = 0;
+            enumerate_device_extensions(handle, nullptr, &device_extension_count, nullptr);
+            std::vector<VkExtensionProperties> device_extensions(device_extension_count);
+            enumerate_device_extensions(handle, nullptr, &device_extension_count, device_extensions.data());
+            portability_subset = std::ranges::any_of(
+                device_extensions,
+                [](const VkExtensionProperties& extension)
+                { return std::string_view(extension.extensionName) == VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME; });
+        }
+        device.features = query_device_features(get_features2, handle, portability_subset);
         devices.push_back(std::move(device));
     }
 

@@ -135,6 +135,18 @@ class Feature(IntEnum):
     #: A draw count the GPU decides: count_buffer= on draw_indirect and
     #: draw_indexed_indirect.
     DRAW_INDIRECT_COUNT = 14
+    #: create_sampler(compare=), which GLSL reads as sampler2DShadow. True on every
+    #: full Vulkan driver. A Vulkan portability subset may answer False: Metal has
+    #: no mutable comparison samplers, so MoltenVK can refuse them.
+    COMPARISON_SAMPLER = 15
+    #: create_sampler(mip_lod_bias=). True on every full Vulkan driver, and a
+    #: portability subset may answer False. Where it does, bias the level in the
+    #: shader with textureLod().
+    SAMPLER_MIP_LOD_BIAS = 16
+    #: A multisampled image with layers > 1. True on every full Vulkan driver, and
+    #: a portability subset may answer False, because Metal has no multisampled
+    #: texture array.
+    MULTISAMPLE_ARRAYS = 17
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
