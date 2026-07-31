@@ -1366,7 +1366,10 @@ private:
         // The set is recorded either way (see the loop condition), so supports()
         // answers True on every non-portability driver without a struct to read.
         for (Feature portability :
-             {Feature::COMPARISON_SAMPLER, Feature::SAMPLER_MIP_LOD_BIAS, Feature::MULTISAMPLE_ARRAYS})
+             {Feature::COMPARISON_SAMPLER,
+              Feature::SAMPLER_MIP_LOD_BIAS,
+              Feature::MULTISAMPLE_ARRAYS,
+              Feature::IMAGE_VIEW_2D_ON_3D})
         {
             if (feature_available(available, portability))
             {

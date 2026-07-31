@@ -203,6 +203,23 @@ inline void require_preservable(const RenderTarget& target, bool preserve, const
     }
 }
 
+// A 3D target is rendered one Z slice at a time: its whole-target view is a 3D
+// view, which Vulkan does not accept as an attachment, so the mistake is
+// refused with the fix rather than surfacing as a validation error naming a
+// view type. Same address as the two guards above: a user error, and the
+// recording methods chain.
+inline void require_sliced_when_3d(const RenderTarget& target, const char* what)
+{
+    if (const auto* offscreen = dynamic_cast<const OffscreenTarget*>(&target); offscreen && offscreen->is_3d())
+    {
+        raise_error(err_resource(
+            std::format(
+                "{}: a 3D target is rendered one slice at a time. Use target.layer(z) — "
+                "cmd.begin_rendering(target.layer(z)) — instead of the whole target.",
+                what)));
+    }
+}
+
 // Resolves a list's element type from the explicit argument or the first
 // element. `int_default` is the caller's policy: create_buffer infers UINT32
 // for integers going into an INDEX buffer, update infers INT32 — a deliberate

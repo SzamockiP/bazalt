@@ -27,6 +27,7 @@ void bind_commands(py::module_& m)
                std::uint32_t clear_stencil)
             {
                 require_same_context(self->owner(), target->owner(), "begin_rendering");
+                require_sliced_when_3d(*target, "begin_rendering");
                 auto clears = parse_clear_colors(clear_color);
                 require_preservable(*target, !clears.has_value(), "begin_rendering");
                 self->begin_rendering(std::move(target), clears, clear_depth, clear_stencil);
@@ -56,6 +57,7 @@ void bind_commands(py::module_& m)
                std::uint32_t clear_stencil)
             {
                 require_same_context(self->owner(), target->owner(), "rendering");
+                require_sliced_when_3d(*target, "rendering");
                 auto clears = parse_clear_colors(clear_color);
                 require_preservable(*target, !clears.has_value(), "rendering");
                 return RenderingScope{

@@ -529,11 +529,41 @@ public:
                     "no mip chain, and this image has {} levels",
                     first->mip_levels())));
         }
+        // A 3D color attachment is rendered one Z slice at a time through
+        // target.layer(z), and the slice view is a 2D view of a 3D image — which
+        // only a driver with imageView2DOn3DImage allows (full Vulkan always
+        // does; MoltenVK does not). Gated at creation, because every use of this
+        // target goes through that view.
+        if (first->is_3d())
+        {
+            if (!context.supports(Feature::IMAGE_VIEW_2D_ON_3D))
+            {
+                return std::unexpected(err_unsupported(
+                    "rendering into a 3D image needs the IMAGE_VIEW_2D_ON_3D feature, which this "
+                    "driver does not offer. Ask ctx.supports(bz.Feature.IMAGE_VIEW_2D_ON_3D), and "
+                    "fill the volume with a compute shader (image3D + imageStore) where it "
+                    "answers False."));
+            }
+            // Depth testing against one slice of a volume is not a case any use
+            // of a 3D target has; a depth-format 3D image is a validation
+            // minefield, and the guard is one sentence (SCOPE, DESIGN.md 0.23).
+            if (depth)
+            {
+                return std::unexpected(err_resource(
+                    "a 3D color attachment cannot combine with a depth attachment. Render the "
+                    "slices without depth, or use a layered 2D target."));
+            }
+            if (msaa)
+            {
+                return std::unexpected(err_resource("samples>1 cannot combine with a 3D attachment"));
+            }
+        }
 
         auto target = std::shared_ptr<OffscreenTarget>(new OffscreenTarget(context.shared_from_this()));
         target->extent_ = {first->width(), first->height()};
         target->samples_ = *vk_samples;
         target->layers_ = first->array_layers();
+        target->slices_ = first->depth();
         target->mip_levels_ = first->mip_levels();
         target->colors_ = std::move(colors);
         target->depth_ = std::move(depth);
@@ -879,6 +909,19 @@ public:
     // multiview GPU feature; composes with MSAA (resolves each view per layer).
     std::expected<std::shared_ptr<RenderTarget>, Error> all_layers();
 
+    // True when the color attachment is a 3D image. Such a target is rendered
+    // one Z slice at a time through layer(z): the slice view is legal, the 3D
+    // main view as an attachment is not — which is why begin_rendering on the
+    // whole target is refused at the binding layer.
+    bool is_3d() const
+    {
+        return slices_ > 1;
+    }
+    std::uint32_t slices() const
+    {
+        return slices_;
+    }
+
     const Context* owner() const override
     {
         return context_.get();
@@ -918,6 +961,19 @@ private:
                     role,
                     image.array_layers(),
                     reference.array_layers())));
+        }
+        // Also refuses mixing a 3D attachment with 2D ones: their Z extents
+        // differ. "Deep", not "depth", because the depth ATTACHMENT is the
+        // other meaning of the word in this message's own signature.
+        if (image.depth() != reference.depth())
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "every attachment must be equally deep: {} is {} deep, the first attachment "
+                    "is {} (a 3D attachment cannot mix with 2D ones)",
+                    role,
+                    image.depth(),
+                    reference.depth())));
         }
         if (image.mip_levels() != reference.mip_levels())
         {
@@ -986,6 +1042,10 @@ private:
     // Layer / mip counts every attachment shares. layers_ == 6 for a cube.
     std::uint32_t layers_ = 1;
     std::uint32_t mip_levels_ = 1;
+    // Z slices of a 3D attachment (1 for every 2D target). A volume has one
+    // array layer, so layers_ and slices_ are never both > 1; layer(i) means
+    // "slice i" exactly when slices_ > 1.
+    std::uint32_t slices_ = 1;
 
     // Lazily created views, keyed (VkImage handle, base layer, layer count, mip).
     // Owned here, destroyed (deferred) in the destructor.
@@ -1087,13 +1147,21 @@ public:
         return parent_->depth_final_layout();
     }
 
+    // For a 3D parent the view axis and the barrier axis diverge, on purpose —
+    // the one exception to the 0.13 "view and barrier come from one (layer,
+    // mip)" rule. The slice index feeds only the VIEW (baseArrayLayer selects
+    // the Z slice of a 2D_ARRAY_COMPATIBLE volume); Vulkan tracks the layout of
+    // a 3D image per mip with exactly one array layer, so the barrier and the
+    // marking must name layer 0 or they would index past the layout state.
+    // Consequence: rendering one slice marks the whole mip — correct, because
+    // that IS the granularity a volume's layout has.
     Subresource color_subresource() const override
     {
-        return {layer_, 1, mip_, 1};
+        return {parent_->is_3d() ? 0 : layer_, 1, mip_, 1};
     }
     Subresource depth_subresource() const override
     {
-        return {layer_, 1, mip_, 1};
+        return {parent_->is_3d() ? 0 : layer_, 1, mip_, 1};
     }
 
     // Tells the parent that exactly THIS layer and mip are now in the final
@@ -1236,21 +1304,39 @@ private:
 
 inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::layer(std::uint32_t i, std::uint32_t mip)
 {
-    if (i >= layers_)
-    {
-        return std::unexpected(
-            err_resource(std::format("layer {} is out of range. This target has {} layer(s)", i, layers_)));
-    }
     if (mip >= mip_levels_)
     {
         return std::unexpected(
             err_resource(std::format("mip {} is out of range. This target has {} mip level(s)", mip, mip_levels_)));
+    }
+    // On a 3D target the layer axis IS the slice axis, and unlike array layers
+    // it shrinks with the mip: level 1 of a depth-4 volume has 2 slices. A
+    // volume has one array layer, so one bound covers both kinds of target.
+    const std::uint32_t extent = slices_ > 1 ? (std::ranges::max)(slices_ >> mip, 1u) : layers_;
+    if (i >= extent)
+    {
+        return std::unexpected(err_resource(
+            std::format(
+                "layer {} is out of range. Mip {} of this target has {} {}",
+                i,
+                mip,
+                extent,
+                slices_ > 1 ? "slice(s)" : "layer(s)")));
     }
     return std::make_shared<SubresourceTarget>(shared_from_this(), i, mip);
 }
 
 inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::all_layers()
 {
+    // Multiview routes one draw into array layers, and a volume has exactly
+    // one: its slices are not layers, so there is nothing for a view mask to
+    // light up. Render slice by slice through layer(z) instead.
+    if (slices_ > 1)
+    {
+        return std::unexpected(err_resource(
+            "all_layers() has no meaning on a 3D target: a volume has one array layer. "
+            "Render one slice at a time with target.layer(z)."));
+    }
     if (!context_->supports(Feature::MULTIVIEW))
     {
         return std::unexpected(err_unsupported(
