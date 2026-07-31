@@ -8,10 +8,11 @@ patch versions never do).
 ## [0.22.0] — 2026-07-31
 
 "It runs on a Mac". Bazalt supplies macOS wheels now, and the full test suite
-runs on Apple Silicon against MoltenVK in CI. The Vulkan side cost one line:
-vk-bootstrap already asks for the portability extensions, and the 1.2 baseline
-already covered a driver that does not report 1.3. What the port really cost was
-the toolchain and the CI to prove it.
+runs on Apple Silicon against MoltenVK in CI. The Vulkan side cost one line,
+because bazalt asks for the portability extensions through vk-bootstrap already
+and the 1.2 baseline already had the code path a 1.2 driver needs. What the port
+cost was the toolchain, the CI to prove it, and one bug that only a Mac can show
+you: bazalt refused a GPU older than its loader, which is every Mac.
 
 The rest of the release is the infrastructure a 1.0 needs. CI gates on
 clang-format, builds a source distribution, caches what it downloads, and adds
@@ -49,6 +50,12 @@ which public symbols does no test touch.
   a build with no local change.
 
 ### Fixed
+- **A GPU older than its loader was refused.** Bazalt gave the device selector
+  the API version the *instance* negotiated, so a driver that reports less than
+  its loader never got looked at. Every Mac is such a machine: the loader reports
+  1.4 and MoltenVK reports 1.2. The baseline is 1.2, and only the device decides
+  whether bazalt takes the 1.3 path or `VK_KHR_dynamic_rendering`. Windows and
+  Linux never showed this, because a 1.3 loader there comes with a 1.3 driver.
 - **`fits_within` refused to compile on macOS.** It took one deduced type for
   three arguments — an offset, a length and a size. Windows and Linux spell
   `VkDeviceSize` and `size_t` with the same underlying type and macOS does not,

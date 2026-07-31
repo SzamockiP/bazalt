@@ -1299,10 +1299,21 @@ on a Mac" was "nobody has tried". Apple Silicon is too large a slice to leave at
   room. CMakeLists.txt refuses a lower target with one sentence, because the alternative is a
   page of "'format' is unavailable" landing on somebody who asked for `pip install bazalt`.
 
+**What the port found in bazalt itself** is the argument for doing it. Once the wheel built,
+the whole suite failed on macOS with "no suitable GPU found", because
+`select_physical_device_` handed `PhysicalDeviceSelector` the version the *instance*
+negotiated. A device may be older than its loader — on macOS it always is, since the LunarG
+loader reports 1.4 and MoltenVK's device reports 1.2 — so bazalt refused every Mac before
+looking at it. The fallback underneath was already right: `configure_features_` reads
+`device_has_1_3` off the device and takes `VK_KHR_dynamic_rendering` when it must. One line
+upstream was asking the wrong object, and no Windows or Linux machine could show it, because
+there a 1.3 loader arrives with a 1.3 driver. **A version negotiated at one level is not a
+fact about the level below it.**
+
 The lesson the release generalizes: **a platform port is mostly the CI to prove it, and the
 toolchain to survive it.** The failures came in this order: the installer URL, the archive
-format, then twenty compiler errors. Not one of them is a Vulkan question, and the Vulkan
-part really was one define.
+format, twenty compiler errors, then one real bug in bazalt. Only the last is a Vulkan
+question, and the Vulkan part of the port really was one define.
 
 ---
 

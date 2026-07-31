@@ -21,8 +21,9 @@ env:
   CIBW_SKIP: "*-musllinux* *-win32 *-manylinux_i686"
 
   # Smoke test on every built wheel: the module imports and the .pyi stub
-  # matches __all__. The GPU test suite can't run here (no Vulkan driver
-  # in the containers) and stays a local concern.
+  # matches __all__. A wheel is built where nothing can render — no driver in
+  # the manylinux container, none on the Windows runner — so anything that
+  # touches a GPU belongs to test_lavapipe and test_moltenvk instead.
   CIBW_TEST_REQUIRES: pytest
   CIBW_TEST_COMMAND: python -c "import bazalt" && python -m pytest {project}/tests/test_stubs.py -q
 
@@ -275,17 +276,23 @@ jobs:
           # binding layer uses it everywhere. CMakeLists.txt refuses anything
           # lower with that sentence rather than a page of availability errors.
           #
-          # Here rather than in CIBW_ENVIRONMENT_MACOS, and the difference is not
-          # cosmetic: CIBW_ENVIRONMENT reaches the compiler but not cibuildwheel
-          # itself, which computes the WHEEL TAG from its own environment. Set
-          # only there, the first macOS wheel compiled against 14.0 and shipped
-          # as macosx_11_0_arm64 — a wheel that installs on macOS 11 and then
-          # fails to load.
           MACOSX_DEPLOYMENT_TARGET: "14.0"
+
+          # _PYTHON_HOST_PLATFORM decides the wheel TAG, and it has to be said
+          # separately, because the two are computed from different things.
+          # MACOSX_DEPLOYMENT_TARGET reaches CMake, so the code compiles against
+          # 14.0; the tag comes from the interpreter's own sysconfig, and the
+          # python.org arm64 build reports 11.0. The first two macOS wheels went
+          # out as macosx_11_0_arm64 with 14.0 binaries inside — wheels that
+          # install on macOS 11 and then fail to load. A tag is a promise about
+          # the binary, so it is set from the same number, not inferred.
+          _PYTHON_HOST_PLATFORM: macosx-14.0-arm64
 
           CIBW_ENVIRONMENT_MACOS: >
             VULKAN_SDK=$HOME/VulkanSDK/macOS
             CMAKE_PREFIX_PATH=$HOME/VulkanSDK/macOS
+            MACOSX_DEPLOYMENT_TARGET=14.0
+            _PYTHON_HOST_PLATFORM=macosx-14.0-arm64
 
           # Same rule as the Windows job: bazalt must not ship a Vulkan loader.
           # volk opens the one the user installed, and a bundled copy would

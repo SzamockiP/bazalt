@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <expected>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "Error.hpp"
@@ -110,15 +111,32 @@ inline std::expected<std::vector<Device>, Error> list_devices()
         .pEngineName = "bazalt",
         .engineVersion = 0,
         .apiVersion = VK_API_VERSION_1_2};
+    // A portability driver -- MoltenVK is the one that exists -- is invisible to a
+    // plain vkCreateInstance, which fails with VK_ERROR_INCOMPATIBLE_DRIVER rather
+    // than returning zero devices. Context does not need this code because
+    // vk-bootstrap does it there. This instance is built by hand, so it asks for
+    // itself, and it asks only when the loader offers the extension: enabling an
+    // absent extension is a hard failure, and on Windows and Linux it is absent.
+    std::uint32_t extension_count = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &extension_count, nullptr);
+    std::vector<VkExtensionProperties> extensions(extension_count);
+    vkEnumerateInstanceExtensionProperties(nullptr, &extension_count, extensions.data());
+
+    const bool portability = std::ranges::any_of(
+        extensions,
+        [](const VkExtensionProperties& extension)
+        { return std::string_view(extension.extensionName) == VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME; });
+
+    const char* portability_extension = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
     VkInstanceCreateInfo create_info{
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pNext = nullptr,
-        .flags = 0,
+        .flags = portability ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : VkInstanceCreateFlags{0},
         .pApplicationInfo = &app_info,
         .enabledLayerCount = 0,
         .ppEnabledLayerNames = nullptr,
-        .enabledExtensionCount = 0,
-        .ppEnabledExtensionNames = nullptr};
+        .enabledExtensionCount = portability ? 1u : 0u,
+        .ppEnabledExtensionNames = portability ? &portability_extension : nullptr};
 
     VkInstance instance = VK_NULL_HANDLE;
     if (auto e = check(vkCreateInstance(&create_info, nullptr, &instance), "create instance to list devices"))
