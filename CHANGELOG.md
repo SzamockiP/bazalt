@@ -30,6 +30,19 @@ which public symbols does no test touch.
   `ctx.supports(bz.Feature.GEOMETRY_SHADER)` and `SHADER_FLOAT64` answer False
   there. Ask for a capability and read the answer, which is what `Feature` is
   for.
+- **`bz.Feature.COMPARISON_SAMPLER`, `bz.Feature.SAMPLER_MIP_LOD_BIAS` and
+  `bz.Feature.MULTISAMPLE_ARRAYS`.** Three capabilities that full Vulkan always
+  has and a portability driver can take away. They answer True on Windows and
+  Linux. On macOS ask before you use them:
+
+  ```python
+  if ctx.supports(bz.Feature.COMPARISON_SAMPLER):
+      shadow = ctx.create_sampler(compare=bz.CompareOp.LESS)
+  ```
+
+  `create_sampler` and `create_image` now refuse the unsupported combination
+  with a message that names the feature, instead of letting the driver produce a
+  validation error and a wrong picture.
 - **Python 3.14 wheels**, on all three platforms.
 - **A source distribution on PyPI.** A platform with no wheel builds from source
   now, instead of failing with "no matching distribution".
@@ -64,8 +77,20 @@ which public symbols does no test touch.
 - **`MpscQueue` used `std::hardware_destructive_interference_size`**, which
   libc++ does not supply. The padding now falls back to the cache line size of
   the architecture.
+- **A shader that prints was refused by an ordinary Context on a 1.2 driver.**
+  `VK_KHR_shader_non_semantic_info` was enabled only for a Context with
+  `shader_printf=True`, but Vulkan needs it to accept the SPIR-V at all. A
+  printing shader compiled in a normal Context is legal — it prints nothing —
+  so bazalt now enables the extension wherever the device offers it.
 
 ### Notes
+- **What Metal does not give you.** Geometry shaders and 64-bit floats in
+  shaders are absent, as they always were. Beyond those, MoltenVK on the CI GPU
+  refuses `debugPrintfEXT` at pipeline build (the Metal compiler has no such
+  function), reports every GPU timestamp delta as zero, counts an empty pass as
+  a non-zero occlusion result, and needs descriptor-pool room for a whole array
+  even where only some slots are written. Bazalt reports what it can report and
+  the tests read the driver rather than assume it.
 - The macOS wheels need macOS 14 or later, because libc++ supplies `std::format`
   from 13.3 and bazalt formats its messages everywhere.
 - To build bazalt from source on macOS you need a recent Apple Clang. The

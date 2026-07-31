@@ -1299,6 +1299,34 @@ on a Mac" was "nobody has tried". Apple Silicon is too large a slice to leave at
   room. CMakeLists.txt refuses a lower target with one sentence, because the alternative is a
   page of "'format' is unavailable" landing on somebody who asked for `pip install bazalt`.
 
+**What Metal does not have, and how each one is answered.** The first green run is the only
+honest source for this list, and it splits into three kinds, which is the useful part:
+
+| What | Kind | Answer |
+| --- | --- | --- |
+| Geometry shaders, `shaderFloat64`, wide lines | plain feature bits | already `Feature`, already skipped |
+| Comparison samplers, sampler mip LOD bias, multisampled arrays | portability-subset bits | three new `Feature` rows (0.22) |
+| `debugPrintfEXT`, timestamp deltas, occlusion of an empty pass, pool room for a whole array | driver behaviour with no bit to read | the tests probe and skip |
+
+The middle row is the one worth the API. These are not exotic capabilities — a comparison
+sampler IS shadow mapping — and full Vulkan has no feature bit for them because it never made
+them a question. Only a portability driver can take them away, so the rows read the opposite
+way from every other: **a device with no `VK_KHR_portability_subset` answers True without a
+struct to read.** That inversion is why they could not be folded into the existing columns.
+
+Two details cost more than the enum entries. Chaining
+`VkPhysicalDevicePortabilitySubsetFeaturesKHR` at device creation is what makes the difference
+between *reporting* the restriction and *lifting* it: an unlisted portability feature defaults
+to off, so a driver that supports comparison samplers still refuses them if nobody asked. And
+the struct lives in `vulkan_beta.h`, so `VK_ENABLE_BETA_EXTENSIONS` is a compile definition on
+every platform, not only Apple — a struct that exists on one platform is how a header compiles
+in CI and not on a contributor's machine.
+
+The bottom row has no bit anywhere, so the tests read the driver's own answer: a timing that
+is exactly zero on every frame, an occlusion query that counts an empty pass, a pool
+allocation that is refused. Each skips with the observed value in the message. **A skip that
+names what it saw survives a driver fixing the problem; one that names the driver does not.**
+
 **What the port found in bazalt itself** is the argument for doing it. Once the wheel built,
 the whole suite failed on macOS with "no suitable GPU found", because
 `select_physical_device_` handed `PhysicalDeviceSelector` the version the *instance*
@@ -1541,6 +1569,18 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
 - **macOS needs the Vulkan SDK, and the wheel does not carry it** (0.22). See the decision
   above. Upgrade path: bundle MoltenVK and a loader, which is additive and reversible, if
   somebody asks for a Mac install with no SDK.
+- **Shader printf needs a driver whose compiler implements it** (0.22), which is a second
+  requirement beside "needs the validation layers" from 0.18. MoltenVK advertises
+  `VK_KHR_shader_non_semantic_info`, accepts the SPIR-V, and then fails in the Metal compiler
+  with "use of undeclared identifier 'debugPrintfEXT'". Nothing can be asked in advance —
+  there is no bit for "my shader compiler implements this instruction" — so the failure is a
+  pipeline build error and the tests probe for it. Upgrade path: none available to bazalt.
+- **A GPU timestamp may be advertised and useless** (0.22). Bazalt already checks
+  `timestampPeriod` and `timestampValidBits` before offering `gpu_time_ms` at all, and
+  MoltenVK on a paravirtual device passes both and then writes the same value twice. There is
+  nothing left to ask, so `gpu_time_ms` returns 0.0 rather than None. Upgrade path: none — a
+  library cannot tell "fast" from "not measured" without a third fact the driver does not
+  supply.
 - **The macOS wheels are arm64 and macOS 14** (0.22). Intel because GitHub retired the
   x86_64 runners and an untested wheel is worse than none. 14.0 because libc++ carries
   `<format>` behind an availability annotation and the binding layer formats everywhere.
