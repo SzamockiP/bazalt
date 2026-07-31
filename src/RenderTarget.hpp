@@ -89,7 +89,7 @@ inline void even_out_image(
                 aspect,
                 mip,
                 1,
-                1,
+                image.barrier_layers(1),
                 layer);
         }
     }
@@ -1152,16 +1152,18 @@ public:
     // mip)" rule. The slice index feeds only the VIEW (baseArrayLayer selects
     // the Z slice of a 2D_ARRAY_COMPATIBLE volume); Vulkan tracks the layout of
     // a 3D image per mip with exactly one array layer, so the barrier and the
-    // marking must name layer 0 or they would index past the layout state.
+    // marking must name layer 0 or they would index past the layout state. The
+    // count is spelled VK_REMAINING_ARRAY_LAYERS for a volume — the layers warn
+    // about the narrower form — and mark_subresource_contents clamps it back.
     // Consequence: rendering one slice marks the whole mip — correct, because
     // that IS the granularity a volume's layout has.
     Subresource color_subresource() const override
     {
-        return {parent_->is_3d() ? 0 : layer_, 1, mip_, 1};
+        return parent_->is_3d() ? Subresource{0, VK_REMAINING_ARRAY_LAYERS, mip_, 1} : Subresource{layer_, 1, mip_, 1};
     }
     Subresource depth_subresource() const override
     {
-        return {parent_->is_3d() ? 0 : layer_, 1, mip_, 1};
+        return parent_->is_3d() ? Subresource{0, VK_REMAINING_ARRAY_LAYERS, mip_, 1} : Subresource{layer_, 1, mip_, 1};
     }
 
     // Tells the parent that exactly THIS layer and mip are now in the final

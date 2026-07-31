@@ -329,6 +329,15 @@ public:
     {
         return depth_ > 1;
     }
+    // The layer count a BARRIER on this image should name. A volume created
+    // with 2D_ARRAY_COMPATIBLE must say VK_REMAINING_ARRAY_LAYERS: with
+    // maintenance9 a count of 1 will mean one Z slice, and the layers already
+    // warn about the narrower spelling. Copy and blit REGIONS keep the real
+    // count — VkImageSubresourceLayers does not accept the sentinel.
+    std::uint32_t barrier_layers(std::uint32_t narrow) const
+    {
+        return is_3d() ? VK_REMAINING_ARRAY_LAYERS : narrow;
+    }
     std::uint32_t mip_levels() const
     {
         return mip_levels_;
@@ -398,6 +407,9 @@ public:
         std::uint32_t base_mip,
         std::uint32_t mip_count)
     {
+        // A caller quoting a barrier range may say VK_REMAINING_ARRAY_LAYERS
+        // (a 3D slice target does); the layout state wants the real count.
+        layer_count = (std::ranges::min)(layer_count, array_layers_ - base_layer);
         layouts_.set_range(layout, base_layer, layer_count, base_mip, mip_count);
         has_contents_.store(true);
     }
@@ -982,7 +994,7 @@ public:
                             aspect,
                             m,
                             1,
-                            1,
+                            barrier_layers(1),
                             l);
                     });
 
@@ -1017,7 +1029,7 @@ public:
                             aspect,
                             m,
                             1,
-                            1,
+                            barrier_layers(1),
                             l);
                     });
             });
@@ -1064,7 +1076,7 @@ public:
             VK_IMAGE_ASPECT_COLOR_BIT,
             0,
             mips,
-            array_layers_);
+            barrier_layers(array_layers_));
 
         record_copy_and_finalize_(cmd, staging, mips);
     }
@@ -1090,7 +1102,7 @@ public:
             VK_IMAGE_ASPECT_COLOR_BIT,
             0,
             mips,
-            array_layers_);
+            barrier_layers(array_layers_));
 
         record_copy_and_finalize_(cmd, staging, mips);
     }
@@ -1135,7 +1147,7 @@ public:
             aspect,
             mip,
             1,
-            1,
+            barrier_layers(1),
             layer);
 
         VkBufferImageCopy region{
@@ -1163,7 +1175,7 @@ public:
             aspect,
             mip,
             1,
-            1,
+            barrier_layers(1),
             layer);
     }
 
@@ -1196,7 +1208,7 @@ public:
             VK_IMAGE_ASPECT_COLOR_BIT,
             0,
             1,
-            array_layers_);
+            barrier_layers(array_layers_));
 
         // The other levels hold nothing worth keeping -> discard into TRANSFER_DST.
         record_image_transition(
@@ -1212,7 +1224,7 @@ public:
             VK_IMAGE_ASPECT_COLOR_BIT,
             1,
             mip_levels_ - 1,
-            array_layers_);
+            barrier_layers(array_layers_));
 
         std::int32_t mip_width = static_cast<std::int32_t>(width_);
         std::int32_t mip_height = static_cast<std::int32_t>(height_);
@@ -1258,7 +1270,7 @@ public:
                 VK_IMAGE_ASPECT_COLOR_BIT,
                 i - 1,
                 1,
-                array_layers_);
+                barrier_layers(array_layers_));
 
             if (i + 1 < mip_levels_)
             {
@@ -1276,7 +1288,7 @@ public:
                     VK_IMAGE_ASPECT_COLOR_BIT,
                     i,
                     1,
-                    array_layers_);
+                    barrier_layers(array_layers_));
             }
             else
             {
@@ -1294,7 +1306,7 @@ public:
                     VK_IMAGE_ASPECT_COLOR_BIT,
                     i,
                     1,
-                    array_layers_);
+                    barrier_layers(array_layers_));
             }
 
             mip_width = next_width;
@@ -1358,7 +1370,7 @@ public:
                 aspect,
                 0,
                 mip_levels_,
-                array_layers_);
+                barrier_layers(array_layers_));
             return;
         }
         layouts_.for_each(
@@ -1377,7 +1389,7 @@ public:
                     aspect,
                     mip,
                     1,
-                    1,
+                    barrier_layers(1),
                     layer);
             });
     }
@@ -1407,7 +1419,7 @@ public:
                 aspect,
                 0,
                 mip_levels_,
-                array_layers_);
+                barrier_layers(array_layers_));
             return;
         }
         layouts_.for_each(
@@ -1426,7 +1438,7 @@ public:
                     aspect,
                     mip,
                     1,
-                    1,
+                    barrier_layers(1),
                     layer);
             });
     }
@@ -1522,7 +1534,7 @@ private:
                 VK_IMAGE_ASPECT_COLOR_BIT,
                 0,
                 1,
-                array_layers_);
+                barrier_layers(array_layers_));
         }
     }
 
@@ -1543,6 +1555,8 @@ private:
         std::int32_t mip_width = static_cast<std::int32_t>(width);
         std::int32_t mip_height = static_cast<std::int32_t>(height);
         std::int32_t mip_depth = static_cast<std::int32_t>(depth);
+        // Barriers on a volume name VK_REMAINING_ARRAY_LAYERS; see barrier_layers.
+        const std::uint32_t barrier_span = depth > 1 ? VK_REMAINING_ARRAY_LAYERS : layers;
 
         // Every layer shares mip dimensions, so one blit with layerCount = layers
         // generates the whole level for all faces/layers at once.
@@ -1561,7 +1575,7 @@ private:
                 VK_IMAGE_ASPECT_COLOR_BIT,
                 i - 1,
                 1,
-                layers);
+                barrier_span);
 
             const std::int32_t next_width = mip_width > 1 ? mip_width / 2 : 1;
             const std::int32_t next_height = mip_height > 1 ? mip_height / 2 : 1;
@@ -1595,7 +1609,7 @@ private:
                 VK_IMAGE_ASPECT_COLOR_BIT,
                 i - 1,
                 1,
-                layers);
+                barrier_span);
 
             mip_width = next_width;
             mip_height = next_height;
@@ -1615,7 +1629,7 @@ private:
             VK_IMAGE_ASPECT_COLOR_BIT,
             mips - 1,
             1,
-            layers);
+            barrier_span);
     }
 
 public:
@@ -1678,6 +1692,7 @@ inline void record_image_copy(
     // fact is here, and record_image_transition takes `vk` for the same reason.
     const VkPipelineStageFlags shader_stages = src.owner()->all_shader_stages();
     const std::uint32_t layers = src.array_layers();
+    const std::uint32_t barrier_span = src.barrier_layers(layers);
     // Every level the two images share. 0.17 copied mip 0 only and called the
     // rest a ceiling ("a full chain is N regions for a case that has not come
     // up"). The case came up: a copy that leaves levels 1..N holding the
@@ -1699,7 +1714,7 @@ inline void record_image_copy(
         src.aspect(),
         0,
         mips,
-        layers);
+        barrier_span);
     // The destination is overwritten in full, so its old contents are discarded
     // rather than waited for — UNDEFINED is legal from any layout.
     record_image_transition(
@@ -1715,7 +1730,7 @@ inline void record_image_copy(
         dst.aspect(),
         0,
         mips,
-        layers);
+        barrier_span);
 
     std::vector<VkImageCopy> regions;
     regions.reserve(mips);
@@ -1761,7 +1776,7 @@ inline void record_image_copy(
             image->aspect(),
             0,
             mips,
-            layers);
+            barrier_span);
     }
 }
 
@@ -1787,6 +1802,7 @@ inline void record_image_blit(
 {
     const VkPipelineStageFlags shader_stages = src.owner()->all_shader_stages();
     const std::uint32_t layers = (std::ranges::min)(src.array_layers(), dst.array_layers());
+    const std::uint32_t barrier_span = src.barrier_layers(layers);
 
     record_image_transition(
         vk,
@@ -1801,7 +1817,7 @@ inline void record_image_blit(
         src.aspect(),
         0,
         1,
-        layers);
+        barrier_span);
     record_image_transition(
         vk,
         cmd,
@@ -1815,7 +1831,7 @@ inline void record_image_blit(
         dst.aspect(),
         0,
         1,
-        layers);
+        barrier_span);
 
     VkImageBlit region{
         .srcSubresource = {.aspectMask = src.aspect(), .mipLevel = 0, .baseArrayLayer = 0, .layerCount = layers},
@@ -1855,7 +1871,7 @@ inline void record_image_blit(
             image->aspect(),
             0,
             1,
-            layers);
+            barrier_span);
     }
 }
 
@@ -1865,7 +1881,7 @@ inline void record_image_blit(
 inline void record_image_clear(const VolkDeviceTable& vk, VkCommandBuffer cmd, Image& image, std::array<float, 4> color)
 {
     const VkPipelineStageFlags shader_stages = image.owner()->all_shader_stages();
-    const std::uint32_t layers = image.array_layers();
+    const std::uint32_t barrier_span = image.barrier_layers(image.array_layers());
     record_image_transition(
         vk,
         cmd,
@@ -1879,7 +1895,7 @@ inline void record_image_clear(const VolkDeviceTable& vk, VkCommandBuffer cmd, I
         image.aspect(),
         0,
         image.mip_levels(),
-        layers);
+        barrier_span);
 
     const VkClearColorValue value{{color[0], color[1], color[2], color[3]}};
     VkImageSubresourceRange range{
@@ -1887,7 +1903,7 @@ inline void record_image_clear(const VolkDeviceTable& vk, VkCommandBuffer cmd, I
         .baseMipLevel = 0,
         .levelCount = image.mip_levels(),
         .baseArrayLayer = 0,
-        .layerCount = layers};
+        .layerCount = barrier_span};
     vk.vkCmdClearColorImage(cmd, image.vk_image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &value, 1, &range);
 
     record_image_transition(
@@ -1903,5 +1919,5 @@ inline void record_image_clear(const VolkDeviceTable& vk, VkCommandBuffer cmd, I
         image.aspect(),
         0,
         image.mip_levels(),
-        layers);
+        barrier_span);
 }

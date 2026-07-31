@@ -1,0 +1,29 @@
+#version 450
+
+// The same grade as lut_slice.frag, written through an image3D. This is the
+// escape hatch for drivers that cannot render into a volume slice (MoltenVK):
+// ctx.supports(Feature.IMAGE_VIEW_2D_ON_3D) picks between the two at startup.
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+layout(binding = 0, rgba8) uniform image3D lut;
+
+vec3 grade(vec3 c) {
+    float luma = dot(c, vec3(0.299, 0.587, 0.114));
+    vec3 shadows = vec3(0.85, 1.0, 1.15);
+    vec3 highlights = vec3(1.15, 1.02, 0.85);
+    c *= mix(shadows, highlights, smoothstep(0.2, 0.8, luma));
+    c = clamp((c - 0.5) * 1.15 + 0.5, 0.0, 1.0);
+    return pow(c, vec3(0.95));
+}
+
+void main() {
+    ivec3 texel = ivec3(gl_GlobalInvocationID);
+    ivec3 size = imageSize(lut);
+    if (any(greaterThanEqual(texel, size))) {
+        return;
+    }
+    // Texel centres, so the compute path lands on the same values the slice
+    // pass rasterizes at.
+    vec3 c = (vec3(texel) + 0.5) / vec3(size);
+    imageStore(lut, texel, vec4(grade(c), 1.0));
+}

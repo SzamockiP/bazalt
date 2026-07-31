@@ -1622,7 +1622,8 @@ private:
                         .baseArrayLayer = 0,
                         // All layers transition together: the tracker holds one
                         // layout per image, and a cube/array is used as a whole.
-                        .layerCount = image->array_layers()}};
+                        // A volume spells that VK_REMAINING_ARRAY_LAYERS.
+                        .layerCount = image->barrier_layers(image->array_layers())}};
                 frame.vk->vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 0, nullptr, 1, &barrier);
             });
     }
