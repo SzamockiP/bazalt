@@ -167,7 +167,7 @@ def test_blit_image_is_refused_inside_a_rendering_scope(ctx):
 
     cmd = ctx.create_command_buffer()
     cmd.begin().begin_rendering(target, clear_color=[0, 0, 0, 1])
-    with pytest.raises(bz.ResourceError):
+    with pytest.raises(bz.StateError):
         cmd.blit_image(src, dst)
 
 

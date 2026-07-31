@@ -59,6 +59,8 @@ inline py::handle exc_out_of_memory;
 inline py::handle exc_shader;
 inline py::handle exc_window;
 inline py::handle exc_resource;
+inline py::handle exc_state;
+inline py::handle exc_unsupported;
 
 inline py::handle make_exception(py::module_& m, const char* name, py::handle base)
 {
@@ -77,6 +79,8 @@ inline void register_exceptions(py::module_& m)
     exc_shader = make_exception(m, "ShaderError", exc_bazalt);
     exc_window = make_exception(m, "WindowError", exc_bazalt);
     exc_resource = make_exception(m, "ResourceError", exc_bazalt);
+    exc_state = make_exception(m, "StateError", exc_bazalt);
+    exc_unsupported = make_exception(m, "UnsupportedError", exc_bazalt);
 }
 
 inline py::handle exception_for(ErrorCode code)
@@ -95,6 +99,10 @@ inline py::handle exception_for(ErrorCode code)
             return exc_window;
         case ErrorCode::Resource:
             return exc_resource;
+        case ErrorCode::State:
+            return exc_state;
+        case ErrorCode::Unsupported:
+            return exc_unsupported;
     }
     return exc_bazalt;
 }

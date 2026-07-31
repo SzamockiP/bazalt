@@ -13,11 +13,18 @@ import numpy as np
 class BazaltError(Exception):
     """Base class for every error bazalt raises.
 
-    A BazaltError means bazalt looked at a resource, at your data or at the
-    device to decide. An argument that is wrong on its own — outside a fixed
-    range in the signature, a sequence of the wrong length, a name not in a
-    fixed set — raises ValueError instead, and stays outside this hierarchy on
-    purpose: `except bz.BazaltError` must not hide a typo in your keywords.
+    A BazaltError means bazalt looked at a resource, at your data, at the
+    device or at the call sequence to decide. An argument that is wrong on its
+    own — outside a fixed range in the signature, a sequence of the wrong
+    length, a name not in a fixed set — raises ValueError instead, and stays
+    outside this hierarchy on purpose: `except bz.BazaltError` must not hide a
+    typo in your keywords.
+
+    Three subclasses answer three different questions. ResourceError: this
+    resource or data cannot do that — fix the data or the resource.
+    StateError: the call is legal, the moment is not — fix the order of calls.
+    UnsupportedError: this GPU cannot, with any argument — ask ctx.supports()
+    or take the escape hatch the message names.
     """
     ...
 
@@ -34,7 +41,11 @@ class OutOfMemoryError(BazaltError):
     vk_result: str
 
 class ShaderError(BazaltError):
-    """Compilation or pipeline creation failed. Recoverable."""
+    """Compilation or pipeline creation failed. Recoverable.
+
+    A missing GPU feature found during compile or build raises
+    UnsupportedError instead: it is a fact about the Context, not the file.
+    """
     path: str
     line: int
     """1-based line number, or -1 when it could not be determined."""
@@ -44,7 +55,29 @@ class WindowError(BazaltError):
     ...
 
 class ResourceError(BazaltError):
-    """Missing file, bad format, or an exhausted pool. Recoverable."""
+    """This resource or data cannot do that.
+
+    A missing file, a bad format, a layer the image does not have, an
+    exhausted pool. Recoverable: fix the data or the resource and retry.
+    """
+    ...
+
+class StateError(BazaltError):
+    """The call is legal, the moment is not.
+
+    A double acquire(), a present() with no acquired image, a barrier inside a
+    rendering scope, a CommandBuffer submitted twice in one frame. Recoverable:
+    fix the order of calls.
+    """
+    ...
+
+class UnsupportedError(BazaltError):
+    """This GPU or driver cannot do it, with any argument.
+
+    A Feature the device does not offer, a format it cannot blit, an MSAA
+    count it does not reach. Ask ctx.supports(bz.Feature...) first, or take
+    the escape hatch the message names.
+    """
     ...
 
 # ── Logging ────────────────────────────────────────────────────────────
@@ -411,7 +444,7 @@ class Buffer:
         `numpy.ascontiguousarray(arr)` to be explicit.
         """
         ...
-    def update(self, list: list, data_type: Optional[DataType] = None, *,
+    def update(self, data: list, data_type: Optional[DataType] = None, *,
                offset: int = 0) -> None: ...
 
     def read(self, dtype: Any) -> Any:
@@ -607,7 +640,7 @@ class Pipeline: ...
 
 class DescriptorSet:
     def set_image(self, binding: int, image: Image,
-                  sampler: Optional[Sampler] = None, index: int = 0) -> None:
+                  sampler: Optional[Sampler] = None, *, index: int = 0) -> None:
         """Bind an image (+ sampler; None means linear/repeat/anisotropic).
 
         `index` selects the element of a binding declared with count>1, and
@@ -616,12 +649,12 @@ class DescriptorSet:
         there rather than adding a second reference to it.
         """
         ...
-    def set_storage_image(self, binding: int, image: Image, index: int = 0) -> None:
+    def set_storage_image(self, binding: int, image: Image, *, index: int = 0) -> None:
         """Bind a storage image (no sampler) to a binding declared with
         .storage_image(). The image is accessed in GENERAL layout; the tracker
         adds the transition and any barrier around the dispatch automatically."""
         ...
-    def set_buffer(self, binding: int, buffer: Buffer, index: int = 0) -> None: ...
+    def set_buffer(self, binding: int, buffer: Buffer, *, index: int = 0) -> None: ...
 
 class DescriptorPool:
     def allocate_set(self, pipeline: Pipeline, set: int) -> DescriptorSet: ...
@@ -1703,11 +1736,11 @@ class Context:
         samples=) and SwapchainRenderer(..., samples=)."""
         ...
 
-    def create_buffer(self, list: list, type: BufferType, usage: MemoryUsage,
+    def create_buffer(self, data: list, type: BufferType, usage: MemoryUsage,
                       data_type: Optional[DataType] = None, *, name: str = "") -> Buffer: ...
-    def create_buffer(self, array: Any, type: BufferType, usage: MemoryUsage,
+    def create_buffer(self, data: Any, type: BufferType, usage: MemoryUsage,
                       *, name: str = "") -> Buffer: ...
-    def create_buffer(self, size_in_bytes: int, type: BufferType,
+    def create_buffer(self, data: int, type: BufferType,
                       usage: MemoryUsage, *, name: str = "") -> Buffer:
         """A GPU buffer from a list, any C-contiguous array, or a size in bytes.
 

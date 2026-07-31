@@ -188,9 +188,9 @@ def test_tessellation_needs_its_feature_at_compile_time(ctx):
     error, some distance from the line that caused it. The session Context never
     asked for TESSELLATION, so this is the ordinary shape of the mistake.
     """
-    with pytest.raises(bz.ShaderError, match="TESSELLATION"):
+    with pytest.raises(bz.UnsupportedError, match="TESSELLATION"):
         ctx.compile_shader(str(SHADER_DIR / "disc.tesc"), bz.ShaderStage.TESS_CONTROL)
-    with pytest.raises(bz.ShaderError, match="TESSELLATION"):
+    with pytest.raises(bz.UnsupportedError, match="TESSELLATION"):
         ctx.compile_shader(str(SHADER_DIR / "disc.tese"), bz.ShaderStage.TESS_EVALUATION)
 
 
@@ -213,7 +213,7 @@ def test_the_pipeline_gate_catches_a_module_from_another_context(ctx, extra_cont
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
     target = bz.RenderTarget(ctx, 32, 32)
 
-    with pytest.raises(bz.ShaderError, match="TESSELLATION"):
+    with pytest.raises(bz.UnsupportedError, match="TESSELLATION"):
         (ctx.graphics_pipeline()
          .vertex_shader(vert)
          .tess_control_shader(tesc)
@@ -281,7 +281,7 @@ def test_geometry_needs_its_feature(ctx):
     """Same reach contract, same compile-time refusal. Also the reason geometry is
     a Feature and not a free stage: Metal has no geometry shaders at all, so
     MoltenVK reports geometryShader false."""
-    with pytest.raises(bz.ShaderError, match="GEOMETRY_SHADER"):
+    with pytest.raises(bz.UnsupportedError, match="GEOMETRY_SHADER"):
         ctx.compile_shader(str(SHADER_DIR / "point_quad.geom"), bz.ShaderStage.GEOMETRY)
 
 

@@ -222,7 +222,7 @@ def test_update_after_bind_needs_the_feature(ctx):
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
     target = bz.RenderTarget(ctx, 16, 16)
-    with pytest.raises(bz.ShaderError, match="BINDLESS"):
+    with pytest.raises(bz.UnsupportedError, match="BINDLESS"):
         (ctx.graphics_pipeline()
          .vertex_shader(vert).fragment_shader(frag)
          .texture(0, bz.ShaderStage.FRAGMENT, set=0, update_after_bind=True)

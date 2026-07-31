@@ -665,7 +665,7 @@ public:
         // a validation error at vkCreateImage (0.22).
         if (samples != VK_SAMPLE_COUNT_1_BIT && array_layers > 1 && !context.supports(Feature::MULTISAMPLE_ARRAYS))
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_unsupported(
                 "A multisampled image with layers>1 needs the MULTISAMPLE_ARRAYS feature, which this driver "
                 "does not offer. Ask ctx.supports(bz.Feature.MULTISAMPLE_ARRAYS), or render the layers one "
                 "at a time into single-layer multisampled targets."));
@@ -674,7 +674,8 @@ public:
         const VkFormat vk_fmt = context.vk_format(format);
         if (vk_fmt == VK_FORMAT_UNDEFINED)
         {
-            return std::unexpected(err_resource(std::format("This device supports no {} format", format_name(format))));
+            return std::unexpected(
+                err_unsupported(std::format("This device supports no {} format", format_name(format))));
         }
         const VkImageAspectFlags aspect = aspect_mask_for(vk_fmt);
         const VkImageViewType view_type =

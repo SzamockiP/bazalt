@@ -778,14 +778,14 @@ public:
         // a sentence naming the capability to ask about (0.22).
         if (desc.compare && !supports(Feature::COMPARISON_SAMPLER))
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_unsupported(
                 "create_sampler(compare=) needs the COMPARISON_SAMPLER feature, which this driver does not "
                 "offer. Ask ctx.supports(bz.Feature.COMPARISON_SAMPLER) and sample the depth texture "
                 "yourself where it answers False."));
         }
         if (desc.mip_lod_bias != 0.0f && !supports(Feature::SAMPLER_MIP_LOD_BIAS))
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_unsupported(
                 "create_sampler(mip_lod_bias=) needs the SAMPLER_MIP_LOD_BIAS feature, which this driver does "
                 "not offer. Ask ctx.supports(bz.Feature.SAMPLER_MIP_LOD_BIAS), or bias the level in the "
                 "shader with textureLod()."));

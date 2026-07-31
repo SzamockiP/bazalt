@@ -29,9 +29,11 @@ enum class ErrorCode
     OutOfMemory,
 
     // Recoverable — the caller can fix the input and try again.
-    Shader,   // compilation/linking; carries path + line
-    Window,   // GLFW; carries the real platform diagnostic
-    Resource, // missing file, bad format, exhausted pool
+    Shader,      // compilation/linking; carries path + line
+    Window,      // GLFW; carries the real platform diagnostic
+    Resource,    // this resource/data cannot do that: bad format, out of range, exhausted pool
+    State,       // right call, wrong moment: double acquire, barrier inside a pass
+    Unsupported, // this GPU cannot: a Feature is absent, a format has no support
 };
 
 struct Error
@@ -121,8 +123,15 @@ inline constexpr ErrorCode code_from_vk_result(VkResult result, ErrorCode fallba
             return ErrorCode::DeviceLost;
         case VK_ERROR_OUT_OF_HOST_MEMORY:
         case VK_ERROR_OUT_OF_DEVICE_MEMORY:
-        case VK_ERROR_OUT_OF_POOL_MEMORY:
             return ErrorCode::OutOfMemory;
+        // A full descriptor pool is a pool the caller sized, not a system out-of-memory:
+        // the fix is a bigger pool (or the auto pool), so it lands beside the other
+        // "this resource cannot do that" errors. FRAGMENTED_POOL is the same user
+        // mistake reported by a pickier driver, and until 0.23 the two arrived as two
+        // different exception types.
+        case VK_ERROR_OUT_OF_POOL_MEMORY:
+        case VK_ERROR_FRAGMENTED_POOL:
+            return ErrorCode::Resource;
         default:
             return fallback;
     }
@@ -218,6 +227,23 @@ inline Error err_window(std::string message)
 inline Error err_resource(std::string message)
 {
     return {ErrorCode::Resource, std::move(message)};
+}
+
+// A sequencing error: the call is legal, the moment is not. A double acquire(),
+// a barrier inside begin_rendering/end_rendering, a CommandBuffer submitted
+// while claimed. The caller fixes the ORDER of calls, not any argument.
+inline Error err_state(std::string message)
+{
+    return {ErrorCode::State, std::move(message)};
+}
+
+// A capability error: this GPU (or driver) cannot do it, on any argument. The
+// caller asks ctx.supports(Feature...) or takes the escape hatch the message
+// names. Distinct from Resource because "fix your data" and "fix your hardware
+// expectations" are different recoveries to except on.
+inline Error err_unsupported(std::string message)
+{
+    return {ErrorCode::Unsupported, std::move(message)};
 }
 
 inline Error err_shader(std::string message, std::string path = {}, int line = -1)

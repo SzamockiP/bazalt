@@ -291,7 +291,7 @@ def test_multi_draw_needs_its_feature(ctx, extra_context):
     cmd.begin()
     if ctx.supports(bz.Feature.MULTI_DRAW_INDIRECT):
         pytest.skip("the session Context has MULTI_DRAW_INDIRECT, so it cannot refuse")
-    with pytest.raises(bz.ResourceError, match="MULTI_DRAW_INDIRECT"):
+    with pytest.raises(bz.UnsupportedError, match="MULTI_DRAW_INDIRECT"):
         cmd.draw_indirect(args, count=2)
 
 
@@ -497,7 +497,7 @@ def test_a_count_buffer_needs_its_feature(ctx):
     counts = args_buffer(ctx)
     cmd = ctx.create_command_buffer()
     cmd.begin()
-    with pytest.raises(bz.ResourceError, match="DRAW_INDIRECT_COUNT"):
+    with pytest.raises(bz.UnsupportedError, match="DRAW_INDIRECT_COUNT"):
         cmd.draw_indirect(args, count_buffer=counts)
 
 

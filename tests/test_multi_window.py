@@ -168,7 +168,7 @@ def test_one_command_buffer_cannot_serve_two_windows(ctx):
             pytest.skip("windows did not both acquire (minimized?)")
 
         renderer_a.present(cmd)
-        with pytest.raises(bz.ResourceError):
+        with pytest.raises(bz.StateError):
             renderer_b.present(cmd)
     finally:
         renderer_a = renderer_b = None
@@ -190,7 +190,7 @@ def test_acquire_twice_without_begin_frame_is_an_error(ctx):
         bz.poll_events()
         ctx.begin_frame()
         renderer.acquire()
-        with pytest.raises(bz.ResourceError):
+        with pytest.raises(bz.StateError):
             renderer.acquire()
     finally:
         renderer = None
@@ -216,7 +216,7 @@ def test_present_without_an_acquired_image_is_an_error(ctx):
         cmd.end_rendering(renderer)
 
         ctx.begin_frame()
-        with pytest.raises(bz.ResourceError):
+        with pytest.raises(bz.StateError):
             renderer.present(cmd)
     finally:
         renderer = None

@@ -146,7 +146,9 @@ void bind_context(py::module_& m)
                 name_buffer(self, buffer, name);
                 return py::cast(buffer);
             },
-            py::arg("list"),
+            // One name across the three overloads, so the keyword spelling works
+            // whichever body the argument picks — and `list` shadowed a builtin (0.23).
+            py::arg("data"),
             py::arg("type"),
             py::arg("usage"),
             py::arg("data_type") = py::none(),
@@ -163,7 +165,7 @@ void bind_context(py::module_& m)
                 name_buffer(self, buffer, name);
                 return py::cast(buffer);
             },
-            py::arg("array"),
+            py::arg("data"),
             py::arg("type"),
             py::arg("usage"),
             py::kw_only(),
@@ -177,7 +179,7 @@ void bind_context(py::module_& m)
                 name_buffer(self, buffer, name);
                 return py::cast(buffer);
             },
-            py::arg("size_in_bytes"),
+            py::arg("data"),
             py::arg("type"),
             py::arg("usage"),
             py::kw_only(),

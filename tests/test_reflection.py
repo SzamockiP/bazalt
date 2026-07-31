@@ -165,7 +165,7 @@ def test_a_graphics_write_needs_its_feature(ctx):
 
     if ctx.supports(bz.Feature.FRAGMENT_STORES):
         pytest.skip("the session Context has FRAGMENT_STORES, so it cannot refuse")
-    with pytest.raises(bz.ShaderError, match="FRAGMENT_STORES"):
+    with pytest.raises(bz.UnsupportedError, match="FRAGMENT_STORES"):
         (ctx.graphics_pipeline()
          .vertex_shader(vert)
          .fragment_shader(frag)

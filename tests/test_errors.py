@@ -1,4 +1,4 @@
-"""The exception type is the contract for whether you can carry on.
+﻿"""The exception type is the contract for whether you can carry on.
 
 Everything used to arrive as a bare RuntimeError, so a typo in a shader was
 indistinguishable from a lost device and neither could be handled.
@@ -8,13 +8,64 @@ import numpy as np
 import pytest
 
 import bazalt as bz
+from conftest import SHADER_DIR
 
 
 def test_every_error_shares_one_base(ctx):
     for exc in (bz.InitializationError, bz.DeviceLostError, bz.OutOfMemoryError,
-                bz.ShaderError, bz.WindowError, bz.ResourceError):
+                bz.ShaderError, bz.WindowError, bz.ResourceError,
+                bz.StateError, bz.UnsupportedError):
         assert issubclass(exc, bz.BazaltError)
     assert issubclass(bz.BazaltError, Exception)
+
+
+def test_the_three_recoverable_kinds_are_siblings(ctx):
+    """0.23 split StateError (fix the call order) and UnsupportedError (this
+    GPU cannot) out of ResourceError (fix the data). An `except
+    bz.ResourceError` written for data problems must not swallow the other
+    two, so they are siblings, not subclasses."""
+    for exc in (bz.StateError, bz.UnsupportedError):
+        assert not issubclass(exc, bz.ResourceError)
+        assert not issubclass(bz.ResourceError, exc)
+    assert not issubclass(bz.StateError, bz.UnsupportedError)
+
+
+def test_a_sequencing_error_is_a_state_error(ctx):
+    """The same mistake spelled two ways gets the same type: a barrier inside
+    a rendering scope is 'right call, wrong moment', not a resource fault."""
+    buf = ctx.create_buffer(1024, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    target = bz.RenderTarget(ctx, 8, 8)
+    cmd = ctx.create_command_buffer()
+    cmd.begin().begin_rendering(target, clear_color=[0, 0, 0, 1])
+    with pytest.raises(bz.StateError):
+        cmd.barrier(buf, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
+
+
+def test_index_is_keyword_only_on_the_set_verbs(ctx):
+    """set_image(0, img, 3) used to read as 'index 3' and pass 3 as a sampler.
+    Since 0.23 index must be spelled, on all three verbs — one rule."""
+    comp = ctx.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
+    pipe = ctx.compute_pipeline().shader(comp).storage_buffer(0).build()
+    pool = ctx.create_descriptor_pool(max_sets=1, storage_buffers=1)
+    dset = pool.allocate_set(pipe, set=0)
+    buf = ctx.create_buffer(64, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    dset.set_buffer(0, buf, index=0)
+    with pytest.raises(TypeError):
+        dset.set_buffer(0, buf, 0)
+
+
+def test_create_buffer_takes_data_as_a_keyword(ctx):
+    """The first parameter is `data` on all three overloads since 0.23, so the
+    keyword spelling works whichever body the argument picks."""
+    by_list = ctx.create_buffer(data=[1.0, 2.0], type=bz.BufferType.VERTEX,
+                                usage=bz.MemoryUsage.STATIC)
+    by_array = ctx.create_buffer(data=np.zeros(4, np.float32),
+                                 type=bz.BufferType.VERTEX,
+                                 usage=bz.MemoryUsage.STATIC)
+    by_size = ctx.create_buffer(data=64, type=bz.BufferType.STORAGE,
+                                usage=bz.MemoryUsage.STATIC)
+    assert np.array_equal(by_array.read(np.float32), np.zeros(4, np.float32))
+    assert by_list is not None and by_size is not None
 
 
 def test_shader_error_carries_path_and_line(ctx, tmp_path):

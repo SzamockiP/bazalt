@@ -285,7 +285,7 @@ def test_occlusion_query_outside_a_rendering_scope_raises(ctx):
     at the call site beats a validation message at submit that names neither."""
     cmd = ctx.create_command_buffer()
     cmd.begin()
-    with pytest.raises(bz.ResourceError):
+    with pytest.raises(bz.StateError):
         cmd.occlusion_query()
 
 
@@ -376,7 +376,7 @@ def test_renderer_read_pixels_captures_the_frame(ctx):
                     .build(renderer))
 
         # Nothing captured yet, and saying so beats handing back an empty buffer.
-        with pytest.raises(bz.ResourceError):
+        with pytest.raises(bz.StateError):
             renderer.read_pixels()
 
         drawn = False

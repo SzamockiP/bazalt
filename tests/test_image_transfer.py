@@ -81,9 +81,9 @@ def test_a_copy_is_refused_inside_a_rendering_scope(ctx):
     cmd = ctx.create_command_buffer()
     cmd.begin()
     cmd.begin_rendering(target)
-    with pytest.raises(bz.ResourceError, match="rendering scope"):
+    with pytest.raises(bz.StateError, match="rendering scope"):
         cmd.copy_image(src, dst)
-    with pytest.raises(bz.ResourceError, match="rendering scope"):
+    with pytest.raises(bz.StateError, match="rendering scope"):
         cmd.clear_image(dst, [1.0, 0.0, 0.0, 1.0])
     cmd.end_rendering(target)
 

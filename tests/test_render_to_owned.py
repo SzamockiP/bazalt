@@ -401,5 +401,5 @@ def test_msaa_on_a_mipped_borrowed_image_is_refused(ctx):
 
 def test_too_many_samples_is_refused(ctx):
     mine = ctx.create_image(32, 32, bz.Format.RGBA8)
-    with pytest.raises(bz.ResourceError):
+    with pytest.raises(bz.UnsupportedError):
         bz.RenderTarget(ctx, color=[mine], samples=ctx.max_samples() * 2)

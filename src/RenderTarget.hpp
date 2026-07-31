@@ -42,7 +42,7 @@ inline std::expected<VkSampleCountFlagBits, Error> validate_sample_count(std::ui
     std::uint32_t max = context.max_samples();
     if (samples == 0 || (samples & (samples - 1)) != 0 || samples > max)
     {
-        return std::unexpected(err_resource(
+        return std::unexpected(err_unsupported(
             std::format(
                 "samples={} is not a valid MSAA count on this GPU. Use a power of two "
                 "in 1..{} (query it with bz.Context.max_samples())",
@@ -1253,7 +1253,7 @@ inline std::expected<std::shared_ptr<RenderTarget>, Error> OffscreenTarget::all_
 {
     if (!context_->supports(Feature::MULTIVIEW))
     {
-        return std::unexpected(err_resource(
+        return std::unexpected(err_unsupported(
             "all_layers() needs the multiview GPU feature, which this device does not support. "
             "Ask ctx.supports(bz.Feature.MULTIVIEW) first, and render one layer at a time if it "
             "answers False."));

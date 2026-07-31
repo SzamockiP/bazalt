@@ -272,7 +272,7 @@ def test_count_without_the_feature_is_refused(ctx):
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "bindless_push.frag"), bz.ShaderStage.FRAGMENT)
 
-    with pytest.raises(bz.ShaderError) as e:
+    with pytest.raises(bz.UnsupportedError) as e:
         (ctx.graphics_pipeline()
          .vertex_shader(vert)
          .fragment_shader(frag)

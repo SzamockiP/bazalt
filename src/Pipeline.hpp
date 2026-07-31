@@ -844,7 +844,7 @@ inline std::expected<void, Error> check_descriptor_arrays(Context& context, cons
     }
     if (layout.max_descriptor_count() > 1 && !context.supports(Feature::BINDLESS))
     {
-        return std::unexpected(err_shader(
+        return std::unexpected(err_unsupported(
             "count > 1 on a binding declarator requires the BINDLESS feature. Create the "
             "Context with optional=[bz.Feature.BINDLESS] and check ctx.supports() before "
             "you declare the array."));
@@ -855,7 +855,7 @@ inline std::expected<void, Error> check_descriptor_arrays(Context& context, cons
     // is the undefined behaviour they asked to be rid of.
     if (layout.wants_update_after_bind() && !context.supports(Feature::BINDLESS))
     {
-        return std::unexpected(err_shader(
+        return std::unexpected(err_unsupported(
             "update_after_bind=True requires the BINDLESS feature. Create the Context with "
             "optional=[bz.Feature.BINDLESS], or write the descriptor before the first frame "
             "that binds the set."));
@@ -1289,7 +1289,7 @@ public:
         }
         if (sample_shading_ && !context_.supports(Feature::SAMPLE_RATE_SHADING))
         {
-            return std::unexpected(err_shader(
+            return std::unexpected(err_unsupported(
                 "sample_shading requires the SAMPLE_RATE_SHADING feature. Create the "
                 "Context with features=[bz.Feature.SAMPLE_RATE_SHADING] (or optional=[...])"));
         }
@@ -1299,7 +1299,7 @@ public:
         // silently producing a driver-dependent pipeline.
         if (polygon_mode_ != PolygonMode::FILL && !context_.supports(Feature::WIREFRAME))
         {
-            return std::unexpected(err_shader(
+            return std::unexpected(err_unsupported(
                 "polygon_mode requires the WIREFRAME feature. Create the Context with "
                 "features=[bz.Feature.WIREFRAME] (or optional=[...])"));
         }
@@ -1314,7 +1314,7 @@ public:
                 const auto it = blend_overrides_.find(i);
                 if (it != blend_overrides_.end() && it->second.applied_to(blend_) != blend_)
                 {
-                    return std::unexpected(err_shader(
+                    return std::unexpected(err_unsupported(
                         "blend(attachment=) / color_mask(attachment=) that differs from the "
                         "pipeline-wide setting requires the INDEPENDENT_BLEND feature. Create "
                         "the Context with features=[bz.Feature.INDEPENDENT_BLEND] (or "
@@ -1333,13 +1333,13 @@ public:
         }
         if (depth_clamp_ && !context_.supports(Feature::DEPTH_CLAMP))
         {
-            return std::unexpected(err_shader(
+            return std::unexpected(err_unsupported(
                 "depth_clamp requires the DEPTH_CLAMP feature. Create the Context with "
                 "features=[bz.Feature.DEPTH_CLAMP] (or optional=[...])"));
         }
         if (line_width_ != 1.0f && !context_.supports(Feature::WIDE_LINES))
         {
-            return std::unexpected(err_shader(
+            return std::unexpected(err_unsupported(
                 "line_width other than 1.0 requires the WIDE_LINES feature. Create the "
                 "Context with features=[bz.Feature.WIDE_LINES] (or optional=[...])"));
         }
@@ -1400,7 +1400,7 @@ public:
             const Feature needed = fragment ? Feature::FRAGMENT_STORES : Feature::VERTEX_STAGE_STORES;
             if (!context_.supports(needed))
             {
-                return std::unexpected(err_shader(
+                return std::unexpected(err_unsupported(
                     std::format(
                         "the {} shader writes a storage buffer or image, which requires the {} feature. "
                         "Create the Context with features=[bz.Feature.{}] (or optional=[...])",

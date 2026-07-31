@@ -163,13 +163,13 @@ def test_single_clear_applies_to_all_attachments(ctx):
 
 
 def test_non_power_of_two_sample_count_is_refused(ctx):
-    with pytest.raises(bz.ResourceError) as info:
+    with pytest.raises(bz.UnsupportedError) as info:
         bz.RenderTarget(ctx, 16, 16, samples=3)
     assert "max_samples" in str(info.value)
 
 
 def test_sample_count_over_max_is_refused(ctx):
-    with pytest.raises(bz.ResourceError):
+    with pytest.raises(bz.UnsupportedError):
         bz.RenderTarget(ctx, 16, 16, samples=ctx.max_samples() * 2)
 
 
@@ -178,7 +178,7 @@ def test_sample_shading_without_feature_is_refused(ctx, triangle_shaders, sample
     does not enable it, so the build must say so rather than fail in validation."""
     vert, frag = triangle_shaders
     target = bz.RenderTarget(ctx, 16, 16, samples=samples)
-    with pytest.raises(bz.ShaderError) as info:
+    with pytest.raises(bz.UnsupportedError) as info:
         (ctx.graphics_pipeline()
          .vertex_shader(vert)
          .fragment_shader(frag)

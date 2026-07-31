@@ -339,6 +339,10 @@ void bind_pipelines(py::module_& m)
             py::arg("binding"),
             py::arg("image"),
             py::arg("sampler") = py::none(),
+            // Keyword-only: set_image(0, img, 3) read as "index 3" and passed 3 as
+            // a sampler. Everywhere else in the API the extras are keyword-only,
+            // and the sibling verbs follow so the rule stays one rule (0.23).
+            py::kw_only(),
             py::arg("index") = 0)
         .def(
             "set_storage_image",
@@ -349,6 +353,7 @@ void bind_pipelines(py::module_& m)
             },
             py::arg("binding"),
             py::arg("image"),
+            py::kw_only(),
             py::arg("index") = 0)
         .def(
             "set_buffer",
@@ -359,6 +364,7 @@ void bind_pipelines(py::module_& m)
             },
             py::arg("binding"),
             py::arg("buffer"),
+            py::kw_only(),
             py::arg("index") = 0);
 
     py::class_<DescriptorPool, std::shared_ptr<DescriptorPool>>(m, "DescriptorPool")

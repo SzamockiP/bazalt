@@ -777,7 +777,7 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.barrier() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
@@ -805,7 +805,7 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.barrier() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
@@ -849,7 +849,7 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.generate_mipmaps() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
@@ -861,7 +861,7 @@ public:
         }
         if (!Image::can_generate_mips(*context_, image->format()))
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_unsupported(
                 "generate_mipmaps: this format cannot be blitted and linearly "
                 "filtered on this device, so a mip chain can't be generated"));
         }
@@ -914,7 +914,7 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.copy_image() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
@@ -1009,7 +1009,7 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.blit_image() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
@@ -1024,7 +1024,7 @@ public:
         // validation error about VkFormatFeatureFlags instead.
         if (!Image::can_blit(*context_, src->format(), dst->format()))
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_unsupported(
                 std::format(
                     "blit_image: this GPU cannot blit {} into {}. Both formats need "
                     "BLIT_SRC/BLIT_DST support, and a linear filter needs the source to be "
@@ -1085,7 +1085,7 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.copy_buffer() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
@@ -1142,7 +1142,7 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.fill_buffer() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
@@ -1186,7 +1186,7 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.clear_image() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
@@ -1350,7 +1350,7 @@ public:
     {
         if (!in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.occlusion_query() must be used inside a rendering scope: Vulkan requires an occlusion "
                 "query to begin and end within one render pass. Move it inside `with cmd.rendering(target):`."));
         }
@@ -1482,7 +1482,7 @@ public:
     {
         if (recorded_serial_ == serial)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "This CommandBuffer was already submitted in the current frame. Each "
                 "window needs its own CommandBuffer — one holds a single command "
                 "buffer per frame slot, so replaying it twice would overwrite work "
@@ -1806,7 +1806,7 @@ private:
         // binding, so the C++ API is as safe as the Python one.
         if (count > 1 && !context_->supports(Feature::MULTI_DRAW_INDIRECT))
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_unsupported(
                 std::format(
                     "{}: count>1 requires the MULTI_DRAW_INDIRECT feature. Create the Context "
                     "with features=[bz.Feature.MULTI_DRAW_INDIRECT] (or optional=[...]), or "
@@ -1832,7 +1832,7 @@ private:
         }
         if (!context_->supports(Feature::DRAW_INDIRECT_COUNT))
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_unsupported(
                 std::format(
                     "{}: count_buffer requires the DRAW_INDIRECT_COUNT feature. Create the "
                     "Context with optional=[bz.Feature.DRAW_INDIRECT_COUNT], or write 0 into "

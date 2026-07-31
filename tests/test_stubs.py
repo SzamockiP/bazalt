@@ -201,7 +201,8 @@ def test_stub_does_not_reference_an_undefined_buffer_type():
 
 def test_exception_hierarchy_matches_the_stub():
     for name in ("BazaltError", "InitializationError", "DeviceLostError",
-                 "OutOfMemoryError", "ShaderError", "WindowError", "ResourceError"):
+                 "OutOfMemoryError", "ShaderError", "WindowError", "ResourceError",
+                 "StateError", "UnsupportedError"):
         assert f"class {name}(" in stub_text()
         assert hasattr(bz, name)
 

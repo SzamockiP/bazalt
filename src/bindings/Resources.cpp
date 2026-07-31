@@ -37,7 +37,7 @@ void bind_resources(py::module_& m)
                     [&](const void* data, size_t nbytes)
                     { unwrap(buffer.update({static_cast<const std::byte*>(data), nbytes}, offset), nullptr); });
             },
-            py::arg("list"),
+            py::arg("data"),
             py::arg("data_type") = py::none(),
             py::kw_only(),
             py::arg("offset") = 0)

@@ -284,7 +284,7 @@ def test_line_width_needs_the_wide_lines_feature(ctx, fullscreen_push):
 
     if ctx.supports(bz.Feature.WIDE_LINES):
         pytest.skip("session Context happens to have WIDE_LINES enabled")
-    with pytest.raises(bz.ShaderError, match="WIDE_LINES"):
+    with pytest.raises(bz.UnsupportedError, match="WIDE_LINES"):
         build(3.0)
 
 
@@ -374,7 +374,7 @@ def test_line_mode_needs_the_wireframe_feature(ctx, triangle_shaders):
 
     vert, frag = triangle_shaders
     target = bz.RenderTarget(ctx, 64, 64)
-    with pytest.raises(bz.ShaderError, match="WIREFRAME"):
+    with pytest.raises(bz.UnsupportedError, match="WIREFRAME"):
         (ctx.graphics_pipeline()
          .vertex_shader(vert)
          .fragment_shader(frag)

@@ -42,7 +42,7 @@ def test_generate_mipmaps_refused_inside_a_rendering_scope(ctx):
     cmd = ctx.create_command_buffer()
     cmd.begin()
     cmd.begin_rendering(target)
-    with pytest.raises(bz.ResourceError, match="rendering scope"):
+    with pytest.raises(bz.StateError, match="rendering scope"):
         cmd.generate_mipmaps(img)
     cmd.end_rendering(target)
 

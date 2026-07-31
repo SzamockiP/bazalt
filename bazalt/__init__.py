@@ -73,6 +73,8 @@ __all__ = [
     "ShaderError",
     "WindowError",
     "ResourceError",
+    "StateError",
+    "UnsupportedError",
     # Version
     "__version__",
 ]

@@ -176,7 +176,7 @@ def test_a_differing_attachment_needs_independent_blend(ctx):
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "mrt.frag"), bz.ShaderStage.FRAGMENT)
     target = bz.RenderTarget(ctx, 32, 32, color=[bz.Format.RGBA8, bz.Format.RGBA8])
-    with pytest.raises(bz.ShaderError, match="INDEPENDENT_BLEND"):
+    with pytest.raises(bz.UnsupportedError, match="INDEPENDENT_BLEND"):
         (ctx.graphics_pipeline()
          .vertex_shader(vert)
          .fragment_shader(frag)
@@ -217,7 +217,7 @@ def test_depth_clamp_needs_its_feature(ctx):
     target = bz.RenderTarget(ctx, 32, 32, color=bz.Format.RGBA8, depth=bz.Format.D32F)
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "push.frag"), bz.ShaderStage.FRAGMENT)
-    with pytest.raises(bz.ShaderError, match="DEPTH_CLAMP"):
+    with pytest.raises(bz.UnsupportedError, match="DEPTH_CLAMP"):
         (ctx.graphics_pipeline()
          .vertex_shader(vert)
          .fragment_shader(frag)

@@ -234,7 +234,7 @@ def test_present_mode_cannot_change_mid_frame(ctx):
         ctx.begin_frame()
         if not renderer.acquire():
             pytest.skip("the window never acquired an image")
-        with pytest.raises(bz.ResourceError, match="acquire"):
+        with pytest.raises(bz.StateError, match="acquire"):
             renderer.set_present_mode(bz.PresentMode.IMMEDIATE)
         renderer.present(cmd)
     finally:

@@ -203,7 +203,7 @@ def test_barrier_inside_rendering_scope_is_refused(ctx, triangle_shaders, triang
     cmd = ctx.create_command_buffer(auto_barriers=False)
     cmd.begin()
     cmd.begin_rendering(target)
-    with pytest.raises(bz.ResourceError, match="rendering scope"):
+    with pytest.raises(bz.StateError, match="rendering scope"):
         cmd.barrier(sbuf, bz.Access.SHADER_WRITE, bz.Access.VERTEX_READ)
     cmd.end_rendering(target)
 
