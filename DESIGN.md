@@ -1826,7 +1826,7 @@ says what we did instead.
 - **Every public symbol from `_core.pyi` is touched by a test.** An unexercised binding is
   an unimplemented binding. 0.22 made this measurable rather than aspirational:
   `pytest --api-coverage` writes `api_coverage.md`, and the answer on the day it was
-  written was **301 of 494** — 129 of 156 methods, 63 of 63 properties, 94 of 136 enum
+  written was **304 of 497** — 129 of 156 methods, 63 of 63 properties, 97 of 139 enum
   members and 3 of 127 key constants. The untouched list is the 1.0 test plan, and
   `tests/api_coverage_baseline.txt` is what stops it growing in the meantime.
 

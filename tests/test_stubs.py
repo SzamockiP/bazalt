@@ -111,7 +111,11 @@ def test_renamed_and_new_api_is_declared():
                      "INDIRECT_READ = 5", "def draw_indirect",
                      "def draw_indexed_indirect", "def dispatch_indirect",
                      "def writes", "def writes_unknown", "def prints",
-                     "FRAGMENT_STORES = 10", "VERTEX_STAGE_STORES = 11"):
+                     "FRAGMENT_STORES = 10", "VERTEX_STAGE_STORES = 11",
+                     # 0.22 — the portability rows, which answer True on every
+                     # full Vulkan driver and False on a subset such as MoltenVK.
+                     "COMPARISON_SAMPLER = 15", "SAMPLER_MIP_LOD_BIAS = 16",
+                     "MULTISAMPLE_ARRAYS = 17"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 

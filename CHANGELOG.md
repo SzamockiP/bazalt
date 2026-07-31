@@ -49,7 +49,7 @@ which public symbols does no test touch.
 - **`pytest --api-coverage`.** Writes `api_coverage.md`, which lists every public
   symbol no test touches. Methods, properties and functions are measured by
   running them, so the report separates `Buffer.update` from `Image.update`. The
-  first measurement reads 301 of 494 symbols. The list is the test plan for 1.0.
+  first measurement reads 304 of 497 symbols. The list is the test plan for 1.0.
 
 ### Changed
 - **The message for a missing Vulkan loader names the fix.** It said "failed to
