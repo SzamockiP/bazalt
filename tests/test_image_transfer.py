@@ -128,12 +128,16 @@ def test_a_border_sampler_is_its_own_cache_entry(ctx):
     black = ctx.create_sampler(address_mode=bz.AddressMode.CLAMP_TO_BORDER)
     white = ctx.create_sampler(address_mode=bz.AddressMode.CLAMP_TO_BORDER,
                                border_color=bz.BorderColor.OPAQUE_WHITE)
-    biased = ctx.create_sampler(address_mode=bz.AddressMode.CLAMP_TO_BORDER, mip_lod_bias=1.5)
     same = ctx.create_sampler(address_mode=bz.AddressMode.CLAMP_TO_BORDER)
 
     assert black is not white
-    assert black is not biased
     assert black is same, "identical descriptions must still share one sampler"
+
+    # The bias is part of the key too, where the driver has the capability to
+    # take one at all (see Feature.SAMPLER_MIP_LOD_BIAS).
+    if ctx.supports(bz.Feature.SAMPLER_MIP_LOD_BIAS):
+        biased = ctx.create_sampler(address_mode=bz.AddressMode.CLAMP_TO_BORDER, mip_lod_bias=1.5)
+        assert black is not biased
 
 
 def test_the_border_colour_is_what_a_sample_outside_the_image_reads(ctx):

@@ -470,6 +470,22 @@ jobs:
       - name: Install wheel + test deps
         run: pip install wheelhouse/bazalt-*-cp312-*macosx*.whl pytest numpy
 
+      # Computed from the SDK version, not written down: the shader-access sync
+      # hazards the negative test needs are reported from layer 1.4.350, and the
+      # SDK pinned above is older. A literal 1 here would stay a 1 forever after
+      # a version bump, which is tech debt #4's lesson in the other direction.
+      - name: Decide whether sync validation can report shader hazards
+        run: |
+          MAJOR_MINOR_PATCH=$(echo "${{ env.VULKAN_SDK_VERSION }}" | cut -d. -f1-3)
+          LOWEST=$(printf '%s\n%s\n' "$MAJOR_MINOR_PATCH" "1.4.350" | sort -V | head -1)
+          if [ "$LOWEST" = "1.4.350" ]; then
+            echo "layers $MAJOR_MINOR_PATCH report shader-access sync hazards"
+            echo "BAZALT_SYNCVAL_UNSUPPORTED=0" >> "$GITHUB_ENV"
+          else
+            echo "layers $MAJOR_MINOR_PATCH are older than 1.4.350, so that one negative test skips"
+            echo "BAZALT_SYNCVAL_UNSUPPORTED=1" >> "$GITHUB_ENV"
+          fi
+
       # cwd is OUTSIDE the repo for the reason the lavapipe job gives: the
       # source tree's bazalt/ has no _core and would shadow the wheel.
       - name: Run test suite

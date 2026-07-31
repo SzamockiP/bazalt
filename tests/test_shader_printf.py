@@ -52,7 +52,9 @@ def dispatch_printf(context):
     return seen
 
 
-def test_printf_reaches_the_logger_as_shader_output(extra_context):
+def test_printf_reaches_the_logger_as_shader_output(extra_context, printf_compiles):
+    if not printf_compiles:
+        pytest.skip("this driver's shader compiler does not implement debugPrintfEXT")
     context = extra_context(shader_printf=True)
     if not context.shader_printf:
         pytest.skip("Context reports shader_printf off")
@@ -67,8 +69,10 @@ def test_printf_reaches_the_logger_as_shader_output(extra_context):
     assert any("1234" in m.text for m in prints)
 
 
-def test_printf_is_not_reported_as_a_validation_error(extra_context):
+def test_printf_is_not_reported_as_a_validation_error(extra_context, printf_compiles):
     """The whole reason the routing exists: a print must not fail its own test."""
+    if not printf_compiles:
+        pytest.skip("this driver's shader compiler does not implement debugPrintfEXT")
     context = extra_context(shader_printf=True)
     seen = dispatch_printf(context)
     if not printf_messages(seen):
@@ -77,13 +81,15 @@ def test_printf_is_not_reported_as_a_validation_error(extra_context):
     assert not [m for m in seen if m.source == bz.Source.VALIDATION and m.severity >= bz.Severity.ERROR]
 
 
-def test_printf_text_is_the_shaders_words_not_the_layers_report(extra_context):
+def test_printf_text_is_the_shaders_words_not_the_layers_report(extra_context, printf_compiles):
     """The layer wraps the print in its own boilerplate; bazalt peels it off.
 
     Without this the useful five characters arrive behind two hundred of object
     handles and message ids, once per print, which for a print inside a loop is
     the difference between a tool and a wall of text.
     """
+    if not printf_compiles:
+        pytest.skip("this driver's shader compiler does not implement debugPrintfEXT")
     context = extra_context(shader_printf=True)
     prints = printf_messages(dispatch_printf(context))
     if not prints:

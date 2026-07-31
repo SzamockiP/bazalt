@@ -1287,8 +1287,17 @@ private:
         // VK_KHR_shader_non_semantic_info — core in 1.3, an extension on the 1.2
         // path. Same "one capability, two spellings" shape as dynamic rendering
         // above, so it is resolved here and nothing downstream asks the version.
-        if (ctx.shader_printf_ && ctx.negotiated_api_version_ < VK_API_VERSION_1_3 &&
-            !ctx.vkb_physical_device_.enable_extension_if_present(VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME))
+        //
+        // Enabled whenever the device has it, not only for a printf Context. A
+        // shader that prints is legal to COMPILE anywhere -- it simply prints
+        // nothing without the layers -- and vkCreateShaderModule refuses SPIR-V
+        // that declares SPV_KHR_non_semantic_info unless the extension is on. So a
+        // printing shader compiled in an ordinary Context was a validation error on
+        // every 1.2 device, which before macOS meant a path nothing in CI ran.
+        const bool non_semantic_info =
+            ctx.negotiated_api_version_ >= VK_API_VERSION_1_3 ||
+            ctx.vkb_physical_device_.enable_extension_if_present(VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME);
+        if (ctx.shader_printf_ && !non_semantic_info)
         {
             return std::unexpected(err_init(
                 "shader_printf=True needs VK_KHR_shader_non_semantic_info (or Vulkan 1.3), which this "

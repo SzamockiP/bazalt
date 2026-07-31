@@ -211,3 +211,41 @@ def triangle_buffers(ctx):
     ibuf = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC,
                              bz.DataType.UINT32)
     return vbuf, ibuf
+
+
+PRINTF_PROBE = """
+#version 450
+#extension GL_EXT_debug_printf : enable
+layout(local_size_x = 1) in;
+void main()
+{
+    debugPrintfEXT("bazalt probe %d", 1);
+}
+"""
+
+
+@pytest.fixture(scope="session")
+def printf_compiles():
+    """Whether this driver's shader compiler implements debugPrintfEXT.
+
+    Nothing can be asked in advance. MoltenVK advertises
+    VK_KHR_shader_non_semantic_info, accepts the SPIR-V, and then fails inside
+    the Metal compiler with "use of undeclared identifier 'debugPrintfEXT'", so
+    the probe compiles one and looks.
+
+    On a Context of its own, never the `extra_context` factory: the failure IS a
+    validation error, and every Context that factory hands out is watched by the
+    referee that fails a test for exactly that.
+    """
+    try:
+        context = bz.Context(bz.Logger(), validation="on", shader_printf=True)
+    except bz.BazaltError:
+        return False
+    if not context.shader_printf:
+        return False
+    try:
+        shader = context.compile_shader("probe.comp", bz.ShaderStage.COMPUTE, source=PRINTF_PROBE)
+        context.compute_pipeline().shader(shader).build()
+        return True
+    except bz.BazaltError:
+        return False
