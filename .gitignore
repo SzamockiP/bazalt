@@ -4,6 +4,13 @@ out/
 build/
 examples/assets/San_Miguel/
 
+# CI: the Vulkan SDK installer, cached between runs (see .github/workflows/build.yml)
+.vulkan-sdk/
+
+# Written by `pytest --api-coverage`. The baseline it is checked against is
+# tracked; the report itself is generated.
+api_coverage.md
+
 CMakeSettings.json
 
 # Python

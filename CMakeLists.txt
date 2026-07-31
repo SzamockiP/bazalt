@@ -63,10 +63,14 @@ if(TARGET vk-bootstrap)
 endif()
 
 #stb
+# A commit, not a branch. stb publishes no tags, so `master` used to be the only
+# spelling available -- and it made an upstream push able to break a build here
+# with no local change, which is the one failure nobody can reproduce. GitHub
+# serves a shallow fetch of an explicit SHA, so pinning costs no clone time.
 FetchContent_Declare(
     stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
-    GIT_TAG master
+    GIT_TAG 31c1ad37456438565541f4919958214b6e762fb4
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(stb)
@@ -117,6 +121,13 @@ set_source_files_properties(src/vma_impl.cpp src/stb_impl.cpp
     PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 set_target_properties(_core PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}" SUFFIX "${PYTHON_MODULE_EXTENSION}")
 
+# VK_KHR_portability_subset lives in vulkan_beta.h, so its feature struct is
+# invisible without this. Defined on every platform, not only Apple: the code that
+# reads it is the same everywhere and only the runtime answer differs, and a struct
+# that exists on one platform and not another is how you get a header that compiles
+# in CI and not on a contributor's machine.
+target_compile_definitions(_core PRIVATE VK_ENABLE_BETA_EXTENSIONS)
+
 target_compile_features(_core PRIVATE cxx_std_23)
 if(MSVC)
     # /bigobj: every pybind lambda is a template instantiation, and 0.14 pushed
@@ -137,6 +148,25 @@ endif()
 
 if(WIN32)
     target_compile_definitions(_core PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+endif()
+
+# The macOS mirror of the line above: it makes volk load vkCreateMetalSurfaceEXT,
+# which is the surface entry point vk-bootstrap enables there. Nothing else about
+# the platform needs code -- vk-bootstrap adds VK_KHR_portability_enumeration and
+# the instance flag by itself, and enables VK_KHR_portability_subset on the device.
+if(APPLE)
+    target_compile_definitions(_core PRIVATE VK_USE_PLATFORM_METAL_EXT)
+
+    # libc++ annotates <format> and the floating-point std::to_chars it calls with
+    # availability, so a deployment target below 13.3 fails to compile every
+    # binding file. Say so in one sentence instead of leaving the reader to find
+    # it in a hundred lines of "'format' is unavailable".
+    if(CMAKE_OSX_DEPLOYMENT_TARGET AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 13.3)
+        message(FATAL_ERROR
+            "bazalt needs a macOS deployment target of 13.3 or later, because libc++ "
+            "supplies std::format from that version. Set MACOSX_DEPLOYMENT_TARGET=14.0 "
+            "(the version the published wheels use).")
+    endif()
 endif()
 
 install(TARGETS _core DESTINATION bazalt)

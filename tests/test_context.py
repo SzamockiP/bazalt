@@ -85,3 +85,50 @@ def test_log_message_is_readable(ctx, messages):
     msg = [m for m in messages() if m.text == "readable"][0]
     assert "readable" in str(msg)
     assert "WARNING" in str(msg)
+
+
+# ── Portability-subset capabilities (0.22) ───────────────────────────────
+# These three read the opposite way from every other Feature: they name things
+# full Vulkan always allows, and only a portability subset (MoltenVK on macOS)
+# can take away. The tests therefore assert the AGREEMENT between the answer and
+# the behaviour, which is the same assertion on both kinds of driver.
+
+
+def test_a_comparison_sampler_agrees_with_what_the_context_says(ctx):
+    """create_sampler(compare=) is sampler2DShadow, which shadow mapping needs.
+    Metal has no mutable comparison samplers, so the capability is a question
+    there and an always-yes everywhere else."""
+    if ctx.supports(bz.Feature.COMPARISON_SAMPLER):
+        assert ctx.create_sampler(compare=bz.CompareOp.LESS) is not None
+    else:
+        with pytest.raises(bz.ResourceError):
+            ctx.create_sampler(compare=bz.CompareOp.LESS)
+
+
+def test_a_mip_lod_bias_agrees_with_what_the_context_says(ctx):
+    if ctx.supports(bz.Feature.SAMPLER_MIP_LOD_BIAS):
+        assert ctx.create_sampler(mip_lod_bias=1.5) is not None
+    else:
+        with pytest.raises(bz.ResourceError):
+            ctx.create_sampler(mip_lod_bias=1.5)
+
+
+def test_a_layered_multisampled_target_agrees_with_what_the_context_says(ctx):
+    """A multisampled image with layers > 1. Refused before vkCreateImage where
+    the driver cannot do it, rather than reported by the validation layers."""
+    if ctx.max_samples() < 4:
+        pytest.skip("this device has no 4x MSAA")
+    if ctx.supports(bz.Feature.MULTISAMPLE_ARRAYS):
+        # color[0] is the RESOLVE attachment and stays single-sample: the
+        # multisampled image the feature is about is the one behind it.
+        target = bz.RenderTarget(ctx, 32, 32, layers=2, samples=4)
+        assert target.color[0].array_layers == 2
+    else:
+        with pytest.raises(bz.ResourceError):
+            bz.RenderTarget(ctx, 32, 32, layers=2, samples=4)
+
+
+def test_a_bias_of_zero_needs_no_capability(ctx):
+    """The gate asks about the argument, not about the call: mip_lod_bias=0.0 is
+    what every sampler in the suite already passes."""
+    assert ctx.create_sampler(mip_lod_bias=0.0) is not None

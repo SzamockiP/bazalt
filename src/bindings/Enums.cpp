@@ -36,7 +36,12 @@ void bind_enums(py::module_& m)
         .value("VERTEX_STAGE_STORES", Feature::VERTEX_STAGE_STORES)
         .value("MULTIVIEW", Feature::MULTIVIEW)
         .value("BINDLESS", Feature::BINDLESS)
-        .value("DRAW_INDIRECT_COUNT", Feature::DRAW_INDIRECT_COUNT);
+        .value("DRAW_INDIRECT_COUNT", Feature::DRAW_INDIRECT_COUNT)
+        // The three below answer True on every full Vulkan driver, because they name
+        // restrictions only a portability subset applies. See Features.hpp.
+        .value("COMPARISON_SAMPLER", Feature::COMPARISON_SAMPLER)
+        .value("SAMPLER_MIP_LOD_BIAS", Feature::SAMPLER_MIP_LOD_BIAS)
+        .value("MULTISAMPLE_ARRAYS", Feature::MULTISAMPLE_ARRAYS);
 
     // The gamepad layout GLFW maps every known pad onto, renamed rather than
     // translated: the values ARE the GLFW ones, so the two cannot drift.

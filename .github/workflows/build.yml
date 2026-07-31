@@ -14,15 +14,66 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # One place, three jobs and every cache key. A bump here re-downloads the SDK
+  # on all platforms and invalidates nothing else.
+  VULKAN_SDK_VERSION: "1.4.309.0"
+
   CIBW_SKIP: "*-musllinux* *-win32 *-manylinux_i686"
 
   # Smoke test on every built wheel: the module imports and the .pyi stub
-  # matches __all__. The GPU test suite can't run here (no Vulkan driver
-  # in the containers) and stays a local concern.
+  # matches __all__. A wheel is built where nothing can render — no driver in
+  # the manylinux container, none on the Windows runner — so anything that
+  # touches a GPU belongs to test_lavapipe and test_moltenvk instead.
   CIBW_TEST_REQUIRES: pytest
   CIBW_TEST_COMMAND: python -c "import bazalt" && python -m pytest {project}/tests/test_stubs.py -q
 
 jobs:
+  # ── C++ formatting ────────────────────────────────────────────
+  # The cheapest job in the file and the only one with no build. Until 0.22 the
+  # .clang-format at the root was enforced by remembering to run it, so a release
+  # ended with a "style(0.N): clang-format over the release's own code" commit.
+  #
+  # The version is pinned and comes from PyPI, not apt: clang-format changes its
+  # output between major versions, so an unpinned formatter turns somebody else's
+  # release into a red build here (the same lesson as tech debt #4).
+  format:
+    name: Format · clang-format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - run: pipx install "clang-format==20.1.*"
+
+      - name: Report the formatter version
+        run: clang-format --version
+
+      - name: Check src/ against .clang-format
+        run: clang-format --dry-run -Werror src/*.hpp src/*.cpp src/bindings/*.hpp src/bindings/*.cpp
+
+  # ── Source distribution ───────────────────────────────────────
+  # Published beside the wheels, so `pip install bazalt` on a platform with no
+  # wheel builds from source instead of failing with "no matching distribution".
+  # There is no separate "does the sdist build" check: wheels_linux builds the
+  # same sources from a clean checkout, which is the same proof.
+  sdist:
+    name: sdist
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - run: pipx run build --sdist
+
+      - run: pipx run twine check dist/*.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
   # ── Linux wheels ──────────────────────────────────────────────
   # A job of its own, not a leg of a shared matrix, because test_lavapipe needs
   # only this wheel. Both platforms in one job made the tests wait for Windows
@@ -36,16 +87,35 @@ jobs:
   #
   # A branch push builds the one interpreter the lavapipe legs install. Every
   # event that gates something — a pull request before merge, a release before
-  # publish, a manual run — builds all four.
+  # publish, a manual run — builds all five.
   wheels_linux:
     name: Wheels · linux ${{ matrix.python }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313"]') }}
+        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
     steps:
       - uses: actions/checkout@v7
+
+      # The SDK is downloaded on the HOST and unpacked in the container, which
+      # is what makes it cacheable at all: cibuildwheel copies the project into
+      # the container and copies only the wheels back out, so anything the
+      # container downloads for itself dies with the container.
+      - name: Cache the Vulkan SDK download
+        uses: actions/cache@v4
+        with:
+          path: .vulkan-sdk
+          key: vulkan-sdk-linux-${{ env.VULKAN_SDK_VERSION }}
+
+      - name: Download the Vulkan SDK
+        env:
+          TARBALL: vulkansdk-linux-x86_64-${{ env.VULKAN_SDK_VERSION }}.tar.xz
+        run: |
+          mkdir -p .vulkan-sdk
+          test -f ".vulkan-sdk/$TARBALL" || \
+            wget -q "https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/linux/$TARBALL" \
+              -O ".vulkan-sdk/$TARBALL"
 
       - uses: pypa/cibuildwheel@v4.1
         env:
@@ -53,20 +123,18 @@ jobs:
           CIBW_ARCHS_LINUX: x86_64
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
 
-          # Install the Vulkan SDK tarball + X11/Wayland deps inside the
-          # manylinux Docker container (not the host).
+          # Unpack the SDK tarball + install the X11/Wayland deps inside the
+          # manylinux Docker container (not the host). The cwd is the project,
+          # so the tarball the host cached is right there.
           CIBW_BEFORE_ALL_LINUX: |
             set -e
-            VULKAN_VERSION=1.4.309.0
-            yum install -y wget tar xz \
+            yum install -y tar xz \
               libX11-devel libXrandr-devel libXinerama-devel \
               libXcursor-devel libXi-devel \
               wayland-devel libxkbcommon-devel
-            wget -q "https://sdk.lunarg.com/sdk/download/${VULKAN_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz" \
-              -O /tmp/vulkansdk.tar.xz
             mkdir -p /opt/vulkan-sdk
-            tar xf /tmp/vulkansdk.tar.xz -C /opt/vulkan-sdk --strip-components=1
-            rm /tmp/vulkansdk.tar.xz
+            tar xf ".vulkan-sdk/vulkansdk-linux-x86_64-${{ env.VULKAN_SDK_VERSION }}.tar.xz" \
+              -C /opt/vulkan-sdk --strip-components=1
 
           CIBW_ENVIRONMENT_LINUX: >
             VULKAN_SDK=/opt/vulkan-sdk/x86_64
@@ -86,19 +154,53 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313"]') }}
+        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
     steps:
       - uses: actions/checkout@v7
+
+      # The installer, not the installed tree: the download is what costs
+      # minutes, the install itself is fast, and C:\VulkanSDK is far too large
+      # to move in and out of the cache every run.
+      - name: Cache the Vulkan SDK installer
+        uses: actions/cache@v4
+        with:
+          path: .vulkan-sdk
+          key: vulkan-sdk-windows-${{ env.VULKAN_SDK_VERSION }}
+
+      # `build-dir = "build/{wheel_tag}"` in pyproject.toml already makes a local
+      # rebuild incremental; caching that tree extends it across runs. What it
+      # saves is the dependencies, not bazalt: actions/checkout stamps every
+      # source file with the current time, so the eight binding TUs recompile
+      # regardless, while _deps (glfw, volk, vma, vk-bootstrap, stb) arrives with
+      # its cached timestamps and neither re-clones nor rebuilds.
+      #
+      # Only on the runners that build natively. The Linux wheels are built in a
+      # container that cibuildwheel copies the project INTO and copies only the
+      # wheels back out of, so nothing written to build/ there ever reaches the
+      # host to be saved.
+      #
+      # The key carries CMakeLists.txt, so any dependency pin bump busts it, and
+      # a v-prefix to bust it by hand.
+      - name: Cache the CMake build tree
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: build-v1-windows-${{ matrix.python }}-${{ hashFiles('CMakeLists.txt', 'pyproject.toml') }}
+          restore-keys: |
+            build-v1-windows-${{ matrix.python }}-
 
       - name: Install Vulkan SDK
         shell: pwsh
         run: |
-          $VERSION = "1.4.309.0"
-          $INSTALLER = "VulkanSDK-$VERSION-Installer.exe"
-          Invoke-WebRequest `
-            -Uri "https://sdk.lunarg.com/sdk/download/$VERSION/windows/$INSTALLER" `
-            -OutFile $INSTALLER
-          Start-Process -FilePath ".\$INSTALLER" `
+          $VERSION = "${{ env.VULKAN_SDK_VERSION }}"
+          New-Item -ItemType Directory -Force .vulkan-sdk | Out-Null
+          $INSTALLER = Join-Path $PWD ".vulkan-sdk\VulkanSDK-$VERSION-Installer.exe"
+          if (-not (Test-Path $INSTALLER)) {
+            Invoke-WebRequest `
+              -Uri "https://sdk.lunarg.com/sdk/download/$VERSION/windows/VulkanSDK-$VERSION-Installer.exe" `
+              -OutFile $INSTALLER
+          }
+          Start-Process -FilePath $INSTALLER `
             -ArgumentList "--accept-licenses --default-answer --confirm-command install" `
             -Wait
           echo "VULKAN_SDK=C:\VulkanSDK\$VERSION" >> $env:GITHUB_ENV
@@ -118,6 +220,97 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: wheels-windows-${{ matrix.python }}
+          path: ./wheelhouse/*.whl
+
+  # ── macOS wheels ──────────────────────────────────────────────
+  # arm64 only. GitHub's x86_64 macOS runners are retired, so an Intel wheel
+  # could be cross-compiled but never tested, and an untested wheel is worse
+  # than no wheel.
+  #
+  # The wheel ships no loader and no MoltenVK: macOS has no system Vulkan, so
+  # the user installs the SDK. That is the same contract as the other two
+  # platforms, where the loader comes with the driver — see DESIGN.md.
+  wheels_macos:
+    name: Wheels · macos ${{ matrix.python }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The image's default Xcode is not always its newest, and bazalt needs a
+      # recent one: deducing this (the whole pipeline builder), std::jthread and
+      # the C++23 range algorithms all arrived in AppleClang later than the rest
+      # of C++23. The runner OS does not reach the wheel — the deployment target
+      # below decides that — so taking the newest toolchain costs nothing.
+      - name: Use the newest Xcode on the image
+        run: |
+          NEWEST=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "using $NEWEST"
+          sudo xcode-select -s "$NEWEST"
+          clang --version
+
+      # The SDK archive is cached inside the composite action, which both macOS
+      # jobs share.
+      - name: Cache the CMake build tree
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: build-v1-macos-${{ matrix.python }}-${{ hashFiles('CMakeLists.txt', 'pyproject.toml') }}
+          restore-keys: |
+            build-v1-macos-${{ matrix.python }}-
+
+      - name: Install the Vulkan SDK (MoltenVK, layers, shaderc)
+        uses: ./.github/actions/install-vulkan-sdk-macos
+        with:
+          version: ${{ env.VULKAN_SDK_VERSION }}
+
+      - uses: pypa/cibuildwheel@v4.1
+        env:
+          CIBW_BUILD: "${{ matrix.python }}-*"
+          CIBW_ARCHS_MACOS: arm64
+
+          # 14.0, because libc++ supplies std::format only from 13.3 and the
+          # binding layer uses it everywhere. CMakeLists.txt refuses anything
+          # lower with that sentence rather than a page of availability errors.
+          #
+          MACOSX_DEPLOYMENT_TARGET: "14.0"
+
+          # _PYTHON_HOST_PLATFORM decides the wheel TAG, and it has to be said
+          # separately, because the two are computed from different things.
+          # MACOSX_DEPLOYMENT_TARGET reaches CMake, so the code compiles against
+          # 14.0; the tag comes from the interpreter's own sysconfig, and the
+          # python.org arm64 build reports 11.0. The first two macOS wheels went
+          # out as macosx_11_0_arm64 with 14.0 binaries inside — wheels that
+          # install on macOS 11 and then fail to load. A tag is a promise about
+          # the binary, so it is set from the same number, not inferred.
+          _PYTHON_HOST_PLATFORM: macosx-14.0-arm64
+
+          CIBW_ENVIRONMENT_MACOS: >
+            VULKAN_SDK=$HOME/VulkanSDK/macOS
+            CMAKE_PREFIX_PATH=$HOME/VulkanSDK/macOS
+            MACOSX_DEPLOYMENT_TARGET=14.0
+            _PYTHON_HOST_PLATFORM=macosx-14.0-arm64
+
+          # Same rule as the Windows job: bazalt must not ship a Vulkan loader.
+          # volk opens the one the user installed, and a bundled copy would
+          # shadow it. The otool step below reports what the extension really
+          # links, so this stays a fact rather than an assumption.
+          CIBW_REPAIR_WHEEL_COMMAND_MACOS: ""
+
+      - name: Report what the extension links
+        run: |
+          set -e
+          WHEEL=$(ls wheelhouse/*.whl | head -1)
+          rm -rf /tmp/wheel-check && mkdir -p /tmp/wheel-check
+          unzip -q "$WHEEL" -d /tmp/wheel-check
+          otool -L /tmp/wheel-check/bazalt/_core*.so
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-macos-${{ matrix.python }}
           path: ./wheelhouse/*.whl
 
   # ── Full GPU suite on lavapipe (Mesa software rasterizer) ─────
@@ -191,7 +384,7 @@ jobs:
         run: vulkaninfo --summary
 
       - name: Install wheel + test deps
-        run: pip install wheelhouse/bazalt-*-cp312-*manylinux*.whl pytest numpy
+        run: pip install wheelhouse/bazalt-*-cp312-*manylinux*.whl pytest numpy pillow
 
       # cwd is OUTSIDE the repo on purpose: the source tree's bazalt/ package
       # has no _core and would shadow the installed wheel on sys.path.
@@ -208,24 +401,120 @@ jobs:
       # that never enabled VK_KHR_dynamic_rendering has no KHR entry points to
       # alias to either. A bazalt-side knob rather than MESA_VK_VERSION_OVERRIDE
       # so the same leg is reproducible on any driver, including a dev GPU.
+      #
+      # --api-coverage on one leg only: it patches every public callable to
+      # record the call, and one measurement of the same suite is enough. It
+      # reports here and gates nowhere — the gate needs a run with no skips, and
+      # lavapipe has no display and not every feature (see conftest.py).
       - name: Run test suite
         working-directory: ${{ runner.temp }}
         env:
           BAZALT_FORCE_VULKAN_1_2: ${{ matrix.api == '1.2' && '1' || '0' }}
           # BAZALT_SYNCVAL_UNSUPPORTED is inherited from GITHUB_ENV.
-        run: python -m pytest ${{ github.workspace }}/tests -q
+        run: python -m pytest ${{ github.workspace }}/tests -q -rs ${{ matrix.api == '1.3' && '--api-coverage' || '' }}
+
+      - name: Upload the API coverage report
+        if: matrix.api == '1.3'
+        uses: actions/upload-artifact@v7
+        with:
+          name: api-coverage
+          path: ${{ runner.temp }}/api_coverage.md
+
+  # ── Full GPU suite on MoltenVK (Metal, real hardware) ─────────
+  # The acceptance test for 0.22: the release claims bazalt runs on macOS, and
+  # this is what makes the claim a fact rather than a wheel that builds. The
+  # runner is Apple Silicon, so unlike lavapipe this leg is a real GPU.
+  #
+  # One leg, not two. lavapipe already runs the 1.2 negotiation on its own leg,
+  # and a second one here would buy a slower pipeline and no new path.
+  #
+  # Expect skips rather than failures where Metal has nothing to offer: no
+  # geometry shaders, no wide lines, no shaderFloat64. Every one of those is
+  # behind Feature negotiation already, and the tests skip themselves.
+  test_moltenvk:
+    name: Tests · MoltenVK (Metal)
+    needs: wheels_macos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheels-macos-cp312
+          path: wheelhouse
+
+      - name: Install the Vulkan SDK (MoltenVK, layers, shaderc)
+        uses: ./.github/actions/install-vulkan-sdk-macos
+        with:
+          version: ${{ env.VULKAN_SDK_VERSION }}
+
+      # Asked of the SDK, not hardcoded, for the reason the lavapipe job gives.
+      - name: Locate the MoltenVK ICD manifest and the layers
+        run: |
+          ICD=$(find "$VULKAN_SDK/share/vulkan/icd.d" -name "*.json" | head -1)
+          test -n "$ICD" || { echo "no ICD manifest in the SDK:"; ls -R "$VULKAN_SDK/share/vulkan"; exit 1; }
+          echo "MoltenVK ICD: $ICD"
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          echo "VK_DRIVER_FILES=$ICD" >> "$GITHUB_ENV"
+          echo "VK_LAYER_PATH=$VULKAN_SDK/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+
+      # Proves a real Metal device answered, rather than the job passing because
+      # every GPU test skipped itself.
+      - name: Report the Vulkan device CI actually sees
+        run: "$VULKAN_SDK/bin/vulkaninfo --summary"
+
+      - name: Install wheel + test deps
+        run: pip install wheelhouse/bazalt-*-cp312-*macosx*.whl pytest numpy pillow
+
+      # Computed from the SDK version, not written down: the shader-access sync
+      # hazards the negative test needs are reported from layer 1.4.350, and the
+      # SDK pinned above is older. A literal 1 here would stay a 1 forever after
+      # a version bump, which is tech debt #4's lesson in the other direction.
+      - name: Decide whether sync validation can report shader hazards
+        run: |
+          MAJOR_MINOR_PATCH=$(echo "${{ env.VULKAN_SDK_VERSION }}" | cut -d. -f1-3)
+          LOWEST=$(printf '%s\n%s\n' "$MAJOR_MINOR_PATCH" "1.4.350" | sort -V | head -1)
+          if [ "$LOWEST" = "1.4.350" ]; then
+            echo "layers $MAJOR_MINOR_PATCH report shader-access sync hazards"
+            echo "BAZALT_SYNCVAL_UNSUPPORTED=0" >> "$GITHUB_ENV"
+          else
+            echo "layers $MAJOR_MINOR_PATCH are older than 1.4.350, so that one negative test skips"
+            echo "BAZALT_SYNCVAL_UNSUPPORTED=1" >> "$GITHUB_ENV"
+          fi
+
+      # cwd is OUTSIDE the repo for the reason the lavapipe job gives: the
+      # source tree's bazalt/ has no _core and would shadow the wheel.
+      # -rs, so the log names every skip and its reason. A suite that reports
+      # "18 skipped" and nothing else cannot be audited: a test skipped because
+      # Metal lacks the capability and a test skipped because a probe broke look
+      # identical from here, and one of them is a test quietly disabled.
+      - name: Run test suite
+        working-directory: ${{ runner.temp }}
+        run: python -m pytest ${{ github.workspace }}/tests -q -rs
 
   # ── Publish to PyPI on release ────────────────────────────────
   publish:
-    needs: [wheels_linux, wheels_windows]
+    needs: [wheels_linux, wheels_windows, wheels_macos, sdist]
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
     permissions:
       id-token: write
     steps:
+      # By pattern, not everything: the run also carries api_coverage.md, and a
+      # markdown file in dist/ is a file the upload has no idea what to do with.
       - uses: actions/download-artifact@v8
         with:
+          pattern: wheels-*
           path: dist
           merge-multiple: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: sdist
+          path: dist
 
       - uses: pypa/gh-action-pypi-publish@release/v1

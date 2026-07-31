@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <expected>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "Error.hpp"
@@ -95,9 +96,9 @@ inline DeviceUUID device_uuid(PFN_vkGetPhysicalDeviceProperties2 get_properties2
 // bindings/Targets.cpp already uses for vkCreateWin32SurfaceKHR.
 inline std::expected<std::vector<Device>, Error> list_devices()
 {
-    if (auto e = check(volkInitialize(), "initialize volk"))
+    if (volkInitialize() != VK_SUCCESS)
     {
-        return std::unexpected(*e);
+        return std::unexpected(err_no_vulkan_loader());
     }
 
     // 1.2 is bazalt's baseline anyway, and it is what makes the Properties2 /
@@ -110,15 +111,32 @@ inline std::expected<std::vector<Device>, Error> list_devices()
         .pEngineName = "bazalt",
         .engineVersion = 0,
         .apiVersion = VK_API_VERSION_1_2};
+    // A portability driver -- MoltenVK is the one that exists -- is invisible to a
+    // plain vkCreateInstance, which fails with VK_ERROR_INCOMPATIBLE_DRIVER rather
+    // than returning zero devices. Context does not need this code because
+    // vk-bootstrap does it there. This instance is built by hand, so it asks for
+    // itself, and it asks only when the loader offers the extension: enabling an
+    // absent extension is a hard failure, and on Windows and Linux it is absent.
+    std::uint32_t extension_count = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &extension_count, nullptr);
+    std::vector<VkExtensionProperties> extensions(extension_count);
+    vkEnumerateInstanceExtensionProperties(nullptr, &extension_count, extensions.data());
+
+    const bool portability = std::ranges::any_of(
+        extensions,
+        [](const VkExtensionProperties& extension)
+        { return std::string_view(extension.extensionName) == VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME; });
+
+    const char* portability_extension = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
     VkInstanceCreateInfo create_info{
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pNext = nullptr,
-        .flags = 0,
+        .flags = portability ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : VkInstanceCreateFlags{0},
         .pApplicationInfo = &app_info,
         .enabledLayerCount = 0,
         .ppEnabledLayerNames = nullptr,
-        .enabledExtensionCount = 0,
-        .ppEnabledExtensionNames = nullptr};
+        .enabledExtensionCount = portability ? 1u : 0u,
+        .ppEnabledExtensionNames = portability ? &portability_extension : nullptr};
 
     VkInstance instance = VK_NULL_HANDLE;
     if (auto e = check(vkCreateInstance(&create_info, nullptr, &instance), "create instance to list devices"))
@@ -132,6 +150,8 @@ inline std::expected<std::vector<Device>, Error> list_devices()
     auto get_properties2 = (PFN_vkGetPhysicalDeviceProperties2)load("vkGetPhysicalDeviceProperties2");
     auto get_features2 = (PFN_vkGetPhysicalDeviceFeatures2)load("vkGetPhysicalDeviceFeatures2");
     auto get_memory = (PFN_vkGetPhysicalDeviceMemoryProperties)load("vkGetPhysicalDeviceMemoryProperties");
+    auto enumerate_device_extensions =
+        (PFN_vkEnumerateDeviceExtensionProperties)load("vkEnumerateDeviceExtensionProperties");
 
     ScopeGuard cleanup(
         [&]
@@ -189,7 +209,23 @@ inline std::expected<std::vector<Device>, Error> list_devices()
         device.api_version = props2.properties.apiVersion;
         device.memory_bytes = device_local;
         std::copy(std::begin(id.deviceUUID), std::end(id.deviceUUID), device.uuid.begin());
-        device.features = query_device_features(get_features2, handle);
+        // Asked per device, because the portability rows read the opposite way for
+        // a device that is a subset and one that is not (see feature_available).
+        // A loader too old to expose the entry point simply reports no subset,
+        // which is what every non-portability driver reports anyway.
+        bool portability_subset = false;
+        if (enumerate_device_extensions)
+        {
+            std::uint32_t device_extension_count = 0;
+            enumerate_device_extensions(handle, nullptr, &device_extension_count, nullptr);
+            std::vector<VkExtensionProperties> device_extensions(device_extension_count);
+            enumerate_device_extensions(handle, nullptr, &device_extension_count, device_extensions.data());
+            portability_subset = std::ranges::any_of(
+                device_extensions,
+                [](const VkExtensionProperties& extension)
+                { return std::string_view(extension.extensionName) == VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME; });
+        }
+        device.features = query_device_features(get_features2, handle, portability_subset);
         devices.push_back(std::move(device));
     }
 

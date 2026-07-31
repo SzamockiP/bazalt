@@ -8,9 +8,16 @@ the setup code short.
 pip install bazalt
 ```
 
-Bazalt supplies wheels for Windows and Linux, for CPython 3.10 to 3.13. You need a driver
-with Vulkan 1.2. To build from source, you need a C++23 compiler (GCC 14+, or MSVC 19.36+
-from Visual Studio 17.6) and the Vulkan SDK.
+Bazalt supplies wheels for Windows, Linux and macOS, for CPython 3.10 to 3.14. You need a
+driver with Vulkan 1.2.
+
+On macOS you must also install the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home). The
+system supplies no Vulkan loader, and the SDK gives you the loader and MoltenVK, which runs
+Vulkan on Metal. The macOS wheels are for Apple Silicon and need macOS 14 or later.
+
+To build from source, you need a C++23 compiler (GCC 14+, or MSVC 19.36+ from Visual Studio
+17.6) and the Vulkan SDK. On macOS, use the newest Xcode you have: bazalt uses C++23 features
+that Apple Clang received late.
 
 ## A triangle
 

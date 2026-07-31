@@ -660,6 +660,16 @@ public:
                 "A multisampled image (samples>1) is a render-target attachment only: "
                 "it cannot have mipmaps or be a cubemap"));
         }
+        // Layered MSAA is plain Vulkan and a portability driver may still refuse it
+        // (Metal has no multisampled texture array). One feature to ask, rather than
+        // a validation error at vkCreateImage (0.22).
+        if (samples != VK_SAMPLE_COUNT_1_BIT && array_layers > 1 && !context.supports(Feature::MULTISAMPLE_ARRAYS))
+        {
+            return std::unexpected(err_resource(
+                "A multisampled image with layers>1 needs the MULTISAMPLE_ARRAYS feature, which this driver "
+                "does not offer. Ask ctx.supports(bz.Feature.MULTISAMPLE_ARRAYS), or render the layers one "
+                "at a time into single-layer multisampled targets."));
+        }
         const FormatInfo info = format_info(format);
         const VkFormat vk_fmt = context.vk_format(format);
         if (vk_fmt == VK_FORMAT_UNDEFINED)

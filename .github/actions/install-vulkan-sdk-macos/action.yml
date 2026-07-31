@@ -1,0 +1,65 @@
+name: Install the Vulkan SDK on macOS
+description: >
+  Installs the LunarG SDK — the loader, MoltenVK, the validation layers and
+  shaderc — and exports VULKAN_SDK. Two jobs need exactly this, so it lives here
+  rather than twice in the workflow.
+
+inputs:
+  version:
+    description: SDK version, for example 1.4.309.0.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The archive, not the installed tree: the download is what costs minutes.
+    - name: Cache the Vulkan SDK archive
+      uses: actions/cache@v4
+      with:
+        path: .vulkan-sdk
+        key: vulkan-sdk-macos-${{ inputs.version }}
+
+    - shell: bash
+      run: |
+        set -e
+        VERSION="${{ inputs.version }}"
+        ZIP=".vulkan-sdk/vulkansdk-macos-$VERSION.zip"
+
+        # A zip. LunarG has shipped the macOS SDK as a dmg for other releases,
+        # so the extension is worth confirming against
+        # https://vulkan.lunarg.com/sdk/files.json before bumping the version.
+        mkdir -p .vulkan-sdk
+        test -f "$ZIP" || curl -sSfL \
+          "https://sdk.lunarg.com/sdk/download/$VERSION/mac/vulkansdk-macos-$VERSION.zip" -o "$ZIP"
+
+        rm -rf "$RUNNER_TEMP/vulkansdk"
+        unzip -q "$ZIP" -d "$RUNNER_TEMP/vulkansdk"
+
+        # The installer app is found, not spelled out: its name and its depth in
+        # the archive have both moved between SDK releases. Same reason the
+        # lavapipe job asks dpkg where the ICD manifest is.
+        APP=$(find "$RUNNER_TEMP/vulkansdk" -maxdepth 3 -name "*.app" | head -1)
+        test -n "$APP" || {
+          echo "no installer app in the archive:"
+          find "$RUNNER_TEMP/vulkansdk" -maxdepth 2 | head -40
+          exit 1
+        }
+        echo "installer: $APP"
+        xattr -dr com.apple.quarantine "$APP" || true
+
+        # --root keeps the SDK under $HOME, so the install needs no privileges.
+        "$APP/Contents/MacOS/$(ls "$APP/Contents/MacOS" | head -1)" \
+          --root "$HOME/VulkanSDK" --accept-licenses --default-answer --confirm-command install
+
+        SDK="$HOME/VulkanSDK/macOS"
+        test -d "$SDK" || { echo "the SDK is not where it was expected:"; ls -la "$HOME/VulkanSDK"; exit 1; }
+        echo "VULKAN_SDK=$SDK" >> "$GITHUB_ENV"
+
+        # The loader is opened with dlopen, by volk and again by GLFW. macOS
+        # strips every DYLD_* variable when it starts a SIP-protected binary,
+        # and /bin/bash is one, so a DYLD_LIBRARY_PATH exported here would not
+        # reach the next step at all. A symlink in a default search path does,
+        # and it is what the SDK's own system install writes.
+        sudo mkdir -p /usr/local/lib
+        sudo ln -sf "$SDK"/lib/libvulkan*.dylib /usr/local/lib/
+        echo "loader:"; ls -l /usr/local/lib/libvulkan*
