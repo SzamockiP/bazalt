@@ -783,7 +783,16 @@ public:
         }
         const StageAccess s = to_vk(src, context_->all_shader_stages());
         const StageAccess d = to_vk(dst, context_->all_shader_stages());
+        Buffer* buf = buffer.get();
         record_barrier_(std::move(buffer), {s.stages, d.stages, s.access, d.access});
+        // Keep the auto-tracker in sync, for the reason the image overload below
+        // does it: the caller just expressed this dependency, so the next
+        // automatic use of the buffer must not emit the first-use floor on top of
+        // it. No-op in manual mode (the tracker is never consulted).
+        if (auto_barriers_)
+        {
+            tracker_.note_buffer_access(buf, d.stages, d.access);
+        }
         return {};
     }
 
@@ -1901,7 +1910,12 @@ private:
         {
             tracked_writes_ = true;
         }
-        if (auto b = tracker_.use(buffer.get(), stages, access, writes))
+        // Only a STORAGE buffer carries VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, so it
+        // is the only type a shader can write. The tracker uses that to narrow
+        // its first-use floor rather than to switch it off — every type can be
+        // written by cmd.copy_buffer and cmd.fill_buffer.
+        const bool shader_writable = buffer->buffer_type() == BufferType::STORAGE;
+        if (auto b = tracker_.use(buffer.get(), stages, access, writes, shader_writable))
         {
             record_barrier_(buffer, *b);
         }

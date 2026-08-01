@@ -85,11 +85,14 @@ inline std::optional<VkImageLayout> image_layout_for(Access access)
 // Keys on Buffer* (object identity), never VkBuffer: a DynamicBuffer has one
 // handle per frame in flight, but it is one resource with one usage history.
 //
-// Scope (0.6): buffers only. The compute API has no storage images, and
-// sampled images are covered by the RenderTarget final_layout contract, so a
-// buffer tracker covers everything the Python API can express. Known limit:
-// SSBO *writes* from graphics shaders are invisible here (no reflection) —
-// cmd.barrier() in manual mode is the ceiling for that.
+// Scope: buffers when this was written in 0.6, images since, and graphics SSBO
+// writes since 0.19 gave it SPIR-V reflection to ask. What it still cannot see
+// is a write from OUTSIDE the recording it is tracking — another CommandBuffer,
+// or the previous replay of this one — because record-time state is per
+// recording by construction. That is what the first-use floors answer, one on
+// each of use() and use_image(): the first touch of a resource assumes the
+// worst about who wrote it last, and every touch after names its real
+// predecessor.
 class ResourceTracker
 {
 public:
@@ -110,10 +113,55 @@ public:
     };
 
     // Registers a use and returns the barrier that must precede it, if any.
-    std::optional<Barrier> use(Buffer* buffer, VkPipelineStageFlags stages, VkAccessFlags access, bool writes)
+    //
+    // `shader_writable` says whether a shader can write this buffer at all, which
+    // is what narrows the first-use floor below. The caller answers it from the
+    // BufferType, because this file knows Buffer by identity only, on purpose.
+    std::optional<Barrier> use(
+        Buffer* buffer,
+        VkPipelineStageFlags stages,
+        VkAccessFlags access,
+        bool writes,
+        bool shader_writable)
     {
-        BufferState& st = states_[buffer];
+        auto [it, inserted] = states_.try_emplace(buffer);
+        BufferState& st = it->second;
         std::optional<Barrier> result;
+
+        // The first READ of a buffer in this recording has no predecessor here to
+        // name, and the writer may be outside the recording entirely: another
+        // CommandBuffer that shares the buffer, or the previous replay of this
+        // one. So it synchronizes against everything that could have written it.
+        // Same argument and the same shape as the image floor below.
+        //
+        // Reads only, and that is the whole precision of it. A recording that
+        // WRITES anything tracked already emits the replay wrap-around barrier at
+        // the top of execute() — so its own first write is ordered against every
+        // prior submit, and a floor here would be a second barrier for a
+        // dependency that already exists. `tracked_writes_` is per RECORDING
+        // though, not per buffer, which is why the read side was never covered:
+        // a recording whose only writes are attachments — any ordinary draw —
+        // sets it false and emitted nothing at all. That is the gap
+        // examples/28_gpu_culling papered over with a manual barrier.
+        //
+        // The mask is narrowed by what can reach this buffer, not the floor
+        // itself. Every type carries TRANSFER_DST (buffer_usage_for), so
+        // cmd.copy_buffer and cmd.fill_buffer reach any of them; only STORAGE
+        // carries VK_BUFFER_USAGE_STORAGE_BUFFER_BIT and can be written by a
+        // shader. A vertex, index or uniform buffer therefore waits on TRANSFER
+        // alone — idle in almost every frame — and only a storage buffer pays for
+        // the shader stages.
+        if (inserted && !writes)
+        {
+            VkPipelineStageFlags floor_stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            VkAccessFlags floor_access = VK_ACCESS_TRANSFER_WRITE_BIT;
+            if (shader_writable)
+            {
+                floor_stages |= all_shader_stages_;
+                floor_access |= VK_ACCESS_SHADER_WRITE_BIT;
+            }
+            result = Barrier{floor_stages, stages, floor_access, access};
+        }
 
         if (writes)
         {
@@ -241,6 +289,23 @@ public:
     // against these consumers. Modelling dst as a completed read is right for
     // both the READ case (a later sample needs no barrier) and the WRITE case (a
     // later write waits on dst before overwriting).
+    // The buffer counterpart, and it exists for the first of those two reasons.
+    // A manual cmd.barrier(buffer, ...) records a real barrier and used to tell
+    // the tracker nothing, which cost nothing while buffers had no floor. With
+    // the floor, the automatic use right after a manual barrier would emit a
+    // second barrier for a dependency the caller just expressed. Seeding the
+    // state as a completed read removes it, and orders a later write in this
+    // recording against the consumers the caller named.
+    void note_buffer_access(Buffer* buffer, VkPipelineStageFlags dst_stages, VkAccessFlags dst_access)
+    {
+        BufferState& st = states_[buffer];
+        st = {};
+        st.read_stages = dst_stages;
+        st.read_access = dst_access;
+        st.visible_stages = dst_stages;
+        st.visible_access = dst_access;
+    }
+
     void note_image_layout(
         Image* image,
         VkImageLayout layout,

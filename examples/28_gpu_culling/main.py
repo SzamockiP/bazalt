@@ -339,14 +339,13 @@ while culled_window.is_open() and observer_window.is_open():
         obs_vp = bytes(glm.transpose(
             observer_view_proj(observer_window.width / max(observer_window.height, 1))))
         observer_cmd.begin()
-        if culling:
-            # The compute pass that filled these ran in the OTHER window's
-            # recording, and the automatic tracker orders uses within ONE recording
-            # only — it cannot see across two. So this recording says out loud what
-            # it is waiting for. Access.INDIRECT_READ (0.19) is the one that matters:
-            # the command processor reads the arguments earlier than any shader.
-            observer_cmd.barrier(args, bz.Access.SHADER_WRITE, bz.Access.INDIRECT_READ)
-            observer_cmd.barrier(visible, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
+        # The compute pass that fills `args` and `visible` runs in the OTHER
+        # window's recording, and this one only reads them. Until 0.24 that needed
+        # two manual barriers here, because the tracker's state is per recording
+        # and this recording writes nothing it can see. It is automatic now: the
+        # first READ of a buffer in a recording waits for whatever wrote it last,
+        # wherever that was. cmd.barrier() is still there for the cases the
+        # tracker cannot reach.
         with observer_cmd.rendering(observer_renderer, clear_color=[0.05, 0.05, 0.09, 1.0]) as c:
             c.bind_pipeline(observer_pipeline)
             c.bind_descriptor_set(source_set, observer_pipeline, set=0)
