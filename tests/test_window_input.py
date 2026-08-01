@@ -15,6 +15,7 @@ the same value twice inside one frame, and it starts at rest.
 """
 
 import pathlib
+import time
 
 import pytest
 
@@ -476,3 +477,44 @@ def test_the_clipboard_needs_a_window():
     # failure of the guard, so skip rather than assert on something this test did
     # not control.
     pytest.skip("a window is still alive in this process")
+
+
+# ── wait_events: the pump that sleeps (0.24) ────────────────────────────
+
+
+def test_wait_events_with_a_timeout_returns(ctx):
+    """The one thing a test can assert without a user at the keyboard: a timeout
+    wakes it. Without the timeout this would block until somebody moved a mouse,
+    which is the whole point of the call and also untestable."""
+    window = bz.Window(64, 64, "wait_events")
+    start = time.perf_counter()
+    bz.wait_events(timeout=0.05)
+    elapsed = time.perf_counter() - start
+
+    assert window.is_open()
+    # Generous: the OS may deliver an event early and wake it sooner, and a
+    # loaded machine may take longer. The assertion is "it returned", not "it
+    # slept precisely".
+    assert elapsed < 5.0
+
+
+def test_wait_events_rotates_the_per_cycle_state(ctx):
+    """It is a pump, so the edge queries have to expire on it exactly as they do
+    on poll_events — otherwise a program that waits sees a key press twice."""
+    window = bz.Window(64, 64, "wait_events rotation")
+    bz.poll_events()
+    bz.wait_events(timeout=0.01)
+    assert window.was_key_pressed(bz.Key.W) is False
+
+
+def test_wait_events_rejects_a_negative_timeout(ctx):
+    window = bz.Window(64, 64, "wait_events negative")
+    with pytest.raises(ValueError, match="negative"):
+        bz.wait_events(timeout=-1.0)
+
+
+def test_wait_events_needs_a_window():
+    """Same precondition and the same message shape as poll_events: with no
+    window GLFW is not initialized, so the call would vanish without a trace."""
+    with pytest.raises(bz.WindowError, match="No windows exist"):
+        bz.wait_events(timeout=0.0)

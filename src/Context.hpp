@@ -66,6 +66,36 @@ class ShaderModule;
 class Pipeline;
 class Image;
 
+// Why a GPU query has no number yet, or no number at all (0.24). One nullopt
+// used to cover all of these, so a caller could not tell "wait longer" from
+// "this GPU cannot" — and the two want opposite reactions. The binding layer
+// turns the first three into exceptions and leaves None meaning exactly one
+// thing.
+//
+// Here rather than on CommandBuffer because both askers need it and Renderer.hpp
+// only forward-declares CommandBuffer. Namespace scope in the header that owns
+// the subject, like Access in ResourceTracker.hpp — and Context is the owner:
+// it holds the timeline the answers are paced by and the gpu_timing flag that
+// produces Disabled.
+enum class QueryStatus
+{
+    Ok,
+    // The device has no usable timestamps: timestampPeriod is 0, or the graphics
+    // family reports timestampValidBits == 0. Never true of an occlusion query,
+    // which is core with no feature behind it.
+    Unsupported,
+    // The device could, but nobody asked: Context(gpu_timing=True) is what turns
+    // the swapchain renderer's per-frame timestamps on. Only
+    // SwapchainRenderer.gpu_time_ms produces this — cmd.timer() needs no flag,
+    // because it costs nothing until a recording asks for a timer.
+    Disabled,
+    // The handle predates a begin(), so its slots now hold a different query's
+    // data. A sequencing mistake, not a device limit.
+    Superseded,
+    // The submit has not finished. The one answer that means "ask again".
+    NotReady
+};
+
 // The hot-reload file watcher, seen from the Context's side — same abstract
 // interface trick as UploadManagerBase (the concrete HotReloadWatcher lives in
 // HotReload.hpp, which needs the full Pipeline/ShaderModule/Image/UploadManager

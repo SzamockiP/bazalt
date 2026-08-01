@@ -105,13 +105,17 @@ void bind_targets(py::module_& m)
             py::arg("cmd"),
             py::kw_only(),
             py::arg("capture") = false)
-        // float milliseconds, or None until the ring has cycled once / on
-        // devices without timestamp support. Per renderer, because the timestamp
-        // pool is: two windows have two GPU frame times.
+        // float milliseconds, and None means one thing since 0.24: the ring has
+        // not cycled once yet. Timing that was never switched on raises
+        // StateError and a device that cannot measure raises UnsupportedError,
+        // because a caller polling this in a frame loop needs to know which of
+        // the three it is looking at. Per renderer, because the timestamp pool
+        // is: two windows have two GPU frame times.
         .def_property_readonly(
             "gpu_time_ms",
             [](const SwapchainRenderer& r) -> py::object
             {
+                raise_for_query_status(r.timing_status(), "gpu_time_ms");
                 auto ms = r.gpu_time_ms();
                 return ms ? py::cast(*ms) : py::none();
             })

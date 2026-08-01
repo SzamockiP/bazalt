@@ -738,6 +738,44 @@ inline std::expected<void, Error> poll_events()
     return {};
 }
 
+// The same dispatch, but it SLEEPS until there is something to dispatch.
+//
+// poll_events() was the only pump, so every program that does not animate — a
+// viewer, a parameter editor, examples/08_pyqt_integration — burned a core
+// spinning through frames identical to the last one. This is the one-line fix
+// GLFW has had all along, and a free function for exactly the reasons above:
+// glfwWaitEvents takes no window either.
+//
+// timeout is in seconds, and None waits indefinitely. Give it a number when
+// something other than input has to wake the loop up — an animation that runs
+// only sometimes, or a watchdog. Note that a hot-reload edit does NOT wake it:
+// the watcher runs on its own thread and its result is applied from
+// begin_frame(), so a program that only ever waits for input would not see the
+// reload until the next click. Pass a timeout there.
+inline std::expected<void, Error> wait_events(std::optional<double> timeout)
+{
+    if (Window::window_count_.load() == 0)
+    {
+        return std::unexpected(err_window(
+            "No windows exist, so there is no event queue to wait on. wait_events() "
+            "sleeps until an OS event arrives for an open window. Create a Window "
+            "first, and stop pumping once the last one is closed."));
+    }
+    if (timeout.has_value())
+    {
+        glfwWaitEventsTimeout(*timeout);
+    }
+    else
+    {
+        glfwWaitEvents();
+    }
+
+    // Same order and the same meaning as poll_events(): the generation counts
+    // completed cycles, so a per-cycle query reports what this call delivered.
+    Window::poll_generation_.fetch_add(1, std::memory_order_relaxed);
+    return {};
+}
+
 // The system clipboard. Free functions, not Window methods, for the same reason
 // poll_events() is a free function: glfwGetClipboardString and
 // glfwSetClipboardString take no window (GLFW accepts NULL and the clipboard is

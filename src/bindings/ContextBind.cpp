@@ -430,6 +430,13 @@ void bind_context(py::module_& m)
             py::arg("name") = "")
         // A single (h,w[,c]) array → a 2D image. cube=True here is a mistake: a
         // cubemap needs six faces, so point the caller at the list form.
+        //
+        // The 0.22 review filed this parameter as "an argument whose whole job is
+        // an error message" and 0.24 kept it, having tried the removal. Without
+        // it, create_image(array, cube=True) matches no overload, and pybind
+        // answers with its own dump of all four signatures — which is where the
+        // caller started. An argument that exists to produce one sentence is
+        // better than no argument that produces forty lines.
         .def(
             "create_image",
             [](Context& self, py::buffer b, bool mipmaps, bool cube, const std::string& name) -> py::object

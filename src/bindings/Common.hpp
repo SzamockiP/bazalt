@@ -218,6 +218,45 @@ inline void require_open(const Context* context, const char* what)
     }
 }
 
+// Turns a query's reason-for-no-answer into the exception the 0.23 taxonomy
+// gives it. Ok and NotReady return; the caller then produces the number or None.
+//
+// The split exists because one sentinel for four reasons is a question the
+// caller cannot answer. "Wait longer" and "this GPU cannot" want opposite
+// reactions, and a loop that polls Timer.ms would spin forever on a device with
+// no timestamps.
+inline void raise_for_query_status(QueryStatus status, const char* what)
+{
+    if (status == QueryStatus::Unsupported)
+    {
+        raise_error(err_unsupported(
+            std::format(
+                "{}: this GPU reports no usable timestamps (timestampPeriod or "
+                "timestampValidBits is zero on the graphics queue), so it can never "
+                "measure GPU time here. Measure on the CPU instead.",
+                what)));
+    }
+    if (status == QueryStatus::Disabled)
+    {
+        raise_error(err_state(
+            std::format(
+                "{}: this Context was built without gpu_timing=True, so no timestamps "
+                "are recorded. Pass Context(gpu_timing=True) to measure frames — it is "
+                "opt-in because it costs a timestamp pair per frame.",
+                what)));
+    }
+    if (status == QueryStatus::Superseded)
+    {
+        raise_error(err_state(
+            std::format(
+                "{}: this handle is from a recording that cmd.begin() has since "
+                "replaced, so its query slots now hold different data. Read the "
+                "result before re-recording, or keep the handle from the current "
+                "recording.",
+                what)));
+    }
+}
+
 // clear_color=None preserves the attachment, and a multisampled target has
 // nothing to preserve: its multisampled image is transient (storeOp
 // DONT_CARE) and the pass result lives in the resolve image, which is not

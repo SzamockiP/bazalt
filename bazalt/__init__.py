@@ -3,7 +3,7 @@
 from bazalt import _core
 from bazalt._core import *  # noqa: F401, F403
 
-__version__ = "0.23.0"
+__version__ = "0.24.0"
 
 __all__ = [
     # Core
@@ -17,6 +17,9 @@ __all__ = [
     "Device",
     "list_devices",
     "poll_events",
+    # The sleeping half of the same pump, for a program that only redraws on
+    # input (0.24).
+    "wait_events",
     # Process-wide, like poll_events: the clipboard is not per window.
     "get_clipboard",
     "set_clipboard",

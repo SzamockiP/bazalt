@@ -1090,6 +1090,14 @@ class GraphicsPipelineBuilder:
         here."""
         ...
     def push_constant(self, size: int, stage: ShaderStage) -> GraphicsPipelineBuilder: ...
+    # Declaring the same (set, binding) twice MERGES the stages rather than
+    # conflicting, so a camera UBO that both stages read is spelled:
+    #
+    #     .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
+    #     .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
+    #
+    # This has always worked and the stub never said so, which made it look like
+    # a mistake (0.24). It applies to every declarator below, not only this one.
     def uniform_buffer(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
                        update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder: ...
     def storage_buffer(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
@@ -1517,11 +1525,17 @@ class OcclusionQuery:
         ...
     @property
     def samples(self) -> Optional[int]:
-        """Fragments that passed the depth and stencil tests, or None if the
-        command buffer was re-recorded since (the handle is stale) or the submit
-        has not completed. Read it after the submit you measured has finished —
-        the default submit(wait=True) is enough; submit(wait=False) needs a
-        ctx.wait() first."""
+        """Fragments that passed the depth and stencil tests.
+
+        None means one thing: the submit has not completed. Read it after the
+        submit you measured has finished — the default submit(wait=True) is
+        enough; submit(wait=False) needs a ctx.wait() first.
+
+        Raises StateError when the command buffer has been re-recorded since, so
+        this handle's query slots now hold a different query's data. That used to
+        be another None (0.24), which made "wait longer" and "this answer is gone"
+        the same reply.
+        """
         ...
     def __enter__(self) -> OcclusionQuery: ...
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
@@ -1542,11 +1556,18 @@ class Timer:
         ...
     @property
     def ms(self) -> Optional[float]:
-        """Measured GPU time in milliseconds, or None if timestamps are
-        unsupported, the command buffer was re-recorded since (the handle is
-        stale), or the submit has not completed. Read it after the submit you
-        timed has finished — the default submit(wait=True) is enough;
-        submit(wait=False) needs a ctx.wait() first."""
+        """Measured GPU time in milliseconds.
+
+        None means one thing: the submit has not completed. Read it after the
+        submit you timed has finished — the default submit(wait=True) is enough;
+        submit(wait=False) needs a ctx.wait() first.
+
+        Raises UnsupportedError when the GPU reports no usable timestamps, and
+        StateError when the command buffer has been re-recorded since. All three
+        answers were one None until 0.24, so a loop polling this could not tell
+        "wait longer" from "this device will never answer" — and spun forever on
+        the second.
+        """
         ...
     def __enter__(self) -> Timer: ...
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
@@ -1713,6 +1734,33 @@ def poll_events() -> None:
 
     Raises WindowError when no window exists — with none open there is no queue
     to drain, and a loop still pumping is a bug rather than a no-op.
+    """
+    ...
+
+def wait_events(timeout: float | None = None) -> None:
+    """Sleep until an OS event arrives, then dispatch it like poll_events (0.24).
+
+    Use this instead of poll_events in a program that only redraws on input — a
+    model viewer, a parameter editor, a Qt application. With poll_events as the
+    only pump, such a program runs a full-speed loop over frames identical to
+    the last one and holds a CPU core at 100%:
+
+        while window.is_open:
+            bz.wait_events()          # sleeps until the user does something
+            if renderer.acquire():
+                ...
+                renderer.present(cmd)
+
+    timeout is in seconds. None waits indefinitely; a number caps the sleep, so
+    give one when something other than input has to wake the loop — an animation
+    that runs only sometimes, or a watchdog.
+
+    A hot-reload edit does NOT wake it. The watcher runs on its own thread and
+    its result is applied from ctx.begin_frame(), so a program that only ever
+    waits for input sees the reload at the next click. Pass a timeout there.
+
+    Raises WindowError when no window exists, like poll_events, and ValueError
+    for a negative timeout.
     """
     ...
 
@@ -1903,7 +1951,7 @@ class Context:
     def begin_frame(self) -> None:
         """Open one logical frame — the frame verb of a windowed loop.
 
-        Advances the ring slot that CommandBuffer, DynamicBuffer and the
+        Advances the ring slot that CommandBuffer, a DYNAMIC buffer and the
         per-frame descriptor sets index, applies pending hot reloads, and
         reclaims deferred handles. All of that is Context-owned, so it happens
         once per frame no matter how many windows draw into it:
@@ -2386,9 +2434,19 @@ class SwapchainRenderer(RenderTargetBase):
     def gpu_time_ms(self) -> Optional[float]:
         """GPU time in milliseconds of the frame submitted frames_in_flight ago
         (a timestamp pair around each submit, read back once its fence signals).
-        None unless the Context was created with gpu_timing=True; also None
-        until the ring has cycled once, and on devices without timestamp
-        support."""
+
+        None means one thing: the ring has not cycled once yet, so read it every
+        frame and use it when it arrives.
+
+        Raises StateError when the Context was built without gpu_timing=True, and
+        UnsupportedError when the GPU reports no usable timestamps. Same split
+        and same reason as Timer.ms (0.24): a frame loop reading this needs to
+        know whether to keep asking.
+
+        A driver that measures and answers 0.0 is a measurement, not a sentinel.
+        MoltenVK on a paravirtual device does exactly that, and nothing can
+        distinguish it from a genuinely fast frame — see DESIGN.md.
+        """
         ...
 
     @property

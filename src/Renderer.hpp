@@ -467,6 +467,29 @@ public:
     {
         return timestamp_pool_ != VK_NULL_HANDLE;
     }
+
+    // Why gpu_time_ms has no number, when it has none. Same three-way split as
+    // cmd.timer(), for the same reason: None used to mean "off", "this GPU
+    // cannot" and "not measured yet" at once, and only the last one is worth
+    // waiting through.
+    //
+    // Ok here means "a measurement is available or will be" — the value itself
+    // may still be absent for the first frames_in_flight frames, which is the
+    // NotReady the caller sees as None.
+    QueryStatus timing_status() const
+    {
+        if (!context_->gpu_timing())
+        {
+            return QueryStatus::Disabled;
+        }
+        // The pool is created once, at renderer construction, and stays null only
+        // when the device failed the timestampPeriod / timestampValidBits check.
+        if (timestamp_pool_ == VK_NULL_HANDLE)
+        {
+            return QueryStatus::Unsupported;
+        }
+        return last_gpu_time_ms_.has_value() ? QueryStatus::Ok : QueryStatus::NotReady;
+    }
     VkQueryPool timestamp_pool() const
     {
         return timestamp_pool_;

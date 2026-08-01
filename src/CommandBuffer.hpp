@@ -1270,15 +1270,38 @@ public:
         return recording_generation_;
     }
 
-    // The measured time of one timer in milliseconds, or nullopt when:
-    // timestamps are unsupported, the handle is from a superseded recording, or
-    // the results are not ready (a submit still in flight — a blocking headless
-    // submit always is).
-    std::optional<double> read_timer(std::size_t index, std::uint64_t generation) const
+    struct TimerReading
     {
-        if (timer_pool_ == VK_NULL_HANDLE || generation != recording_generation_ || index >= timer_count_)
+        QueryStatus status = QueryStatus::NotReady;
+        double ms = 0.0;
+    };
+
+    struct OcclusionReading
+    {
+        QueryStatus status = QueryStatus::NotReady;
+        std::uint64_t samples = 0;
+    };
+
+    // The measured time of one timer in milliseconds, with the reason attached
+    // when there is none.
+    TimerReading read_timer(std::size_t index, std::uint64_t generation) const
+    {
+        // First, because a stale handle's index may be out of range for the
+        // recording that replaced it — that is still the stale handle's fault.
+        if (generation != recording_generation_)
         {
-            return std::nullopt;
+            return {QueryStatus::Superseded};
+        }
+        // timer_supported_ is only filled in at the first execute, so an unset
+        // one means "nobody has asked the device yet", which is NotReady rather
+        // than a verdict.
+        if (timer_supported_.has_value() && !*timer_supported_)
+        {
+            return {QueryStatus::Unsupported};
+        }
+        if (timer_pool_ == VK_NULL_HANDLE || index >= timer_count_)
+        {
+            return {QueryStatus::NotReady};
         }
         std::uint64_t ts[2] = {0, 0};
         if (context_->vk().vkGetQueryPoolResults(
@@ -1291,12 +1314,12 @@ public:
                 sizeof(std::uint64_t),
                 VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
         {
-            return std::nullopt; // VK_NOT_READY: submit not finished
+            return {QueryStatus::NotReady}; // VK_NOT_READY: submit not finished
         }
         const std::uint64_t mask = timer_valid_bits_ >= 64 ? ~std::uint64_t{0}
                                                            : ((std::uint64_t{1} << timer_valid_bits_) - 1);
         const std::uint64_t delta = (ts[1] - ts[0]) & mask;
-        return static_cast<double>(delta) * static_cast<double>(timer_period_) / 1.0e6;
+        return {QueryStatus::Ok, static_cast<double>(delta) * static_cast<double>(timer_period_) / 1.0e6};
     }
 
     // ── Debug labels ────────────────────────────────────────────────────────
@@ -1403,14 +1426,19 @@ public:
             });
     }
 
-    // The sample count of one query, or nullopt when the handle is from a
-    // superseded recording or the results are not ready yet. Same three-way
-    // contract as read_timer, and the same stale-handle guard.
-    std::optional<std::uint64_t> read_occlusion_query(std::size_t index, std::uint64_t generation) const
+    // The sample count of one query, with the same reasons attached. There is no
+    // Unsupported here: an imprecise occlusion query is core Vulkan behind no
+    // feature, so the only answers are the number, a stale handle, and "not
+    // yet".
+    OcclusionReading read_occlusion_query(std::size_t index, std::uint64_t generation) const
     {
-        if (occlusion_pool_ == VK_NULL_HANDLE || generation != recording_generation_ || index >= occlusion_count_)
+        if (generation != recording_generation_)
         {
-            return std::nullopt;
+            return {QueryStatus::Superseded};
+        }
+        if (occlusion_pool_ == VK_NULL_HANDLE || index >= occlusion_count_)
+        {
+            return {QueryStatus::NotReady};
         }
         std::uint64_t samples = 0;
         if (context_->vk().vkGetQueryPoolResults(
@@ -1423,9 +1451,9 @@ public:
                 sizeof(std::uint64_t),
                 VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
         {
-            return std::nullopt; // VK_NOT_READY: submit not finished
+            return {QueryStatus::NotReady}; // VK_NOT_READY: submit not finished
         }
-        return samples;
+        return {QueryStatus::Ok, samples};
     }
 
     // No stage argument: the Pipeline already knows which stages its push constant
