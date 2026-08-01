@@ -50,6 +50,19 @@ here, so one migration covers them.
   `RenderTargetBase`.
 - **`bz.BlendMode.MULTIPLY`.** The darkening overlay — ambient occlusion,
   baked shadows — that the three preset modes could not spell.
+- **`bz.BlendFactor` and `bz.BlendOp`, the blend escape hatch.** The named
+  modes are four points in the factor space; now you can write the equation:
+
+  ```python
+  .blend(True, src=bz.BlendFactor.ONE, dst=bz.BlendFactor.ONE, op=bz.BlendOp.MAX)
+  ```
+
+  `src=` and `dst=` go together, `op=` defaults to ADD, and the alpha channel
+  follows the colour unless `src_alpha=`/`dst_alpha=` spell it out — the
+  `glBlendFunc` rule. Mixing `mode=` with a factor argument raises
+  `ValueError`: they are two ways to say the same thing. There are no
+  constant-colour or dual-source factors, because each needs more API than an
+  enum row.
 - **`VertexFormat.UINT2/3/4` and `UBYTE4_UINT`.** Skinning joint indices are a
   `uvec4`, and nothing could carry them.
 - **Two examples.** `31_volume_raymarch` fills a 128³ density field in compute
@@ -64,6 +77,10 @@ here, so one migration covers them.
 - **`index` is keyword-only** on `set_image`, `set_storage_image` and
   `set_buffer`. `set_image(0, img, 3)` read as "index 3" and passed 3 as a
   sampler.
+- **`blend()` takes everything past `mode` as a keyword**, `attachment=`
+  included. `blend(True, MULTIPLY, 1)` reading as "attachment 1" is the same
+  trap, and the new factor arguments would make it worse. Every call in the
+  examples and the tests already passed `attachment=` by name.
 - **`create_buffer` and `Buffer.update` name their first parameter `data`.**
   It was `list`, `array` or `size_in_bytes` depending on the overload, and
   two of those shadow builtins.

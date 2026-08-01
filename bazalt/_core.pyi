@@ -265,6 +265,39 @@ class BlendMode(IntEnum):
     PREMULTIPLIED = 2
     MULTIPLY = 3
 
+class BlendFactor(IntEnum):
+    """What each side of the blend is multiplied by (0.23).
+
+    The four BlendModes are points in this space; these are the axes, for the
+    fifth thing you want — `blend(True, src=..., dst=..., op=...)`. There are
+    no constant-colour or dual-source factors: each needs more API than an
+    enum row (a blend-constants verb, a second shader output).
+    """
+    ZERO = 0
+    ONE = 1
+    SRC_COLOR = 2
+    ONE_MINUS_SRC_COLOR = 3
+    DST_COLOR = 4
+    ONE_MINUS_DST_COLOR = 5
+    SRC_ALPHA = 6
+    ONE_MINUS_SRC_ALPHA = 7
+    DST_ALPHA = 8
+    ONE_MINUS_DST_ALPHA = 9
+    #: min(src.a, 1 - dst.a) on colour, 1 on alpha.
+    SRC_ALPHA_SATURATE = 10
+
+class BlendOp(IntEnum):
+    """How the two scaled sides combine (0.23). Every named BlendMode uses ADD.
+    MIN and MAX ignore the factors, which is what a "keep the brightest" pass
+    wants."""
+    ADD = 0
+    #: src - dst
+    SUBTRACT = 1
+    #: dst - src
+    REVERSE_SUBTRACT = 2
+    MIN = 3
+    MAX = 4
+
 class PolygonMode(IntEnum):
     """Fill triangles, or draw only their edges (the wireframe view) or
     vertices. All three are core Vulkan and need no Feature."""
@@ -1025,13 +1058,36 @@ class GraphicsPipelineBuilder:
         no call at all.
         """
         ...
-    def blend(self, enable: bool, mode: BlendMode = BlendMode.ALPHA,
+    def blend(self, enable: bool, mode: Optional[BlendMode] = None, *,
+              src: Optional[BlendFactor] = None, dst: Optional[BlendFactor] = None,
+              op: Optional[BlendOp] = None,
+              src_alpha: Optional[BlendFactor] = None,
+              dst_alpha: Optional[BlendFactor] = None,
+              alpha_op: Optional[BlendOp] = None,
               attachment: Optional[int] = None) -> GraphicsPipelineBuilder:
         """How a fragment combines with the attachment it lands on.
 
+        Two spellings of one question. A named mode covers the common blends:
+
+            .blend(True, bz.BlendMode.ADDITIVE)
+
+        or write the equation yourself, for the fifth thing the modes cannot
+        say:
+
+            .blend(True, src=bz.BlendFactor.DST_COLOR, dst=bz.BlendFactor.ZERO)
+            .blend(True, src=bz.BlendFactor.ONE, dst=bz.BlendFactor.ONE,
+                   op=bz.BlendOp.MAX)
+
+        `src=` and `dst=` go together and `op=` defaults to ADD. The alpha
+        channel follows the colour unless `src_alpha=`/`dst_alpha=` spell it
+        out, which is what glBlendFunc does. Mixing `mode=` with any factor
+        argument is a ValueError: they are two ways to say the same thing, and
+        a silent winner between them is a rule nobody remembers.
+
         attachment= narrows the setting to one colour attachment of an MRT
         target; None (the default) sets it for all of them. Per-attachment
-        blend() and color_mask() calls merge, in either order.
+        blend() and color_mask() calls merge, in either order. Attachments that
+        actually differ need Feature.INDEPENDENT_BLEND.
         """
         ...
     def color_mask(self, red: bool = True, green: bool = True, blue: bool = True,

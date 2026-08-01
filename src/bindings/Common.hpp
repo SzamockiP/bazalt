@@ -203,6 +203,63 @@ inline void require_preservable(const RenderTarget& target, bool preserve, const
     }
 }
 
+// `blend()`'s two spellings resolved into the one equation the pipeline stores
+// (0.23). A named mode is four points in the factor space; the factors are the
+// axes, for the fifth thing somebody wants (rule 2: leave the hatch).
+//
+// Three refusals, all ValueError, because each is malformed on its own — no
+// resource, no data and no device enters the decision, which is the 0.20 line.
+// The alternative to refusing is a silent winner between two ways of saying one
+// thing, and "which one wins" is a rule nobody remembers at 3am.
+inline BlendEquation resolve_blend_equation(
+    const std::optional<BlendMode>& mode,
+    const std::optional<BlendFactor>& src,
+    const std::optional<BlendFactor>& dst,
+    const std::optional<BlendOp>& op,
+    const std::optional<BlendFactor>& src_alpha,
+    const std::optional<BlendFactor>& dst_alpha,
+    const std::optional<BlendOp>& alpha_op)
+{
+    const bool any_factor = src || dst || op || src_alpha || dst_alpha || alpha_op;
+    if (mode && any_factor)
+    {
+        throw py::value_error(
+            "blend(): mode= and the factor arguments are two ways to say the same thing. "
+            "Pass a mode for a named blend, or src=/dst=/op= for a hand-written one.");
+    }
+    if (!any_factor)
+    {
+        // No mode either is the historical default: blend(True) is ALPHA.
+        return blend_equation_for(mode.value_or(BlendMode::ALPHA));
+    }
+    // A factor spelling names a COMPLETE equation, so the colour pair is
+    // required together: half of one has no reading that is not a guess about
+    // the other half.
+    if (!src || !dst)
+    {
+        throw py::value_error(
+            "blend(): src= and dst= go together — they are the two sides of one equation. "
+            "Pass both, or a mode= for a named blend.");
+    }
+    BlendEquation eq{*src, *dst, op.value_or(BlendOp::ADD), *src, *dst, op.value_or(BlendOp::ADD)};
+    // The alpha channel follows the colour unless it is spelled out, which is
+    // what glBlendFunc does and what nearly every blend wants. Spelled out, the
+    // same completeness rule applies to the pair.
+    if (src_alpha || dst_alpha || alpha_op)
+    {
+        if (!src_alpha || !dst_alpha)
+        {
+            throw py::value_error(
+                "blend(): src_alpha= and dst_alpha= go together. Pass both to give alpha its "
+                "own equation, or neither to have it follow the colour.");
+        }
+        eq.src_alpha = *src_alpha;
+        eq.dst_alpha = *dst_alpha;
+        eq.alpha_op = alpha_op.value_or(BlendOp::ADD);
+    }
+    return eq;
+}
+
 // The two bodies of RenderTarget.__init__, shared verbatim by
 // ctx.create_render_target (0.23): buffers, images, samplers, pools and
 // pipelines already come from the Context, and the target was one of two

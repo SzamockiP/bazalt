@@ -59,6 +59,8 @@ __all__ = [
     "FrontFace",
     "PolygonMode",
     "BlendMode",
+    "BlendFactor",
+    "BlendOp",
     "StencilOp",
     "BorderColor",
     "MemoryUsage",

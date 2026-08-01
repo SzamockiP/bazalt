@@ -9,6 +9,18 @@ Access.INDEX_READ
 Access.UNIFORM_READ
 AddressMode.MIRROR
 AddressMode.REPEAT
+BlendFactor.DST_ALPHA
+BlendFactor.DST_COLOR
+BlendFactor.ONE_MINUS_DST_ALPHA
+BlendFactor.ONE_MINUS_DST_COLOR
+BlendFactor.ONE_MINUS_SRC_ALPHA
+BlendFactor.ONE_MINUS_SRC_COLOR
+BlendFactor.SRC_ALPHA
+BlendFactor.SRC_ALPHA_SATURATE
+BlendFactor.SRC_COLOR
+BlendOp.MIN
+BlendOp.REVERSE_SUBTRACT
+BlendOp.SUBTRACT
 BorderColor.OPAQUE_BLACK
 Buffer.__init__
 CommandBuffer.__init__
@@ -284,7 +296,6 @@ StencilOp.INCREMENT_CLAMP
 StencilOp.INCREMENT_WRAP
 StencilOp.INVERT
 StencilOp.KEEP
-StencilOp.ZERO
 SubresourceTarget.__init__
 Timer.__init__
 Topology.LINE_LIST

@@ -126,7 +126,10 @@ def test_renamed_and_new_api_is_declared():
                      "def create_render_target", "class SubresourceTarget(",
                      "class MultiviewTarget(", "def create_descriptor_pool",
                      # 0.23 — small additions.
-                     "MULTIPLY = 3", "UINT4 = 8", "UBYTE4_UINT = 9"):
+                     "MULTIPLY = 3", "UINT4 = 8", "UBYTE4_UINT = 9",
+                     "class BlendFactor(", "class BlendOp(",
+                     "SRC_ALPHA_SATURATE = 10", "REVERSE_SUBTRACT = 2",
+                     "src: Optional[BlendFactor]"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 

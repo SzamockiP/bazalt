@@ -672,6 +672,34 @@ entry. The release is a label, not the organizing axis.
   depth and clear the stencil. `clear_color=None` still answers "what happens to the old
   contents" for all of them at once.
 
+- **A blend is stored as an equation, and a mode is four points in that space** (0.23).
+  `BlendState` held a `BlendMode` and `color_blend_attachment_` switched on it at pipeline
+  creation, so a preset was the only thing a pipeline could remember. It holds a
+  `BlendEquation` now — six factors and two ops — and `blend_equation_for(mode)` is the one
+  place a preset means anything. Downstream stops knowing which spelling produced it, which
+  is what keeps the two from disagreeing: the test that pins it renders `src=ONE, dst=ONE`
+  against `mode=ADDITIVE` and compares the pixels.
+
+  **Three rules make the factor spelling complete rather than a diff against a hidden
+  base.** `src=` and `dst=` are required together (half an equation only reads as a guess
+  about the other half). `op=` defaults to ADD, because every named mode uses it. The alpha
+  channel follows the colour unless `src_alpha=`/`dst_alpha=` spell it out — the
+  `glBlendFunc` rule, and the alternative (alpha defaulting to ONE/ZERO) would silently
+  destroy destination alpha for anyone writing a colour blend. Mixing `mode=` with any
+  factor argument is refused, because both answer one question and the alternative is a
+  silent winner between them.
+
+  All three refusals are `ValueError` and live in the binding layer: nothing is consulted to
+  know the call is malformed (the 0.20 line), and raising there points the traceback at the
+  offending line instead of at `build()`. That is `require_preservable`'s address, not
+  0.21's recorded-diagnosis one — the count-mismatch case needed `build()` because the
+  mistake spans two calls, and this one has every argument in hand.
+
+  **What stayed out, and why it is not a hole in the hatch:** constant-colour factors need a
+  `blend_constants()` verb (and the dynamic state to go with it), and `SRC1_*` needs a
+  second output declared in the shader. Each is more API than an enum row, so each remains
+  its own proposal. `SRC_ALPHA_SATURATE` is in, because it is only a row.
+
 - **A per-attachment blend override is per FIELD, not per attachment** (0.17).
   `blend(attachment=1)` and `color_mask(attachment=1)` each set their own optional fields of
   one `BlendOverride`, so the two compose in either order. Resolving against the
@@ -2006,12 +2034,11 @@ Ordered by rule 4 — what makes pictures goes first.
    type: `create_image(w, h, depth=n)`. Best ratio of picture to code on this list. DONE in
    0.23, the release's headline, render-to-slice included — see the decisions above and
    `examples/31_volume_raymarch` / `32_lut_grading`.
-2. **A blend escape hatch, half done.** Three preset modes and no way past them. `MULTIPLY`
+2. ✅ **A blend escape hatch.** Three preset modes and no way past them. `MULTIPLY`
    — an AO or shadow overlay — cannot be spelled at all, nor can a min/max blend op. Rule 2
    says leave the hatch: `BlendMode.MULTIPLY` first, `blend(enable, src=, dst=, op=)`
-   underneath it. 0.23 shipped `MULTIPLY`, which was the case somebody actually hit; the
-   factor/op hatch stays here — it needs two new enums and a mixing rule, and nothing has
-   asked past the named mode yet.
+   underneath it. DONE in 0.23, both halves, in the order the entry gave. See the decision
+   above.
 3. ✅ **`VertexFormat` stops at `UINT`.** There is no `UINT2/3/4`, so skinning joint indices
    (`uvec4`) cannot be delivered — `UBYTE4_NORM` carries the weights and nothing carries the
    indices. Add `UINT2/3/4` and `UBYTE4_UINT`. DONE in 0.23.
@@ -2145,6 +2172,13 @@ UNASKED wearing a costume.
   asks. **0.22:** something asks, and it is smaller than any of these three — `MULTIPLY` and
   a min/max blend op, which the three preset `BlendMode` values cannot spell. That is in the
   backlog. Dual-source and unnormalized coordinates stay here, unasked and unlisted.
+
+  **0.23 shipped that smaller thing** (`BlendMode.MULTIPLY`, then `BlendFactor`/`BlendOp`),
+  and building it sharpened why the other two stay: the hatch names every factor that is
+  only an enum row, and stops exactly where a factor needs machinery beside it. Blend
+  constants need a verb to set them and the dynamic state to change them per draw;
+  dual-source needs a second output in the shader and a `Feature` row for
+  `dualSrcBlend`. Neither is a hole in the hatch — each is its own proposal, still unasked.
 
 **Implementation alternatives.** The 0.22 audit left these unlabelled on purpose. Rule 7
 sorts entries that say "bazalt does not do this"; these say "bazalt does this the other way",
@@ -2409,6 +2443,25 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   feature is off while the tests still pass and the API still answers. Before writing a
   conservative fallback, ask what it looks like when the fallback fires for the wrong
   reason. If the answer is "exactly like working", find a different mechanism.
+
+- **A test branch that only a portability driver reaches is a branch no local run checks**
+  (0.23). The 0.22 capability tests are written as `if ctx.supports(X): assert it works;
+  else: assert it is refused`, which is the right shape — and the `else` half executes on
+  MoltenVK and nowhere else. So the 0.23 error split moved those refusals to
+  `UnsupportedError`, the whole suite passed twice locally and on lavapipe, and macOS CI
+  went red on three tests whose expectation had rotted under them. The census that found
+  every OTHER site was "run the suite and read the failures", and that method is blind here
+  by construction. **When a release changes what an error IS, grep the tests for the type by
+  name; do not trust a green run to have visited every branch.**
+
+- **A test may only assert what bazalt promises, not what a driver happens to do** (0.23).
+  `test_a_full_fixed_pool_raises_one_type` asserted that a pool sized for one set refuses
+  the second. Vulkan permits an implementation to serve more than the pool was sized for,
+  and lavapipe does, because its descriptors are host memory — so the test failed on the
+  one machine the suite gates on. What bazalt actually promises is the TYPE: if the driver
+  refuses, it is `ResourceError` and never `OutOfMemoryError`. The test now probes, asserts
+  the type when a refusal comes, and skips naming what it saw when none does — the same
+  shape as the 0.22 MoltenVK skips, for the same reason.
 
 - **A plausible number is not a verified number** (0.19). `examples/28_gpu_culling` reported
   about 350 survivors out of 20,000 and that was accepted for a whole release, because it

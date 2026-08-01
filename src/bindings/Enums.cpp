@@ -315,6 +315,28 @@ void bind_enums(py::module_& m)
         .value("PREMULTIPLIED", BlendMode::PREMULTIPLIED)
         .value("MULTIPLY", BlendMode::MULTIPLY);
 
+    // The axes the four modes are points in (0.23). No constant-colour or
+    // dual-source factors: each needs more API than an enum row.
+    py::enum_<BlendFactor>(m, "BlendFactor")
+        .value("ZERO", BlendFactor::ZERO)
+        .value("ONE", BlendFactor::ONE)
+        .value("SRC_COLOR", BlendFactor::SRC_COLOR)
+        .value("ONE_MINUS_SRC_COLOR", BlendFactor::ONE_MINUS_SRC_COLOR)
+        .value("DST_COLOR", BlendFactor::DST_COLOR)
+        .value("ONE_MINUS_DST_COLOR", BlendFactor::ONE_MINUS_DST_COLOR)
+        .value("SRC_ALPHA", BlendFactor::SRC_ALPHA)
+        .value("ONE_MINUS_SRC_ALPHA", BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .value("DST_ALPHA", BlendFactor::DST_ALPHA)
+        .value("ONE_MINUS_DST_ALPHA", BlendFactor::ONE_MINUS_DST_ALPHA)
+        .value("SRC_ALPHA_SATURATE", BlendFactor::SRC_ALPHA_SATURATE);
+
+    py::enum_<BlendOp>(m, "BlendOp")
+        .value("ADD", BlendOp::ADD)
+        .value("SUBTRACT", BlendOp::SUBTRACT)
+        .value("REVERSE_SUBTRACT", BlendOp::REVERSE_SUBTRACT)
+        .value("MIN", BlendOp::MIN)
+        .value("MAX", BlendOp::MAX);
+
     py::enum_<PolygonMode>(m, "PolygonMode")
         .value("FILL", PolygonMode::FILL)
         .value("LINE", PolygonMode::LINE)

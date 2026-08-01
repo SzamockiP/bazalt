@@ -79,11 +79,34 @@ void bind_pipelines(py::module_& m)
             py::arg("slope") = 0.0f)
         .def(
             "blend",
-            [](GraphicsPipelineBuilder& self, bool enable, BlendMode mode, std::optional<std::uint32_t> attachment)
-                -> GraphicsPipelineBuilder&
-            { return self.blend(enable, mode, attachment ? static_cast<int>(*attachment) : -1); },
+            [](GraphicsPipelineBuilder& self,
+               bool enable,
+               std::optional<BlendMode> mode,
+               std::optional<BlendFactor> src,
+               std::optional<BlendFactor> dst,
+               std::optional<BlendOp> op,
+               std::optional<BlendFactor> src_alpha,
+               std::optional<BlendFactor> dst_alpha,
+               std::optional<BlendOp> alpha_op,
+               std::optional<std::uint32_t> attachment) -> GraphicsPipelineBuilder&
+            {
+                return self.blend(
+                    enable,
+                    resolve_blend_equation(mode, src, dst, op, src_alpha, dst_alpha, alpha_op),
+                    attachment ? static_cast<int>(*attachment) : -1);
+            },
             py::arg("enable"),
-            py::arg("mode") = BlendMode::ALPHA,
+            py::arg("mode") = py::none(),
+            // Everything past the mode is keyword-only. blend(True, MULTIPLY, 1)
+            // reading as "attachment 1" is the trap set_image's index= had, and
+            // the factors would make it worse (0.23).
+            py::kw_only(),
+            py::arg("src") = py::none(),
+            py::arg("dst") = py::none(),
+            py::arg("op") = py::none(),
+            py::arg("src_alpha") = py::none(),
+            py::arg("dst_alpha") = py::none(),
+            py::arg("alpha_op") = py::none(),
             py::arg("attachment") = py::none())
         .def(
             "color_mask",

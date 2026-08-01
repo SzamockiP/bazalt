@@ -28,7 +28,7 @@ def fullscreen_push(ctx):
     """
     frag = ctx.compile_shader(str(SHADER_DIR / "push.frag"), bz.ShaderStage.FRAGMENT)
 
-    def make(target, *, far=False, blend=None, depth=None):
+    def make(target, *, far=False, blend=None, equation=None, depth=None):
         name = "fullscreen_far.vert" if far else "fullscreen.vert"
         vert = ctx.compile_shader(str(SHADER_DIR / name), bz.ShaderStage.VERTEX)
         builder = (ctx.graphics_pipeline()
@@ -37,6 +37,8 @@ def fullscreen_push(ctx):
                    .push_constant(16, bz.ShaderStage.FRAGMENT))
         if blend is not None:
             builder = builder.blend(True, mode=blend)
+        if equation is not None:
+            builder = builder.blend(True, **equation)
         if depth is not None:
             builder = builder.depth_test(True, **depth)
         return builder.build(target)
@@ -111,6 +113,100 @@ def test_multiply_darkens_where_alpha_replaces(ctx, fullscreen_push):
     alpha = fullscreen_push(target, blend=bz.BlendMode.ALPHA)
     assert np.allclose(draw_over(ctx, target, alpha, half_red, half_grey)[:3],
                        [128, 128, 128], atol=3)
+
+
+# ── the factor/op escape hatch (0.23) ─────────────────────────────────────
+
+
+def test_a_written_equation_matches_the_mode_it_spells(ctx, fullscreen_push):
+    """ONE/ONE ADD is what ADDITIVE resolves to, so the two spellings must
+    produce the same pixel. If they ever diverge, one of them stopped going
+    through blend_equation_for."""
+    target = bz.RenderTarget(ctx, 64, 64)
+    quarter = [0.25, 0.0, 0.0, 1.0]
+
+    written = fullscreen_push(target, equation=dict(src=bz.BlendFactor.ONE,
+                                                    dst=bz.BlendFactor.ONE))
+    by_mode = fullscreen_push(target, blend=bz.BlendMode.ADDITIVE)
+    assert np.array_equal(draw_over(ctx, target, written, quarter, quarter),
+                          draw_over(ctx, target, by_mode, quarter, quarter))
+
+
+def test_a_max_blend_op_ignores_the_factors(ctx, fullscreen_push):
+    """MAX is the case no preset can spell: the two sides are compared, not
+    summed. Half-red in the framebuffer, a dimmer red with some green on top —
+    MAX keeps the brighter of each channel, ADD would sum them."""
+    target = bz.RenderTarget(ctx, 64, 64)
+    half_red = [0.5, 0.0, 0.0, 1.0]
+    source = [0.25, 0.25, 0.0, 1.0]
+    both = dict(src=bz.BlendFactor.ONE, dst=bz.BlendFactor.ONE)
+
+    maxed = fullscreen_push(target, equation=dict(**both, op=bz.BlendOp.MAX))
+    assert np.allclose(draw_over(ctx, target, maxed, half_red, source)[:3],
+                       [128, 64, 0], atol=3)
+
+    added = fullscreen_push(target, equation=both)
+    assert np.allclose(draw_over(ctx, target, added, half_red, source)[:3],
+                       [191, 64, 0], atol=3)
+
+
+def test_alpha_follows_the_colour_until_it_is_spelled_out(ctx, fullscreen_push):
+    """The glBlendFunc rule: one equation covers both channels, and
+    src_alpha=/dst_alpha= give alpha its own. Destination alpha 0.25, source
+    alpha 0.5 — following the colour adds them, ZERO/ONE keeps the
+    destination's."""
+    target = bz.RenderTarget(ctx, 64, 64)
+    dst = [0.0, 0.0, 0.0, 0.25]
+    src = [1.0, 0.0, 0.0, 0.5]
+    both = dict(src=bz.BlendFactor.ONE, dst=bz.BlendFactor.ONE)
+
+    following = fullscreen_push(target, equation=both)
+    assert np.allclose(draw_over(ctx, target, following, dst, src)[3], 191, atol=3)
+
+    separate = fullscreen_push(target, equation=dict(**both,
+                                                     src_alpha=bz.BlendFactor.ZERO,
+                                                     dst_alpha=bz.BlendFactor.ONE))
+    assert np.allclose(draw_over(ctx, target, separate, dst, src)[3], 64, atol=3)
+
+
+def test_a_mode_and_a_factor_together_are_refused(ctx, fullscreen_push):
+    """Two ways to say one thing, so there is no silent winner. ValueError, not
+    a BazaltError: the call is malformed on its own."""
+    with pytest.raises(ValueError, match="two ways to say the same thing"):
+        ctx.graphics_pipeline().blend(True, bz.BlendMode.ADDITIVE, src=bz.BlendFactor.ONE)
+
+
+def test_half_an_equation_is_refused(ctx):
+    """src= and dst= are the two sides of one equation, and so are the alpha
+    pair. Half of either has no reading that is not a guess."""
+    with pytest.raises(ValueError, match="go together"):
+        ctx.graphics_pipeline().blend(True, src=bz.BlendFactor.ONE)
+    with pytest.raises(ValueError, match="go together"):
+        ctx.graphics_pipeline().blend(True, dst=bz.BlendFactor.ONE)
+    with pytest.raises(ValueError, match="src_alpha"):
+        ctx.graphics_pipeline().blend(True, src=bz.BlendFactor.ONE,
+                                      dst=bz.BlendFactor.ONE,
+                                      src_alpha=bz.BlendFactor.ZERO)
+
+
+def test_a_written_equation_is_ignored_while_blending_is_off(ctx, fullscreen_push):
+    """Same claim as the mode below, for the other spelling: blend(False)
+    replaces, whatever equation came with it."""
+    target = bz.RenderTarget(ctx, 64, 64)
+    off = fullscreen_push(target, equation=dict(src=bz.BlendFactor.ONE,
+                                                dst=bz.BlendFactor.ONE))
+    # Rebuild with blending disabled but the same arguments.
+    frag = ctx.compile_shader(str(SHADER_DIR / "push.frag"), bz.ShaderStage.FRAGMENT)
+    vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+    disabled = (ctx.graphics_pipeline()
+                .vertex_shader(vert)
+                .fragment_shader(frag)
+                .push_constant(16, bz.ShaderStage.FRAGMENT)
+                .blend(False, src=bz.BlendFactor.ONE, dst=bz.BlendFactor.ONE)
+                .build(target))
+    quarter = [0.25, 0.0, 0.0, 1.0]
+    assert np.allclose(draw_over(ctx, target, off, quarter, quarter)[:3], [128, 0, 0], atol=3)
+    assert np.allclose(draw_over(ctx, target, disabled, quarter, quarter)[:3], [64, 0, 0], atol=3)
 
 
 def test_blend_off_ignores_the_mode(ctx, fullscreen_push):
