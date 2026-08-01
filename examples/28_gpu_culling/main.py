@@ -11,7 +11,8 @@ Two windows, one Context, one culled scene:
 The observer is the whole point. From inside the culled camera nothing looks
 culled — that is what culling means, and it is measurable: the culled view renders
 PIXEL-IDENTICAL with culling on and off, while the observer's pixel count drops
-from about 99,000 to about 13,000. Fly out to the side and you can see the scene
+by roughly a factor of seven (about 99,000 to about 13,000 on the machine this
+was written on — press P to get your own). Fly out to the side and you can see the scene
 has been cut to a wedge: cubes exist inside the yellow frustum and nowhere else,
 and the wedge swings around as the culling camera turns.
 
@@ -41,7 +42,11 @@ same mesh. Use a count buffer when the survivors need DIFFERENT commands, e.g. o
 per mesh or per LOD.
 
 Keys: WASD + QE move the observer, hold RIGHT MOUSE to look, SPACE pauses the
-culling camera, C toggles culling off. Close either window to exit.
+culling camera, C toggles culling off, P prints the observer's drawn-pixel count.
+Close either window to exit.
+
+Press P from outside the frustum with culling on, then C and P again: the two
+numbers are the claim above, measured on your machine rather than remembered.
 """
 
 import struct
@@ -267,6 +272,11 @@ while culled_window.is_open() and observer_window.is_open():
         paused = not paused
     if culled_window.was_key_pressed(bz.KEY_C) or observer_window.was_key_pressed(bz.KEY_C):
         culling = not culling
+    # P measures instead of asking you to look. The docstring's numbers used to be
+    # a measurement somebody took once and wrote down; this is the same
+    # measurement, on your machine, from the frame you are looking at.
+    measure = (culled_window.was_key_pressed(bz.KEY_P)
+               or observer_window.was_key_pressed(bz.KEY_P))
 
     now = time.time()
     dt = now - last
@@ -357,7 +367,27 @@ while culled_window.is_open() and observer_window.is_open():
             c.push_constants(observer_lines, 0, obs_vp)
             c.bind_vertex_buffer(frustum_lines)
             c.draw(len(FRUSTUM_EDGES) * 2)
-        observer_renderer.present(observer_cmd)
+        observer_renderer.present(observer_cmd, capture=measure)
+        if measure:
+            # The readback stalls the frame, which is why this sits on a key
+            # rather than in the loop.
+            try:
+                pixels = observer_renderer.read_pixels()
+            except bz.ResourceError as error:
+                print(f"cannot measure: {error}")
+            else:
+                # Background is whatever colour covers most of the frame, not the
+                # clear colour worked out by hand: the swapchain is sRGB, so 0.05
+                # does not arrive as 13. Taking the mode asks the picture instead
+                # of reproducing the driver's transfer function.
+                rgb = pixels[:, :, :3].reshape(-1, 3)
+                packed = (rgb[:, 0].astype(np.uint32) << 16
+                          | rgb[:, 1].astype(np.uint32) << 8
+                          | rgb[:, 2])
+                counts = np.unique(packed, return_counts=True)[1]
+                drawn = int(packed.size - counts.max())
+                state = "on" if culling else "OFF"
+                print(f"observer: {drawn} drawn pixels of {packed.size}, culling {state}")
 
     frames += 1
     if time.time() - fps_timer >= 1.0:
