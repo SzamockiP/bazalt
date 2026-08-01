@@ -40,7 +40,7 @@ def pair(extra_context):
 def render_flat(context, color):
     """A cleared 16x16 target, read back. Enough GPU traffic to catch a command
     recorded through the wrong device's dispatch table."""
-    target = bz.RenderTarget(context, 16, 16)
+    target = context.create_render_target(16, 16)
     cmd = context.create_command_buffer()
     cmd.begin()
     cmd.begin_rendering(target, clear_color=color)
@@ -115,7 +115,7 @@ def test_foreign_pipeline_in_a_command_buffer_is_refused(pair):
                 .vertex_shader(a.compile_shader(str(SHADER_DIR / "triangle.vert"), bz.ShaderStage.VERTEX))
                 .fragment_shader(a.compile_shader(str(SHADER_DIR / "triangle.frag"), bz.ShaderStage.FRAGMENT))
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
-                .build(bz.RenderTarget(a, 16, 16)))
+                .build(a.create_render_target(16, 16)))
     cmd = b.create_command_buffer()
     cmd.begin()
     with pytest.raises(bz.ResourceError):
@@ -124,7 +124,7 @@ def test_foreign_pipeline_in_a_command_buffer_is_refused(pair):
 
 def test_foreign_target_in_begin_rendering_is_refused(pair):
     a, b = pair
-    target = bz.RenderTarget(a, 16, 16)
+    target = a.create_render_target(16, 16)
     cmd = b.create_command_buffer()
     cmd.begin()
     with pytest.raises(bz.ResourceError):

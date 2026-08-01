@@ -46,7 +46,7 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 ctx = bz.Context(logger, optional=[bz.Feature.WIREFRAME])
 
 window = bz.Window(900, 600, "Bazalt - Window Modes")
-renderer = bz.SwapchainRenderer(window, ctx, present_mode=bz.PresentMode.FIFO)
+renderer = ctx.create_renderer(window, present_mode=bz.PresentMode.FIFO)
 
 scene_vert = ctx.compile_shader("scene.vert", bz.ShaderStage.VERTEX)
 scene_frag = ctx.compile_shader("scene.frag", bz.ShaderStage.FRAGMENT)

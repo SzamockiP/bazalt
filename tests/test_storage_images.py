@@ -36,13 +36,13 @@ def test_set_storage_image_on_sampler_binding_is_refused(ctx, fullscreen_vert):
     """A storage_image write to a combined-image-sampler binding is a mistake
     diagnosed at the call site, not left to the validation layers."""
     frag = ctx.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 16, 16)
+    target = ctx.create_render_target(16, 16)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(fullscreen_vert)
                 .fragment_shader(frag)
                 .texture(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(target))
-    pool = ctx.create_descriptor_pool(max_sets=4, samplers=4)
+    pool = ctx.create_descriptor_pool(max_sets=4, textures=4)
     dset = pool.allocate_set(pipeline, set=0)
     img = ctx.create_image(16, 16, bz.Format.RGBA8)
 
@@ -109,7 +109,7 @@ def test_compute_to_compute_barrier(ctx):
 def test_compute_written_image_sampled_by_graphics(ctx, fullscreen_vert):
     fill = _fill_pipeline(ctx)
     frag = ctx.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     gfx = (ctx.graphics_pipeline()
            .vertex_shader(fullscreen_vert)
            .fragment_shader(frag)
@@ -117,7 +117,7 @@ def test_compute_written_image_sampled_by_graphics(ctx, fullscreen_vert):
            .build(target))
 
     img = ctx.create_image(16, 16, bz.Format.RGBA8)
-    pool = ctx.create_descriptor_pool(max_sets=4, storage_images=4, samplers=4)
+    pool = ctx.create_descriptor_pool(max_sets=4, storage_images=4, textures=4)
     fill_set = pool.allocate_set(fill, set=0)
     fill_set.set_storage_image(0, img)
     sample_set = pool.allocate_set(gfx, set=0)

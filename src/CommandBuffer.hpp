@@ -777,7 +777,7 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.barrier() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
@@ -805,7 +805,7 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.barrier() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
@@ -849,7 +849,7 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.generate_mipmaps() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
@@ -861,7 +861,7 @@ public:
         }
         if (!Image::can_generate_mips(*context_, image->format()))
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_unsupported(
                 "generate_mipmaps: this format cannot be blitted and linearly "
                 "filtered on this device, so a mip chain can't be generated"));
         }
@@ -914,24 +914,26 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.copy_image() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
-        if (src->width() != dst->width() || src->height() != dst->height() || src->format() != dst->format() ||
-            src->array_layers() != dst->array_layers())
+        if (src->width() != dst->width() || src->height() != dst->height() || src->depth() != dst->depth() ||
+            src->format() != dst->format() || src->array_layers() != dst->array_layers())
         {
             return std::unexpected(err_resource(
                 std::format(
                     "copy_image: source and destination must match in size, format and layer "
-                    "count. Got {}x{} {} ({} layers) into {}x{} {} ({} layers). A resize or a "
-                    "format change is a render pass, not a copy.",
+                    "count. Got {}x{}x{} {} ({} layers) into {}x{}x{} {} ({} layers). A resize "
+                    "or a format change is a render pass, not a copy.",
                     src->width(),
                     src->height(),
+                    src->depth(),
                     format_name(src->format()),
                     src->array_layers(),
                     dst->width(),
                     dst->height(),
+                    dst->depth(),
                     format_name(dst->format()),
                     dst->array_layers())));
         }
@@ -1009,7 +1011,7 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.blit_image() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
@@ -1019,12 +1021,21 @@ public:
                 "blit_image: a multisampled image cannot be blitted. Render into it and "
                 "blit the resolved attachment"));
         }
+        // Vulkan requires both ends of a blit to be the same image type, so a
+        // volume scales into a volume — resampling a volume into a 2D image is a
+        // shader's job (sample the slice you want).
+        if (src->is_3d() != dst->is_3d())
+        {
+            return std::unexpected(err_resource(
+                "blit_image: a 3D image can only be blitted into another 3D image. To "
+                "flatten a volume, sample it in a shader."));
+        }
         // A blit filters, and filtering is a format capability rather than a
         // given. Checking here names the format; letting it through produces a
         // validation error about VkFormatFeatureFlags instead.
         if (!Image::can_blit(*context_, src->format(), dst->format()))
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_unsupported(
                 std::format(
                     "blit_image: this GPU cannot blit {} into {}. Both formats need "
                     "BLIT_SRC/BLIT_DST support, and a linear filter needs the source to be "
@@ -1085,7 +1096,7 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.copy_buffer() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
@@ -1142,7 +1153,7 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.fill_buffer() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
@@ -1186,7 +1197,7 @@ public:
         }
         if (in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.clear_image() is not allowed inside a rendering scope. "
                 "Record it before begin_rendering"));
         }
@@ -1350,7 +1361,7 @@ public:
     {
         if (!in_rendering_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "cmd.occlusion_query() must be used inside a rendering scope: Vulkan requires an occlusion "
                 "query to begin and end within one render pass. Move it inside `with cmd.rendering(target):`."));
         }
@@ -1482,7 +1493,7 @@ public:
     {
         if (recorded_serial_ == serial)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "This CommandBuffer was already submitted in the current frame. Each "
                 "window needs its own CommandBuffer — one holds a single command "
                 "buffer per frame slot, so replaying it twice would overwrite work "
@@ -1611,7 +1622,8 @@ private:
                         .baseArrayLayer = 0,
                         // All layers transition together: the tracker holds one
                         // layout per image, and a cube/array is used as a whole.
-                        .layerCount = image->array_layers()}};
+                        // A volume spells that VK_REMAINING_ARRAY_LAYERS.
+                        .layerCount = image->barrier_layers(image->array_layers())}};
                 frame.vk->vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 0, nullptr, 1, &barrier);
             });
     }
@@ -1806,7 +1818,7 @@ private:
         // binding, so the C++ API is as safe as the Python one.
         if (count > 1 && !context_->supports(Feature::MULTI_DRAW_INDIRECT))
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_unsupported(
                 std::format(
                     "{}: count>1 requires the MULTI_DRAW_INDIRECT feature. Create the Context "
                     "with features=[bz.Feature.MULTI_DRAW_INDIRECT] (or optional=[...]), or "
@@ -1832,7 +1844,7 @@ private:
         }
         if (!context_->supports(Feature::DRAW_INDIRECT_COUNT))
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_unsupported(
                 std::format(
                     "{}: count_buffer requires the DRAW_INDIRECT_COUNT feature. Create the "
                     "Context with optional=[bz.Feature.DRAW_INDIRECT_COUNT], or write 0 into "

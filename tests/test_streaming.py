@@ -178,13 +178,13 @@ def test_an_updated_image_is_still_sampleable(ctx):
 
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
-    screen = bz.RenderTarget(ctx, 8, 8)
+    screen = ctx.create_render_target(8, 8)
     pipe = (ctx.graphics_pipeline()
             .vertex_shader(vert)
             .fragment_shader(frag)
             .texture(0, bz.ShaderStage.FRAGMENT, set=0)
             .build(screen))
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, img, sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 

@@ -1,0 +1,50 @@
+#version 450
+
+// Fills the 3D texture with fBm value noise: a hash per lattice point, trilinear
+// interpolation, four octaves. Written once at startup through an image3D — the
+// escape hatch that works on every driver, including the ones that cannot
+// render into a volume slice.
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+layout(binding = 0, r8) uniform image3D vol;
+
+float hash(vec3 p) {
+    p = fract(p * 0.3183099 + 0.1);
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float value_noise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(hash(i + vec3(0, 0, 0)), hash(i + vec3(1, 0, 0)), f.x),
+                   mix(hash(i + vec3(0, 1, 0)), hash(i + vec3(1, 1, 0)), f.x), f.y),
+               mix(mix(hash(i + vec3(0, 0, 1)), hash(i + vec3(1, 0, 1)), f.x),
+                   mix(hash(i + vec3(0, 1, 1)), hash(i + vec3(1, 1, 1)), f.x), f.y),
+               f.z);
+}
+
+void main() {
+    ivec3 texel = ivec3(gl_GlobalInvocationID);
+    ivec3 size = imageSize(vol);
+    if (any(greaterThanEqual(texel, size))) {
+        return;
+    }
+    vec3 p = vec3(texel) / vec3(size);
+
+    float density = 0.0;
+    float amplitude = 0.5;
+    float frequency = 4.0;
+    for (int octave = 0; octave < 4; ++octave) {
+        density += amplitude * value_noise(p * frequency);
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
+    // Carve the field so the cloud has empty space around it: fade the density
+    // out towards the volume's edges.
+    float edge = min(min(p.x, 1.0 - p.x), min(min(p.y, 1.0 - p.y), min(p.z, 1.0 - p.z)));
+    density = clamp((density - 0.35) * 2.0, 0.0, 1.0) * smoothstep(0.0, 0.15, edge);
+
+    imageStore(vol, texel, vec4(density, 0.0, 0.0, 1.0));
+}

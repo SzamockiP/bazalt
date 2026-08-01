@@ -5,170 +5,11 @@ void bind_targets(py::module_& m)
     // ── RenderTarget ──
     py::class_<RenderTarget, std::shared_ptr<RenderTarget>>(m, "RenderTargetBase");
 
+    // No py::init since 0.23: a target comes from ctx.create_render_target(),
+    // like every other resource the Context owns. The class stays a type — it
+    // is what isinstance and the annotations name — and the two construction
+    // shapes live on the Context (see bind_context).
     py::class_<OffscreenTarget, RenderTarget, std::shared_ptr<OffscreenTarget>>(m, "RenderTarget")
-        // color: None | Format | [Format, ...]; depth: None | Format. A bool
-        // depth is refused with a migration hint (it was one in 0.4).
-        .def(
-            py::init(
-                [](Context& context,
-                   std::uint32_t width,
-                   std::uint32_t height,
-                   py::object color,
-                   py::object depth,
-                   std::uint32_t samples,
-                   std::uint32_t layers,
-                   bool cube,
-                   std::uint32_t mip_levels,
-                   const std::string& name)
-                {
-                    std::vector<Format> colors;
-                    if (!color.is_none())
-                    {
-                        if (py::isinstance<Format>(color))
-                        {
-                            colors.push_back(color.cast<Format>());
-                        }
-                        else if (py::isinstance<py::sequence>(color) && !py::isinstance<py::str>(color))
-                        {
-                            for (auto item : color.cast<py::sequence>())
-                            {
-                                // Images here mean the caller wants the borrowed-attachment
-                                // overload below but also passed width/height, which that
-                                // overload does not take. pybind cannot fall through to it
-                                // once this signature has matched, so say so rather than
-                                // letting item.cast<Format>() report a cast error about a
-                                // type mismatch the caller did not make.
-                                if (py::isinstance<Image>(item))
-                                {
-                                    raise_error(err_resource(
-                                        "to render into images you already own, drop width and height: "
-                                        "bz.RenderTarget(ctx, color=[image]) — the size, layers and mip "
-                                        "levels come off the images"));
-                                }
-                                colors.push_back(item.cast<Format>());
-                            }
-                        }
-                        else if (py::isinstance<Image>(color))
-                        {
-                            raise_error(err_resource(
-                                "to render into an image you already own, drop width and height: "
-                                "bz.RenderTarget(ctx, color=[image]) — the size, layers and mip "
-                                "levels come off the images"));
-                        }
-                        else
-                        {
-                            raise_error(err_resource("color must be a bz.Format, a list of them, or None"));
-                        }
-                    }
-
-                    std::optional<Format> depth_format;
-                    if (!depth.is_none())
-                    {
-                        if (py::isinstance<py::bool_>(depth))
-                        {
-                            raise_error(err_resource(
-                                "depth is a pixel format now: pass depth=bz.Format.D32F "
-                                "instead of depth=True"));
-                        }
-                        depth_format = depth.cast<Format>();
-                    }
-
-                    return unwrap(
-                        OffscreenTarget::create(
-                            context,
-                            width,
-                            height,
-                            std::move(colors),
-                            depth_format,
-                            samples,
-                            layers,
-                            cube,
-                            mip_levels,
-                            name),
-                        context.logger().get());
-                }),
-            py::arg("context"),
-            py::arg("width"),
-            py::arg("height"),
-            py::arg("color") = Format::RGBA8,
-            py::arg("depth") = py::none(),
-            py::arg("samples") = 1,
-            py::kw_only(),
-            py::arg("layers") = 1,
-            py::arg("cube") = false,
-            py::arg("mip_levels") = 1,
-            py::arg("name") = "")
-        // A target on images from create_image, instead of attachments the target
-        // allocates. A second __init__ rather than optional width/height on the one
-        // above: this signature has no width, height, layers, cube or mip_levels,
-        // because every one of those is a property of the images now. samples= stays,
-        // because it is not: it says how many samples to RENDER with, and the images
-        // handed in are the resolve targets.
-        // pybind picks between the two on arity — width and height are required
-        // positionals up there and absent here.
-        .def(
-            py::init(
-                [](Context& context, py::object color, py::object depth, std::uint32_t samples, const std::string& name)
-                {
-                    std::vector<std::shared_ptr<Image>> colors;
-                    if (!color.is_none())
-                    {
-                        if (py::isinstance<Image>(color))
-                        {
-                            colors.push_back(color.cast<std::shared_ptr<Image>>());
-                        }
-                        else if (py::isinstance<py::sequence>(color) && !py::isinstance<py::str>(color))
-                        {
-                            for (auto item : color.cast<py::sequence>())
-                            {
-                                if (py::isinstance<Format>(item))
-                                {
-                                    raise_error(err_resource(
-                                        "color has pixel formats but no width and height. Pass the size "
-                                        "to have the target allocate its attachments — "
-                                        "bz.RenderTarget(ctx, 512, 512, color=bz.Format.RGBA8) — or pass "
-                                        "images from ctx.create_image to render into those."));
-                                }
-                                colors.push_back(item.cast<std::shared_ptr<Image>>());
-                            }
-                        }
-                        else
-                        {
-                            raise_error(err_resource(
-                                "color must be an Image, a list of them, or None. To have the target "
-                                "allocate its own attachments, pass a width and height with a bz.Format."));
-                        }
-                    }
-
-                    std::shared_ptr<Image> depth_image;
-                    if (!depth.is_none())
-                    {
-                        depth_image = depth.cast<std::shared_ptr<Image>>();
-                    }
-
-                    // The cross-Context guard belongs in the binding layer, as it does
-                    // for every other resource: this catches a user mistake, not a C++
-                    // invariant, and the GIL is held here.
-                    for (const auto& image : colors)
-                    {
-                        require_same_context(&context, image->owner(), "RenderTarget(color=)");
-                    }
-                    if (depth_image)
-                    {
-                        require_same_context(&context, depth_image->owner(), "RenderTarget(depth=)");
-                    }
-
-                    return unwrap(
-                        OffscreenTarget::create_from_images(
-                            context, std::move(colors), std::move(depth_image), samples, name),
-                        context.logger().get());
-                }),
-            py::arg("context"),
-            py::kw_only(),
-            py::arg("color") = py::none(),
-            py::arg("depth") = py::none(),
-            py::arg("samples") = 1,
-            py::arg("name") = "")
         .def_property_readonly("width", [](const OffscreenTarget& t) { return t.extent().width; })
         .def_property_readonly("height", [](const OffscreenTarget& t) { return t.extent().height; })
         // The attachments are ordinary Images — this is the whole
@@ -190,116 +31,32 @@ void bind_targets(py::module_& m)
         // Render-to-layer / render-to-mip: a lightweight view of one subresource.
         // Pass it straight to cmd.rendering(...). Cube face i == layer i, Vulkan
         // order +X, -X, +Y, -Y, +Z, -Z.
+        //
+        // mip is keyword-only since 0.23, by the rule the set_image break wrote:
+        // two adjacent ints of which the second selects a different axis is the
+        // trap that made set_image(0, img, 3) read as "index 3". layer(0, 2) is
+        // worse, because on a 3D target the FIRST int is a Z slice, so both
+        // spellings look like a coordinate.
         .def(
             "layer",
             [](std::shared_ptr<OffscreenTarget> self, std::uint32_t index, std::uint32_t mip)
             { return unwrap(self->layer(index, mip), nullptr); },
             py::arg("index"),
+            py::kw_only(),
             py::arg("mip") = 0)
         // Multiview: one pass into every layer (the shader uses gl_ViewIndex).
         .def("all_layers", [](std::shared_ptr<OffscreenTarget> self) { return unwrap(self->all_layers(), nullptr); });
 
+    // Registered so pybind's automatic downcasting (the base is polymorphic)
+    // returns a NAMED type from layer() / all_layers() above — until 0.23 both
+    // came back as opaque RenderTargetBase, so nothing could be said about them
+    // in the stub. No methods: each is a view that exists to be handed to
+    // cmd.rendering(...), and the parent keeps every knob.
+    py::class_<SubresourceTarget, RenderTarget, std::shared_ptr<SubresourceTarget>>(m, "SubresourceTarget");
+    py::class_<MultiviewTarget, RenderTarget, std::shared_ptr<MultiviewTarget>>(m, "MultiviewTarget");
+
+    // Also constructor-free since 0.23: ctx.create_renderer(window) makes one.
     py::class_<SwapchainRenderer, RenderTarget, std::shared_ptr<SwapchainRenderer>>(m, "SwapchainRenderer")
-        .def(
-            py::init(
-                [](Window& window,
-                   std::shared_ptr<Context> context,
-                   PresentMode present_mode,
-                   std::uint32_t samples,
-                   bool stencil)
-                {
-                    auto sp = window.get_surface_provider();
-                    return std::shared_ptr<SwapchainRenderer>(unwrap(
-                        SwapchainRenderer::create(context, std::move(sp), present_mode, samples, stencil),
-                        context->logger().get()));
-                }),
-            py::arg("window"),
-            py::arg("context"),
-            py::arg("present_mode") = PresentMode::MAILBOX,
-            py::arg("samples") = 1,
-            py::arg("stencil") = false,
-            // The SurfaceProvider that get_surface_provider() returns captures the raw
-            // GLFWwindow* and a pointer to the Window's own resize flag, and the renderer
-            // keeps it for its whole life. So the Window has to outlive the renderer, and
-            // nothing else says so: `del window` alone would leave both pointers dangling.
-            // The hwnd overload below captures an integer and needs no such tie.
-            py::keep_alive<1, 2>())
-        .def(
-            py::init(
-                [](uint64_t hwnd,
-                   std::shared_ptr<Context> context,
-                   PresentMode present_mode,
-                   std::uint32_t samples,
-                   bool stencil) -> std::shared_ptr<SwapchainRenderer>
-                {
-#ifdef _WIN32
-                    SurfaceProvider sp;
-                    sp.required_instance_extensions = {"VK_KHR_surface", "VK_KHR_win32_surface"};
-
-                    sp.create_surface = [hwnd](VkInstance instance) -> VkSurfaceKHR
-                    {
-                        auto pfnCreateWin32Surface =
-                            (PFN_vkCreateWin32SurfaceKHR)vkGetInstanceProcAddr(instance, "vkCreateWin32SurfaceKHR");
-                        if (!pfnCreateWin32Surface)
-                        {
-                            return VK_NULL_HANDLE;
-                        }
-                        VkWin32SurfaceCreateInfoKHR createInfo{
-                            .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
-                            .pNext = nullptr,
-                            .flags = 0,
-                            .hinstance = GetModuleHandle(nullptr),
-                            .hwnd = (HWND)hwnd};
-                        VkSurfaceKHR surface = VK_NULL_HANDLE;
-                        if (pfnCreateWin32Surface(instance, &createInfo, nullptr, &surface) != VK_SUCCESS)
-                        {
-                            return VK_NULL_HANDLE;
-                        }
-                        return surface;
-                    };
-
-                    sp.get_framebuffer_size = [hwnd]() -> std::pair<int, int>
-                    {
-                        RECT rect;
-                        if (GetClientRect((HWND)hwnd, &rect))
-                        {
-                            return {rect.right - rect.left, rect.bottom - rect.top};
-                        }
-                        return {0, 0};
-                    };
-
-                    auto last_width = std::make_shared<int>(0);
-                    auto last_height = std::make_shared<int>(0);
-
-                    sp.consume_resize_flag = [hwnd, last_width, last_height]() -> bool
-                    {
-                        RECT rect;
-                        if (GetClientRect((HWND)hwnd, &rect))
-                        {
-                            int w = rect.right - rect.left;
-                            int h = rect.bottom - rect.top;
-                            if (w != *last_width || h != *last_height)
-                            {
-                                *last_width = w;
-                                *last_height = h;
-                                return true;
-                            }
-                        }
-                        return false;
-                    };
-
-                    return std::shared_ptr<SwapchainRenderer>(unwrap(
-                        SwapchainRenderer::create(context, std::move(sp), present_mode, samples, stencil),
-                        context->logger().get()));
-#else
-            raise_error(err_window("win32_hwnd constructor is only supported on Windows"));
-#endif
-                }),
-            py::arg("win32_hwnd"),
-            py::arg("context"),
-            py::arg("present_mode") = PresentMode::MAILBOX,
-            py::arg("samples") = 1,
-            py::arg("stencil") = false)
         .def_property_readonly("present_mode", &SwapchainRenderer::present_mode)
         // A verb, not a settable property, because the request is a preference:
         // read present_mode back to see what the driver actually gave you.

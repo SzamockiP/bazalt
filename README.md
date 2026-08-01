@@ -29,7 +29,7 @@ import bazalt as bz
 
 window = bz.Window(1024, 720, "Bazalt - triangle")
 ctx = bz.Context()
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 # A pipeline is built against a render target, which supplies the formats.
 # The window is one target. An offscreen image is another. Same call.
@@ -106,7 +106,7 @@ W = H = 512
 
 window = bz.Window(W, H, "Bazalt - compute")
 ctx = bz.Context(hot_reload=True)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 # Compute: no vertices and no fragment shader. One dispatch per frame.
 generate = (ctx.compute_pipeline()
@@ -125,7 +125,7 @@ present = (ctx.graphics_pipeline()
 # One image, bound two ways: written as a storage image, read as a texture.
 image = ctx.create_image(W, H, bz.Format.RGBA8)
 
-pool = ctx.create_descriptor_pool(max_sets=2, samplers=1, storage_images=1)
+pool = ctx.create_descriptor_pool(max_sets=2, textures=1, storage_images=1)
 write_set = pool.allocate_set(generate, set=0)
 write_set.set_storage_image(0, image)
 read_set = pool.allocate_set(present, set=0)
@@ -194,13 +194,14 @@ void main() {
 
 ## The same code, with no window
 
-A `RenderTarget` is an offscreen image with the same interface as the window. Build the
+A render target is an offscreen image with the same interface as the window. Both come from
+the Context, and everything else in this file works the same against either. Build the
 pipeline against it, submit, and read the pixels into NumPy. This runs in a test and in CI,
 where no display exists:
 
 ```python
 ctx = bz.Context()
-target = bz.RenderTarget(ctx, 800, 600, depth=bz.Format.D32F)
+target = ctx.create_render_target(800, 600, depth=bz.Format.D32F)
 
 pipeline = ...   # the triangle pipeline above, built with .build(target)
 
@@ -223,6 +224,10 @@ pixels = target.color[0].read()      # numpy (600, 800, 4) uint8
   `Context(auto_barriers=False)` gives that job back to you through `cmd.barrier()`.
 - **Compute beside graphics.** One command buffer holds a dispatch and a draw. A dispatch
   writes the vertices and the draw reads them. Results come back as NumPy arrays.
+- **Images in every shape.** 2D textures, texture arrays, cubemaps and 3D volumes come from
+  one function: `create_image(w, h, cube=True)` or `create_image(w, h, depth=n)`. A volume
+  is a `sampler3D` in the shader — colour-grading LUTs, volumetric noise, raymarched
+  clouds — and a NumPy array of the matching shape uploads straight into any of them.
 - **Every pipeline stage.** Vertex, fragment and compute, plus tessellation for displacement
   and adaptive detail, and geometry for a primitive that becomes a different one. A dispatch
   or a draw can also read its own arguments from a buffer the GPU filled, so the count never
@@ -269,12 +274,13 @@ Every directory in `examples/` runs on its own.
 | Compute | [11_particles](examples/11_particles) (compute writes the vertices), [13_compute_postprocess](examples/13_compute_postprocess) |
 | Shadows and deferred | [09_shadow_map](examples/09_shadow_map), [17_cascade_shadows](examples/17_cascade_shadows), [10_gbuffer_mrt](examples/10_gbuffer_mrt) |
 | Cubemaps and layers | [14_skybox](examples/14_skybox), [16_env_capture](examples/16_env_capture) (six faces), [18_multiview](examples/18_multiview) |
+| 3D textures | [31_volume_raymarch](examples/31_volume_raymarch) (a raymarched cloud), [32_lut_grading](examples/32_lut_grading) (colour grading through a LUT baked by render-to-slice) |
 | Image quality | [15_msaa](examples/15_msaa), [23_outline](examples/23_outline) (stencil) |
 | Pipeline stages | [25_tessellation](examples/25_tessellation) (displacement and adaptive detail), [26_geometry_normals](examples/26_geometry_normals) (triangles become lines) |
-| GPU-driven work | [28_gpu_culling](examples/28_gpu_culling) (indirect draw, two windows) |
+| GPU-driven work | [28_gpu_culling](examples/28_gpu_culling) (indirect draw, two windows), [29_bindless](examples/29_bindless) (one draw, many textures) |
 | Data in and out | [24_video_texture](examples/24_video_texture) (per-frame updates), [22_instancing](examples/22_instancing) (20000 instances) |
 | Windows and devices | [19_multi_window](examples/19_multi_window), [20_multi_context](examples/20_multi_context) (two GPUs), [21_window_modes](examples/21_window_modes), [08_pyqt_integration](examples/08_pyqt_integration) |
-| Tools | [12_hot_reload](examples/12_hot_reload), [27_drop_and_icon](examples/27_drop_and_icon) (drag a picture onto the window) |
+| Tools | [12_hot_reload](examples/12_hot_reload), [27_drop_and_icon](examples/27_drop_and_icon) (drag a picture onto the window), [30_gamepad](examples/30_gamepad) |
 
 [CHANGELOG.md](CHANGELOG.md) lists what each release added. [DESIGN.md](DESIGN.md) gives the
 reasons behind the API.

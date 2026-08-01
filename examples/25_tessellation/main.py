@@ -36,7 +36,7 @@ window = bz.Window(1024, 720, "Bazalt Demo - Tessellated terrain")
 # negotiates. WIREFRAME is optional too, and only the toggle depends on it.
 ctx = bz.Context(logger, features=[bz.Feature.TESSELLATION],
                  optional=[bz.Feature.WIREFRAME])
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 vert = ctx.compile_shader("terrain.vert", bz.ShaderStage.VERTEX)
 tesc = ctx.compile_shader("terrain.tesc", bz.ShaderStage.TESS_CONTROL)

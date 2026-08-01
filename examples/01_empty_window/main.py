@@ -9,7 +9,7 @@ def on_message(msg):
 
 window = bz.Window(1024, 720, "Bazalt Demo - Empty", logger=logger)
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 # Record command buffer once
 cmd = ctx.create_command_buffer()

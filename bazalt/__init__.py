@@ -3,13 +3,15 @@
 from bazalt import _core
 from bazalt._core import *  # noqa: F401, F403
 
-__version__ = "0.22.0"
+__version__ = "0.23.0"
 
 __all__ = [
     # Core
     "Context",
     "RenderTarget",
     "RenderTargetBase",
+    "SubresourceTarget",
+    "MultiviewTarget",
     "SwapchainRenderer",
     "Window",
     "Device",
@@ -57,6 +59,8 @@ __all__ = [
     "FrontFace",
     "PolygonMode",
     "BlendMode",
+    "BlendFactor",
+    "BlendOp",
     "StencilOp",
     "BorderColor",
     "MemoryUsage",
@@ -65,6 +69,9 @@ __all__ = [
     "Feature",
     "GamepadButton",
     "GamepadAxis",
+    "Key",
+    "MouseButton",
+    "CursorMode",
     # Errors — the type is the recoverability contract
     "BazaltError",
     "InitializationError",
@@ -73,6 +80,8 @@ __all__ = [
     "ShaderError",
     "WindowError",
     "ResourceError",
+    "StateError",
+    "UnsupportedError",
     # Version
     "__version__",
 ]

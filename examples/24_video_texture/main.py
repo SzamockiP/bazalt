@@ -43,7 +43,7 @@ def on_message(msg):
 
 window = bz.Window(W, H, "Bazalt Demo - CPU Image Streaming", logger=logger)
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 
 def frame_at(t):
@@ -81,7 +81,7 @@ present = (ctx.graphics_pipeline()
            .name("present")
            .build(renderer))
 
-pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
 dset = pool.allocate_set(present, set=0)
 # Bound ONCE. update() writes into the same VkImage, so no descriptor set is
 # ever rewritten — that is the difference from creating a new image per frame.

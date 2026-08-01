@@ -25,7 +25,7 @@ CLEAR = [0.1, 0.2, 0.3, 1.0]
 def test_dropping_everything_between_submits_is_safe(ctx, triangle_shaders):
     """Create, render, drop, render something else, repeat."""
     vert, frag = triangle_shaders
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
 
     for _ in range(3):
         vertices = [
@@ -68,7 +68,7 @@ def test_rerecording_a_command_buffer_drops_old_resources_safely(ctx, triangle_s
     triggers must be deferred, not inline."""
     vert, frag = triangle_shaders
     vbuf, ibuf = triangle_buffers
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
@@ -111,7 +111,7 @@ def test_a_renderer_keeps_its_window_alive(ctx):
     renderer = None
     try:
         before = sys.getrefcount(window)
-        renderer = bz.SwapchainRenderer(window, ctx)
+        renderer = ctx.create_renderer(window)
         assert sys.getrefcount(window) == before + 1, "the renderer holds no reference to the window"
 
         vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)

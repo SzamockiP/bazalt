@@ -10,7 +10,7 @@ def on_message(msg):
 
 window = bz.Window(1024, 720, "Bazalt Demo - Triangle", logger=logger)
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 # Load and compile shaders
 vert_spv = ctx.compile_shader("triangle.vert", bz.ShaderStage.VERTEX)

@@ -76,7 +76,7 @@ class DemoApp:
         self.logger.on_message(self.on_message)
         self.window = bz.Window(1024, 720, "Bazalt Demo - Model Loader", logger=self.logger)
         self.ctx = bz.Context(self.logger)
-        self.renderer = bz.SwapchainRenderer(self.window, self.ctx)
+        self.renderer = self.ctx.create_renderer(self.window)
         self.window.set_cursor_mode(bz.CURSOR_DISABLED)
         
         self.camera = Camera()
@@ -197,7 +197,7 @@ class DemoApp:
         self.pool = self.ctx.create_descriptor_pool(
             max_sets=3 + len(self.loaded_textures), 
             uniform_buffers=2, 
-            samplers=1 + len(self.loaded_textures)
+            textures=1 + len(self.loaded_textures)
         )
         self.frame_set = self.pool.allocate_frame_set(self.pipeline, set=0)
         self.frame_set.set_buffer(0, self.ubuf)

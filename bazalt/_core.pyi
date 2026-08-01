@@ -13,11 +13,18 @@ import numpy as np
 class BazaltError(Exception):
     """Base class for every error bazalt raises.
 
-    A BazaltError means bazalt looked at a resource, at your data or at the
-    device to decide. An argument that is wrong on its own — outside a fixed
-    range in the signature, a sequence of the wrong length, a name not in a
-    fixed set — raises ValueError instead, and stays outside this hierarchy on
-    purpose: `except bz.BazaltError` must not hide a typo in your keywords.
+    A BazaltError means bazalt looked at a resource, at your data, at the
+    device or at the call sequence to decide. An argument that is wrong on its
+    own — outside a fixed range in the signature, a sequence of the wrong
+    length, a name not in a fixed set — raises ValueError instead, and stays
+    outside this hierarchy on purpose: `except bz.BazaltError` must not hide a
+    typo in your keywords.
+
+    Three subclasses answer three different questions. ResourceError: this
+    resource or data cannot do that — fix the data or the resource.
+    StateError: the call is legal, the moment is not — fix the order of calls.
+    UnsupportedError: this GPU cannot, with any argument — ask ctx.supports()
+    or take the escape hatch the message names.
     """
     ...
 
@@ -34,7 +41,11 @@ class OutOfMemoryError(BazaltError):
     vk_result: str
 
 class ShaderError(BazaltError):
-    """Compilation or pipeline creation failed. Recoverable."""
+    """Compilation or pipeline creation failed. Recoverable.
+
+    A missing GPU feature found during compile or build raises
+    UnsupportedError instead: it is a fact about the Context, not the file.
+    """
     path: str
     line: int
     """1-based line number, or -1 when it could not be determined."""
@@ -44,7 +55,29 @@ class WindowError(BazaltError):
     ...
 
 class ResourceError(BazaltError):
-    """Missing file, bad format, or an exhausted pool. Recoverable."""
+    """This resource or data cannot do that.
+
+    A missing file, a bad format, a layer the image does not have, an
+    exhausted pool. Recoverable: fix the data or the resource and retry.
+    """
+    ...
+
+class StateError(BazaltError):
+    """The call is legal, the moment is not.
+
+    A double acquire(), a present() with no acquired image, a barrier inside a
+    rendering scope, a CommandBuffer submitted twice in one frame. Recoverable:
+    fix the order of calls.
+    """
+    ...
+
+class UnsupportedError(BazaltError):
+    """This GPU or driver cannot do it, with any argument.
+
+    A Feature the device does not offer, a format it cannot blit, an MSAA
+    count it does not reach. Ask ctx.supports(bz.Feature...) first, or take
+    the escape hatch the message names.
+    """
     ...
 
 # ── Logging ────────────────────────────────────────────────────────────
@@ -147,6 +180,10 @@ class Feature(IntEnum):
     #: a portability subset may answer False, because Metal has no multisampled
     #: texture array.
     MULTISAMPLE_ARRAYS = 17
+    #: Rendering into one Z slice of a 3D image (target.layer(z)). True on every
+    #: full Vulkan driver; MoltenVK answers False. Where it is False, fill the
+    #: volume with a compute shader through a storage image instead.
+    IMAGE_VIEW_2D_ON_3D = 18
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -191,6 +228,12 @@ class VertexFormat(IntEnum):
     UBYTE4_NORM = 4
     #: An unsigned integer attribute (`in uint`), e.g. a material index.
     UINT = 5
+    #: Integer vectors (`in uvecN`, no conversion). UINT4 carries skinning
+    #: joint indices; UBYTE4_UINT is the same four joints in a quarter the size.
+    UINT2 = 6
+    UINT3 = 7
+    UINT4 = 8
+    UBYTE4_UINT = 9
 
 class Topology(IntEnum):
     """Primitive topology for graphics pipelines. TRIANGLE_LIST is the default.
@@ -212,12 +255,48 @@ class BlendMode(IntEnum):
     """How a fragment combines with what the attachment already holds.
 
     Read only when blend() is enabled. ALPHA is ordinary transparency,
-    ADDITIVE is order-independent accumulation (particles, glow), and
-    PREMULTIPLIED is for colours that already carry their alpha.
+    ADDITIVE is order-independent accumulation (particles, glow),
+    PREMULTIPLIED is for colours that already carry their alpha, and
+    MULTIPLY scales the framebuffer by the fragment — a darkening overlay
+    such as ambient occlusion or baked shadows (0.23).
     """
     ALPHA = 0
     ADDITIVE = 1
     PREMULTIPLIED = 2
+    MULTIPLY = 3
+
+class BlendFactor(IntEnum):
+    """What each side of the blend is multiplied by (0.23).
+
+    The four BlendModes are points in this space; these are the axes, for the
+    fifth thing you want — `blend(True, src=..., dst=..., op=...)`. There are
+    no constant-colour or dual-source factors: each needs more API than an
+    enum row (a blend-constants verb, a second shader output).
+    """
+    ZERO = 0
+    ONE = 1
+    SRC_COLOR = 2
+    ONE_MINUS_SRC_COLOR = 3
+    DST_COLOR = 4
+    ONE_MINUS_DST_COLOR = 5
+    SRC_ALPHA = 6
+    ONE_MINUS_SRC_ALPHA = 7
+    DST_ALPHA = 8
+    ONE_MINUS_DST_ALPHA = 9
+    #: min(src.a, 1 - dst.a) on colour, 1 on alpha.
+    SRC_ALPHA_SATURATE = 10
+
+class BlendOp(IntEnum):
+    """How the two scaled sides combine (0.23). Every named BlendMode uses ADD.
+    MIN and MAX ignore the factors, which is what a "keep the brightest" pass
+    wants."""
+    ADD = 0
+    #: src - dst
+    SUBTRACT = 1
+    #: dst - src
+    REVERSE_SUBTRACT = 2
+    MIN = 3
+    MAX = 4
 
 class PolygonMode(IntEnum):
     """Fill triangles, or draw only their edges (the wireframe view) or
@@ -395,6 +474,157 @@ class GamepadAxis(IntEnum):
     LEFT_TRIGGER = 4
     RIGHT_TRIGGER = 5
 
+class Key(IntEnum):
+    """The keyboard, the gamepad's way (0.23): the values are GLFW's own.
+
+    The bare KEY_* module ints stay valid — every query takes either. D0..D9
+    are the top-row digits (a name cannot start with one); the keypad is
+    KP_*. There is no LAST member: that is GLFW's array-size sentinel, and
+    the KEY_LAST int remains for anyone who wants it.
+    """
+    SPACE = 32
+    APOSTROPHE = 39
+    COMMA = 44
+    MINUS = 45
+    PERIOD = 46
+    SLASH = 47
+    D0 = 48
+    D1 = 49
+    D2 = 50
+    D3 = 51
+    D4 = 52
+    D5 = 53
+    D6 = 54
+    D7 = 55
+    D8 = 56
+    D9 = 57
+    SEMICOLON = 59
+    EQUAL = 61
+    A = 65
+    B = 66
+    C = 67
+    D = 68
+    E = 69
+    F = 70
+    G = 71
+    H = 72
+    I = 73
+    J = 74
+    K = 75
+    L = 76
+    M = 77
+    N = 78
+    O = 79
+    P = 80
+    Q = 81
+    R = 82
+    S = 83
+    T = 84
+    U = 85
+    V = 86
+    W = 87
+    X = 88
+    Y = 89
+    Z = 90
+    LEFT_BRACKET = 91
+    BACKSLASH = 92
+    RIGHT_BRACKET = 93
+    GRAVE_ACCENT = 96
+    WORLD_1 = 161
+    WORLD_2 = 162
+    ESCAPE = 256
+    ENTER = 257
+    TAB = 258
+    BACKSPACE = 259
+    INSERT = 260
+    DELETE = 261
+    RIGHT = 262
+    LEFT = 263
+    DOWN = 264
+    UP = 265
+    PAGE_UP = 266
+    PAGE_DOWN = 267
+    HOME = 268
+    END = 269
+    CAPS_LOCK = 280
+    SCROLL_LOCK = 281
+    NUM_LOCK = 282
+    PRINT_SCREEN = 283
+    PAUSE = 284
+    F1 = 290
+    F2 = 291
+    F3 = 292
+    F4 = 293
+    F5 = 294
+    F6 = 295
+    F7 = 296
+    F8 = 297
+    F9 = 298
+    F10 = 299
+    F11 = 300
+    F12 = 301
+    F13 = 302
+    F14 = 303
+    F15 = 304
+    F16 = 305
+    F17 = 306
+    F18 = 307
+    F19 = 308
+    F20 = 309
+    F21 = 310
+    F22 = 311
+    F23 = 312
+    F24 = 313
+    F25 = 314
+    KP_0 = 320
+    KP_1 = 321
+    KP_2 = 322
+    KP_3 = 323
+    KP_4 = 324
+    KP_5 = 325
+    KP_6 = 326
+    KP_7 = 327
+    KP_8 = 328
+    KP_9 = 329
+    KP_DECIMAL = 330
+    KP_DIVIDE = 331
+    KP_MULTIPLY = 332
+    KP_SUBTRACT = 333
+    KP_ADD = 334
+    KP_ENTER = 335
+    KP_EQUAL = 336
+    LEFT_SHIFT = 340
+    LEFT_CONTROL = 341
+    LEFT_ALT = 342
+    LEFT_SUPER = 343
+    RIGHT_SHIFT = 344
+    RIGHT_CONTROL = 345
+    RIGHT_ALT = 346
+    RIGHT_SUPER = 347
+    MENU = 348
+
+class MouseButton(IntEnum):
+    """Mouse buttons by name; the MOUSE_BUTTON_* ints stay valid (0.23)."""
+    LEFT = 0
+    RIGHT = 1
+    MIDDLE = 2
+    BUTTON_4 = 3
+    BUTTON_5 = 4
+    BUTTON_6 = 5
+    BUTTON_7 = 6
+    BUTTON_8 = 7
+
+class CursorMode(IntEnum):
+    """What set_cursor_mode takes; the CURSOR_* ints stay valid (0.23).
+
+    NORMAL shows the cursor. HIDDEN hides it while it is over the window.
+    DISABLED locks it to the window and hands out unbounded motion — the
+    first-person camera mode.
+    """
+    NORMAL = 212993
+    HIDDEN = 212994
+    DISABLED = 212995
+
 # ── Resources ──────────────────────────────────────────────────────────
 
 class Buffer:
@@ -411,7 +641,7 @@ class Buffer:
         `numpy.ascontiguousarray(arr)` to be explicit.
         """
         ...
-    def update(self, list: list, data_type: Optional[DataType] = None, *,
+    def update(self, data: list, data_type: Optional[DataType] = None, *,
                offset: int = 0) -> None: ...
 
     def read(self, dtype: Any) -> Any:
@@ -499,13 +729,18 @@ class ShaderModule:
 
 class Image:
     """A GPU image: pixels + format. May be 2D, a texture array (array_layers >
-    1) or a cubemap (is_cube). The sampler it used to be fused with is a
-    separate (cached) object — see Context.create_sampler."""
+    1), a cubemap (is_cube) or a 3D volume (depth > 1). The sampler it used to
+    be fused with is a separate (cached) object — see Context.create_sampler."""
 
     @property
     def width(self) -> int: ...
     @property
     def height(self) -> int: ...
+    @property
+    def depth(self) -> int:
+        """The Z extent: 1 for every 2D image, >1 for a 3D volume
+        (create_image(depth=)). Not the depth ATTACHMENT — that is a format."""
+        ...
     @property
     def format(self) -> Format: ...
     @property
@@ -547,8 +782,9 @@ class Image:
         """Copy one subresource back to host memory as a numpy array.
 
         Shape is (height, width, channels) — or (height, width) for
-        single-channel formats — and the dtype follows the format (uint8,
-        float16 or float32). Blocking; a debugging and test path.
+        single-channel formats, with a leading depth axis for a 3D image:
+        (depth, height, width[, channels]) — and the dtype follows the format
+        (uint8, float16 or float32). Blocking; a debugging and test path.
 
         layer picks a cube face or array slice, mip picks a level, and the shape
         follows the MIP: level 2 of a 64x64 texture reads back 16x16. Before
@@ -577,12 +813,14 @@ class Image:
 
         Raises ResourceError for all of those, and for a layer, a mip or a region
         this image does not have — the image decides each one, so it is the same
-        exception read() raises for the same question. A region= that is not four
-        numbers is a ValueError, because no image is needed to say so.
+        exception read() raises for the same question. A region= of the wrong
+        length is a ValueError, because no image is needed to say so.
 
         region=(x, y, width, height) writes a rectangle and leaves the rest
-        alone — what painting and a sprite atlas need. Omitted, the whole level
-        is replaced.
+        alone — what painting and a sprite atlas need. On a 3D image the region
+        is (x, y, z, width, height, depth) and the array is shaped
+        (depth, height, width[, channels]). Omitted, the whole level is
+        replaced.
 
         ASYNCHRONOUS, like load_image: it returns at once and the copy runs on
         the upload worker, because the case this exists for is a video frame at
@@ -607,7 +845,7 @@ class Pipeline: ...
 
 class DescriptorSet:
     def set_image(self, binding: int, image: Image,
-                  sampler: Optional[Sampler] = None, index: int = 0) -> None:
+                  sampler: Optional[Sampler] = None, *, index: int = 0) -> None:
         """Bind an image (+ sampler; None means linear/repeat/anisotropic).
 
         `index` selects the element of a binding declared with count>1, and
@@ -616,12 +854,12 @@ class DescriptorSet:
         there rather than adding a second reference to it.
         """
         ...
-    def set_storage_image(self, binding: int, image: Image, index: int = 0) -> None:
+    def set_storage_image(self, binding: int, image: Image, *, index: int = 0) -> None:
         """Bind a storage image (no sampler) to a binding declared with
         .storage_image(). The image is accessed in GENERAL layout; the tracker
         adds the transition and any barrier around the dispatch automatically."""
         ...
-    def set_buffer(self, binding: int, buffer: Buffer, index: int = 0) -> None: ...
+    def set_buffer(self, binding: int, buffer: Buffer, *, index: int = 0) -> None: ...
 
 class DescriptorPool:
     def allocate_set(self, pipeline: Pipeline, set: int) -> DescriptorSet: ...
@@ -641,67 +879,14 @@ class RenderTargetBase:
 class RenderTarget(RenderTargetBase):
     """An offscreen target backed by Images. No window required.
 
+    Comes from `ctx.create_render_target(...)` — since 0.23 there is no
+    constructor, because a target is a resource the Context owns like every
+    other, and two spellings of one call is a fork rather than a convenience.
+
     The attachments are ordinary Images: `target.color[0]` and `target.depth`
     go straight into DescriptorSet.set_image — that is the whole
     render-to-texture and shadow-map API.
-
-    Two ways to build one, and they do different jobs. Pass a width and height and
-    the target allocates its attachments from pixel formats. Pass images from
-    create_image and it renders into those instead — that signature has no size,
-    layers, cube or mip_levels, because the images already answer all of them
-    (0.19).
     """
-
-    @overload
-    def __init__(self, context: Context, *,
-                 color: Optional[Image | Sequence[Image]] = None,
-                 depth: Optional[Image] = None, samples: int = 1,
-                 name: str = "") -> None:
-        """Render into images you already own, rather than attachments the target
-        allocates.
-
-        What this makes reachable: a graphics ping-pong between two textures,
-        drawing over a texture a compute pass baked, and drawing into an image
-        carried from another Context. All three were impossible while a target
-        insisted on owning its attachments.
-
-        Every attachment must be the same size with the same layer and mip count;
-        a mismatch is refused rather than intersected. The target holds the images,
-        so dropping your reference does not take the attachment with it — and it
-        does write to their layout tracking, which is what leaves the result
-        sampleable.
-
-        samples>1 works as it does on the other signature (0.21): the target
-        renders into multisampled attachments it allocates and resolves into the
-        images you passed, so those stay single-sample and sampleable. Not
-        available with a mipped attachment, because a multisampled image has no mip
-        chain.
-        """
-        ...
-
-    @overload
-    def __init__(self, context: Context, width: int, height: int,
-                 color: Optional[Format | Sequence[Format]] = Format.RGBA8,
-                 depth: Optional[Format] = None,
-                 samples: int = 1, *, layers: int = 1, cube: bool = False,
-                 mip_levels: int = 1, name: str = "") -> None:
-        """color=None with depth=D32F makes a depth-only (shadow) target;
-        a list of formats makes an MRT target. At least one attachment is
-        required.
-
-        samples>1 turns on MSAA: the target renders into a multisampled image and
-        resolves into target.color/target.depth (which stay single-sample and
-        sampleable — depth resolves too, via SAMPLE_ZERO). Must be a power of two
-        <= ctx.max_samples(). name labels the attachments in validation messages.
-
-        layers>1 / cube=True / mip_levels>1 make the attachments layered / cube /
-        mipped so a scene can be rasterized into one subresource with
-        .layer(i, mip=m) (render-to-layer / render-to-mip: dynamic env capture,
-        cascade shadows). cube fixes 6 square layers and gives the colour attachment a
-        CUBE view so target.color[0] samples as a cubemap. Single-sample only:
-        samples>1 cannot combine with layers/cube/mip_levels this release.
-        """
-        ...
 
     @property
     def color(self) -> tuple[Image, ...]: ...
@@ -713,24 +898,47 @@ class RenderTarget(RenderTargetBase):
     @property
     def height(self) -> int: ...
 
-    def layer(self, index: int, mip: int = 0) -> RenderTargetBase:
+    def layer(self, index: int, *, mip: int = 0) -> SubresourceTarget:
         """A view of one array layer / cube face (and optionally one mip) of this
         target, to render into with cmd.rendering(target.layer(i)). `mip=` selects
         a level for a layered AND mipped target (e.g. a mipped cube for prefiltered
         reflections). Cube face i == layer i, Vulkan order +X, -X, +Y, -Y, +Z, -Z.
         Render every layer you intend to sample before sampling target.color /
-        target.depth."""
+        target.depth.
+
+        On a target over a 3D image (0.23) the index is the Z SLICE, and it
+        shrinks with the mip: level 1 of a depth-4 volume has 2 slices. Needs
+        ctx.supports(Feature.IMAGE_VIEW_2D_ON_3D), which is True everywhere but
+        a portability driver such as MoltenVK.
+
+        `mip` is keyword-only since 0.23: two adjacent ints of which the second
+        selects a different axis is the trap set_image was fixed for, and on a
+        3D target both spellings look like a coordinate."""
         ...
 
-    def all_layers(self) -> RenderTargetBase:
+    def all_layers(self) -> MultiviewTarget:
         """A multiview view of the whole target: cmd.rendering(target.all_layers())
         renders into EVERY layer in ONE pass instead of a pass per layer. The
         shader selects per-layer work with gl_ViewIndex (e.g. a per-face matrix
         for cube capture). Needs a layered target and
         ctx.supports(Feature.MULTIVIEW);
         composes with MSAA (each view resolves into its own layer). Renders every
-        layer, so the result is fully sampleable with no partial-render caveat."""
+        layer, so the result is fully sampleable with no partial-render caveat.
+        Refused on a 3D target: a volume has one array layer, so there is
+        nothing for a view mask to light up — use layer(z) per slice."""
         ...
+
+class SubresourceTarget(RenderTargetBase):
+    """One (layer, mip) of a RenderTarget — or one Z slice of a 3D one — as a
+    drawable view. Comes from target.layer(); owns nothing; hand it straight to
+    cmd.rendering(...). The parent keeps every attachment and knob (0.23:
+    named, so the stub can say so — it used to come back as RenderTargetBase)."""
+    ...
+
+class MultiviewTarget(RenderTargetBase):
+    """Every layer of a RenderTarget as one multiview drawable. Comes from
+    target.all_layers(); owns nothing; hand it straight to cmd.rendering(...)."""
+    ...
 
 class GraphicsPipelineBuilder:
     def vertex_shader(self, shader: ShaderModule) -> GraphicsPipelineBuilder: ...
@@ -801,13 +1009,36 @@ class GraphicsPipelineBuilder:
         no call at all.
         """
         ...
-    def blend(self, enable: bool, mode: BlendMode = BlendMode.ALPHA,
+    def blend(self, enable: bool, mode: Optional[BlendMode] = None, *,
+              src: Optional[BlendFactor] = None, dst: Optional[BlendFactor] = None,
+              op: Optional[BlendOp] = None,
+              src_alpha: Optional[BlendFactor] = None,
+              dst_alpha: Optional[BlendFactor] = None,
+              alpha_op: Optional[BlendOp] = None,
               attachment: Optional[int] = None) -> GraphicsPipelineBuilder:
         """How a fragment combines with the attachment it lands on.
 
+        Two spellings of one question. A named mode covers the common blends:
+
+            .blend(True, bz.BlendMode.ADDITIVE)
+
+        or write the equation yourself, for the fifth thing the modes cannot
+        say:
+
+            .blend(True, src=bz.BlendFactor.DST_COLOR, dst=bz.BlendFactor.ZERO)
+            .blend(True, src=bz.BlendFactor.ONE, dst=bz.BlendFactor.ONE,
+                   op=bz.BlendOp.MAX)
+
+        `src=` and `dst=` go together and `op=` defaults to ADD. The alpha
+        channel follows the colour unless `src_alpha=`/`dst_alpha=` spell it
+        out, which is what glBlendFunc does. Mixing `mode=` with any factor
+        argument is a ValueError: they are two ways to say the same thing, and
+        a silent winner between them is a rule nobody remembers.
+
         attachment= narrows the setting to one colour attachment of an MRT
         target; None (the default) sets it for all of them. Per-attachment
-        blend() and color_mask() calls merge, in either order.
+        blend() and color_mask() calls merge, in either order. Attachments that
+        actually differ need Feature.INDEPENDENT_BLEND.
         """
         ...
     def color_mask(self, red: bool = True, green: bool = True, blue: bool = True,
@@ -1136,7 +1367,7 @@ class CommandBuffer:
         Mip 0 of every shared layer. Call generate_mipmaps on the destination if
         it needs a chain.
 
-        Raises ResourceError when this GPU cannot blit between the two formats —
+        Raises UnsupportedError when this GPU cannot blit between the two formats —
         BLIT_SRC/BLIT_DST are format features, not a given, and a linear filter
         needs the source to be filterable on top.
 
@@ -1194,8 +1425,9 @@ class CommandBuffer:
         SHADER_WRITE (GENERAL, mip 0 fresh from compute).
 
         Raises ResourceError if the image has a single level (create it with
-        mip_levels>1 or mipmaps=True), if the format can't be blitted/linearly
-        filtered, or if called inside a rendering scope."""
+        mip_levels>1 or mipmaps=True), UnsupportedError if the format can't be
+        blitted/linearly filtered on this GPU, and StateError inside a rendering
+        scope."""
         ...
 
     def push_constants(self, pipeline: Pipeline, offset: int, data: bytes) -> CommandBuffer:
@@ -1262,7 +1494,7 @@ class CommandBuffer:
 
         The handle is the identity, exactly as for timer(). Must sit inside a
         rendering scope — Vulkan requires the query to begin and end within one
-        render pass — and raises ResourceError otherwise.
+        render pass — and raises StateError otherwise.
 
         The count is not requested as precise, because precision needs the
         occlusionQueryPrecise feature and without it the spec allows any non-zero
@@ -1330,9 +1562,9 @@ class Window:
         """
         ...
     def is_open(self) -> bool: ...
-    def is_key_pressed(self, key: int) -> bool: ...
-    def is_mouse_button_pressed(self, button: int) -> bool: ...
-    def was_key_pressed(self, key: int) -> bool:
+    def is_key_pressed(self, key: Key | int) -> bool: ...
+    def is_mouse_button_pressed(self, button: MouseButton | int) -> bool: ...
+    def was_key_pressed(self, key: Key | int) -> bool:
         """True when the key went down during the last poll_events() cycle.
 
         The edge, where is_key_pressed is the level. Use it for a toggle, and
@@ -1340,7 +1572,7 @@ class Window:
         count as an edge.
         """
         ...
-    def was_mouse_button_pressed(self, button: int) -> bool: ...
+    def was_mouse_button_pressed(self, button: MouseButton | int) -> bool: ...
     def dropped_files(self) -> list[str]:
         """Paths dropped onto the window during the last poll cycle (0.19).
 
@@ -1349,7 +1581,7 @@ class Window:
         inside one frame and does not consume: two readers both see the drop.
         """
         ...
-    def set_cursor_mode(self, mode: int) -> None: ...
+    def set_cursor_mode(self, mode: CursorMode | int) -> None: ...
     def set_cursor_position(self, x: float, y: float) -> None:
         """Move the cursor, without the move reading as the user moving it (0.19).
 
@@ -1703,11 +1935,11 @@ class Context:
         samples=) and SwapchainRenderer(..., samples=)."""
         ...
 
-    def create_buffer(self, list: list, type: BufferType, usage: MemoryUsage,
+    def create_buffer(self, data: list, type: BufferType, usage: MemoryUsage,
                       data_type: Optional[DataType] = None, *, name: str = "") -> Buffer: ...
-    def create_buffer(self, array: Any, type: BufferType, usage: MemoryUsage,
+    def create_buffer(self, data: Any, type: BufferType, usage: MemoryUsage,
                       *, name: str = "") -> Buffer: ...
-    def create_buffer(self, size_in_bytes: int, type: BufferType,
+    def create_buffer(self, data: int, type: BufferType,
                       usage: MemoryUsage, *, name: str = "") -> Buffer:
         """A GPU buffer from a list, any C-contiguous array, or a size in bytes.
 
@@ -1825,23 +2057,104 @@ class Context:
         one-shot copies of create_buffer and create_image(array), which have
         nothing to decode and join the batch already submitted."""
         ...
+    def create_render_target(self, width: int, height: int,
+                             color: Optional[Format | Sequence[Format]] = Format.RGBA8,
+                             depth: Optional[Format] = None, samples: int = 1, *,
+                             layers: int = 1, cube: bool = False,
+                             mip_levels: int = 1, name: str = "") -> RenderTarget:
+        """An offscreen target that allocates its attachments (0.23; this was
+        the RenderTarget constructor).
+
+        color=None with depth=D32F makes a depth-only (shadow) target; a list
+        of formats makes an MRT target. At least one attachment is required.
+
+        samples>1 turns on MSAA: the target renders into a multisampled image
+        and resolves into target.color/target.depth (which stay single-sample
+        and sampleable — depth resolves too, via SAMPLE_ZERO). Must be a power
+        of two <= ctx.max_samples(). name labels the attachments in validation
+        messages.
+
+        layers>1 / cube=True / mip_levels>1 make the attachments layered / cube
+        / mipped so a scene can be rasterized into one subresource with
+        .layer(i, mip=m) (render-to-layer / render-to-mip: dynamic env capture,
+        cascade shadows). cube fixes 6 square layers and gives the colour
+        attachment a CUBE view so target.color[0] samples as a cubemap.
+        Single-sample only: samples>1 cannot combine with
+        layers/cube/mip_levels.
+        """
+        ...
+    def create_render_target(self, *, color: Optional[Image | Sequence[Image]] = None,
+                             depth: Optional[Image] = None, samples: int = 1,
+                             name: str = "") -> RenderTarget:
+        """A target that renders into images you already own.
+
+        What this makes reachable: a graphics ping-pong between two textures,
+        drawing over a texture a compute pass baked, drawing into an image
+        carried from another Context, and (0.23) rendering into the Z slices of
+        a volume. No width, height, layers, cube or mip_levels here, because
+        the images already answer all of them.
+
+        Every attachment must be the same size with the same layer, mip and
+        depth count; a mismatch is refused rather than intersected. The target
+        holds the images, so dropping your reference does not take the
+        attachment with it.
+
+        samples>1 works as it does on the other form: the target renders into
+        multisampled attachments it allocates and resolves into the images you
+        passed, so those stay single-sample and sampleable. Not available with
+        a mipped or 3D attachment.
+        """
+        ...
+
+    def create_renderer(self, window: Window, *,
+                        present_mode: PresentMode = PresentMode.MAILBOX,
+                        samples: int = 1, stencil: bool = False) -> SwapchainRenderer:
+        """The swapchain renderer that presents to `window` (0.23; this was the
+        SwapchainRenderer constructor).
+
+        The renderer keeps the window alive for as long as it lives: it holds
+        pointers into it, so `del window` alone would leave them dangling.
+
+        samples>1 turns on windowed MSAA: rendering goes into a multisampled
+        colour+depth image that resolves into the swapchain image on present.
+        Must be a power of two <= ctx.max_samples().
+
+        stencil=True gives the window's depth buffer a stencil aspect, which is
+        what a masked pass (an outline, a portal) needs on screen. Without it a
+        stencil_test() pipeline can only be built against an offscreen target
+        with depth=Format.DEPTH_STENCIL.
+        """
+        ...
+    def create_renderer(self, *, win32_hwnd: int,
+                        present_mode: PresentMode = PresentMode.MAILBOX,
+                        samples: int = 1, stencil: bool = False) -> SwapchainRenderer:
+        """Attach to a window bazalt did not open — a Qt widget, a wx frame,
+        anything with an HWND. Windows only; elsewhere it raises WindowError.
+        See examples/08_pyqt_integration."""
+        ...
     def create_image(self, width: int, height: int,
-                     format: Format = Format.RGBA8, *, layers: int = 1,
-                     cube: bool = False, mip_levels: int = 1, name: str = "") -> Image:
+                     format: Format = Format.RGBA8, *, depth: int = 1,
+                     layers: int = 1, cube: bool = False, mip_levels: int = 1,
+                     name: str = "") -> Image:
         """Empty image on the GPU. `layers > 1` makes a texture array (view
-        2D_ARRAY); `cube=True` makes a cubemap (6 square faces, view CUBE). An
-        empty layered image is filled by rendering into it or by a compute
-        storage image (procedural skyboxes/arrays); the data forms below upload
+        2D_ARRAY); `cube=True` makes a cubemap (6 square faces, view CUBE);
+        `depth > 1` makes a 3D image (view 3D — `sampler3D` / `image3D` in the
+        shader). A volume has exactly one array layer, so depth= does not
+        combine with layers= or cube=. An empty image is filled by rendering
+        into it or by a compute storage image; the data forms below upload
         pixels instead.
 
         `mip_levels > 1` allocates a mip chain (1..full chain for the size); the
         extra levels start empty — write mip 0 (compute / a render pass) then
-        `cmd.generate_mipmaps(img)` to fill the rest."""
+        `cmd.generate_mipmaps(img)` to fill the rest. Depth counts toward the
+        chain: a 1x1x64 volume has 7 levels."""
         ...
     def create_image(self, array: Any, *, mipmaps: bool = False,
                      cube: bool = False, name: str = "") -> Image:
-        """From one numpy array → a 2D image; shape + dtype pick the format
-        (UNORM — arrays are data, files are pictures). One level by default;
+        """From one numpy array; shape + dtype pick the format (UNORM — arrays
+        are data, files are pictures). (h, w) or (h, w, channels) makes a 2D
+        image; a 4-dimensional (depth, h, w, channels) array makes a 3D image —
+        a single-channel volume is `arr[..., None]`. One level by default;
         `mipmaps=True` generates the full chain (arrays stay 1-level unless asked,
         so a data texture gets no surprise filtering). (h, w, 3) has no portable
         GPU format and raises ResourceError with a padding hint. `cube=True` here
@@ -1905,10 +2218,29 @@ class Context:
         calls that differ only by name give one object named "a + b", which
         `sampler.name` reports."""
         ...
-    def create_descriptor_pool(self, max_sets: int, samplers: int = 0,
-                               uniform_buffers: int = 0,
-                               storage_buffers: int = 0,
-                               storage_images: int = 0) -> DescriptorPool: ...
+    def create_descriptor_pool(self, max_sets: Optional[int] = None,
+                               textures: Optional[int] = None,
+                               uniform_buffers: Optional[int] = None,
+                               storage_buffers: Optional[int] = None,
+                               storage_images: Optional[int] = None) -> DescriptorPool:
+        """A pool to allocate descriptor sets from.
+
+        With no arguments (0.23) the pool is AUTOMATIC: it grows a new
+        VkDescriptorPool block whenever one fills, each sized from the layout
+        being served, so a whole count=N array always fits. Before that, the
+        correct sizes depended on ctx.frames_in_flight (allocate_frame_set
+        consumes frames x N descriptors), a number the call never mentioned —
+        guessing with headroom was the only strategy.
+
+        Explicit sizes keep the old behavior: one fixed block, exhaustion is a
+        ResourceError. That is the escape hatch for a hand-budgeted pool.
+
+        `textures=` counts COMBINED_IMAGE_SAMPLER descriptors — the ones the
+        builder declares with .texture() and the set fills with set_image().
+        It was called `samplers=` before 0.23: three names for one descriptor
+        type, and the builder's name won.
+        """
+        ...
 
     def create_command_buffer(self, auto_barriers: Optional[bool] = None) -> CommandBuffer:
         """Command buffers are a device resource, so they come from the Context —
@@ -1950,25 +2282,11 @@ class Context:
         ...
 
 class SwapchainRenderer(RenderTargetBase):
-    """Presents to a window. One implementation of a render target."""
+    """Presents to a window. One implementation of a render target.
 
-    def __init__(self, window: Window, context: Context,
-                 present_mode: PresentMode = PresentMode.MAILBOX, samples: int = 1,
-                 stencil: bool = False) -> None:
-        """samples>1 turns on windowed MSAA: rendering goes into a multisampled
-        colour+depth image that resolves into the swapchain image on present.
-        Must be a power of two <= ctx.max_samples().
-
-        stencil=True gives the window's depth buffer a stencil aspect, which is
-        what a masked pass (an outline, a portal) needs on screen. Without it a
-        stencil_test() pipeline can only be built against an offscreen
-        RenderTarget with depth=Format.DEPTH_STENCIL."""
-        ...
-    def __init__(self, win32_hwnd: int, context: Context,
-                 present_mode: PresentMode = PresentMode.MAILBOX, samples: int = 1,
-                 stencil: bool = False) -> None:
-        """Attach to an existing native window (Windows only)."""
-        ...
+    Comes from `ctx.create_renderer(window)` — since 0.23 there is no
+    constructor, for the reason RenderTarget has none.
+    """
 
     @property
     def present_mode(self) -> PresentMode:
@@ -1980,7 +2298,7 @@ class SwapchainRenderer(RenderTargetBase):
 
         The mode is a preference, so read present_mode back to see what the
         driver gave you. Call it outside the acquire/present pair: raises
-        ResourceError while an image is acquired, because recreation would
+        StateError while an image is acquired, because recreation would
         destroy the swapchain that image belongs to.
         """
         ...
@@ -1996,7 +2314,7 @@ class SwapchainRenderer(RenderTargetBase):
             if renderer.acquire():
                 renderer.present(cmd)
 
-        Acquiring twice on one frame raises ResourceError; in practice that
+        Acquiring twice on one frame raises StateError; in practice that
         means ctx.begin_frame() was not called.
         """
         ...
@@ -2024,9 +2342,9 @@ class SwapchainRenderer(RenderTargetBase):
         illegal by the spec and the validation layer reports it. The copy has to
         ride the frame's own submit.
 
-        Raises ResourceError when nothing has been captured, or when the
-        compositor refused to let the swapchain images be copied from — render
-        into a bz.RenderTarget and read that instead.
+        Raises StateError when nothing has been captured, and UnsupportedError
+        when the compositor refused to let the swapchain images be copied from —
+        render into a bz.RenderTarget and read that instead.
         """
         ...
 

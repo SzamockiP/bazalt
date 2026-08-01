@@ -58,6 +58,14 @@ These settle most arguments.
    This is also why 0.20 is not 0.19.1. `CHANGELOG.md` promises that a patch release never
    breaks the API, and removing `.export_values()` deletes about sixty names that were
    reachable. Undocumented is not the same as absent.
+7. **A limit is only a limit if something holds it.** Every entry that says "bazalt does not
+   do this" carries one of five verdicts — HARD, SCOPE, COST, STALE, UNASKED — defined under
+   the ceilings below. The test that assigns them: **an entry with no way out is HARD or
+   SCOPE; an entry with a way out and no named price is UNASKED, not a ceiling.** The 0.22
+   audit added this rule because the file had been recording all five in one section called
+   "accepted on purpose", which lent the authority of a decision to work nobody had done yet.
+   A reader cannot tell those apart a year later, and an unlabelled entry forbids as loudly
+   as a real limit.
 
 Rules 4 and 5 have a corollary that the 0.9 to 0.15 sequence confirmed: **the most invasive
 work goes last.** The volk dispatch-table pass touched every `vk*` call. Done early it would
@@ -163,6 +171,18 @@ entry. The release is a label, not the organizing axis.
 
   The callbacks must never rotate. One that did would mark the generation seen halfway
   through a cycle and hide every later event of the same cycle.
+
+- **The keyboard follows the gamepad: renamed, not translated** (0.23, ergonomics #5).
+  `Key`, `MouseButton` and `CursorMode` are `enum class`es whose values ARE the GLFW
+  ints, exactly as `GamepadButton` has been since 0.21, so the two cannot drift. The
+  query methods keep their `int` signatures — a pybind enum converts through its value —
+  which is what keeps every bare `KEY_*` int valid with zero aliasing code. Three naming
+  decisions worth recording: the top-row digits are `D0..D9` (an identifier cannot start
+  with a digit, and `NUM_*` would read as the keypad, which stays `KP_*`); the C++ member
+  for the delete key is `DEL` because `<windows.h>` defines `DELETE` as a macro, while
+  the Python name stays `DELETE` (the binding names it); and there is no `LAST` member,
+  because `KEY_LAST` is GLFW's array-size sentinel, not a key — the int remains for
+  anyone sizing an array.
 
 - **A gamepad is a free function returning a snapshot** (0.21). `glfwGetGamepadState`
   takes a joystick id and no window, so a pad belongs to the process — the same
@@ -449,7 +469,53 @@ entry. The release is a label, not the organizing axis.
   **a container that only ever grows is a leak with a delay.** The size of the
   thing being appended is what decides how long the delay is.
 
+### The 0.23 error taxonomy
+
+- **Three recoverable kinds, split by what the caller fixes** (0.23, breaking #3 plus a
+  wider move the census forced). `ResourceError` means "this resource or data cannot do
+  that" — fix the data. `StateError` means "right call, wrong moment" (a double
+  `acquire()`, a barrier inside a rendering scope, a CommandBuffer submitted twice) — fix
+  the order. `UnsupportedError` means "this GPU cannot, with any argument" — ask
+  `ctx.supports()` or take the escape hatch the message names. Siblings, not subclasses:
+  an `except bz.ResourceError` written for data problems must not swallow the other two.
+  The 0.20 rule (`ValueError` when the argument is wrong on its own) stays untouched
+  underneath.
+
+- **The capability gates moved out of `ShaderError` too** (0.23), which the plan's census
+  did not list and the grep found. `polygon_mode` needing WIREFRAME, `count>1` needing
+  BINDLESS, a tessellation stage needing its feature — all raised `ShaderError` because
+  they happened to be found in a builder or a compile. A missing feature is a fact about
+  the Context, not the file, and the compile-time and build-time gates go through one
+  function, so both now raise `UnsupportedError` and cannot disagree. Pipeline
+  DESCRIPTION errors (a stencil test against a target with no stencil, a missing fragment
+  shader) stay `ShaderError`. Hot reload keeps its contract: a recompile failure is still
+  `ShaderError`, and a feature gate cannot newly fail on reload because the feature set is
+  fixed per Context.
+
+- **A full descriptor pool is `ResourceError`, from either `VkResult`** (0.23).
+  `VK_ERROR_OUT_OF_POOL_MEMORY` mapped to `OutOfMemoryError` and
+  `VK_ERROR_FRAGMENTED_POOL` fell through to `ResourceError`, so one user mistake arrived
+  as two types depending on the driver's mood. The fix for a full pool is a bigger pool
+  (or the automatic one), not freeing memory, so `code_from_vk_result` sends both to
+  `Resource`.
+
 ### Render targets and resources
+
+- **The automatic descriptor pool grows blocks sized from the layout being served**
+  (0.23, ergonomics #1). `create_descriptor_pool()` with no arguments is auto mode: a
+  vector of `VkDescriptorPool` blocks, a new one whenever the current fills
+  (`OUT_OF_POOL_MEMORY` / `FRAGMENTED_POOL`), each sized `max(default, this request)` per
+  descriptor type with array `count=` included. Sizing from the layout is what satisfies
+  MoltenVK, which refuses a pool that cannot hold a whole bindless array even when only
+  some slots are written (0.22) — one mechanism, two reasons. Explicit sizes keep the old
+  fixed single block as the escape hatch, byte-for-byte. The trap the plan predicted was
+  real: a free must return to the block that allocated the set, and the `shared_ptr` alone
+  cannot say which, so every `DescriptorSet` carries its `block_`. The pool kwarg renamed
+  `samplers=` to `textures=` in the same pass (ergonomics #2): the builder's `.texture()`,
+  the pool's `samplers=` and the set's `set_image()` looked like three names for
+  `COMBINED_IMAGE_SAMPLER`, and the audit's answer is that only the first two were — 
+  `set_image` names its ARGUMENT, and `test_stubs.py` already asserts `set_texture` is
+  dead, so resurrecting that name would undo a recorded decision.
 
 - **Subresource rendering is kwargs plus a view handle, not a new verb** (0.13). `layers=` /
   `cube=` / `mip_levels=` on `RenderTarget` mirror `create_image` (rule 1).
@@ -464,6 +530,14 @@ entry. The release is a label, not the organizing axis.
   to the old hard-coded `{0,1,0,1}`, so existing targets do not change, and a per-mip scaled
   `extent()` covers renderArea, viewport and scissor with no extra code. Because both the
   view and the barrier read the same source, they cannot drift apart.
+
+  **The one exception is a 3D slice target** (0.23). Vulkan tracks a volume's layout per
+  mip with exactly one array layer, so `target.layer(z)` on a 3D attachment feeds `z` only
+  into the VIEW (`baseArrayLayer` selects the slice of a `2D_ARRAY_COMPATIBLE` volume) and
+  the barrier names layer 0. Feeding `z` into both — the 0.13 rule applied naively — would
+  index past the layout state. Consequence, documented rather than fought: rendering one
+  slice marks the whole mip, which is the granularity a volume's layout actually has, so a
+  partial render followed by a sample is legal.
 
 - **One layout for a whole image** (0.13, and it holds today). `on_rendering_recorded` marks
   the WHOLE image, because an `Image` holds one `layout_`. Render every layer and every mip
@@ -598,6 +672,34 @@ entry. The release is a label, not the organizing axis.
   depth and clear the stencil. `clear_color=None` still answers "what happens to the old
   contents" for all of them at once.
 
+- **A blend is stored as an equation, and a mode is four points in that space** (0.23).
+  `BlendState` held a `BlendMode` and `color_blend_attachment_` switched on it at pipeline
+  creation, so a preset was the only thing a pipeline could remember. It holds a
+  `BlendEquation` now — six factors and two ops — and `blend_equation_for(mode)` is the one
+  place a preset means anything. Downstream stops knowing which spelling produced it, which
+  is what keeps the two from disagreeing: the test that pins it renders `src=ONE, dst=ONE`
+  against `mode=ADDITIVE` and compares the pixels.
+
+  **Three rules make the factor spelling complete rather than a diff against a hidden
+  base.** `src=` and `dst=` are required together (half an equation only reads as a guess
+  about the other half). `op=` defaults to ADD, because every named mode uses it. The alpha
+  channel follows the colour unless `src_alpha=`/`dst_alpha=` spell it out — the
+  `glBlendFunc` rule, and the alternative (alpha defaulting to ONE/ZERO) would silently
+  destroy destination alpha for anyone writing a colour blend. Mixing `mode=` with any
+  factor argument is refused, because both answer one question and the alternative is a
+  silent winner between them.
+
+  All three refusals are `ValueError` and live in the binding layer: nothing is consulted to
+  know the call is malformed (the 0.20 line), and raising there points the traceback at the
+  offending line instead of at `build()`. That is `require_preservable`'s address, not
+  0.21's recorded-diagnosis one — the count-mismatch case needed `build()` because the
+  mistake spans two calls, and this one has every argument in hand.
+
+  **What stayed out, and why it is not a hole in the hatch:** constant-colour factors need a
+  `blend_constants()` verb (and the dynamic state to go with it), and `SRC1_*` needs a
+  second output declared in the shader. Each is more API than an enum row, so each remains
+  its own proposal. `SRC_ALPHA_SATURATE` is in, because it is only a row.
+
 - **A per-attachment blend override is per FIELD, not per attachment** (0.17).
   `blend(attachment=1)` and `color_mask(attachment=1)` each set their own optional fields of
   one `BlendOverride`, so the two compose in either order. Resolving against the
@@ -626,6 +728,72 @@ entry. The release is a label, not the organizing axis.
   says `Access.SHADER_READ` or `Access.SHADER_WRITE`. Both ends finish in `SHADER_READ_ONLY`
   and BOTH are marked on the `Image`, not just the destination: a source that still believed
   it was in `GENERAL` hands a stale `oldLayout` to the next `read()`.
+
+- **A 3D texture is `depth=` on `create_image`, and a numpy volume is ndim 4** (0.23).
+  Rule 1 both times. The empty overload takes `depth=n`; the array overload keeps every
+  existing meaning — ndim 3 is still `(h, w, channels)` — and a volume is `(d, h, w, c)`,
+  with a single-channel volume one `arr[..., None]` away. A `depth=` kwarg on the array
+  overload was rejected because the shape already carries the fact, and a validation-only
+  argument is the `create_image(array, cube=True)` defect the 0.22 review filed. The two
+  error messages that teach the rule are the ndim gate and the unsupported-shape branch,
+  because a raw `(64, 512, 512)` volume lands in the second with its depth read as
+  channels. A volume has exactly one array layer (Vulkan's rule), so `depth=` refuses
+  `layers=`, `cube=` and `samples>1` with the reason.
+
+- **Render-to-slice is the borrowed-images target plus the existing `layer(z)`** (0.23).
+  No new verb and no new kwarg: `layer()` already names the slice axis of an attachment,
+  and on a volume that axis shrinks with the mip (level 1 of a depth-4 volume has 2
+  slices), so the bound follows. The slice view is a 2D view of a 3D image — full Vulkan
+  always allows it, MoltenVK does not — so target creation gates on
+  `Feature::IMAGE_VIEW_2D_ON_3D` (the fourth portability row, enabled implicitly like the
+  other three) and the refusal names the compute escape hatch. Rendering the WHOLE 3D
+  target is refused at the binding layer: its main view is a 3D view, which Vulkan does not
+  accept as an attachment, and the message says `target.layer(z)`. A depth attachment
+  beside a 3D colour is refused as SCOPE — no use of a volume target has asked to z-test
+  into a slice, and the guard is one sentence. `all_layers()` on a volume is refused too:
+  multiview lights array layers, and a volume has one.
+
+- **A barrier on a volume says `VK_REMAINING_ARRAY_LAYERS`** (0.23). The validation layers
+  warn about a layer count of 1 on a `2D_ARRAY_COMPATIBLE` 3D image — with maintenance9
+  that count will mean one Z slice — and the first example run printed ten warnings before
+  drawing a frame. `Image::barrier_layers()` is the one place the choice lives; copy and
+  blit REGIONS keep the real count, because `VkImageSubresourceLayers` does not accept the
+  sentinel. `mark_subresource_contents` clamps the sentinel back to a real count, so the
+  layout state never sees it.
+
+- **Everything a Context owns comes from a `ctx.create_*` verb, and the two constructors
+  that did not are GONE** (0.23, ergonomics #8). `bz.Context` and `bz.Window` are the roots
+  — nothing owns them — and every resource under them is made by the Context: buffers,
+  images, samplers, pools, pipelines, command buffers, and now render targets
+  (`ctx.create_render_target`) and swapchain renderers (`ctx.create_renderer`). Remembering
+  which of two conventions a type used was a coin flip; now there is no second convention.
+
+  **The first attempt added the factory and kept the constructor, and that was the bug.**
+  An alias is not a migration: it leaves both spellings alive, and this file's own 0.18
+  audit says a second spelling of the same call is a fork, not a convenience — same work,
+  same arguments, one paragraph of documentation explaining which to prefer, and the
+  paragraph is the tell. These would have been the seventh and eighth. The constructors are
+  removed instead, which is legal exactly once: 0.23 is the pre-1.0 break batch. The classes
+  stay registered as TYPES, because `isinstance` and the annotations still name them.
+
+  No `TargetType` enum: the two target forms differ by their arguments (formats plus a size,
+  or images), which is the same overload pattern `create_image` uses, and an enum would
+  duplicate what the arguments already say.
+
+  **The renderer's `keep_alive` had to move, and it is the interesting part.** The
+  constructor tied the Window to the new instance (`keep_alive<1, 2>`), because the
+  `SurfaceProvider` captures the raw `GLFWwindow*` and a pointer to the Window's own resize
+  flag — the 0.20 dangling-pointer bug. On a factory the nurse is the RETURN VALUE, so it is
+  `keep_alive<0, 2>`: argument 1 is the Context, argument 2 the window. Getting that index
+  wrong reintroduces exactly the bug that entry was written about, and nothing in the C++
+  would say so.
+
+- **`SubresourceTarget` and `MultiviewTarget` are registered, empty, and that is the whole
+  feature** (0.23). The base is polymorphic, so pybind downcasts the existing `layer()` /
+  `all_layers()` returns to the registered derived type by itself. Until then both came
+  back as opaque `RenderTargetBase` and the stub could say nothing about them. No methods:
+  each is a view that exists to be handed to `cmd.rendering(...)`, and the parent keeps
+  every knob.
 
 - **Cross-Context image transfer is the fourth overload of `create_image`** (0.15).
   `create_image` already had three overloads that differ by the type of the first argument
@@ -1422,69 +1590,87 @@ permanent ceiling.
 
 ### Ceilings accepted on purpose
 
-These are not debt to pay, they are limits we chose. Each one names its upgrade path.
+**Audited in 0.22.** The section used to open with "these are not debt to pay, they are
+limits we chose", and that sentence was true of about half of what it covered. The rest was
+work nobody had needed yet, filed under a heading that made it read as settled. The audit
+went through every entry against the code and split them by what actually holds each one:
 
-- **`Error.hpp`'s `check()` puts the raw `VkResult` name in the message** (0.20). It is the
-  template behind essentially every internal Vulkan failure, so `VK_ERROR_OUT_OF_POOL_MEMORY`
-  reaches a Python user who cannot act on it. The 0.20 audit listed it as the highest-impact
-  message in the codebase and it was left alone on purpose: for a driver-level failure that
-  name is exactly what a bug report needs, and the alternative is either a translation table
-  for a long enum (wrong in both directions, and written from memory) or dropping the one
-  fact that identifies the failure. Upgrade path: none wanted. The messages worth improving
-  are the ones bazalt writes itself, and 0.20 did those.
+- **HARD** — the spec, the driver or the platform forbids it. Bazalt has no move.
+- **SCOPE** — possible, and deliberately outside the library. It must fail the scope test
+  above, and the entry says on which of the two questions.
+- **COST** — possible and in scope, not done because the price is real. The entry names the
+  price and who pays it. These moved to `### Priced, not forbidden` below.
+- **STALE** — the obstacle the entry named is gone, or was never there. Moved to the
+  ergonomics backlog, with a one-line trace left here.
+- **UNASKED** — possible, in scope, cheap, and the only reason is that nobody hit it. This
+  is the honest name for "we don't do that". Also moved to the backlog.
 
-- **`recreate_swapchain` takes `vkDeviceWaitIdle`** (0.14), so a resize of one window
-  stutters the other for a moment. It is correct, it only stutters. Upgrade path: narrow it
-  to one swapchain.
+Rule 7 is the test: no way out means HARD or SCOPE; a way out with no named price means
+UNASKED. What follows are the HARD and SCOPE entries, plus the traces of what left.
+
+- **HARD. `Error.hpp`'s `check()` puts the raw `VkResult` name in the message** (0.20). It is
+  the template behind essentially every internal Vulkan failure, so
+  `VK_ERROR_OUT_OF_POOL_MEMORY` reaches a Python user who cannot act on it. The 0.20 audit
+  listed it as the highest-impact message in the codebase and it was left alone on purpose:
+  for a driver-level failure that name is exactly what a bug report needs, and the
+  alternative is either a translation table for a long enum (wrong in both directions, and
+  written from memory) or dropping the one fact that identifies the failure. Upgrade path:
+  none wanted, which is what makes this HARD rather than UNASKED — every alternative is worse
+  than the thing being complained about. The messages worth improving are the ones bazalt
+  writes itself, and 0.20 did those.
+
 - ✅ **A cross-Context transfer regenerates the mip levels above 0** (0.15) — CLOSED in
   0.18. It copies the source's own levels now, one readback and one update per
   (layer, mip). Slower, and deliberately so: the overload is a setup step already.
-- **A cross-Context transfer goes through host memory and blocks the source queue** (0.15).
-  Without `external_memory` there is no portable alternative, so the documentation calls it
-  a setup operation.
-- **`FULLSCREEN` is not exclusive fullscreen** (0.16). It takes the monitor and its
-  current video mode, but the swapchain stays composited, because exclusive fullscreen
-  needs `VK_EXT_full_screen_exclusive`. Upgrade path: a `Feature`, not a fifth
-  `WindowMode` — it is a property of the swapchain, not of the window.
-- **Fullscreen picks the monitor, and nothing picks the video mode** (0.16). The monitor
-  is the one the window overlaps most, which is the difference between "works" and
-  "fullscreens on the other screen". A `monitor=` argument and video-mode enumeration
-  (resolution and refresh rate) are deferred until somebody asks. Upgrade path: both are
-  additive.
+- *Moved in 0.22: `recreate_swapchain` takes `vkDeviceWaitIdle` — COST, see `Priced, not
+  forbidden`.*
+- *Moved in 0.22: a cross-Context transfer goes through host memory — COST, see `Priced, not
+  forbidden`.*
+- *Moved in 0.22: `FULLSCREEN` is not exclusive fullscreen — UNASKED, to the backlog. The
+  entry said the upgrade path was "a `Feature`, not a fifth `WindowMode`", which is an
+  additive change with no price attached, and rule 7 calls that a backlog item. The
+  observation itself stands and is documented on `WindowMode`: the swapchain stays
+  composited.*
+- *Moved in 0.22: fullscreen picks the monitor and nothing picks the video mode — UNASKED,
+  to the backlog. The entry ended "deferred until somebody asks", which is the definition of
+  the label. `src/Window.hpp:526` already enumerates the monitors and reads their video
+  modes to pick the best-overlapping one, so what is missing is the user-facing choice, not
+  the machinery.*
 - ✅ **An HLSL entry point that matches no function compiles to an empty shader** (0.16) —
   CLOSED in 0.19. Reflection sees the empty body and no interface, so the typo is refused at
   the compile that caused it. Gated on HLSL with an explicit `entry_point`, because a GLSL
   `main()` that deliberately does nothing is legitimate and has no name to misspell.
-- **`line_width` other than 1.0 needs `WIDE_LINES`** (0.16), because a driver may support
-  exactly one width. Same shape as `polygon_mode` needing `WIREFRAME`: the rasterizer looks
-  like free fixed-function state and is not.
-- **A preserved second pass re-transitions the attachment** (0.16). Pass 1 retires the
-  image to `final_layout()` and pass 2 brings it back, so N passes cost N round trips
-  instead of staying in `COLOR_ATTACHMENT_OPTIMAL`. It reuses the existing RenderTarget
-  contract rather than inventing a "this pass may continue" state. Upgrade path: a
-  recording-wide look-ahead, which is the same machinery the depth store-op would want.
+- **HARD. `line_width` other than 1.0 needs `WIDE_LINES`** (0.16), because a driver may
+  support exactly one width. Same shape as `polygon_mode` needing `WIREFRAME`: the rasterizer
+  looks like free fixed-function state and is not.
+- *Moved in 0.22: a preserved second pass re-transitions the attachment — COST, see `Priced,
+  not forbidden`.*
 - ✅ **Per-subresource layout tracking does not exist in `Image`** — CLOSED in 0.18. The
   entry called the gain small ("it only removes the loud edge of a partial render"), and
   that was the wrong reading: the loud edge WAS the feature, because it made rendering
   into one mip and then sampling the image impossible. See the decision above.
-- **A `DEPTH_STENCIL` attachment cannot be sampled or read back** (0.17). Its view carries
-  both aspects. Upgrade path: a second, depth-only view beside the attachment one, the same
-  shape as the cubemap's parallel `2D_ARRAY` storage view.
-- **The stencil state is the same for front and back faces** (0.17). Upgrade path: a `face=`
-  kwarg on `stencil_test`, additive.
-- **`primitiveRestartEnable` is always FALSE** (0.17), so a strip is one primitive per draw.
-  A restart index would change what the largest index value in an index buffer means, which
-  is a decision, not a flag.
-- **A specialized compute workgroup size needs Vulkan 1.3** (0.17).
+- *Moved in 0.22: a `DEPTH_STENCIL` attachment cannot be sampled or read back — COST, see
+  `Priced, not forbidden`. The Vulkan half of the entry is real (a view carrying both aspects
+  cannot be sampled); the conclusion was not, because the parallel-view trick the entry names
+  as its upgrade path is already written for cubemaps in the same file.*
+- *Moved in 0.22: the stencil state is the same for front and back faces — UNASKED, to the
+  backlog. `src/Pipeline.hpp` writes the same struct into `.front` and `.back`, and the
+  entry's own upgrade path is one additive kwarg.*
+- *Moved in 0.22: `primitiveRestartEnable` is always FALSE — UNASKED, to the backlog. The
+  entry's argument was "a restart index would change what the largest index value in an index
+  buffer means, which is a decision, not a flag", and that is right about a global switch and
+  wrong about the fix: restart is per-pipeline state, so an opt-in kwarg makes the meaning
+  change the caller's own. `src/Pipeline.hpp:1644` hardcodes `VK_FALSE`.*
+- **HARD. A specialized compute workgroup size needs Vulkan 1.3** (0.17).
   `layout(local_size_x_id = 0)` compiles to `OpExecutionMode LocalSizeId`, which requires
   `maintenance4`, and the baseline is 1.2. Specialize the numbers the shader reads instead.
   Upgrade path: none needed — it becomes available by itself as the baseline moves.
 - ✅ **`copy_image` copies mip 0 only** (0.17) — CLOSED in 0.18. The case came up:
   `image.update(mip=)` makes per-level content ordinary, and a copy that leaves the other
   levels stale is a copy of the top level rather than of the image.
-- **A pipeline cache lives and dies with its Context** (0.17). See the decision above: on
-  disk it needs a frozen API to be worth writing.
-- **Shader printf needs the validation layers** (0.18). It is a layer service, not a
+- *Moved in 0.22: a pipeline cache lives and dies with its Context — COST, see `Priced, not
+  forbidden`.*
+- **HARD. Shader printf needs the validation layers** (0.18). It is a layer service, not a
   driver one, so it is unavailable in a release run by construction. Upgrade path: none —
   this is what the feature IS.
 - ✅ **A printf Context compiles every shader unoptimized** (0.18) — CLOSED in 0.19.
@@ -1494,21 +1680,26 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
   reflects, and recompiles at performance when the shader turns out not to print. A
   printing shader is one compile; a quiet one in a printf Context is two, and it is no
   longer taxed for the Context it happens to be in.
-- **An occlusion count is not precise** (0.18). `occlusionQueryPrecise` is a feature bit,
-  and without it the spec allows any non-zero value. `samples > 0` is the promise.
-  Upgrade path: a `Feature`, additive.
-- **`blit_image` covers mip 0 of every shared layer** (0.18). A blit chain between two
-  images is a different question, and `generate_mipmaps` answers it on the destination.
-- **`image.update` writes one (layer, mip) per call** (0.18). A layered update is N calls;
-  they are queued on one worker and land in order, so the result is the same and the API
-  stays one verb.
-- **A screenshot needs `present(capture=True)` first** (0.18). Not an ergonomic choice: a
-  presentable image may only be touched between acquire and present. Upgrade path: none
+- *Moved in 0.22: an occlusion count is not precise — UNASKED, to the backlog. The code
+  comment at `src/CommandBuffer.hpp:1363` gives the real argument, which the entry did not:
+  asking for a count bazalt cannot promise on every device would make `samples` mean two
+  different things depending on the driver. That argument is exactly what `Feature` exists to
+  answer, and 0.22 added three rows to it in one release, so "a `Feature`, additive" is a
+  backlog item rather than a limit.*
+- **SCOPE. `blit_image` covers mip 0 of every shared layer** (0.18). A blit chain between two
+  images is a different question, and `generate_mipmaps` answers it on the destination. The
+  capability is reachable, so what this entry defends is rule 1 rather than a limit: the
+  price of lifting it is a second idiom for something that already has one.
+- **SCOPE. `image.update` writes one (layer, mip) per call** (0.18). A layered update is N
+  calls; they are queued on one worker and land in order, so the result is the same and the
+  API stays one verb. Same shape as the entry above — reachable, and the cost of a shortcut
+  is a second spelling.
+- **HARD. A screenshot needs `present(capture=True)` first** (0.18). Not an ergonomic choice:
+  a presentable image may only be touched between acquire and present. Upgrade path: none
   that Vulkan permits.
-- **A cross-Context transfer of a mipped image is O(layers x mips) readbacks** (0.18).
-  Upgrade path: a single readback of every level, which needs a staging layout the host
-  side does not currently describe.
-- **Automatic barriers are computed at RECORD time from reflection** (0.19), so a hot
+- *Moved in 0.22: a cross-Context transfer of a mipped image is O(layers x mips) readbacks —
+  COST, see `Priced, not forbidden`.*
+- **HARD. Automatic barriers are computed at RECORD time from reflection** (0.19), so a hot
   reload that makes a shader start writing an already-bound resource does not re-barrier a
   recording that is only replayed. Much narrower than it sounds: `rebuild()` never
   recreates the descriptor layouts, so a reload cannot *add* a binding — the hazard is
@@ -1517,13 +1708,14 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
   in the example whose subject IS hot reload. Nothing can close it automatically, because
   re-deriving the barriers means re-running user Python. Upgrade path: a generation counter
   on `ShaderModule` bumped by `replace()`, checked at `execute()` to warn.
-- **The write scan fails open** (0.19). A descriptor handed to a function, one appearing in
+- **HARD. The write scan fails open** (0.19), and the direction is the point rather than the
+  precision. A descriptor handed to a function, one appearing in
   a pointer `OpPhi`, a decoration group, a malformed word, or SPIR-V bazalt did not compile
   are all treated as written. The tracker may be pessimistic, never optimistic: an
   uncertain module behaves exactly as bazalt did before reflection existed. Writes through
   `buffer_device_address` stay invisible, and no bazalt API can produce such a buffer.
   Upgrade path: a real def-use pass over call graphs, when a shader measurably pays for it.
-- **Reflection is only trusted for SPIR-V bazalt compiled** (0.19). A `.spv` file or
+- **HARD. Reflection is only trusted for SPIR-V bazalt compiled** (0.19). A `.spv` file or
   `compile_shader(source=bytes)` sets `writes_unknown`, so no barrier is narrowed for it.
   The first attempt at this was a capability allowlist, and that was the wrong mechanism:
   the numbers are a long enum, a list written from memory is wrong in both directions, and
@@ -1534,68 +1726,119 @@ These are not debt to pay, they are limits we chose. Each one names its upgrade 
   and not by the `create_image(samples=)` the entry named. See the decision above:
   `samples=` on the borrowed signature reuses the MSAA machinery that already
   existed, and the entry's upgrade path would have added a second MSAA idiom.
-- **A multisampled attachment cannot be sampled** (0.21). `usage_for_image` drops
-  `SAMPLED` for `samples > 1` and `read()` refuses, so a custom resolve in a shader
-  (`sampler2DMS`, per-sample edge detection) is out of reach — bazalt's MSAA is
-  render-and-resolve. Upgrade path: a sampleable multisampled image plus a
-  `texture2DMS` declarator, additive, and nothing asks for it yet.
+- *Moved in 0.22: a multisampled attachment cannot be sampled — UNASKED, to the backlog. The
+  entry ended "additive, and nothing asks for it yet", which is the label's definition.
+  `src/Image.hpp:576` drops `SAMPLED` for `samples > 1` and the comment beside it says why:
+  "SAMPLED/TRANSFER are dead weight (you sample the resolve)". True of render-and-resolve
+  MSAA and not of `sampler2DMS`, which is legal Vulkan needing only that bit — so the holder
+  here is a default, not the API.*
 - ✅ **The indirect verbs' `count` is CPU-side** (0.19) — CLOSED in 0.21 by
   `count_buffer=`, once the pNext column made `drawIndirectCount` nameable. The
   entry's own prediction held: it waited on exactly the thing it said it waited on.
-- **The indirect verbs take no `stride=`** (0.19). A packed array is the one obvious
-  way and `offset=` covers starting later in the buffer.
-- **The record-time descriptor walk is per descriptor, not per binding** (0.21). A
-  draw asks the tracker about every bound descriptor, so a 500-texture array is 500
-  hash lookups — at RECORD time only, since replay costs nothing, and a sampled
-  image the tracker never saw stops at `tracker_.tracks()`. Upgrade path: skip the
-  walk for bindings above some declared count and require a manual barrier there,
-  which is a worse API for a cost nobody has measured yet.
-- **A descriptor is rewritable mid-flight only where somebody said so** (0.21).
+- *Moved in 0.22: the indirect verbs take no `stride=` — UNASKED, to the backlog. "A packed
+  array is the one obvious way" holds for the common case and stops holding the moment the
+  draw arguments are interleaved with per-draw data, which is ordinary GPU-driven practice.
+  `src/CommandBuffer.hpp:699` passes `sizeof(VkDrawIndirectCommand)` as a constant.*
+- *Moved in 0.22: the record-time descriptor walk is per descriptor — COST, see `Priced, not
+  forbidden`.*
+- **HARD. A descriptor is rewritable mid-flight only where somebody said so** (0.21).
   The default is on for an array and off for a single descriptor, and
   `update_after_bind=` overrides either. Rewriting a descriptor that has neither
   while a submit reads it is undefined, and the layers report it. Not a ceiling to
   raise: the alternative is the flag everywhere, which spends the separate limit
   budget on descriptors nobody rewrites.
-- **A gamepad has no edge queries** (0.21). Level state only: `pad.button(...)` says
-  what is down now, and there is no `was_button_pressed`. Upgrade path: the per-cycle
-  rotation the windows use, which needs somewhere process-wide to keep the
-  generation — see the 0.16 rejection of a registry of live windows.
-- **The tracker orders uses within ONE recording** (0.19, and true since 0.6 — written down
-  now because indirect draw made it easy to hit). Two CommandBuffers that share a
-  GPU-written buffer are ordered by nothing the tracker can see, so the second recording
-  needs a manual `cmd.barrier()`. `examples/28_gpu_culling` does exactly that, because the
-  compute pass runs in one window's recording and the other window reads its output.
-  Upgrade path: Context-level tracking of which serial last wrote a resource.
-- **macOS needs the Vulkan SDK, and the wheel does not carry it** (0.22). See the decision
-  above. Upgrade path: bundle MoltenVK and a loader, which is additive and reversible, if
-  somebody asks for a Mac install with no SDK.
-- **Shader printf needs a driver whose compiler implements it** (0.22), which is a second
+- *Moved in 0.22: a gamepad has no edge queries — **STALE**, to the backlog. The entry said
+  the rotation "needs somewhere process-wide to keep the generation" and pointed at the 0.16
+  rejection of a registry of live windows. That obstacle does not exist and did not exist
+  when the entry was written: `poll_generation_` is a `static inline std::atomic<uint64_t>`
+  on `Window` (`src/Window.hpp:80`), which is process-wide already and is the exact counter
+  the entry went looking for. What 0.16 rejected was a registry of window objects, which is a
+  different thing. This is the entry that motivated the audit.*
+- *Moved in 0.22: the tracker orders uses within ONE recording — COST, see `Priced, not
+  forbidden`.*
+- **HARD. macOS needs the Vulkan SDK, and the wheel does not carry it** (0.22). See the
+  decision above. The platform ships no loader, and bundling one is refused for a stated
+  reason rather than an unexamined one: a bundled loader hides the one the user installed.
+  Upgrade path: bundle MoltenVK and a loader, which is additive and reversible, if somebody
+  asks for a Mac install with no SDK.
+- **HARD. Shader printf needs a driver whose compiler implements it** (0.22), a second
   requirement beside "needs the validation layers" from 0.18. MoltenVK advertises
   `VK_KHR_shader_non_semantic_info`, accepts the SPIR-V, and then fails in the Metal compiler
   with "use of undeclared identifier 'debugPrintfEXT'". Nothing can be asked in advance —
   there is no bit for "my shader compiler implements this instruction" — so the failure is a
   pipeline build error and the tests probe for it. Upgrade path: none available to bazalt.
-- **A GPU timestamp may be advertised and useless** (0.22). Bazalt already checks
+- **HARD. A GPU timestamp may be advertised and useless** (0.22). Bazalt already checks
   `timestampPeriod` and `timestampValidBits` before offering `gpu_time_ms` at all, and
   MoltenVK on a paravirtual device passes both and then writes the same value twice. There is
   nothing left to ask, so `gpu_time_ms` returns 0.0 rather than None. Upgrade path: none — a
   library cannot tell "fast" from "not measured" without a third fact the driver does not
   supply.
-- **The macOS wheels are arm64 and macOS 14** (0.22). Intel because GitHub retired the
+- **HARD. The macOS wheels are arm64 and macOS 14** (0.22). Intel because GitHub retired the
   x86_64 runners and an untested wheel is worse than none. 14.0 because libc++ carries
   `<format>` behind an availability annotation and the binding layer formats everywhere.
   Upgrade path for the first: a cross-compiled wheel plus somebody with the hardware to
   test it. For the second: none wanted — it moves by itself as the floor rises.
-- **API coverage counts a symbol per NAME, not per (class, name), for the half it cannot
-  call** (0.22). Methods, properties and functions are measured exactly, by wrapping them.
+- **HARD. API coverage counts a symbol per NAME, not per (class, name), for the half it
+  cannot call** (0.22). Methods, properties and functions are measured exactly, by wrapping
+  them.
   Enum members and the key constants are read rather than called, so nothing can wrap them
   and the report matches their bare name against the identifiers in the test sources. Two
   enums that share a member name share an answer. Upgrade path: none worth it — the report
   exists to say what to test next, and it is exact for everything that is called.
-- **A symbol used only by an example counts as untouched** (0.22). Deliberate: the examples
-  are not run by CI, so they prove nothing about a symbol still working. It is also why the
-  untouched list is longer than it looks — 124 of the 127 key constants are in it, and
-  `examples/21_window_modes` presses a good many of them.
+- **HARD. A symbol used only by an example counts as untouched** (0.22). Deliberate: the
+  examples are not run by CI, so they prove nothing about a symbol still working. It is also
+  why the untouched list is longer than it looks — 124 of the 127 key constants are in it,
+  and `examples/21_window_modes` presses a good many of them.
+
+### Priced, not forbidden
+
+The COST half of the 0.22 audit. Every entry here is possible and in scope, and each one
+names what it costs and who pays. That is the difference between this section and the one
+above: these are for sale, and the price is why nobody has bought yet. An entry that loses
+its price stops belonging here and becomes backlog.
+
+- **`recreate_swapchain` takes `vkDeviceWaitIdle`** (0.14), so a resize of one window
+  stutters the other for a moment. It is correct, it only stutters. **Price of lifting it:**
+  narrowing the wait to one swapchain means tracking which submits touched which swapchain,
+  which is per-window state the Renderer does not keep today. **Paid by:** anyone with two
+  windows on one Context, at every resize.
+- **A cross-Context transfer goes through host memory and blocks the source queue** (0.15).
+  **Price:** `external_memory` — `VK_KHR_external_memory_win32` and `_fd` are two spellings
+  of one idea plus a platform split in the build, and the entry in `Proposed features` files
+  the same work under raw-handle interop. So the honest statement is not "no portable
+  alternative" but "one escape hatch buys this and three other integrations, and nobody has
+  asked for any of them yet". **Paid by:** multi-GPU setups, once, at setup time.
+- **A preserved second pass re-transitions the attachment** (0.16). Pass 1 retires the image
+  to `final_layout()` and pass 2 brings it back, so N passes cost N round trips instead of
+  staying in `COLOR_ATTACHMENT_OPTIMAL`. **Price:** a recording-wide look-ahead — the same
+  machinery a depth store-op wants — against the current design where each pass is decided in
+  isolation. **Paid by:** any multi-pass recording on one target, per frame.
+- **A `DEPTH_STENCIL` attachment cannot be sampled or read back** (0.17). Its view carries
+  both aspects, and Vulkan forbids sampling through such a view — that half is HARD. The
+  conclusion is not: **price** is a second, depth-only view beside the attachment one, plus
+  deciding which view `set_image` hands out. The shape already exists in the same file — a
+  cubemap keeps a parallel `2D_ARRAY` storage view beside its `CUBE` sampling view
+  (`src/Image.hpp:738`) — so this is a known pattern applied twice, not new machinery.
+  **Paid by:** anyone wanting a stencil-carrying shadow map, who today needs two targets.
+- **A pipeline cache lives and dies with its Context** (0.17). **Price:** an on-disk format is
+  only worth writing against a frozen API, so this one is genuinely waiting on 1.0 rather
+  than on effort. **Paid by:** startup time, every run.
+- **A cross-Context transfer of a mipped image is O(layers x mips) readbacks** (0.18).
+  **Price:** a single readback of every level needs a staging layout the host side does not
+  describe today. **Paid by:** setup time on a mipped cross-GPU transfer.
+- **The record-time descriptor walk is per descriptor, not per binding** (0.21). A draw asks
+  the tracker about every bound descriptor, so a 500-texture array is 500 hash lookups — at
+  RECORD time only, since replay costs nothing, and a sampled image the tracker never saw
+  stops at `tracker_.tracks()`. **Price:** skipping the walk above some declared count means
+  requiring a manual barrier there, which is a worse API. **Paid by:** nobody measured yet,
+  which is the entry's real status.
+- **The tracker orders uses within ONE recording** (0.19, and true since 0.6 — written down
+  when indirect draw made it easy to hit). Two CommandBuffers that share a GPU-written buffer
+  are ordered by nothing the tracker can see, so the second recording needs a manual
+  `cmd.barrier()`; `examples/28_gpu_culling` does exactly that. **Price:** Context-level
+  tracking of which serial last wrote each resource. **Paid by:** correctness, not
+  performance — this is the one entry here whose price is charged in surprise rather than in
+  milliseconds, and it is the strongest candidate of the eight.
 
 ---
 
@@ -1684,39 +1927,299 @@ layer, the stub, tests, an example and the docs.
   wrapper with no decisions in it.
 - ✅ **An async `StaticBuffer`** — DONE in 0.18.0.
 
+---
+
+## The ergonomics backlog
+
+Two inputs, one list. The first is an API review done in 0.22 from the outside — someone
+reading the stub and the examples as a graphics programmer who has not seen the internals.
+The second is the audit above: every ceiling that turned out to be STALE or UNASKED lands
+here, because that is what those labels mean.
+
+This is deliberately **not** part of `Proposed features`, which opens by promising that
+everything in it is additive. Three entries here are not.
+
+Each entry says: what you write today, what you should write, whether it breaks the API and
+how it avoids breaking it if it can, where the code is, and why. The last part is the point —
+rule 7 exists because a list of complaints with no reasons decays into a list of orders.
+
+Nothing here is assigned to a release. The one scheduling fact is the split below: **three
+entries are breaking, and only those three are bounded by the 1.0 freeze.** Everything else
+is additive and can land before or after it. The COST entries in `Priced, not forbidden`
+above are also work, and are listed there rather than here because their price is the
+interesting part.
+
+### Breaking, and therefore before the freeze
+
+**All three landed in 0.23**, which is the pre-1.0 break batch rule 6 asked for. The
+entries stay for their reasoning; each carries its outcome.
+
+1. ✅ **`DescriptorSet.set_image` takes `index` positionally.** `set_image(binding, image,
+   sampler=None, index=0)` — everywhere else in the API the extras are keyword-only, so
+   `set_image(0, img, 3)` reads as "index 3" and passes 3 as a sampler. Make it
+   `*, index`. `bazalt/_core.pyi:609`. Shipped in 0.21, so the exposure is one release.
+   DONE in 0.23, on all three set verbs — one rule, not one exception.
+2. ✅ **`create_buffer` and `Buffer.update` name their first parameter `list`, `array` or
+   `size_in_bytes`.** These are the names an IDE shows, and two of them shadow builtins.
+   `data` in all of them. Breaks only a caller who passed by keyword, which nothing in the
+   examples or the tests does. `bazalt/_core.pyi:401` and `:1706`. DONE in 0.23 — one name
+   across the overloads is also what makes the keyword spelling work whichever body the
+   argument picks.
+3. ✅ **`ResourceError` is the bag for everything.** It covers a strided numpy view, a resource
+   from another Context, a double `acquire()`, `set_present_mode` while an image is acquired,
+   an unsupported blit, a query outside a pass, a missing file and an exhausted pool. The
+   `BazaltError` docstring divides errors into "bazalt had to ask an object" and "the argument
+   is wrong on its own", and a double `acquire()` is neither — it is a sequencing error, a
+   third category with no name. Proposal: `StateError` beside it. **Counter-argument, kept on
+   purpose:** one class fewer is one thing fewer to learn, and the split has to be right the
+   first time because `except` clauses freeze at 1.0. Decide before the freeze either way;
+   this is the only entry in the file whose cost goes UP if it is deferred.
+
+   DONE in 0.23, and wider than proposed: the census found a THIRD kind hiding in
+   `ShaderError` too (capability gates in the builders and the compiler), so the split is
+   `StateError` plus `UnsupportedError`. See "The 0.23 error taxonomy" above for the full
+   reasoning and what stayed where.
+
+4. ✅ **`target.layer()` takes `mip` positionally.** Found by the 0.23 release review, after
+   entry 1 above was called done. `layer(0, 2)` is the identical trap to
+   `set_image(0, img, 3)` — two adjacent ints of which the second selects a different axis —
+   and the 3D work in the same release made it worse, because on a target over a volume the
+   FIRST argument is a Z coordinate, so both ints read as position. DONE in 0.23: three test
+   call sites, no example, one `py::kw_only()`.
+
+   **The lesson is about entry 1, not about this signature.** Entry 1 named three verbs and
+   was implemented as those three verbs. The rule it was written from — extras are
+   keyword-only, "one rule, not one exception" — has no such list. A backlog entry that
+   states a rule and then enumerates its known instances gets implemented as the
+   enumeration, and the instance nobody wrote down survives into the freeze. When an entry
+   generalizes, **grep for the shape** and put the result in the entry before it is worked.
+
+### Ergonomics, additive
+
+Ordered by how often the friction shows up, not by effort.
+
+1. ✅ **The descriptor pool makes the user do Vulkan's arithmetic.** DONE in 0.23 — the
+   automatic pool, exactly the fix this entry proposed. See the decision above.
+   `create_descriptor_pool(max_sets=4, uniform_buffers=8, samplers=4)` asks for per-type
+   descriptor counts, and `allocate_frame_set` then consumes `frames_in_flight` sets and
+   `frames_in_flight × N` descriptors (`src/DescriptorSet.hpp:499`). So the correct number
+   depends on `ctx.frames_in_flight`, which does not appear in the call — `examples/09_shadow_map`
+   guesses with headroom, which is the only available strategy. Getting it wrong yields
+   `VK_ERROR_OUT_OF_POOL_MEMORY` with the raw name, by the HARD entry above. Fix: make the
+   arguments optional and allocate another `VkDescriptorPool` block when one fills; explicit
+   sizes stay as the escape hatch.
+
+   **This is not the idea rejected in 0.19** ("Optional binding declarators, inferred from
+   SPIR-V"). Layouts stay hand-declared, with the stage they carry and the reload behaviour
+   that decision protects. What goes away is only the arithmetic, which the declarators
+   already know at build time. Anybody re-reading both entries should not conflate them.
+2. ✅ **Three names for one descriptor type.** The builder says `.texture()`, the pool says
+   `samplers=`, the set says `set_image()`, and all three mean
+   `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER`. Rule 1 says one name per thing. Fold the
+   rename into entry 1, since that call site is being changed anyway. DONE in 0.23:
+   `samplers=` became `textures=`. `set_image` stays — it names its argument (an Image),
+   not the descriptor type, and `test_stubs.py` asserts `set_texture` is dead. Two of the
+   three were the same name problem; the third was a different question.
+3. **`bind_descriptor_set` and `push_constants` take a pipeline that is already known.**
+   `cmd.bind_descriptor_set(scene_set, scene_pipe, set=0)` passes three arguments of which two
+   are derivable: `bound_graphics_pipeline_` and `bound_compute_pipeline_` are already kept as
+   record-time state (`src/CommandBuffer.hpp:539`, added by 0.19's reflection work), and a
+   `DescriptorSet` already knows the layout and set index it was allocated from. Add the short
+   overload, keep the long one for a recording split across functions.
+4. **`cmd.begin()` has no `cmd.end()`.** Every other pair in the API is symmetric —
+   `begin_rendering`/`end_rendering`, `begin_label`/`end_label` — and this one means "reset and
+   start recording" while being named like half of a pair. Add `with ctx.record() as cmd:`;
+   `begin()` stays.
+5. ✅ **The keyboard is bare ints while the gamepad is an enum.** DONE in 0.23, in the
+   backward-compatible shape this entry predicted. See the decision beside the gamepad's. `bz.KEY_W: int`,
+   `set_cursor_mode(mode: int)` and `is_mouse_button_pressed(button: int)` sit next to
+   `bz.GamepadButton.A`, which got an `IntEnum` in 0.21. Nothing type-checks, nothing
+   autocompletes as a group, and `is_key_pressed(bz.MOUSE_BUTTON_LEFT)` compiles. `Key`,
+   `MouseButton` and `CursorMode` as `IntEnum`s are backward-compatible by construction; the
+   `bz.KEY_W` names stay as aliases. The api-coverage report's "124 of 127 key constants
+   untouched" is the same fact seen from the test side.
+6. **A binding read by two stages is declared twice.** A camera UBO read in vertex and
+   fragment is `.uniform_buffer(0, VERTEX, set=0).uniform_buffer(0, FRAGMENT, set=0)`. The
+   merge is real and deliberate (`src/Pipeline.hpp:591`) but appears nowhere in the stub, so a
+   user cannot know it is allowed. Accept a sequence, and document the merge either way — the
+   documentation half is worth more than the sugar.
+7. **`set` has no default on the graphics builder and defaults to 0 on the compute one.**
+   Same declarator, two contracts.
+8. ✅ **Two factory conventions.** Buffers, images, samplers, pools, command buffers and
+   pipelines come from the Context; `RenderTarget` and `SwapchainRenderer` are top-level
+   constructors taking the Context as their first argument. Either is fine, both is a coin
+   flip to memorize. `ctx.create_render_target()` as an alias; the class stays. DONE in
+   0.23 for BOTH types — and **the entry's own proposal was wrong about how**. "As an
+   alias" would have kept two spellings alive, which the 0.18 audit calls a fork; the
+   constructors are gone instead. The entry also let `SwapchainRenderer` off on the
+   grounds that its first argument is the Window rather than the Context, and that is a
+   distinction about the argument list, not about ownership: the renderer is a Context
+   resource like the rest, so it is `ctx.create_renderer(window)`. See the decision above.
+9. **No `close()` and no context manager on `Context` or `Window`.** Re-running a notebook
+   cell leaks a device, an upload worker, a VMA allocator and a command pool until the garbage
+   collector gets to it. Rule 4 makes this worse than it looks: the notebook is the prototyping
+   surface.
+
+### Features, additive
+
+Ordered by rule 4 — what makes pictures goes first.
+
+1. ✅ **3D textures.** No `image3D` or `sampler3D` anywhere, which rules out 3D LUT colour
+   grading, volumetric noise and every volume renderer. The descriptor type does not change
+   (still combined-image-sampler or storage-image), so the work is image creation and a view
+   type: `create_image(w, h, depth=n)`. Best ratio of picture to code on this list. DONE in
+   0.23, the release's headline, render-to-slice included — see the decisions above and
+   `examples/31_volume_raymarch` / `32_lut_grading`.
+2. ✅ **A blend escape hatch.** Three preset modes and no way past them. `MULTIPLY`
+   — an AO or shadow overlay — cannot be spelled at all, nor can a min/max blend op. Rule 2
+   says leave the hatch: `BlendMode.MULTIPLY` first, `blend(enable, src=, dst=, op=)`
+   underneath it. DONE in 0.23, both halves, in the order the entry gave. See the decision
+   above.
+3. ✅ **`VertexFormat` stops at `UINT`.** There is no `UINT2/3/4`, so skinning joint indices
+   (`uvec4`) cannot be delivered — `UBYTE4_NORM` carries the weights and nothing carries the
+   indices. Add `UINT2/3/4` and `UBYTE4_UINT`. DONE in 0.23.
+4. **`bz.wait_events(timeout=None)`.** Any window that does not animate — a viewer, a
+   parameter editor, `examples/08_pyqt_integration` — spins at 100% CPU because `poll_events`
+   is the only pump. One GLFW call, free function for the reason `poll_events` is one.
+5. **`window.text_input()`.** Dropped files and the clipboard both shipped in 0.19, but there
+   is no character callback, so typing a filename inside an application is impossible. Same
+   per-cycle rotation as the key edges.
+6. **Y-flip through a negative-height viewport.** `proj[1][1] *= -1` appears in every example
+   and will appear in every user program. Bazalt emits the viewport itself
+   (`src/CommandBuffer.hpp:378`) and negative height has been core since 1.1, under a 1.2
+   baseline. **The catch, which is why this is last and not first:** it flips the winding, so
+   it is a Context-level decision (`Context(y_up=True)`, opt-in) and not a per-draw switch,
+   and every example and shader has to be read once when it lands.
+
+### Moved in from the ceilings, by the 0.22 audit
+
+These arrived with their reasoning already written; see the traces above for what each one
+used to claim.
+
+- **Gamepad edge queries** (was STALE). `pad.was_button_pressed(...)` needs the per-cycle
+  rotation the windows use, and the process-wide counter it wanted has existed since 0.16
+  (`src/Window.hpp:80`). What is left is a per-pad previous-state snapshot.
+- **A sampleable multisampled image** (was UNASKED). Keep `SAMPLED` for `samples > 1` and add
+  a `texture2DMS` declarator, which unlocks a custom resolve — per-sample edge detection, and
+  the shape a TAA resolve wants.
+- **`stride=` on the indirect verbs** (was UNASKED). One argument, and it is what lets draw
+  arguments be interleaved with per-draw data instead of living in their own packed array.
+- **A precise occlusion count** (was UNASKED). A `Feature` row plus the `PRECISE` flag when it
+  is on. The code comment's worry — that `samples` would mean two things depending on the
+  driver — is exactly what `Feature` answers, and 0.22 added three rows this way.
+- **Per-face stencil state** (was UNASKED). A `face=` kwarg; `src/Pipeline.hpp` writes one
+  struct into both `.front` and `.back` today.
+- **Primitive restart** (was UNASKED). `topology(TRIANGLE_STRIP, restart=True)`, opt-in so the
+  change in what the largest index value means belongs to the caller who asked for it.
+  `src/Pipeline.hpp:1644` hardcodes `VK_FALSE`.
+- **`monitor=` and video-mode enumeration for fullscreen** (was UNASKED). The monitor
+  enumeration and video-mode read already exist (`src/Window.hpp:526`); what is missing is
+  letting the caller choose.
+- **Exclusive fullscreen** (was UNASKED). A `Feature` over `VK_EXT_full_screen_exclusive`, not
+  a fifth `WindowMode` — it is a property of the swapchain.
+- **Compressed texture formats** (was a STALE rejection). BC and ASTC rows in `Format` plus an
+  upload path that does not decode. Container parsing (KTX2) stays out of scope, which is what
+  the original rejection got right.
+- **A text or ImGui overlay example** (was a SCOPE rejection whose promise nobody kept). Not
+  core — an example or a companion package, exactly as the rejection says, but written.
+
+### Small, and looked at
+
+Defects small enough that each is a line, plus one thing the review raised that turned out to
+be fine — recorded so it does not get re-raised.
+
+- `bazalt/_core.pyi:1674` — the `begin_frame` docstring names `DynamicBuffer`, which is not a
+  public symbol. It should say "a DYNAMIC buffer". Internal vocabulary leaking into the file
+  users read. (In this file `DynamicBuffer` is correct: this is the developer's document.)
+- The stub does not say that declaring a binding twice merges the stages. See ergonomics 6.
+- `Timer.ms` and `OcclusionQuery.samples` return `None` for four different reasons — no
+  timestamp support, a re-recorded command buffer, an unfinished submit, no query pool. The
+  caller cannot tell "wait longer" from "this GPU cannot".
+- `renderer.gpu_time_ms` returns `0.0` on MoltenVK and `None` elsewhere for the same
+  question. The `0.0` is a documented HARD ceiling from 0.22, but two sentinels for one
+  answer is a separate problem from the one that forced it.
+- `Image.samples` cannot return anything but 1 to a user: the multisampled image is internal
+  and the exposed ones are the resolves. A property with one possible value.
+- `create_image(array, cube=True)` exists only to raise. An argument whose whole job is an
+  error message.
+- **Looked at, and correct as it stands:** `create_sampler(anisotropy=True)`. The review filed
+  it as a default that silently does nothing without `optional=[ANISOTROPIC_FILTERING]`. It is
+  not: `ANISOTROPIC_FILTERING` is on the implicit list (`src/Context.hpp:1350`) and is enabled
+  wherever the device has it, the same way `MULTIVIEW` is. The default is honest.
+
 ## Rejected, and why
 
 Scope rejections and implementation alternatives we looked at and turned down. Each entry
 says what we did instead.
 
-**Out of scope:**
+**Out of scope.** The 0.22 audit went through these too, and each one now says which of the
+scope test's two questions it fails. An "out of scope" that cannot name the question is an
+UNASKED wearing a costume.
 
-- **`load_model`** — no Vulkan glue and trimesh already solves it. Bazalt does not know
-  about file paths for geometry.
-- **Audio and physics** — no Vulkan glue, and the ecosystem covers them. Do not mix them
-  into a graphics library.
-- **ImGui inside core.** ImGui makes no pixels: every frame it emits `ImDrawData`, which is
+- **SCOPE (fails both). `load_model`** — no Vulkan glue and trimesh already solves it. Bazalt
+  does not know about file paths for geometry.
+- **SCOPE (fails both). Audio and physics** — no Vulkan glue, and the ecosystem covers them.
+  Do not mix them into a graphics library.
+- **SCOPE (fails neither question — it is in scope, and lives beside the library).
+  ImGui inside core.** ImGui makes no pixels: every frame it emits `ImDrawData`, which is
   vertices, indices, draw commands, a scissor and an atlas id. Bazalt already has every
-  primitive for that (`DynamicBuffer.update`, `graphics_pipeline`, an atlas through
+  primitive for that (a DYNAMIC buffer's `update`, `graphics_pipeline`, an atlas through
   `create_image` and a sampler, `draw_indexed` with `set_scissor`, `push_constants`). The
   backend is about 90% glue over the public API plus input forwarding, so it belongs beside
   bazalt, not inside it.
+
+  **0.22 note.** The scope table at the top of this file already says the same thing —
+  "in scope, but a companion package" — so this is not a rejection of the capability, only of
+  its address. What neither entry says is that the companion package does not exist, which
+  makes the practical answer to "how do I put a slider on screen" read as "write an ImGui
+  backend yourself". That is a real gap in the story, and it is filed in the backlog rather
+  than here, because the fix is a package to write, not a decision to revisit.
 - **A 2.0 for new hardware capabilities.** Ray tracing and mesh shaders become new entries
   in `Feature` (rule 3). Nothing about them needs a major break.
 
-- **Text rendering and a debug overlay.** Font rasterization is the ecosystem's
-  (freetype, PIL), and the atlas-plus-quads layer is the same argument that kept ImGui out
-  of the core: about 90% glue over the public API. A companion package or an example.
-- **`image.save(path)`.** No Vulkan glue at all — `read()` returns a numpy array and
-  PIL/imageio write the file. It fails the scope test on the second question.
-- **Compressed texture loading (BC / KTX2).** Parsing the container is the ecosystem's
-  job; accepting already-compressed bytes is a variant of `load_image(bytes)`, not a
-  feature of its own.
+- **SCOPE (fails the second question, for the rasterizer half only). Text rendering and a
+  debug overlay.** Font rasterization is the ecosystem's (freetype, PIL), and the
+  atlas-plus-quads layer is the same argument that kept ImGui out of the core: about 90% glue
+  over the public API. A companion package or an example.
+
+  **0.22 note, and it cuts against the entry.** The identical argument would have rejected
+  the gamepad wrapper, which shipped in 0.21 — and the entry written for it says "a thin
+  wrapper is not the same as a wrapper with no decisions in it". An overlay has decisions in
+  it too (atlas residency, one dynamic buffer or many, whether it owns a pipeline). Rule 4
+  also ranks it high: for a prototyping library, putting a number on screen is the second
+  thing a user wants after a triangle. The verdict stays SCOPE because the rasterizer really
+  is freetype's job, but the honest reading is that "a companion package or an example" is a
+  promise nobody has kept, and an unkept promise reads to a user as a refusal. Filed in the
+  backlog as an example to write.
+- **SCOPE (fails the second question). `image.save(path)`.** No Vulkan glue at all —
+  `read()` returns a numpy array and PIL/imageio write the file.
+- **STALE, corrected in 0.22. Compressed texture loading (BC / KTX2).** The entry said
+  "parsing the container is the ecosystem's job; accepting already-compressed bytes is a
+  variant of `load_image(bytes)`, not a feature of its own". The first half stands. The second
+  half describes something that does not exist: `load_image(bytes)` runs
+  `stbi_load_from_memory` (`src/UploadManager.hpp:475`) and produces RGBA8, and `Format`
+  carries no BC or ASTC row at all, so there is no way to hand bazalt a compressed block —
+  the variant the entry points at is not a variant of anything. What the rejection actually
+  rejected, without saying so, is compressed textures altogether, at a cost of four to eight
+  times the VRAM for every real asset. The container half stays out of scope; the format
+  rows and an upload path that does not decode are in the backlog.
 - **Dual-source blending, blend constants, unnormalized sampler coordinates.** Real Vulkan
   state, but nothing on the proposal list needs them. They stay unlisted until something
-  asks.
+  asks. **0.22:** something asks, and it is smaller than any of these three — `MULTIPLY` and
+  a min/max blend op, which the three preset `BlendMode` values cannot spell. That is in the
+  backlog. Dual-source and unnormalized coordinates stay here, unasked and unlisted.
 
-**Implementation alternatives:**
+  **0.23 shipped that smaller thing** (`BlendMode.MULTIPLY`, then `BlendFactor`/`BlendOp`),
+  and building it sharpened why the other two stay: the hatch names every factor that is
+  only an enum row, and stops exactly where a factor needs machinery beside it. Blend
+  constants need a verb to set them and the dynamic state to change them per draw;
+  dual-source needs a second output in the shader and a `Feature` row for
+  `dualSrcBlend`. Neither is a hole in the hatch — each is its own proposal, still unasked.
+
+**Implementation alternatives.** The 0.22 audit left these unlabelled on purpose. Rule 7
+sorts entries that say "bazalt does not do this"; these say "bazalt does this the other way",
+which is a choice between two implementations of the same reachable behaviour. There is no
+ceiling to raise, so there is nothing for the five verdicts to grade.
 
 - **`volkLoadInstanceTable`** (0.15). It sets the *global* `vkGetDeviceProcAddr` from one
   instance anyway, and volk says so in its own comment, so an instance table would remove no
@@ -1823,6 +2326,23 @@ says what we did instead.
 
 - **Freeze the API.** Deprecation gets one minor release of warnings, and there are no
   silent removals.
+
+  **What the freeze actually blocks** (0.22). The ergonomics backlog has twenty-odd entries
+  and exactly **three** of them break the API: keyword-only `index` on `set_image`, the
+  `data` parameter rename on `create_buffer` / `Buffer.update`, and splitting `StateError`
+  out of `ResourceError`. Those three are bounded by this release and nothing else is —
+  every other entry, including the enums, the short `bind_descriptor_set`, 3D textures and
+  the whole ceiling backlog, is additive and can land after 1.0 without a deprecation cycle.
+  So the freeze is not a deadline for the backlog; it is a deadline for three lines of
+  signature. Deciding how many releases the rest takes is a separate question from deciding
+  when 1.0 ships.
+
+  **0.23 paid all three**, plus the break the census found hiding in `ShaderError`
+  (capability gates), the `samplers=` → `textures=` rename that rode along, and a FOURTH
+  signature the release review turned up after the first three were called done:
+  `target.layer(index, mip)` was the same positional-extra trap as `set_image` (backlog
+  entry 4 says why one entry produced two rounds of work). Nothing breaking remains on the
+  backlog, so 1.0 no longer waits on any signature.
 - **Every public symbol from `_core.pyi` is touched by a test.** An unexercised binding is
   an unimplemented binding. 0.22 made this measurable rather than aspirational:
   `pytest --api-coverage` writes `api_coverage.md`, and the answer on the day it was
@@ -1835,6 +2355,33 @@ says what we did instead.
   most of the arithmetic: they are read-only integers, so a test that touches all 127
   proves nothing except that they exist — which `test_stubs.py` already checks. Reading
   the number as one percentage would put 1.0 behind a pointless test.
+
+  **0.23 acted on that paragraph instead of only writing it down, and then the number
+  answered.** The census stopped counting two things it was double-counting or
+  fabricating, and both changes are asserted by `tests/test_api_coverage.py` so neither
+  can quietly come back:
+
+  - the 127 `KEY_*` / `MOUSE_*` / `CURSOR_*` integers, which since 0.23 are the pre-enum
+    spelling of `Key`, `MouseButton` and `CursorMode` — enums the census already counts.
+    Keeping both reported the keyboard TWICE (116 untouched constants beside 99 untouched
+    `Key` members) and made it the largest number in the file for no fact.
+  - `__init__` on a class with no `py::init`. pybind leaves a slot wrapper there that
+    exists to raise `TypeError`, and 0.23 made two more classes unconstructible on
+    purpose. Counting it asks for a test that constructs what cannot be constructed —
+    **23 of the 26 untouched methods were this**, which is why the methods row looked
+    like the problem and was not.
+
+  With the noise gone the real answer is **347 of 506**: methods 136/136, properties
+  64/64, functions 5/5, exceptions 9/9, and enum members 133/292. So the goal is now one
+  row, not five, and the four methods that were genuinely untested
+  (`ComputePipelineBuilder.name`, `OcclusionQuery.stop`, `Window.is_open`,
+  `Window.set_title`) got tests in 0.23 — all four trivial, none previously noticed, which
+  is the argument for the census in one line.
+
+  The remaining 159 are enum members, and they are NOT one job. A `Format` row nobody
+  passed to `create_image` is an untested code path; a `Key` member is a read-only integer
+  that `test_stubs.py` already proves exists — the same argument the constants lost on.
+  Split the row before treating it as the 1.0 test plan.
 - ✅ Add the `KEY_*` and `MOUSE_*` constants to `__all__` in `bazalt/__init__.py` — DONE, and
   it had been done for several releases while this line still asked for it. Found by the 0.20
   audit. A checklist nothing tests is a checklist that drifts.
@@ -1856,7 +2403,25 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
 
 ### API design
 
-- **A second spelling is not a convenience, it is a fork** (0.18). The audit before
+- **When the exception type is the contract, the docstring that names it is the contract
+  too** (0.23). The release split `StateError` and `UnsupportedError` out of `ResourceError`
+  and swept the C++ call sites, the tests and the CHANGELOG. It did not sweep the docstrings
+  in `_core.pyi`, so six of them still promised `ResourceError` for a double `acquire()`, a
+  blit this GPU cannot do, an occlusion query outside a pass. A user writes `except` from
+  the file their editor shows them, so the stub was handing out a contract the library no
+  longer honoured — a silent one, because nothing runs a docstring. **Any change to an error
+  taxonomy is a grep of the prose, not only of the code**, and the count is the tell: six
+  wrong lines against about forty correct ones is drift, not a typo.
+- **A second spelling is not a convenience, it is a fork** (0.18), **and the rule catches
+  additions as readily as legacy** (0.23). `ctx.create_render_target()` was added beside
+  `bz.RenderTarget(ctx, ...)` as "an alias; the class stays", which is how all six of the
+  0.18 forks began — an ergonomic shortcut next to the general form, both kept because
+  removing either would break someone. The tell showed up immediately: the examples split
+  into two dialects, the new ones using the factory and the old ones the constructor. The
+  fix was to finish the migration rather than document a preference. **When a backlog entry
+  proposes "add X as an alias for Y", read it as "fork Y" and price the removal instead.**
+
+  The audit before
   0.18 found six, and each had the same origin: an ergonomic shortcut added next to the
   general form, both kept because removing either would break someone. `target.read_pixels()`
   was `target.color[0].read()` with the layer and mip choice removed, and its own binding
@@ -1962,6 +2527,25 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   feature is off while the tests still pass and the API still answers. Before writing a
   conservative fallback, ask what it looks like when the fallback fires for the wrong
   reason. If the answer is "exactly like working", find a different mechanism.
+
+- **A test branch that only a portability driver reaches is a branch no local run checks**
+  (0.23). The 0.22 capability tests are written as `if ctx.supports(X): assert it works;
+  else: assert it is refused`, which is the right shape — and the `else` half executes on
+  MoltenVK and nowhere else. So the 0.23 error split moved those refusals to
+  `UnsupportedError`, the whole suite passed twice locally and on lavapipe, and macOS CI
+  went red on three tests whose expectation had rotted under them. The census that found
+  every OTHER site was "run the suite and read the failures", and that method is blind here
+  by construction. **When a release changes what an error IS, grep the tests for the type by
+  name; do not trust a green run to have visited every branch.**
+
+- **A test may only assert what bazalt promises, not what a driver happens to do** (0.23).
+  `test_a_full_fixed_pool_raises_one_type` asserted that a pool sized for one set refuses
+  the second. Vulkan permits an implementation to serve more than the pool was sized for,
+  and lavapipe does, because its descriptors are host memory — so the test failed on the
+  one machine the suite gates on. What bazalt actually promises is the TYPE: if the driver
+  refuses, it is `ResourceError` and never `OutOfMemoryError`. The test now probes, asserts
+  the type when a refusal comes, and skips naming what it saw when none does — the same
+  shape as the 0.22 MoltenVK skips, for the same reason.
 
 - **A plausible number is not a verified number** (0.19). `examples/28_gpu_culling` reported
   about 350 survivors out of 20,000 and that was accepted for a whole release, because it
@@ -2164,6 +2748,13 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   the renderer is built is the assertion. Dropping the window and presenting is the second
   half, and on its own it is only a probabilistic check — freed memory often still reads.
 
+  **0.23 moved the construction to `ctx.create_renderer(window)` and the annotation had to
+  move with it**: on a factory the nurse is the return value, so `keep_alive<1, 2>` becomes
+  `keep_alive<0, 2>`. The indices are positional and silent — write the constructor's pair
+  on a factory and you have re-created this bug, with the same test still passing if it only
+  checks the refcount of the wrong object. **When a binding changes shape, re-derive its
+  keep_alive indices from what the nurse now is; do not port the numbers.**
+
 - **`offset + length > size` on unsigned operands is a bypass, not a bounds check** (0.20).
   Six of them, and the Python boundary hands the offset straight through, so
   `buffer.update(data, offset=2**64 - 10)` wrapped the sum to a small number, passed, and
@@ -2247,6 +2838,18 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
 - **The Context is session-scoped** (one per process in the fixture) and every resource holds
   its Context, so a per-test Context is a leak trap. A test that needs its own Context asks
   the `extra_context` factory, which applies the same referee.
+- **`test_stubs.py` must pass with no GPU, and something has to say so** (0.23). It is the
+  file `CIBW_TEST_COMMAND` runs on every wheel, and those runners have no Vulkan driver, so
+  one test there that asks for `ctx` fails at SETUP with `InitializationError` and takes all
+  three wheel jobs down — which also cancels the lavapipe and MoltenVK jobs that depend on
+  them. 0.23 shipped exactly that for one commit, and the failure reads like a broken wheel
+  rather than a misplaced test, which is the expensive part. `test_this_module_needs_no_gpu`
+  now asserts that no test in the file takes any parameter at all. The blanket form is
+  deliberate: "not `ctx`" needs a list of which fixtures are safe, and this needs nothing.
+
+  Generally: **when a file is a CI entry point, the constraint that makes it one belongs
+  inside the file as an assertion**, not in a comment and not in the workflow. The person
+  adding a test there is reading the tests, not `build.yml`.
 - **On lavapipe, a deliberately invalid draw is NOT usable as a diagnostic.** Validation does
   not stop execution, and lavapipe segfaults before the Logger drains, so diagnostics for
   validation errors must be host-side.

@@ -296,8 +296,8 @@ public:
         std::vector<std::byte> pixels,
         std::uint32_t layer,
         std::uint32_t mip,
-        VkOffset2D offset,
-        VkExtent2D extent)
+        VkOffset3D offset,
+        VkExtent3D extent)
     {
         Job job;
         job.from_layout = image->layout_of(layer, mip);
@@ -405,8 +405,8 @@ private:
         // Which level, as opposed to `mips` above, which is how many a load
         // generates. An update writes exactly one.
         std::uint32_t mip = 0;
-        VkOffset2D offset{0, 0};
-        VkExtent2D extent{0, 0};
+        VkOffset3D offset{0, 0, 0};
+        VkExtent3D extent{0, 0, 0};
         VkImageLayout from_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     };
 

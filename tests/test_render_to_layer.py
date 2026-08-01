@@ -24,7 +24,7 @@ def _sample_depth_layer(ctx, target, layer):
     universally filter."""
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     view_frag = ctx.compile_shader(str(SHADER_DIR / "depth_array_view.frag"), bz.ShaderStage.FRAGMENT)
-    screen = bz.RenderTarget(ctx, target.width, target.height)
+    screen = ctx.create_render_target(target.width, target.height)
     pipe = (ctx.graphics_pipeline()
             .vertex_shader(fullscreen)
             .fragment_shader(view_frag)
@@ -32,7 +32,7 @@ def _sample_depth_layer(ctx, target, layer):
             .push_constant(4, bz.ShaderStage.FRAGMENT)
             .build(screen))
 
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, target.depth, sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
@@ -53,14 +53,14 @@ def _sample_color_layer(ctx, target, layer):
     and read it back."""
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     view_frag = ctx.compile_shader(str(SHADER_DIR / "array_view.frag"), bz.ShaderStage.FRAGMENT)
-    screen = bz.RenderTarget(ctx, target.width, target.height)
+    screen = ctx.create_render_target(target.width, target.height)
     pipe = (ctx.graphics_pipeline()
             .vertex_shader(fullscreen)
             .fragment_shader(view_frag)
             .texture(0, bz.ShaderStage.FRAGMENT, set=0)
             .push_constant(4, bz.ShaderStage.FRAGMENT)
             .build(screen))
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, target.color[0], sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
@@ -83,7 +83,7 @@ def test_render_into_specific_layer(ctx, triangle_shaders, triangle_buffers):
     vert, _ = triangle_shaders
     vbuf, ibuf = triangle_buffers
 
-    target = bz.RenderTarget(ctx, 64, 64, color=None, depth=bz.Format.D32F, layers=2)
+    target = ctx.create_render_target(64, 64, color=None, depth=bz.Format.D32F, layers=2)
     assert target.depth.array_layers == 2
 
     depth_pipe = (ctx.graphics_pipeline()
@@ -126,24 +126,24 @@ def test_render_into_mip(ctx):
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     lod_frag = ctx.compile_shader(str(SHADER_DIR / "sample_lod.frag"), bz.ShaderStage.FRAGMENT)
 
-    target = bz.RenderTarget(ctx, 64, 64, color=bz.Format.RGBA8, mip_levels=3)
+    target = ctx.create_render_target(64, 64, color=bz.Format.RGBA8, mip_levels=3)
     colors = [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1]]
 
     cmd = ctx.create_command_buffer()
     cmd.begin()
     for m, c in enumerate(colors):
-        cmd.begin_rendering(target.layer(0, m), clear_color=c)  # clear-only, no draw
-        cmd.end_rendering(target.layer(0, m))
+        cmd.begin_rendering(target.layer(0, mip=m), clear_color=c)  # clear-only, no draw
+        cmd.end_rendering(target.layer(0, mip=m))
     ctx.submit(cmd)
 
-    screen = bz.RenderTarget(ctx, 8, 8)
+    screen = ctx.create_render_target(8, 8)
     pipe = (ctx.graphics_pipeline()
             .vertex_shader(fullscreen)
             .fragment_shader(lod_frag)
             .texture(0, bz.ShaderStage.FRAGMENT, set=0)
             .push_constant(4, bz.ShaderStage.FRAGMENT)
             .build(screen))
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, target.color[0], sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
@@ -167,7 +167,7 @@ def test_render_into_layer_and_mip(ctx):
     Same SubresourceTarget machinery as the single-axis slices — this pins that
     both can be selected at once and the pass is validation-clean (the view and
     the barrier must agree on {layer 1, mip 1}, or the ctx fixture flags it)."""
-    target = bz.RenderTarget(ctx, 32, 32, color=bz.Format.RGBA8, layers=2, mip_levels=2)
+    target = ctx.create_render_target(32, 32, color=bz.Format.RGBA8, layers=2, mip_levels=2)
     cmd = ctx.create_command_buffer()
     cmd.begin()
     cmd.begin_rendering(target.layer(1, mip=1), clear_color=[1, 0, 0, 1])
@@ -176,7 +176,7 @@ def test_render_into_layer_and_mip(ctx):
 
 
 def test_combined_axis_bounds_are_checked(ctx):
-    target = bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA8, layers=2, mip_levels=2)
+    target = ctx.create_render_target(16, 16, color=bz.Format.RGBA8, layers=2, mip_levels=2)
     with pytest.raises(bz.ResourceError):
         target.layer(0, mip=2)
     with pytest.raises(bz.ResourceError):
@@ -194,7 +194,7 @@ def test_multiview_renders_all_layers_in_one_pass(ctx):
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     mv_frag = ctx.compile_shader(str(SHADER_DIR / "multiview_color.frag"), bz.ShaderStage.FRAGMENT)
 
-    target = bz.RenderTarget(ctx, 32, 32, color=bz.Format.RGBA8, layers=3)
+    target = ctx.create_render_target(32, 32, color=bz.Format.RGBA8, layers=3)
     pipe = (ctx.graphics_pipeline()
             .vertex_shader(fullscreen)
             .fragment_shader(mv_frag)
@@ -216,7 +216,7 @@ def test_all_layers_refuses_non_layered(ctx):
     if not ctx.supports(bz.Feature.MULTIVIEW):
         pytest.skip("GPU reports no multiview support")
     with pytest.raises(bz.ResourceError):
-        bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA8).all_layers()  # 1 layer
+        ctx.create_render_target(16, 16, color=bz.Format.RGBA8).all_layers()  # 1 layer
 
 
 def test_msaa_multiview_resolves_all_layers(ctx):
@@ -233,7 +233,7 @@ def test_msaa_multiview_resolves_all_layers(ctx):
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     mv_frag = ctx.compile_shader(str(SHADER_DIR / "multiview_color.frag"), bz.ShaderStage.FRAGMENT)
 
-    target = bz.RenderTarget(ctx, 32, 32, color=bz.Format.RGBA8, layers=3, samples=samples)
+    target = ctx.create_render_target(32, 32, color=bz.Format.RGBA8, layers=3, samples=samples)
     pipe = (ctx.graphics_pipeline()
             .vertex_shader(fullscreen)
             .fragment_shader(mv_frag)
@@ -252,21 +252,29 @@ def test_msaa_multiview_resolves_all_layers(ctx):
 
 
 def test_layer_out_of_range_is_refused(ctx):
-    target = bz.RenderTarget(ctx, 16, 16, depth=bz.Format.D32F, layers=2)
+    target = ctx.create_render_target(16, 16, depth=bz.Format.D32F, layers=2)
     with pytest.raises(bz.ResourceError):
         target.layer(2)
 
 
 def test_mip_out_of_range_is_refused(ctx):
-    target = bz.RenderTarget(ctx, 16, 16, mip_levels=2)
+    target = ctx.create_render_target(16, 16, mip_levels=2)
     with pytest.raises(bz.ResourceError):
-        target.layer(0, 2)
+        target.layer(0, mip=2)
+
+
+def test_mip_is_keyword_only(ctx):
+    """0.23: layer(0, 2) read as a coordinate — and on a 3D target the first
+    int IS one. Same rule as the set_image break, on the same release."""
+    target = ctx.create_render_target(16, 16, mip_levels=2)
+    with pytest.raises(TypeError):
+        target.layer(0, 1)
 
 
 def test_cube_target_makes_a_sampleable_cubemap(ctx):
     """cube=True gives the colour attachment 6 layers with a CUBE view, so after
     rendering all six faces target.color[0] samples as a cubemap."""
-    target = bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA8, depth=bz.Format.D32F, cube=True)
+    target = ctx.create_render_target(16, 16, color=bz.Format.RGBA8, depth=bz.Format.D32F, cube=True)
     assert target.color[0].is_cube
     assert target.color[0].array_layers == 6
     assert target.depth.array_layers == 6
@@ -276,7 +284,7 @@ def test_msaa_with_mips_is_refused(ctx):
     """A multisampled image has no mip chain; the ctor rejects samples>1 with
     mip_levels>1 up front rather than at vkCreateImage. (MSAA + layers is fine.)"""
     with pytest.raises(bz.ResourceError):
-        bz.RenderTarget(ctx, 16, 16, samples=4, mip_levels=2)
+        ctx.create_render_target(16, 16, samples=4, mip_levels=2)
 
 
 def test_msaa_layered_resolves_per_layer(ctx, triangle_shaders, triangle_buffers):
@@ -292,7 +300,7 @@ def test_msaa_layered_resolves_per_layer(ctx, triangle_shaders, triangle_buffers
 
     clear = [0.1, 0.2, 0.3, 1.0]
     clear_px = [round(c * 255) for c in clear[:3]]
-    target = bz.RenderTarget(ctx, 64, 64, color=bz.Format.RGBA8, depth=bz.Format.D32F,
+    target = ctx.create_render_target(64, 64, color=bz.Format.RGBA8, depth=bz.Format.D32F,
                              layers=2, samples=samples)
     assert target.color[0].array_layers == 2
 

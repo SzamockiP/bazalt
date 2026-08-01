@@ -35,6 +35,13 @@ enum class VertexFormat
     // An unsigned integer attribute (`in uint` in GLSL, no conversion). A
     // material index or an object id carried per instance.
     UINT,
+    // Integer vectors (`in uvecN`, no conversion). UINT4 is what skinning joint
+    // indices need — UBYTE4_NORM carried the weights and nothing carried the
+    // indices (0.23). UBYTE4_UINT is the same four joints in a quarter the size.
+    UINT2,
+    UINT3,
+    UINT4,
+    UBYTE4_UINT,
 };
 
 // The Vulkan format and the byte size of one attribute. One table instead of a
@@ -63,6 +70,14 @@ inline constexpr VertexFormatInfo vertex_format_info(VertexFormat format)
             return {VK_FORMAT_R8G8B8A8_UNORM, 4};
         case VertexFormat::UINT:
             return {VK_FORMAT_R32_UINT, 4};
+        case VertexFormat::UINT2:
+            return {VK_FORMAT_R32G32_UINT, 8};
+        case VertexFormat::UINT3:
+            return {VK_FORMAT_R32G32B32_UINT, 12};
+        case VertexFormat::UINT4:
+            return {VK_FORMAT_R32G32B32A32_UINT, 16};
+        case VertexFormat::UBYTE4_UINT:
+            return {VK_FORMAT_R8G8B8A8_UINT, 4};
     }
     // Not std::unreachable(): pybind enums accept arbitrary ints.
     return {VK_FORMAT_R32G32B32_SFLOAT, 12};
@@ -113,8 +128,153 @@ enum class BlendMode
     ADDITIVE,
     // src + (1 - src.a) * dst, for colours that already carry their alpha —
     // what a composited texture or a text atlas wants.
-    PREMULTIPLIED
+    PREMULTIPLIED,
+    // src * dst. Darkening overlays: ambient occlusion, baked shadows, tinted
+    // glass. The one common mode the first three could not spell (0.23).
+    MULTIPLY
 };
+
+// What each side of the blend is multiplied by. The named modes above are four
+// points in this space; these are the axes, for the fifth thing somebody wants
+// (0.23). 1:1 with VkBlendFactor, minus two families that need more API than a
+// row: the constant-colour factors want a blend_constants() verb, and the SRC1_*
+// ones want dual-source output declared in the shader.
+enum class BlendFactor
+{
+    ZERO,
+    ONE,
+    SRC_COLOR,
+    ONE_MINUS_SRC_COLOR,
+    DST_COLOR,
+    ONE_MINUS_DST_COLOR,
+    SRC_ALPHA,
+    ONE_MINUS_SRC_ALPHA,
+    DST_ALPHA,
+    ONE_MINUS_DST_ALPHA,
+    // min(src.a, 1 - dst.a) on the colour channels, 1 on alpha. The
+    // order-independent-ish additive trick.
+    SRC_ALPHA_SATURATE
+};
+
+// How the two scaled sides are combined. ADD is what every named mode uses;
+// MIN and MAX ignore the factors entirely and are what a depth-peel or a
+// "keep the brightest" pass wants.
+enum class BlendOp
+{
+    ADD,
+    SUBTRACT,         // src - dst
+    REVERSE_SUBTRACT, // dst - src
+    MIN,
+    MAX
+};
+
+inline constexpr VkBlendFactor to_vk(BlendFactor factor)
+{
+    switch (factor)
+    {
+        case BlendFactor::ZERO:
+            return VK_BLEND_FACTOR_ZERO;
+        case BlendFactor::ONE:
+            return VK_BLEND_FACTOR_ONE;
+        case BlendFactor::SRC_COLOR:
+            return VK_BLEND_FACTOR_SRC_COLOR;
+        case BlendFactor::ONE_MINUS_SRC_COLOR:
+            return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+        case BlendFactor::DST_COLOR:
+            return VK_BLEND_FACTOR_DST_COLOR;
+        case BlendFactor::ONE_MINUS_DST_COLOR:
+            return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+        case BlendFactor::SRC_ALPHA:
+            return VK_BLEND_FACTOR_SRC_ALPHA;
+        case BlendFactor::ONE_MINUS_SRC_ALPHA:
+            return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        case BlendFactor::DST_ALPHA:
+            return VK_BLEND_FACTOR_DST_ALPHA;
+        case BlendFactor::ONE_MINUS_DST_ALPHA:
+            return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+        case BlendFactor::SRC_ALPHA_SATURATE:
+            return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+    }
+    // Not std::unreachable(): a pybind enum accepts any int, so a forged value
+    // has to land on something legal.
+    return VK_BLEND_FACTOR_ONE;
+}
+
+inline constexpr VkBlendOp to_vk(BlendOp op)
+{
+    switch (op)
+    {
+        case BlendOp::ADD:
+            return VK_BLEND_OP_ADD;
+        case BlendOp::SUBTRACT:
+            return VK_BLEND_OP_SUBTRACT;
+        case BlendOp::REVERSE_SUBTRACT:
+            return VK_BLEND_OP_REVERSE_SUBTRACT;
+        case BlendOp::MIN:
+            return VK_BLEND_OP_MIN;
+        case BlendOp::MAX:
+            return VK_BLEND_OP_MAX;
+    }
+    return VK_BLEND_OP_ADD;
+}
+
+// The whole blend equation, colour and alpha. A BlendMode resolves into one of
+// these, and so do the factor arguments — so the pipeline stores an equation
+// and nothing downstream has to know which spelling produced it.
+struct BlendEquation
+{
+    BlendFactor src_color = BlendFactor::SRC_ALPHA;
+    BlendFactor dst_color = BlendFactor::ONE_MINUS_SRC_ALPHA;
+    BlendOp color_op = BlendOp::ADD;
+    BlendFactor src_alpha = BlendFactor::ONE;
+    BlendFactor dst_alpha = BlendFactor::ONE_MINUS_SRC_ALPHA;
+    BlendOp alpha_op = BlendOp::ADD;
+
+    bool operator==(const BlendEquation&) const = default;
+};
+
+// The four named modes, written out. This is the only place a preset means
+// anything: past here everything is an equation.
+inline constexpr BlendEquation blend_equation_for(BlendMode mode)
+{
+    switch (mode)
+    {
+        case BlendMode::ALPHA:
+            return {
+                BlendFactor::SRC_ALPHA,
+                BlendFactor::ONE_MINUS_SRC_ALPHA,
+                BlendOp::ADD,
+                BlendFactor::ONE,
+                BlendFactor::ONE_MINUS_SRC_ALPHA,
+                BlendOp::ADD};
+        case BlendMode::ADDITIVE:
+            // Nothing scales down and nothing is subtracted, so draw order
+            // stops mattering — the point of additive.
+            return {BlendFactor::ONE, BlendFactor::ONE, BlendOp::ADD, BlendFactor::ONE, BlendFactor::ONE, BlendOp::ADD};
+        case BlendMode::PREMULTIPLIED:
+            // The colour already carries its alpha, so only the destination is
+            // attenuated.
+            return {
+                BlendFactor::ONE,
+                BlendFactor::ONE_MINUS_SRC_ALPHA,
+                BlendOp::ADD,
+                BlendFactor::ONE,
+                BlendFactor::ONE_MINUS_SRC_ALPHA,
+                BlendOp::ADD};
+        case BlendMode::MULTIPLY:
+            // dst * src + 0: the framebuffer is scaled by the fragment. White
+            // leaves it alone, black removes it — an AO or shadow overlay.
+            // Alpha keeps the destination's coverage.
+            return {
+                BlendFactor::DST_COLOR,
+                BlendFactor::ZERO,
+                BlendOp::ADD,
+                BlendFactor::ZERO,
+                BlendFactor::ONE,
+                BlendOp::ADD};
+    }
+    return {};
+}
 
 // What happens to a stencil value when a fragment arrives. 1:1 with VkStencilOp.
 // The compare op is CompareOp, shared with the depth test and the compare
@@ -232,7 +392,7 @@ struct StencilState
 struct BlendState
 {
     bool enable = false;
-    BlendMode mode = BlendMode::ALPHA;
+    BlendEquation equation = blend_equation_for(BlendMode::ALPHA);
     VkColorComponentFlags write_mask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
                                        VK_COLOR_COMPONENT_A_BIT;
 
@@ -241,17 +401,19 @@ struct BlendState
 
 // One attachment's deviation from the pipeline-wide BlendState. Every field is
 // optional so that two calls naming the same attachment merge instead of
-// overwriting each other.
+// overwriting each other. The equation is ONE field, not six: half an equation
+// is not a state anybody can act on, and `blend()` always resolves a complete
+// one from its own arguments.
 struct BlendOverride
 {
     std::optional<bool> enable;
-    std::optional<BlendMode> mode;
+    std::optional<BlendEquation> equation;
     std::optional<VkColorComponentFlags> write_mask;
 
     BlendState applied_to(BlendState base) const
     {
         base.enable = enable.value_or(base.enable);
-        base.mode = mode.value_or(base.mode);
+        base.equation = equation.value_or(base.equation);
         base.write_mask = write_mask.value_or(base.write_mask);
         return base;
     }
@@ -844,7 +1006,7 @@ inline std::expected<void, Error> check_descriptor_arrays(Context& context, cons
     }
     if (layout.max_descriptor_count() > 1 && !context.supports(Feature::BINDLESS))
     {
-        return std::unexpected(err_shader(
+        return std::unexpected(err_unsupported(
             "count > 1 on a binding declarator requires the BINDLESS feature. Create the "
             "Context with optional=[bz.Feature.BINDLESS] and check ctx.supports() before "
             "you declare the array."));
@@ -855,7 +1017,7 @@ inline std::expected<void, Error> check_descriptor_arrays(Context& context, cons
     // is the undefined behaviour they asked to be rid of.
     if (layout.wants_update_after_bind() && !context.supports(Feature::BINDLESS))
     {
-        return std::unexpected(err_shader(
+        return std::unexpected(err_unsupported(
             "update_after_bind=True requires the BINDLESS feature. Create the Context with "
             "optional=[bz.Feature.BINDLESS], or write the descriptor before the first frame "
             "that binds the set."));
@@ -1017,8 +1179,10 @@ public:
         return std::forward<Self>(self);
     }
 
-    // mode= is a kwarg on the existing verb, not a second method: the question
-    // "how does this blend" has one answer per pipeline.
+    // One verb for the question "how does this blend", whether the answer is a
+    // named mode or a hand-written equation: the binding layer resolves both
+    // spellings into a BlendEquation before it gets here, so there is one path
+    // and no way for the two to disagree.
     //
     // attachment= narrows the answer to one colour attachment of an MRT target,
     // and everything without an override keeps what the plain call set. The
@@ -1027,18 +1191,22 @@ public:
     // the default at call time would make the result depend on which line came
     // first, which is exactly the kind of rule nobody remembers at 3am.
     template <typename Self>
-    Self&& blend(this Self&& self, bool enable, BlendMode mode = BlendMode::ALPHA, int attachment = -1)
+    Self&& blend(
+        this Self&& self,
+        bool enable,
+        BlendEquation equation = blend_equation_for(BlendMode::ALPHA),
+        int attachment = -1)
     {
         if (attachment < 0)
         {
             self.blend_.enable = enable;
-            self.blend_.mode = mode;
+            self.blend_.equation = equation;
         }
         else
         {
             auto& o = self.blend_overrides_[static_cast<std::uint32_t>(attachment)];
             o.enable = enable;
-            o.mode = mode;
+            o.equation = equation;
         }
         return std::forward<Self>(self);
     }
@@ -1289,7 +1457,7 @@ public:
         }
         if (sample_shading_ && !context_.supports(Feature::SAMPLE_RATE_SHADING))
         {
-            return std::unexpected(err_shader(
+            return std::unexpected(err_unsupported(
                 "sample_shading requires the SAMPLE_RATE_SHADING feature. Create the "
                 "Context with features=[bz.Feature.SAMPLE_RATE_SHADING] (or optional=[...])"));
         }
@@ -1299,7 +1467,7 @@ public:
         // silently producing a driver-dependent pipeline.
         if (polygon_mode_ != PolygonMode::FILL && !context_.supports(Feature::WIREFRAME))
         {
-            return std::unexpected(err_shader(
+            return std::unexpected(err_unsupported(
                 "polygon_mode requires the WIREFRAME feature. Create the Context with "
                 "features=[bz.Feature.WIREFRAME] (or optional=[...])"));
         }
@@ -1314,7 +1482,7 @@ public:
                 const auto it = blend_overrides_.find(i);
                 if (it != blend_overrides_.end() && it->second.applied_to(blend_) != blend_)
                 {
-                    return std::unexpected(err_shader(
+                    return std::unexpected(err_unsupported(
                         "blend(attachment=) / color_mask(attachment=) that differs from the "
                         "pipeline-wide setting requires the INDEPENDENT_BLEND feature. Create "
                         "the Context with features=[bz.Feature.INDEPENDENT_BLEND] (or "
@@ -1333,13 +1501,13 @@ public:
         }
         if (depth_clamp_ && !context_.supports(Feature::DEPTH_CLAMP))
         {
-            return std::unexpected(err_shader(
+            return std::unexpected(err_unsupported(
                 "depth_clamp requires the DEPTH_CLAMP feature. Create the Context with "
                 "features=[bz.Feature.DEPTH_CLAMP] (or optional=[...])"));
         }
         if (line_width_ != 1.0f && !context_.supports(Feature::WIDE_LINES))
         {
-            return std::unexpected(err_shader(
+            return std::unexpected(err_unsupported(
                 "line_width other than 1.0 requires the WIDE_LINES feature. Create the "
                 "Context with features=[bz.Feature.WIDE_LINES] (or optional=[...])"));
         }
@@ -1400,7 +1568,7 @@ public:
             const Feature needed = fragment ? Feature::FRAGMENT_STORES : Feature::VERTEX_STAGE_STORES;
             if (!context_.supports(needed))
             {
-                return std::unexpected(err_shader(
+                return std::unexpected(err_unsupported(
                     std::format(
                         "the {} shader writes a storage buffer or image, which requires the {} feature. "
                         "Create the Context with features=[bz.Feature.{}] (or optional=[...])",
@@ -1885,47 +2053,27 @@ private:
 
     static VkPipelineColorBlendAttachmentState color_blend_attachment_(const BlendState& s)
     {
-        // Blending off is ONE/ZERO — the source replaces the destination — so the
-        // mode is read only when it is on.
-        VkBlendFactor src_color = VK_BLEND_FACTOR_ONE;
-        VkBlendFactor dst_color = VK_BLEND_FACTOR_ZERO;
-        VkBlendFactor src_alpha = VK_BLEND_FACTOR_ONE;
-        VkBlendFactor dst_alpha = VK_BLEND_FACTOR_ZERO;
-
-        if (s.enable)
-        {
-            switch (s.mode)
-            {
-                case BlendMode::ALPHA:
-                    src_color = VK_BLEND_FACTOR_SRC_ALPHA;
-                    dst_color = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-                    dst_alpha = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-                    break;
-                case BlendMode::ADDITIVE:
-                    // Nothing scales down and nothing is subtracted, so draw
-                    // order stops mattering — the point of additive.
-                    src_color = VK_BLEND_FACTOR_ONE;
-                    dst_color = VK_BLEND_FACTOR_ONE;
-                    dst_alpha = VK_BLEND_FACTOR_ONE;
-                    break;
-                case BlendMode::PREMULTIPLIED:
-                    // The colour already carries its alpha, so only the
-                    // destination is attenuated.
-                    src_color = VK_BLEND_FACTOR_ONE;
-                    dst_color = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-                    dst_alpha = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-                    break;
-            }
-        }
+        // Blending off is ONE/ZERO ADD — the source replaces the destination —
+        // so the equation is read only when it is on. Vulkan ignores these
+        // fields with blendEnable false; writing them anyway keeps
+        // blend(False, ...) from depending on that.
+        const BlendEquation eq = s.enable ? s.equation
+                                          : BlendEquation{
+                                                BlendFactor::ONE,
+                                                BlendFactor::ZERO,
+                                                BlendOp::ADD,
+                                                BlendFactor::ONE,
+                                                BlendFactor::ZERO,
+                                                BlendOp::ADD};
 
         return {
             .blendEnable = s.enable ? VK_TRUE : VK_FALSE,
-            .srcColorBlendFactor = src_color,
-            .dstColorBlendFactor = dst_color,
-            .colorBlendOp = VK_BLEND_OP_ADD,
-            .srcAlphaBlendFactor = src_alpha,
-            .dstAlphaBlendFactor = dst_alpha,
-            .alphaBlendOp = VK_BLEND_OP_ADD,
+            .srcColorBlendFactor = to_vk(eq.src_color),
+            .dstColorBlendFactor = to_vk(eq.dst_color),
+            .colorBlendOp = to_vk(eq.color_op),
+            .srcAlphaBlendFactor = to_vk(eq.src_alpha),
+            .dstAlphaBlendFactor = to_vk(eq.dst_alpha),
+            .alphaBlendOp = to_vk(eq.alpha_op),
             .colorWriteMask = s.write_mask};
     }
 

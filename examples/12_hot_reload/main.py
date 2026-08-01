@@ -27,7 +27,7 @@ def on_message(msg):
 
 window = bz.Window(800, 600, "Bazalt - Hot Reload (edit the shaders while running)")
 ctx = bz.Context(logger, hot_reload=True)   # <-- the only new line
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 vert = ctx.compile_shader("shader.vert", bz.ShaderStage.VERTEX)
 frag = ctx.compile_shader("shader.frag", bz.ShaderStage.FRAGMENT)
@@ -40,7 +40,7 @@ pipeline = (ctx.graphics_pipeline()
             .name("hot_reload_pipeline")
             .build(renderer))
 
-pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
 desc_set = pool.allocate_set(pipeline, set=0)
 # The descriptor set keeps pointing at the same image/view across reloads —
 # an image reload re-uploads in place, so this never needs rewriting.

@@ -10,7 +10,7 @@ def on_message(msg):
 
 window = bz.Window(800, 600, "Bazalt Demo - Textured Quad")
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 # Compile shaders
 vert_spv = ctx.compile_shader("quad_tex.vert", bz.ShaderStage.VERTEX)
@@ -42,7 +42,7 @@ indices = [0, 3, 2, 2, 1, 0]
 ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
 
 # Descriptors
-pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
 desc_set = pool.allocate_set(pipeline, set=0)
 desc_set.set_image(0, texture)
 

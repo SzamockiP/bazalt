@@ -29,7 +29,7 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 window = bz.Window(1024, 720, "Bazalt Demo - Stencil outline")
 ctx = bz.Context(logger)
 # The stencil lives on the depth attachment, so it is a renderer option.
-renderer = bz.SwapchainRenderer(window, ctx, stencil=True)
+renderer = ctx.create_renderer(window, stencil=True)
 
 vert = ctx.compile_shader("object.vert", bz.ShaderStage.VERTEX)
 frag = ctx.compile_shader("object.frag", bz.ShaderStage.FRAGMENT)

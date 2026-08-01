@@ -88,8 +88,8 @@ def test_two_windows_share_one_context(ctx):
     window_a, window_b = _two_windows()
     renderer_a = renderer_b = None
     try:
-        renderer_a = bz.SwapchainRenderer(window_a, ctx)
-        renderer_b = bz.SwapchainRenderer(window_b, ctx)
+        renderer_a = ctx.create_renderer(window_a)
+        renderer_b = ctx.create_renderer(window_b)
         pipeline = _solid_pipeline(ctx, renderer_a)
 
         # One CommandBuffer per window: they own one command buffer per ring
@@ -127,8 +127,8 @@ def test_both_windows_render_on_the_same_ring_slot(ctx):
     window_a, window_b = _two_windows()
     renderer_a = renderer_b = None
     try:
-        renderer_a = bz.SwapchainRenderer(window_a, ctx)
-        renderer_b = bz.SwapchainRenderer(window_b, ctx)
+        renderer_a = ctx.create_renderer(window_a)
+        renderer_b = ctx.create_renderer(window_b)
 
         bz.poll_events()
         ctx.begin_frame()
@@ -151,8 +151,8 @@ def test_one_command_buffer_cannot_serve_two_windows(ctx):
     window_a, window_b = _two_windows()
     renderer_a = renderer_b = None
     try:
-        renderer_a = bz.SwapchainRenderer(window_a, ctx)
-        renderer_b = bz.SwapchainRenderer(window_b, ctx)
+        renderer_a = ctx.create_renderer(window_a)
+        renderer_b = ctx.create_renderer(window_b)
         pipeline = _solid_pipeline(ctx, renderer_a)
 
         cmd = ctx.create_command_buffer()
@@ -168,7 +168,7 @@ def test_one_command_buffer_cannot_serve_two_windows(ctx):
             pytest.skip("windows did not both acquire (minimized?)")
 
         renderer_a.present(cmd)
-        with pytest.raises(bz.ResourceError):
+        with pytest.raises(bz.StateError):
             renderer_b.present(cmd)
     finally:
         renderer_a = renderer_b = None
@@ -186,11 +186,11 @@ def test_acquire_twice_without_begin_frame_is_an_error(ctx):
         pytest.skip("no display available")
     renderer = None
     try:
-        renderer = bz.SwapchainRenderer(window, ctx)
+        renderer = ctx.create_renderer(window)
         bz.poll_events()
         ctx.begin_frame()
         renderer.acquire()
-        with pytest.raises(bz.ResourceError):
+        with pytest.raises(bz.StateError):
             renderer.acquire()
     finally:
         renderer = None
@@ -206,7 +206,7 @@ def test_present_without_an_acquired_image_is_an_error(ctx):
         pytest.skip("no display available")
     renderer = None
     try:
-        renderer = bz.SwapchainRenderer(window, ctx)
+        renderer = ctx.create_renderer(window)
         pipeline = _solid_pipeline(ctx, renderer)
         cmd = ctx.create_command_buffer()
         cmd.begin()
@@ -216,7 +216,7 @@ def test_present_without_an_acquired_image_is_an_error(ctx):
         cmd.end_rendering(renderer)
 
         ctx.begin_frame()
-        with pytest.raises(bz.ResourceError):
+        with pytest.raises(bz.StateError):
             renderer.present(cmd)
     finally:
         renderer = None

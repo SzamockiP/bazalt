@@ -74,14 +74,14 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
 window = bz.Window(W, H, "Bazalt Demo - Multiview Environment Capture", logger=logger)
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 window.set_cursor_mode(bz.CURSOR_DISABLED)  # mouse-look
 
 if not ctx.supports(bz.Feature.MULTIVIEW):
     print("This GPU does not support multiview; see example 16 for the six-pass version.")
     sys.exit(0)
 
-env = bz.RenderTarget(ctx, ENV, ENV, color=bz.Format.RGBA8, depth=bz.Format.D32F, cube=True)
+env = ctx.create_render_target(ENV, ENV, color=bz.Format.RGBA8, depth=bz.Format.D32F, cube=True)
 
 capture_vert = ctx.compile_shader("capture_mv.vert", bz.ShaderStage.VERTEX)
 solid_vert = ctx.compile_shader("solid.vert", bz.ShaderStage.VERTEX)
@@ -186,7 +186,7 @@ for d, u in zip(FACE_DIRS, FACE_UPS):
 faces_ubo = ctx.create_buffer(np.frombuffer(face_bytes, np.float32).copy(),
                               bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
-pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4, samplers=2)
+pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4, textures=2)
 capture_set = pool.allocate_frame_set(capture_pipe, set=0)
 capture_set.set_buffer(0, faces_ubo)
 reflect_set = pool.allocate_set(reflect_pipe, set=0)

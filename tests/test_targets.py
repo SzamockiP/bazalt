@@ -23,34 +23,34 @@ CLEAR = [0.1, 0.2, 0.3, 1.0]
 
 def test_no_attachments_is_refused(ctx):
     with pytest.raises(bz.ResourceError):
-        bz.RenderTarget(ctx, 16, 16, color=None, depth=None)
+        ctx.create_render_target(16, 16, color=None, depth=None)
 
 
 def test_bool_depth_gets_a_migration_hint(ctx):
     """depth was a bool in 0.4; the error must say what to write instead."""
     with pytest.raises(bz.ResourceError) as info:
-        bz.RenderTarget(ctx, 16, 16, depth=True)
+        ctx.create_render_target(16, 16, depth=True)
     assert "D32F" in str(info.value)
 
 
 def test_depth_format_in_color_slot_is_refused(ctx):
     with pytest.raises(bz.ResourceError) as info:
-        bz.RenderTarget(ctx, 16, 16, color=bz.Format.D32F)
+        ctx.create_render_target(16, 16, color=bz.Format.D32F)
     assert "depth" in str(info.value)
 
 
 def test_color_format_in_depth_slot_is_refused(ctx):
     with pytest.raises(bz.ResourceError) as info:
-        bz.RenderTarget(ctx, 16, 16, depth=bz.Format.RGBA8)
+        ctx.create_render_target(16, 16, depth=bz.Format.RGBA8)
     assert "D32F" in str(info.value)
 
 
 def test_attachments_are_images(ctx):
-    target = bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA16F, depth=bz.Format.D32F)
+    target = ctx.create_render_target(16, 16, color=bz.Format.RGBA16F, depth=bz.Format.D32F)
     assert len(target.color) == 1
     assert target.color[0].format == bz.Format.RGBA16F
     assert target.depth.format == bz.Format.D32F
-    assert bz.RenderTarget(ctx, 16, 16).depth is None
+    assert ctx.create_render_target(16, 16).depth is None
 
 
 # ── depth-only target: the shadow-map shape ───────────────────────────────
@@ -62,7 +62,7 @@ def test_depth_only_pass_writes_sampleable_depth(ctx, triangle_shaders, triangle
     vert, _ = triangle_shaders
     vbuf, ibuf = triangle_buffers
 
-    shadow = bz.RenderTarget(ctx, 64, 64, color=None, depth=bz.Format.D32F)
+    shadow = ctx.create_render_target(64, 64, color=None, depth=bz.Format.D32F)
 
     # No fragment shader: legal exactly because the target has no colour.
     depth_pipe = (ctx.graphics_pipeline()
@@ -91,14 +91,14 @@ def test_depth_only_pass_writes_sampleable_depth(ctx, triangle_shaders, triangle
     # Sampled in a second pass: shadow.depth is just an Image.
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     view_frag = ctx.compile_shader(str(SHADER_DIR / "depth_view.frag"), bz.ShaderStage.FRAGMENT)
-    screen = bz.RenderTarget(ctx, 64, 64)
+    screen = ctx.create_render_target(64, 64)
     view_pipe = (ctx.graphics_pipeline()
                  .vertex_shader(fullscreen)
                  .fragment_shader(view_frag)
                  .texture(0, bz.ShaderStage.FRAGMENT, set=0)
                  .build(screen))
 
-    pool = ctx.create_descriptor_pool(max_sets=4, samplers=4)
+    pool = ctx.create_descriptor_pool(max_sets=4, textures=4)
     dset = pool.allocate_set(view_pipe, set=0)
     # NEAREST: linear filtering of depth formats is not universally supported.
     dset.set_image(0, shadow.depth, sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
@@ -121,7 +121,7 @@ def test_depth_only_target_has_no_colour_to_read(ctx):
     """A depth-only target exposes an empty color tuple, so the mistake is an
     IndexError at the subscript rather than a read of the wrong attachment.
     target.depth is the one to read."""
-    target = bz.RenderTarget(ctx, 16, 16, color=None, depth=bz.Format.D32F)
+    target = ctx.create_render_target(16, 16, color=None, depth=bz.Format.D32F)
     assert target.color == ()
     with pytest.raises(IndexError):
         target.color[0].read()
@@ -134,7 +134,7 @@ def test_depth_only_target_has_no_colour_to_read(ctx):
 def test_mrt_renders_into_both_attachments(ctx):
     """One pass, two colour attachments with different formats; each read()
     comes back in its own dtype with its own contents."""
-    gbuf = bz.RenderTarget(ctx, 32, 32, color=[bz.Format.RGBA16F, bz.Format.RGBA8])
+    gbuf = ctx.create_render_target(32, 32, color=[bz.Format.RGBA16F, bz.Format.RGBA8])
 
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     mrt_frag = ctx.compile_shader(str(SHADER_DIR / "mrt.frag"), bz.ShaderStage.FRAGMENT)
@@ -164,7 +164,7 @@ def test_mrt_renders_into_both_attachments(ctx):
 
 def test_missing_fragment_shader_with_color_attachments_is_refused(ctx, triangle_shaders):
     vert, _ = triangle_shaders
-    target = bz.RenderTarget(ctx, 16, 16)
+    target = ctx.create_render_target(16, 16)
     with pytest.raises(bz.ShaderError):
         (ctx.graphics_pipeline()
          .vertex_shader(vert)
@@ -181,7 +181,7 @@ def test_color_attachment_samples_as_a_texture(ctx, triangle_shaders, triangle_b
     vert, frag = triangle_shaders
     vbuf, ibuf = triangle_buffers
 
-    first = bz.RenderTarget(ctx, 64, 64)
+    first = ctx.create_render_target(64, 64)
     pipe1 = (ctx.graphics_pipeline()
              .vertex_shader(vert)
              .fragment_shader(frag)
@@ -200,14 +200,14 @@ def test_color_attachment_samples_as_a_texture(ctx, triangle_shaders, triangle_b
 
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     tex_frag = ctx.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
-    second = bz.RenderTarget(ctx, 64, 64)
+    second = ctx.create_render_target(64, 64)
     pipe2 = (ctx.graphics_pipeline()
              .vertex_shader(fullscreen)
              .fragment_shader(tex_frag)
              .texture(0, bz.ShaderStage.FRAGMENT, set=0)
              .build(second))
 
-    pool = ctx.create_descriptor_pool(max_sets=4, samplers=4)
+    pool = ctx.create_descriptor_pool(max_sets=4, textures=4)
     dset = pool.allocate_set(pipe2, set=0)
     dset.set_image(0, first.color[0])
 
@@ -221,3 +221,46 @@ def test_color_attachment_samples_as_a_texture(ctx, triangle_shaders, triangle_b
     ctx.submit(cmd2)
 
     np.testing.assert_array_equal(second.color[0].read(), first.color[0].read())
+
+
+# ── the factory and the named views (0.23) ────────────────────────────────
+
+
+def test_create_render_target_is_the_only_way_to_make_one(ctx):
+    """The factory exists because every other resource comes from a create_*
+    verb on the Context, and the constructor is gone rather than kept beside
+    it — a second spelling of one call is a fork (the 0.18 audit).
+
+    The refusal half lives in test_stubs.py, which runs on every wheel with no
+    driver. This is the half that needs a device: the factory returns the class
+    the stub and every annotation name, and the thing it returns draws."""
+    made = ctx.create_render_target(8, 8)
+    assert isinstance(made, bz.RenderTarget)
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.begin_rendering(made, clear_color=[1, 0, 0, 1])
+    cmd.end_rendering(made)
+    ctx.submit(cmd)
+    assert np.all(made.color[0].read()[:, :, 0] == 255)
+
+
+def test_create_render_target_takes_borrowed_images(ctx):
+    mine = ctx.create_image(8, 8, bz.Format.RGBA8)
+    target = ctx.create_render_target(color=[mine])
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.begin_rendering(target, clear_color=[0, 1, 0, 1])
+    cmd.end_rendering(target)
+    ctx.submit(cmd)
+    assert np.all(mine.read()[:, :, 1] == 255)
+
+
+def test_the_views_come_back_as_named_types(ctx):
+    """layer() and all_layers() used to return opaque RenderTargetBase, so the
+    stub could say nothing about them. pybind downcasts a polymorphic base to
+    the registered derived type — registration alone is the feature."""
+    target = ctx.create_render_target(8, 8, layers=2)
+    assert type(target.layer(0)).__name__ == "SubresourceTarget"
+    if ctx.supports(bz.Feature.MULTIVIEW):
+        assert type(target.all_layers()).__name__ == "MultiviewTarget"
+    assert isinstance(target.layer(1), bz.RenderTargetBase)

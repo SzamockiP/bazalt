@@ -7,7 +7,7 @@ each into `env.layer(i)` — and then the cube samples that cubemap as a
 the reflection is rendered, not baked, so a moving scene would reflect live.
 
 The whole feature is the two new bits of API:
-  * env = bz.RenderTarget(ctx, ENV, ENV, color=..., depth=..., cube=True)
+  * env = ctx.create_render_target(ENV, ENV, color=..., depth=..., cube=True)
       → a cube colour target (target.color[0] samples as a cubemap) with a
         matching 6-layer depth buffer;
   * cmd.rendering(env.layer(i)) → a pass that rasterizes into cube face i.
@@ -78,12 +78,12 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
 window = bz.Window(W, H, "Bazalt Demo - Environment Capture (render-to-layer)", logger=logger)
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 window.set_cursor_mode(bz.CURSOR_DISABLED)  # mouse-look
 
 # The environment probe: a cube colour target + a matching cube-shaped depth
 # buffer. color[0] ends up sampleable as a samplerCube.
-env = bz.RenderTarget(ctx, ENV, ENV, color=bz.Format.RGBA8, depth=bz.Format.D32F, cube=True)
+env = ctx.create_render_target(ENV, ENV, color=bz.Format.RGBA8, depth=bz.Format.D32F, cube=True)
 
 solid_vert = ctx.compile_shader("solid.vert", bz.ShaderStage.VERTEX)
 solid_frag = ctx.compile_shader("solid.frag", bz.ShaderStage.FRAGMENT)
@@ -117,7 +117,7 @@ reflect_pipe = (ctx.graphics_pipeline()
                 .texture(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(renderer))
 
-pool = ctx.create_descriptor_pool(max_sets=2, samplers=2)
+pool = ctx.create_descriptor_pool(max_sets=2, textures=2)
 reflect_set = pool.allocate_set(reflect_pipe, set=0)
 reflect_set.set_image(0, env.color[0], sampler=ctx.create_sampler(filter=bz.Filter.LINEAR))
 

@@ -4,8 +4,10 @@ These tests are cheap and catch the common failure: an API renamed in C++ and
 forgotten in the stub, which silently misleads every user's type checker.
 """
 
+import inspect
 import pathlib
 import re
+import sys
 
 import pytest
 
@@ -16,6 +18,23 @@ PYI = pathlib.Path(bz.__file__).parent / "_core.pyi"
 
 def stub_text():
     return PYI.read_text(encoding="utf-8")
+
+
+def test_this_module_needs_no_gpu():
+    """This file is the only test CI runs on every wheel (CIBW_TEST_COMMAND),
+    and those runners have no Vulkan driver. A test here that asks for the `ctx`
+    fixture fails at SETUP with InitializationError and takes all three wheel
+    jobs with it — 0.23 shipped exactly that for one commit, and the failure
+    reads like a broken wheel rather than a misplaced test.
+
+    The rule is "no parameters" rather than "not ctx" because it needs no
+    maintenance: a driver-free fixture that is genuinely wanted here can be
+    added to this assertion, and the choice becomes deliberate."""
+    for name, function in vars(sys.modules[__name__]).items():
+        if not (name.startswith("test_") and inspect.isfunction(function)):
+            continue
+        taken = list(inspect.signature(function).parameters)
+        assert not taken, f"{name} takes {taken}; test_stubs.py must pass with no GPU"
 
 
 def test_stub_exists_and_package_is_typed():
@@ -115,7 +134,23 @@ def test_renamed_and_new_api_is_declared():
                      # 0.22 — the portability rows, which answer True on every
                      # full Vulkan driver and False on a subset such as MoltenVK.
                      "COMPARISON_SAMPLER = 15", "SAMPLER_MIP_LOD_BIAS = 16",
-                     "MULTISAMPLE_ARRAYS = 17"):
+                     "MULTISAMPLE_ARRAYS = 17",
+                     # 0.23 — the keyboard follows the gamepad: values are GLFW's.
+                     "class Key(", "class MouseButton(", "class CursorMode(",
+                     "W = 87", "ESCAPE = 256", "MIDDLE = 2", "DISABLED = 212995",
+                     "key: Key | int", "mode: CursorMode | int",
+                     # 0.23 — 3D textures.
+                     "IMAGE_VIEW_2D_ON_3D = 18", "def depth",
+                     # 0.23 — the target factory and the named target views.
+                     "def create_render_target", "class SubresourceTarget(",
+                     "class MultiviewTarget(", "def create_descriptor_pool",
+                     # 0.23 — small additions.
+                     "MULTIPLY = 3", "UINT4 = 8", "UBYTE4_UINT = 9",
+                     "class BlendFactor(", "class BlendOp(",
+                     "SRC_ALPHA_SATURATE = 10", "REVERSE_SUBTRACT = 2",
+                     "src: Optional[BlendFactor]",
+                     # 0.23 — the two constructors that became Context verbs.
+                     "def create_renderer", "win32_hwnd: int"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 
@@ -134,6 +169,21 @@ def test_the_verbs_0_18_removed_are_gone():
                       (bz.Context, "uploads_done"), (bz.Window, "should_close"),
                       (bz.RenderTarget, "read_pixels"), (bz.RenderTarget, "mip")):
         assert not hasattr(cls, attr), f"{cls.__name__}.{attr} is still bound"
+
+
+def test_the_target_types_are_not_constructible():
+    """0.23: a RenderTarget and a SwapchainRenderer come from the Context, and
+    the constructors are GONE rather than kept beside the factories — a second
+    spelling of one call is a fork (the 0.18 audit). The classes stay as types,
+    which is what isinstance and the annotations name.
+
+    No Context here on purpose — see test_this_module_needs_no_gpu. The refusal
+    happens before any argument is looked at, so None is as good as a device,
+    and the factory half of the claim is asserted in test_targets.py where a
+    Context already exists."""
+    for cls in (bz.RenderTarget, bz.SwapchainRenderer):
+        with pytest.raises(TypeError):
+            cls(None, 16, 16)
 
     # The survivors of the same audit. read_pixels stays on the renderer because
     # a screenshot is different work; the two begin/end pairs stay because a
@@ -201,7 +251,8 @@ def test_stub_does_not_reference_an_undefined_buffer_type():
 
 def test_exception_hierarchy_matches_the_stub():
     for name in ("BazaltError", "InitializationError", "DeviceLostError",
-                 "OutOfMemoryError", "ShaderError", "WindowError", "ResourceError"):
+                 "OutOfMemoryError", "ShaderError", "WindowError", "ResourceError",
+                 "StateError", "UnsupportedError"):
         assert f"class {name}(" in stub_text()
         assert hasattr(bz, name)
 

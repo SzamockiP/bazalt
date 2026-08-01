@@ -34,7 +34,7 @@ def on_message(msg):
 
 window = bz.Window(W, H, "Bazalt Demo - Compute Post-processing", logger=logger)
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 # Compute: writes the storage image. No stage arguments, no target.
 gen_shader = ctx.compile_shader("pattern.comp", bz.ShaderStage.COMPUTE)
@@ -58,7 +58,7 @@ present = (ctx.graphics_pipeline()
 # image, so it sees both uses and transitions the layout between them.
 image = ctx.create_image(W, H, bz.Format.RGBA8)
 
-pool = ctx.create_descriptor_pool(max_sets=4, storage_images=4, samplers=4)
+pool = ctx.create_descriptor_pool(max_sets=4, storage_images=4, textures=4)
 gen_set = pool.allocate_set(generate, set=0)
 gen_set.set_storage_image(0, image)
 present_set = pool.allocate_set(present, set=0)

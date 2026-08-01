@@ -28,7 +28,7 @@ def fullscreen_push(ctx):
     """
     frag = ctx.compile_shader(str(SHADER_DIR / "push.frag"), bz.ShaderStage.FRAGMENT)
 
-    def make(target, *, far=False, blend=None, depth=None):
+    def make(target, *, far=False, blend=None, equation=None, depth=None):
         name = "fullscreen_far.vert" if far else "fullscreen.vert"
         vert = ctx.compile_shader(str(SHADER_DIR / name), bz.ShaderStage.VERTEX)
         builder = (ctx.graphics_pipeline()
@@ -37,6 +37,8 @@ def fullscreen_push(ctx):
                    .push_constant(16, bz.ShaderStage.FRAGMENT))
         if blend is not None:
             builder = builder.blend(True, mode=blend)
+        if equation is not None:
+            builder = builder.blend(True, **equation)
         if depth is not None:
             builder = builder.depth_test(True, **depth)
         return builder.build(target)
@@ -63,7 +65,7 @@ def draw_over(ctx, target, pipeline, clear, rgba):
 def test_additive_accumulates_where_alpha_replaces(ctx, fullscreen_push):
     """Quarter-red over quarter-red: additive reaches a half, alpha stays a
     quarter because a fully opaque source replaces the destination."""
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     quarter = [0.25, 0.0, 0.0, 1.0]
 
     additive = fullscreen_push(target, blend=bz.BlendMode.ADDITIVE)
@@ -82,7 +84,7 @@ def test_premultiplied_does_not_scale_the_source(ctx, fullscreen_push):
     destination. Alpha multiplies the source by its own 0.5 as well, so the red
     lands at a quarter instead of a half.
     """
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     half_blue = [0.0, 0.0, 0.5, 1.0]
     source = [0.5, 0.0, 0.0, 0.5]
 
@@ -95,9 +97,121 @@ def test_premultiplied_does_not_scale_the_source(ctx, fullscreen_push):
                        [64, 0, 64], atol=3)
 
 
+def test_multiply_darkens_where_alpha_replaces(ctx, fullscreen_push):
+    """Half-grey over half-red: MULTIPLY scales the framebuffer by the
+    fragment (0.5 * 0.5 = 0.25 red), where ALPHA with an opaque source just
+    replaces it. Two-sided, per the pixel-test rule — a mode that silently
+    fell back to ALPHA would fail the first assertion."""
+    target = ctx.create_render_target(64, 64)
+    half_red = [0.5, 0.0, 0.0, 1.0]
+    half_grey = [0.5, 0.5, 0.5, 1.0]
+
+    multiply = fullscreen_push(target, blend=bz.BlendMode.MULTIPLY)
+    assert np.allclose(draw_over(ctx, target, multiply, half_red, half_grey)[:3],
+                       [64, 0, 0], atol=3)
+
+    alpha = fullscreen_push(target, blend=bz.BlendMode.ALPHA)
+    assert np.allclose(draw_over(ctx, target, alpha, half_red, half_grey)[:3],
+                       [128, 128, 128], atol=3)
+
+
+# ── the factor/op escape hatch (0.23) ─────────────────────────────────────
+
+
+def test_a_written_equation_matches_the_mode_it_spells(ctx, fullscreen_push):
+    """ONE/ONE ADD is what ADDITIVE resolves to, so the two spellings must
+    produce the same pixel. If they ever diverge, one of them stopped going
+    through blend_equation_for."""
+    target = ctx.create_render_target(64, 64)
+    quarter = [0.25, 0.0, 0.0, 1.0]
+
+    written = fullscreen_push(target, equation=dict(src=bz.BlendFactor.ONE,
+                                                    dst=bz.BlendFactor.ONE))
+    by_mode = fullscreen_push(target, blend=bz.BlendMode.ADDITIVE)
+    assert np.array_equal(draw_over(ctx, target, written, quarter, quarter),
+                          draw_over(ctx, target, by_mode, quarter, quarter))
+
+
+def test_a_max_blend_op_ignores_the_factors(ctx, fullscreen_push):
+    """MAX is the case no preset can spell: the two sides are compared, not
+    summed. Half-red in the framebuffer, a dimmer red with some green on top —
+    MAX keeps the brighter of each channel, ADD would sum them."""
+    target = ctx.create_render_target(64, 64)
+    half_red = [0.5, 0.0, 0.0, 1.0]
+    source = [0.25, 0.25, 0.0, 1.0]
+    both = dict(src=bz.BlendFactor.ONE, dst=bz.BlendFactor.ONE)
+
+    maxed = fullscreen_push(target, equation=dict(**both, op=bz.BlendOp.MAX))
+    assert np.allclose(draw_over(ctx, target, maxed, half_red, source)[:3],
+                       [128, 64, 0], atol=3)
+
+    added = fullscreen_push(target, equation=both)
+    assert np.allclose(draw_over(ctx, target, added, half_red, source)[:3],
+                       [191, 64, 0], atol=3)
+
+
+def test_alpha_follows_the_colour_until_it_is_spelled_out(ctx, fullscreen_push):
+    """The glBlendFunc rule: one equation covers both channels, and
+    src_alpha=/dst_alpha= give alpha its own. Destination alpha 0.25, source
+    alpha 0.5 — following the colour adds them, ZERO/ONE keeps the
+    destination's."""
+    target = ctx.create_render_target(64, 64)
+    dst = [0.0, 0.0, 0.0, 0.25]
+    src = [1.0, 0.0, 0.0, 0.5]
+    both = dict(src=bz.BlendFactor.ONE, dst=bz.BlendFactor.ONE)
+
+    following = fullscreen_push(target, equation=both)
+    assert np.allclose(draw_over(ctx, target, following, dst, src)[3], 191, atol=3)
+
+    separate = fullscreen_push(target, equation=dict(**both,
+                                                     src_alpha=bz.BlendFactor.ZERO,
+                                                     dst_alpha=bz.BlendFactor.ONE))
+    assert np.allclose(draw_over(ctx, target, separate, dst, src)[3], 64, atol=3)
+
+
+def test_a_mode_and_a_factor_together_are_refused(ctx, fullscreen_push):
+    """Two ways to say one thing, so there is no silent winner. ValueError, not
+    a BazaltError: the call is malformed on its own."""
+    with pytest.raises(ValueError, match="two ways to say the same thing"):
+        ctx.graphics_pipeline().blend(True, bz.BlendMode.ADDITIVE, src=bz.BlendFactor.ONE)
+
+
+def test_half_an_equation_is_refused(ctx):
+    """src= and dst= are the two sides of one equation, and so are the alpha
+    pair. Half of either has no reading that is not a guess."""
+    with pytest.raises(ValueError, match="go together"):
+        ctx.graphics_pipeline().blend(True, src=bz.BlendFactor.ONE)
+    with pytest.raises(ValueError, match="go together"):
+        ctx.graphics_pipeline().blend(True, dst=bz.BlendFactor.ONE)
+    with pytest.raises(ValueError, match="src_alpha"):
+        ctx.graphics_pipeline().blend(True, src=bz.BlendFactor.ONE,
+                                      dst=bz.BlendFactor.ONE,
+                                      src_alpha=bz.BlendFactor.ZERO)
+
+
+def test_a_written_equation_is_ignored_while_blending_is_off(ctx, fullscreen_push):
+    """Same claim as the mode below, for the other spelling: blend(False)
+    replaces, whatever equation came with it."""
+    target = ctx.create_render_target(64, 64)
+    off = fullscreen_push(target, equation=dict(src=bz.BlendFactor.ONE,
+                                                dst=bz.BlendFactor.ONE))
+    # Rebuild with blending disabled but the same arguments.
+    frag = ctx.compile_shader(str(SHADER_DIR / "push.frag"), bz.ShaderStage.FRAGMENT)
+    vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+    disabled = (ctx.graphics_pipeline()
+                .vertex_shader(vert)
+                .fragment_shader(frag)
+                .push_constant(16, bz.ShaderStage.FRAGMENT)
+                .blend(False, src=bz.BlendFactor.ONE, dst=bz.BlendFactor.ONE)
+                .build(target))
+    quarter = [0.25, 0.0, 0.0, 1.0]
+    assert np.allclose(draw_over(ctx, target, off, quarter, quarter)[:3], [128, 0, 0], atol=3)
+    assert np.allclose(draw_over(ctx, target, disabled, quarter, quarter)[:3], [64, 0, 0], atol=3)
+
+
 def test_blend_off_ignores_the_mode(ctx, fullscreen_push):
     """blend(False, mode=ADDITIVE) must still replace, not add."""
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     frag = ctx.compile_shader(str(SHADER_DIR / "push.frag"), bz.ShaderStage.FRAGMENT)
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     pipeline = (ctx.graphics_pipeline()
@@ -120,7 +234,7 @@ def test_depth_write_false_leaves_the_buffer_alone(ctx, fullscreen_push):
 
     The control is the same pair with write=True, where the far draw loses.
     """
-    target = bz.RenderTarget(ctx, 64, 64, depth=bz.Format.D32F)
+    target = ctx.create_render_target(64, 64, depth=bz.Format.D32F)
 
     def render(write):
         near = fullscreen_push(target, depth={"write": write})
@@ -147,7 +261,7 @@ def test_depth_write_false_leaves_the_buffer_alone(ctx, fullscreen_push):
 def test_depth_compare_never_rejects_everything(ctx, fullscreen_push):
     """compare= reaches depthCompareOp: NEVER leaves the clear colour intact,
     where the default LESS_OR_EQUAL paints over it."""
-    target = bz.RenderTarget(ctx, 64, 64, depth=bz.Format.D32F)
+    target = ctx.create_render_target(64, 64, depth=bz.Format.D32F)
     red = [1.0, 0.0, 0.0, 1.0]
     green = [0.0, 1.0, 0.0, 1.0]
 
@@ -164,7 +278,7 @@ def test_reversed_depth_needs_both_the_compare_and_the_clear(ctx, fullscreen_pus
     clear to 0.0 and a reversed-depth buffer works, which is what the pair is
     for.
     """
-    target = bz.RenderTarget(ctx, 64, 64, depth=bz.Format.D32F)
+    target = ctx.create_render_target(64, 64, depth=bz.Format.D32F)
     red = [1.0, 0.0, 0.0, 1.0]
     green = [0.0, 1.0, 0.0, 1.0]
     greater = fullscreen_push(target, far=True, depth={"compare": bz.CompareOp.GREATER})
@@ -189,7 +303,7 @@ def test_reversed_depth_needs_both_the_compare_and_the_clear(ctx, fullscreen_pus
 def test_clear_depth_is_ignored_when_the_pass_preserves(ctx, fullscreen_push):
     """clear_depth is the clear VALUE, not a second preserve switch. A preserving
     pass keeps the depth the previous pass wrote whatever it says."""
-    target = bz.RenderTarget(ctx, 64, 64, depth=bz.Format.D32F)
+    target = ctx.create_render_target(64, 64, depth=bz.Format.D32F)
     near = fullscreen_push(target, depth={})
     far = fullscreen_push(target, far=True, depth={})
 
@@ -227,7 +341,7 @@ def test_depth_bias_pushes_the_written_depth(ctx, fullscreen_push):
     D24_UNORM tutorial move the depth by nothing at all, and a visible offset
     needs five or six digits.
     """
-    target = bz.RenderTarget(ctx, 64, 64, depth=bz.Format.D32F)
+    target = ctx.create_render_target(64, 64, depth=bz.Format.D32F)
     frag = ctx.compile_shader(str(SHADER_DIR / "push.frag"), bz.ShaderStage.FRAGMENT)
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen_far.vert"), bz.ShaderStage.VERTEX)
 
@@ -268,7 +382,7 @@ def test_depth_bias_pushes_the_written_depth(ctx, fullscreen_push):
 def test_line_width_needs_the_wide_lines_feature(ctx, fullscreen_push):
     """A driver may support exactly one line width, so anything but 1.0 is
     negotiated. 1.0 must stay free."""
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     frag = ctx.compile_shader(str(SHADER_DIR / "push.frag"), bz.ShaderStage.FRAGMENT)
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
 
@@ -284,7 +398,7 @@ def test_line_width_needs_the_wide_lines_feature(ctx, fullscreen_push):
 
     if ctx.supports(bz.Feature.WIDE_LINES):
         pytest.skip("session Context happens to have WIDE_LINES enabled")
-    with pytest.raises(bz.ShaderError, match="WIDE_LINES"):
+    with pytest.raises(bz.UnsupportedError, match="WIDE_LINES"):
         build(3.0)
 
 
@@ -304,7 +418,7 @@ def test_wide_lines_thicken_the_wireframe(extra_context):
     ]
     vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
     ibuf = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
 
     def painted(width):
         pipeline = (ctx.graphics_pipeline()
@@ -333,7 +447,7 @@ def test_depth_test_off_still_writes_nothing(ctx, fullscreen_push):
     """depth_test(False) has always meant "nothing to do with depth", and the
     new write= default must not quietly turn writes back on: a far draw after a
     near one must survive."""
-    target = bz.RenderTarget(ctx, 64, 64, depth=bz.Format.D32F)
+    target = ctx.create_render_target(64, 64, depth=bz.Format.D32F)
     frag = ctx.compile_shader(str(SHADER_DIR / "push.frag"), bz.ShaderStage.FRAGMENT)
 
     def plain(name):
@@ -373,8 +487,8 @@ def test_line_mode_needs_the_wireframe_feature(ctx, triangle_shaders):
         pytest.skip("session Context happens to have WIREFRAME enabled")
 
     vert, frag = triangle_shaders
-    target = bz.RenderTarget(ctx, 64, 64)
-    with pytest.raises(bz.ShaderError, match="WIREFRAME"):
+    target = ctx.create_render_target(64, 64)
+    with pytest.raises(bz.UnsupportedError, match="WIREFRAME"):
         (ctx.graphics_pipeline()
          .vertex_shader(vert)
          .fragment_shader(frag)
@@ -404,7 +518,7 @@ def test_line_mode_draws_edges_and_leaves_the_interior(extra_context):
     ]
     vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
     ibuf = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
 
     def render(mode):
         pipeline = (ctx.graphics_pipeline()

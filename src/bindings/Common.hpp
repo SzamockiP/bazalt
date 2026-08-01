@@ -59,6 +59,8 @@ inline py::handle exc_out_of_memory;
 inline py::handle exc_shader;
 inline py::handle exc_window;
 inline py::handle exc_resource;
+inline py::handle exc_state;
+inline py::handle exc_unsupported;
 
 inline py::handle make_exception(py::module_& m, const char* name, py::handle base)
 {
@@ -77,6 +79,8 @@ inline void register_exceptions(py::module_& m)
     exc_shader = make_exception(m, "ShaderError", exc_bazalt);
     exc_window = make_exception(m, "WindowError", exc_bazalt);
     exc_resource = make_exception(m, "ResourceError", exc_bazalt);
+    exc_state = make_exception(m, "StateError", exc_bazalt);
+    exc_unsupported = make_exception(m, "UnsupportedError", exc_bazalt);
 }
 
 inline py::handle exception_for(ErrorCode code)
@@ -95,6 +99,10 @@ inline py::handle exception_for(ErrorCode code)
             return exc_window;
         case ErrorCode::Resource:
             return exc_resource;
+        case ErrorCode::State:
+            return exc_state;
+        case ErrorCode::Unsupported:
+            return exc_unsupported;
     }
     return exc_bazalt;
 }
@@ -191,6 +199,323 @@ inline void require_preservable(const RenderTarget& target, bool preserve, const
                 "nothing to preserve. The multisampled image is discarded at the end of each pass. "
                 "The result goes to the resolve image, and the next pass does not render into that "
                 "image. Use a target with samples=1 for a multi-pass sequence.",
+                what)));
+    }
+}
+
+// `blend()`'s two spellings resolved into the one equation the pipeline stores
+// (0.23). A named mode is four points in the factor space; the factors are the
+// axes, for the fifth thing somebody wants (rule 2: leave the hatch).
+//
+// Three refusals, all ValueError, because each is malformed on its own — no
+// resource, no data and no device enters the decision, which is the 0.20 line.
+// The alternative to refusing is a silent winner between two ways of saying one
+// thing, and "which one wins" is a rule nobody remembers at 3am.
+inline BlendEquation resolve_blend_equation(
+    const std::optional<BlendMode>& mode,
+    const std::optional<BlendFactor>& src,
+    const std::optional<BlendFactor>& dst,
+    const std::optional<BlendOp>& op,
+    const std::optional<BlendFactor>& src_alpha,
+    const std::optional<BlendFactor>& dst_alpha,
+    const std::optional<BlendOp>& alpha_op)
+{
+    const bool any_factor = src || dst || op || src_alpha || dst_alpha || alpha_op;
+    if (mode && any_factor)
+    {
+        throw py::value_error(
+            "blend(): mode= and the factor arguments are two ways to say the same thing. "
+            "Pass a mode for a named blend, or src=/dst=/op= for a hand-written one.");
+    }
+    if (!any_factor)
+    {
+        // No mode either is the historical default: blend(True) is ALPHA.
+        return blend_equation_for(mode.value_or(BlendMode::ALPHA));
+    }
+    // A factor spelling names a COMPLETE equation, so the colour pair is
+    // required together: half of one has no reading that is not a guess about
+    // the other half.
+    if (!src || !dst)
+    {
+        throw py::value_error(
+            "blend(): src= and dst= go together — they are the two sides of one equation. "
+            "Pass both, or a mode= for a named blend.");
+    }
+    BlendEquation eq{*src, *dst, op.value_or(BlendOp::ADD), *src, *dst, op.value_or(BlendOp::ADD)};
+    // The alpha channel follows the colour unless it is spelled out, which is
+    // what glBlendFunc does and what nearly every blend wants. Spelled out, the
+    // same completeness rule applies to the pair.
+    if (src_alpha || dst_alpha || alpha_op)
+    {
+        if (!src_alpha || !dst_alpha)
+        {
+            throw py::value_error(
+                "blend(): src_alpha= and dst_alpha= go together. Pass both to give alpha its "
+                "own equation, or neither to have it follow the colour.");
+        }
+        eq.src_alpha = *src_alpha;
+        eq.dst_alpha = *dst_alpha;
+        eq.alpha_op = alpha_op.value_or(BlendOp::ADD);
+    }
+    return eq;
+}
+
+// ── What the Context makes ────────────────────────────────────────────────────
+//
+// One rule with no exceptions since 0.23: `bz.Context` and `bz.Window` are the
+// roots — nothing owns them, so they are constructors — and every resource a
+// Context owns comes from a `ctx.create_*` verb. Buffers, images, samplers,
+// pools, pipelines and command buffers always did; the render target and the
+// swapchain renderer were top-level constructors until 0.23, which made "which
+// convention does this type use" a coin flip to memorize.
+//
+// The constructors are GONE rather than kept as aliases. A second spelling of
+// the same call is a fork, not a convenience (the 0.18 audit), and these two
+// would have been the seventh and eighth: same work, same arguments, one
+// paragraph of documentation explaining which to prefer — which is the tell.
+//
+// The bodies live here rather than inline in ContextBind.cpp because each is
+// sixty lines of argument-shape parsing, and that file is long enough.
+
+// Allocating form: the target creates its attachments from formats.
+inline std::shared_ptr<OffscreenTarget> make_offscreen_target(
+    Context& context,
+    std::uint32_t width,
+    std::uint32_t height,
+    const py::object& color,
+    const py::object& depth,
+    std::uint32_t samples,
+    std::uint32_t layers,
+    bool cube,
+    std::uint32_t mip_levels,
+    const std::string& name)
+{
+    std::vector<Format> colors;
+    if (!color.is_none())
+    {
+        if (py::isinstance<Format>(color))
+        {
+            colors.push_back(color.cast<Format>());
+        }
+        else if (py::isinstance<py::sequence>(color) && !py::isinstance<py::str>(color))
+        {
+            for (auto item : color.cast<py::sequence>())
+            {
+                // Images here mean the caller wants the borrowed-attachment
+                // overload but also passed width/height, which that overload
+                // does not take. pybind cannot fall through once this signature
+                // has matched, so say so rather than letting item.cast<Format>()
+                // report a cast error about a type mismatch the caller did not
+                // make.
+                if (py::isinstance<Image>(item))
+                {
+                    raise_error(err_resource(
+                        "to render into images you already own, drop width and height: "
+                        "ctx.create_render_target(color=[image]) — the size, layers and mip "
+                        "levels come off the images"));
+                }
+                colors.push_back(item.cast<Format>());
+            }
+        }
+        else if (py::isinstance<Image>(color))
+        {
+            raise_error(err_resource(
+                "to render into an image you already own, drop width and height: "
+                "ctx.create_render_target(color=[image]) — the size, layers and mip "
+                "levels come off the images"));
+        }
+        else
+        {
+            raise_error(err_resource("color must be a bz.Format, a list of them, or None"));
+        }
+    }
+
+    std::optional<Format> depth_format;
+    if (!depth.is_none())
+    {
+        if (py::isinstance<py::bool_>(depth))
+        {
+            raise_error(err_resource(
+                "depth is a pixel format now: pass depth=bz.Format.D32F "
+                "instead of depth=True"));
+        }
+        depth_format = depth.cast<Format>();
+    }
+
+    return unwrap(
+        OffscreenTarget::create(
+            context, width, height, std::move(colors), depth_format, samples, layers, cube, mip_levels, name),
+        context.logger().get());
+}
+
+// Borrowed-images form: the caller's Images become the attachments (with MSAA
+// they become the resolve targets).
+inline std::shared_ptr<OffscreenTarget> make_offscreen_target_from_images(
+    Context& context,
+    const py::object& color,
+    const py::object& depth,
+    std::uint32_t samples,
+    const std::string& name)
+{
+    std::vector<std::shared_ptr<Image>> colors;
+    if (!color.is_none())
+    {
+        if (py::isinstance<Image>(color))
+        {
+            colors.push_back(color.cast<std::shared_ptr<Image>>());
+        }
+        else if (py::isinstance<py::sequence>(color) && !py::isinstance<py::str>(color))
+        {
+            for (auto item : color.cast<py::sequence>())
+            {
+                if (py::isinstance<Format>(item))
+                {
+                    raise_error(err_resource(
+                        "color has pixel formats but no width and height. Pass the size "
+                        "to have the target allocate its attachments — "
+                        "ctx.create_render_target(512, 512, color=bz.Format.RGBA8) — or pass "
+                        "images from ctx.create_image to render into those."));
+                }
+                colors.push_back(item.cast<std::shared_ptr<Image>>());
+            }
+        }
+        else
+        {
+            raise_error(err_resource(
+                "color must be an Image, a list of them, or None. To have the target "
+                "allocate its own attachments, pass a width and height with a bz.Format."));
+        }
+    }
+
+    std::shared_ptr<Image> depth_image;
+    if (!depth.is_none())
+    {
+        depth_image = depth.cast<std::shared_ptr<Image>>();
+    }
+
+    // The cross-Context guard belongs in the binding layer, as it does for
+    // every other resource: this catches a user mistake, not a C++ invariant,
+    // and the GIL is held here.
+    for (const auto& image : colors)
+    {
+        require_same_context(&context, image->owner(), "RenderTarget(color=)");
+    }
+    if (depth_image)
+    {
+        require_same_context(&context, depth_image->owner(), "RenderTarget(depth=)");
+    }
+
+    return unwrap(
+        OffscreenTarget::create_from_images(context, std::move(colors), std::move(depth_image), samples, name),
+        context.logger().get());
+}
+
+// The swapchain renderer over a bazalt Window. The Context is the receiver
+// (ctx.create_renderer(window)) rather than the second argument, which is the
+// 0.23 rule; the window is what it needs, exactly as an Image is what
+// create_render_target(color=[...]) needs.
+inline std::shared_ptr<SwapchainRenderer> make_swapchain_renderer(
+    std::shared_ptr<Context> context,
+    Window& window,
+    PresentMode present_mode,
+    std::uint32_t samples,
+    bool stencil)
+{
+    auto sp = window.get_surface_provider();
+    return std::shared_ptr<SwapchainRenderer>(unwrap(
+        SwapchainRenderer::create(context, std::move(sp), present_mode, samples, stencil), context->logger().get()));
+}
+
+// The same renderer over a window bazalt did not open: a Qt widget, a wx frame,
+// anything that can hand over an HWND. Windows only, and it says so.
+inline std::shared_ptr<SwapchainRenderer> make_swapchain_renderer_win32(
+    std::shared_ptr<Context> context,
+    std::uint64_t hwnd,
+    PresentMode present_mode,
+    std::uint32_t samples,
+    bool stencil)
+{
+#ifdef _WIN32
+    SurfaceProvider sp;
+    sp.required_instance_extensions = {"VK_KHR_surface", "VK_KHR_win32_surface"};
+
+    sp.create_surface = [hwnd](VkInstance instance) -> VkSurfaceKHR
+    {
+        auto pfnCreateWin32Surface =
+            (PFN_vkCreateWin32SurfaceKHR)vkGetInstanceProcAddr(instance, "vkCreateWin32SurfaceKHR");
+        if (!pfnCreateWin32Surface)
+        {
+            return VK_NULL_HANDLE;
+        }
+        VkWin32SurfaceCreateInfoKHR createInfo{
+            .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+            .pNext = nullptr,
+            .flags = 0,
+            .hinstance = GetModuleHandle(nullptr),
+            .hwnd = (HWND)hwnd};
+        VkSurfaceKHR surface = VK_NULL_HANDLE;
+        if (pfnCreateWin32Surface(instance, &createInfo, nullptr, &surface) != VK_SUCCESS)
+        {
+            return VK_NULL_HANDLE;
+        }
+        return surface;
+    };
+
+    sp.get_framebuffer_size = [hwnd]() -> std::pair<int, int>
+    {
+        RECT rect;
+        if (GetClientRect((HWND)hwnd, &rect))
+        {
+            return {rect.right - rect.left, rect.bottom - rect.top};
+        }
+        return {0, 0};
+    };
+
+    auto last_width = std::make_shared<int>(0);
+    auto last_height = std::make_shared<int>(0);
+
+    sp.consume_resize_flag = [hwnd, last_width, last_height]() -> bool
+    {
+        RECT rect;
+        if (GetClientRect((HWND)hwnd, &rect))
+        {
+            int w = rect.right - rect.left;
+            int h = rect.bottom - rect.top;
+            if (w != *last_width || h != *last_height)
+            {
+                *last_width = w;
+                *last_height = h;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    return std::shared_ptr<SwapchainRenderer>(unwrap(
+        SwapchainRenderer::create(context, std::move(sp), present_mode, samples, stencil), context->logger().get()));
+#else
+    (void)context;
+    (void)hwnd;
+    (void)present_mode;
+    (void)samples;
+    (void)stencil;
+    raise_error(err_window("create_renderer(win32_hwnd=) is only supported on Windows"));
+#endif
+}
+
+// A 3D target is rendered one Z slice at a time: its whole-target view is a 3D
+// view, which Vulkan does not accept as an attachment, so the mistake is
+// refused with the fix rather than surfacing as a validation error naming a
+// view type. Same address as the two guards above: a user error, and the
+// recording methods chain.
+inline void require_sliced_when_3d(const RenderTarget& target, const char* what)
+{
+    if (const auto* offscreen = dynamic_cast<const OffscreenTarget*>(&target); offscreen && offscreen->is_3d())
+    {
+        raise_error(err_resource(
+            std::format(
+                "{}: a 3D target is rendered one slice at a time. Use target.layer(z) — "
+                "cmd.begin_rendering(target.layer(z)) — instead of the whole target.",
                 what)));
     }
 }
@@ -302,26 +627,37 @@ inline size_t contiguous_nbytes(const py::buffer_info& info, const char* what)
     return static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
 }
 
-// One (h, w) or (h, w, channels) array → its GPU Format + dimensions. UNORM,
-// never sRGB (arrays are data, files are pictures). Raises a ResourceError on
-// an unsupported dtype/shape. Shared by the single-image and layered
-// (texture array / cubemap) create_image paths.
+// One (h, w), (h, w, channels) or (d, h, w, channels) array → its GPU Format +
+// dimensions. UNORM, never sRGB (arrays are data, files are pictures). Raises a
+// ResourceError on an unsupported dtype/shape. Shared by the single-image and
+// layered (texture array / cubemap) create_image paths.
+//
+// The dimension count IS the disambiguation: ndim 3 stays (h, w, channels) as
+// it always was, and a volume is ndim 4 — a single-channel volume is one
+// arr[..., None] away. A depth= kwarg on the array overload would be a
+// validation-only argument, which is the shape the design notes condemn.
 struct ArrayImageSpec
 {
     Format format;
     uint32_t width;
     uint32_t height;
+    uint32_t depth = 1;
 };
 inline ArrayImageSpec array_image_spec(const py::buffer_info& info)
 {
-    if (info.ndim != 2 && info.ndim != 3)
+    if (info.ndim != 2 && info.ndim != 3 && info.ndim != 4)
     {
         raise_error(err_resource(
-            std::format("create_image expects a (h, w) or (h, w, channels) array, got {} dimensions", info.ndim)));
+            std::format(
+                "create_image expects a (h, w) or (h, w, channels) array — or (d, h, w, "
+                "channels) for a 3D image — got {} dimensions",
+                info.ndim)));
     }
-    const auto height = static_cast<uint32_t>(info.shape[0]);
-    const auto width = static_cast<uint32_t>(info.shape[1]);
-    const py::ssize_t channels = info.ndim == 3 ? info.shape[2] : 1;
+    const bool volume = info.ndim == 4;
+    const auto depth = volume ? static_cast<uint32_t>(info.shape[0]) : 1u;
+    const auto height = static_cast<uint32_t>(info.shape[volume ? 1 : 0]);
+    const auto width = static_cast<uint32_t>(info.shape[volume ? 2 : 1]);
+    const py::ssize_t channels = volume ? info.shape[3] : (info.ndim == 3 ? info.shape[2] : 1);
 
     std::optional<Format> format;
     if (info.format == "B")
@@ -357,14 +693,19 @@ inline ArrayImageSpec array_image_spec(const py::buffer_info& info)
                 "Pad to 4 channels first, e.g. "
                 "np.concatenate([arr, np.full_like(arr[..., :1], 255)], axis=-1)"));
         }
+        // A raw (d, h, w) float volume lands here with its whole depth read as
+        // channels, so the message must teach the 4-dim rule or the caller
+        // cannot find it.
         raise_error(err_resource(
             std::format(
                 "create_image: unsupported dtype/shape (dtype '{}', {} channel(s)). "
-                "Supported: uint8 x 1/2/4 channels, float16 x 1/4, float32 x 1/4",
+                "Supported: uint8 x 1/2/4 channels, float16 x 1/4, float32 x 1/4. "
+                "For a 3D image pass (depth, h, w, channels) — a single-channel "
+                "volume is arr[..., None].",
                 info.format,
                 channels)));
     }
-    return {*format, width, height};
+    return {*format, width, height, depth};
 }
 
 inline const char* severity_name(Severity severity)
@@ -757,8 +1098,9 @@ struct OcclusionQuery
 };
 
 // Readback shaped for numpy: (h, w, channels) — or (h, w) for single-channel
-// formats — with the dtype the format table dictates. Shared by Image.read and
-// RenderTarget.read_pixels.
+// formats, with a leading depth axis for a volume — with the dtype the format
+// table dictates. Shared by Image.read and RenderTarget.read_pixels. Mirrors
+// the create_image convention: a volume reads back as (d, h, w[, channels]).
 inline py::array image_to_numpy(Image& image, std::uint32_t layer = 0, std::uint32_t mip = 0)
 {
     auto bytes = unwrap(image.read(/*all_layers=*/false, layer, mip), nullptr);
@@ -768,15 +1110,20 @@ inline py::array image_to_numpy(Image& image, std::uint32_t layer = 0, std::uint
     // shape the caller has to correct for.
     const auto h = static_cast<py::ssize_t>(mip_extent(image.height(), mip));
     const auto w = static_cast<py::ssize_t>(mip_extent(image.width(), mip));
+    const auto d = static_cast<py::ssize_t>(mip_extent(image.depth(), mip));
 
     std::vector<py::ssize_t> shape;
-    if (info.channels == 1)
+    if (image.is_3d())
     {
-        shape = {h, w};
+        shape = {d, h, w};
     }
     else
     {
-        shape = {h, w, static_cast<py::ssize_t>(info.channels)};
+        shape = {h, w};
+    }
+    if (info.channels != 1)
+    {
+        shape.push_back(static_cast<py::ssize_t>(info.channels));
     }
 
     py::array out(py::dtype(info.numpy_dtype), shape);
@@ -799,7 +1146,8 @@ inline std::vector<std::byte> update_pixels_from_numpy(
     Image& image,
     const py::array& array,
     std::uint32_t width,
-    std::uint32_t height)
+    std::uint32_t height,
+    std::uint32_t depth = 1)
 {
     const FormatInfo info = format_info(image.format());
     if (info.numpy_dtype[0] == '\0')
@@ -828,13 +1176,26 @@ inline std::vector<std::byte> update_pixels_from_numpy(
 
     const py::ssize_t expected_h = static_cast<py::ssize_t>(height);
     const py::ssize_t expected_w = static_cast<py::ssize_t>(width);
+    const py::ssize_t expected_d = static_cast<py::ssize_t>(depth);
     const py::ssize_t ndim = array.ndim();
-    const bool shape_ok =
-        info.channels == 1
-            ? ((ndim == 2 && array.shape(0) == expected_h && array.shape(1) == expected_w) ||
-               (ndim == 3 && array.shape(0) == expected_h && array.shape(1) == expected_w && array.shape(2) == 1))
-            : (ndim == 3 && array.shape(0) == expected_h && array.shape(1) == expected_w &&
-               array.shape(2) == static_cast<py::ssize_t>(info.channels));
+    bool shape_ok = false;
+    if (depth > 1)
+    {
+        // A volume region takes the create_image convention: (d, h, w) for one
+        // channel — with a trailing 1 accepted — or (d, h, w, channels).
+        const bool dhw = ndim >= 3 && array.shape(0) == expected_d && array.shape(1) == expected_h &&
+                         array.shape(2) == expected_w;
+        shape_ok = info.channels == 1 ? (dhw && (ndim == 3 || (ndim == 4 && array.shape(3) == 1)))
+                                      : (dhw && ndim == 4 && array.shape(3) == static_cast<py::ssize_t>(info.channels));
+    }
+    else
+    {
+        shape_ok = info.channels == 1 ? ((ndim == 2 && array.shape(0) == expected_h && array.shape(1) == expected_w) ||
+                                         (ndim == 3 && array.shape(0) == expected_h && array.shape(1) == expected_w &&
+                                          array.shape(2) == 1))
+                                      : (ndim == 3 && array.shape(0) == expected_h && array.shape(1) == expected_w &&
+                                         array.shape(2) == static_cast<py::ssize_t>(info.channels));
+    }
     if (!shape_ok)
     {
         std::string got;
@@ -842,18 +1203,17 @@ inline std::vector<std::byte> update_pixels_from_numpy(
         {
             got += (i ? ", " : "") + std::to_string(array.shape(i));
         }
+        std::string expected = depth > 1 ? std::format("({}, {}, {}, {})", depth, height, width, info.channels)
+                                         : std::format("({}, {}, {})", height, width, info.channels);
         raise_error(err_resource(
             std::format(
-                "update(): expected an array of shape ({}, {}, {}) for a {} region of a {} image, got ({})",
-                height,
-                width,
-                info.channels,
-                format_name(image.format()),
+                "update(): expected an array of shape {} for this region of a {} image, got ({})",
+                expected,
                 format_name(image.format()),
                 got)));
     }
 
-    const std::size_t size = static_cast<std::size_t>(width) * height * info.bytes_per_pixel;
+    const std::size_t size = static_cast<std::size_t>(width) * height * depth * info.bytes_per_pixel;
     std::vector<std::byte> out(size);
     std::memcpy(out.data(), array.data(), size);
     return out;

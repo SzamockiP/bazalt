@@ -24,7 +24,7 @@ void main() { o = vec4(1.0); }
 
 def render_fullscreen(ctx, vert, frag, size=64):
     """One fullscreen pass with the given shaders; returns the pixels."""
-    target = bz.RenderTarget(ctx, size, size)
+    target = ctx.create_render_target(size, size)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
@@ -196,7 +196,7 @@ def test_spv_round_trip_produces_identical_image(ctx, tmp_path, triangle_shaders
     vbuf, ibuf = triangle_buffers
 
     def render(vs, fs):
-        target = bz.RenderTarget(ctx, 64, 64)
+        target = ctx.create_render_target(64, 64)
         pipeline = (ctx.graphics_pipeline()
                     .vertex_shader(vs)
                     .fragment_shader(fs)
@@ -296,7 +296,7 @@ def test_spirv_bytes_render(ctx, triangle_shaders, triangle_buffers):
     vbuf, ibuf = triangle_buffers
 
     def render(vs, fs):
-        target = bz.RenderTarget(ctx, 64, 64)
+        target = ctx.create_render_target(64, 64)
         pipeline = (ctx.graphics_pipeline()
                     .vertex_shader(vs)
                     .fragment_shader(fs)
@@ -445,7 +445,7 @@ def test_shadow_compare_matches_manual_compare(ctx, triangle_shaders, triangle_b
     vert, _ = triangle_shaders
     vbuf, ibuf = triangle_buffers
 
-    shadow = bz.RenderTarget(ctx, 64, 64, color=None, depth=bz.Format.D32F)
+    shadow = ctx.create_render_target(64, 64, color=None, depth=bz.Format.D32F)
     depth_pipe = (ctx.graphics_pipeline()
                   .vertex_shader(vert)
                   .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
@@ -465,13 +465,13 @@ def test_shadow_compare_matches_manual_compare(ctx, triangle_shaders, triangle_b
 
     def compare_pass(frag_source, name, sampler):
         frag = ctx.compile_shader(name, bz.ShaderStage.FRAGMENT, source=frag_source)
-        screen = bz.RenderTarget(ctx, 64, 64)
+        screen = ctx.create_render_target(64, 64)
         pipeline = (ctx.graphics_pipeline()
                     .vertex_shader(fullscreen)
                     .fragment_shader(frag)
                     .texture(0, bz.ShaderStage.FRAGMENT, set=0)
                     .build(screen))
-        pool = ctx.create_descriptor_pool(max_sets=4, samplers=4)
+        pool = ctx.create_descriptor_pool(max_sets=4, textures=4)
         dset = pool.allocate_set(pipeline, set=0)
         dset.set_image(0, shadow.depth, sampler=sampler)
 

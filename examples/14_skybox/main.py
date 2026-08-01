@@ -33,7 +33,7 @@ def on_message(msg):
 
 window = bz.Window(W, H, "Bazalt Demo - Skybox (procedural cubemap)", logger=logger)
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 window.set_cursor_mode(bz.CURSOR_DISABLED)  # mouse-look
 
 # Compute writes the six faces of an empty cubemap.
@@ -52,7 +52,7 @@ skybox = (ctx.graphics_pipeline()
           .build(renderer))
 
 # One image, bound two ways: storage (written) and sampled (read).
-pool = ctx.create_descriptor_pool(max_sets=4, storage_images=4, samplers=4)
+pool = ctx.create_descriptor_pool(max_sets=4, storage_images=4, textures=4)
 gen_set = pool.allocate_set(generate, set=0)
 gen_set.set_storage_image(0, cubemap)
 sky_set = pool.allocate_set(skybox, set=0)

@@ -19,12 +19,12 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
 window = bz.Window(WIDTH, HEIGHT, "Bazalt Demo - G-Buffer MRT")
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 # The g-buffer: two colour formats in one target, plus depth.
-gbuffer = bz.RenderTarget(ctx, WIDTH, HEIGHT,
-                          color=[bz.Format.RGBA16F, bz.Format.RGBA8],
-                          depth=bz.Format.D32F)
+gbuffer = ctx.create_render_target(WIDTH, HEIGHT,
+                                   color=[bz.Format.RGBA16F, bz.Format.RGBA8],
+                                   depth=bz.Format.D32F)
 
 gbuf_vert = ctx.compile_shader("gbuffer.vert", bz.ShaderStage.VERTEX)
 gbuf_frag = ctx.compile_shader("gbuffer.frag", bz.ShaderStage.FRAGMENT)
@@ -72,7 +72,7 @@ ibuf = ctx.create_buffer(np.array(idx, dtype=np.uint32),
 ubuf = ctx.create_buffer(np.zeros(32, dtype=np.float32),
                          bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
-pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4, samplers=8)
+pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4, textures=8)
 
 gbuf_set = pool.allocate_frame_set(gbuf_pipe, set=0)
 gbuf_set.set_buffer(0, ubuf)

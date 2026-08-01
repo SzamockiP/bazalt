@@ -22,7 +22,7 @@ def test_debug_names_are_accepted_and_render_cleanly(ctx):
     img = ctx.create_image(8, 8, name="scratch")
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
@@ -39,6 +39,19 @@ def test_debug_names_are_accepted_and_render_cleanly(ctx):
 
     assert target.color[0].read().shape == (8, 8, 4)
     assert buf is not None and img is not None
+
+
+def test_a_compute_pipeline_takes_a_name_too(ctx):
+    """Same verb on the other builder. It had no test until the api-coverage
+    report named it, which is the whole argument for measuring the surface: the
+    graphics half was covered and read as if both were."""
+    comp = ctx.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
+    pipeline = (ctx.compute_pipeline()
+                .shader(comp)
+                .storage_buffer(0)
+                .name("doubler")
+                .build())
+    assert pipeline is not None
 
 
 def test_empty_name_is_a_no_op(ctx):
@@ -144,7 +157,7 @@ def test_gpu_time_ms_is_reported_after_the_ring_cycles(ctx):
         pytest.skip("no display available")
 
     try:
-        renderer = bz.SwapchainRenderer(window, ctx)
+        renderer = ctx.create_renderer(window)
         vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
         frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
         pipeline = (ctx.graphics_pipeline()
@@ -203,7 +216,7 @@ def test_debug_labels_render_cleanly(ctx):
     """As with debug names, the referee is the ctx fixture: an unbalanced
     begin/end pair is a validation error, and that is what could actually break.
     Whether RenderDoc groups the draws is not observable from here."""
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     pipeline = solid_pipeline(ctx, target)
 
     cmd = ctx.create_command_buffer()
@@ -243,7 +256,7 @@ def test_occlusion_query_counts_fragments(ctx):
     query has a known floor. Not an exact equality: without occlusionQueryPrecise
     the spec only promises a non-zero value, and helper invocations can push a
     precise count above the pixel count."""
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     pipeline = solid_pipeline(ctx, target)
 
     cmd = ctx.create_command_buffer()
@@ -260,7 +273,7 @@ def test_occlusion_query_counts_fragments(ctx):
 def test_occlusion_query_reports_zero_when_nothing_is_drawn(ctx):
     """The two-sided half: a query that always answered "lots" would pass the
     test above while measuring nothing."""
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     solid_pipeline(ctx, target)
 
     cmd = ctx.create_command_buffer()
@@ -280,19 +293,39 @@ def test_occlusion_query_reports_zero_when_nothing_is_drawn(ctx):
     assert q.samples == 0
 
 
+def test_occlusion_query_stops_explicitly(ctx):
+    """`with` is the spelling every other test uses, so `stop()` — the verb the
+    `with` block calls for you — went untested until the api-coverage report
+    said so. A recording split across functions has no block to span, which is
+    the reason the explicit pair exists at all."""
+    target = ctx.create_render_target(8, 8)
+    pipeline = solid_pipeline(ctx, target)
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
+        q = cmd.occlusion_query()
+        cmd.bind_pipeline(pipeline).draw(3)
+        q.stop()
+    ctx.submit(cmd)
+
+    assert q.samples is not None
+    assert q.samples > 0
+
+
 def test_occlusion_query_outside_a_rendering_scope_raises(ctx):
     """Vulkan requires the query to begin and end in one render pass. Refusing
     at the call site beats a validation message at submit that names neither."""
     cmd = ctx.create_command_buffer()
     cmd.begin()
-    with pytest.raises(bz.ResourceError):
+    with pytest.raises(bz.StateError):
         cmd.occlusion_query()
 
 
 def test_stale_occlusion_handle_reads_none(ctx):
     """Same stale-handle contract as a Timer: re-recording gives the slots to a
     different query, so the old handle reports None instead of a wrong number."""
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     pipeline = solid_pipeline(ctx, target)
 
     cmd = ctx.create_command_buffer()
@@ -367,7 +400,7 @@ def test_renderer_read_pixels_captures_the_frame(ctx):
 
     renderer = None
     try:
-        renderer = bz.SwapchainRenderer(window, ctx)
+        renderer = ctx.create_renderer(window)
         vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
         frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
         pipeline = (ctx.graphics_pipeline()
@@ -376,7 +409,7 @@ def test_renderer_read_pixels_captures_the_frame(ctx):
                     .build(renderer))
 
         # Nothing captured yet, and saying so beats handing back an empty buffer.
-        with pytest.raises(bz.ResourceError):
+        with pytest.raises(bz.StateError):
             renderer.read_pixels()
 
         drawn = False

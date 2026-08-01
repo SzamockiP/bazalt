@@ -463,7 +463,10 @@ public:
         {
             return {};
         }
-        return std::unexpected(err_shader(
+        // A missing stage feature is a fact about this Context, not about the file,
+        // so it is Unsupported rather than Shader — the same failure surfaces at
+        // build() through the same function, and the two must agree on the type.
+        return std::unexpected(err_unsupported(
             std::format(
                 "a {} shader requires the {} feature. Create the Context with "
                 "features=[bz.Feature.{}] (or optional=[...])",

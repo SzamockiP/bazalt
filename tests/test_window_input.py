@@ -117,7 +117,7 @@ def test_the_swapchain_follows_a_mode_change(ctx):
     window = a_window()
     renderer = None
     try:
-        renderer = bz.SwapchainRenderer(window, ctx)
+        renderer = ctx.create_renderer(window)
         pipeline = solid_pipeline(ctx, renderer)
         cmd = ctx.create_command_buffer()
         cmd.begin()
@@ -193,7 +193,7 @@ def test_present_mode_switches_at_runtime(ctx):
     window = a_window()
     renderer = None
     try:
-        renderer = bz.SwapchainRenderer(window, ctx, present_mode=bz.PresentMode.FIFO)
+        renderer = ctx.create_renderer(window, present_mode=bz.PresentMode.FIFO)
         pipeline = solid_pipeline(ctx, renderer)
         cmd = ctx.create_command_buffer()
         cmd.begin()
@@ -221,7 +221,7 @@ def test_present_mode_cannot_change_mid_frame(ctx):
     window = a_window()
     renderer = None
     try:
-        renderer = bz.SwapchainRenderer(window, ctx, present_mode=bz.PresentMode.FIFO)
+        renderer = ctx.create_renderer(window, present_mode=bz.PresentMode.FIFO)
         pipeline = solid_pipeline(ctx, renderer)
         cmd = ctx.create_command_buffer()
         cmd.begin()
@@ -234,7 +234,7 @@ def test_present_mode_cannot_change_mid_frame(ctx):
         ctx.begin_frame()
         if not renderer.acquire():
             pytest.skip("the window never acquired an image")
-        with pytest.raises(bz.ResourceError, match="acquire"):
+        with pytest.raises(bz.StateError, match="acquire"):
             renderer.set_present_mode(bz.PresentMode.IMMEDIATE)
         renderer.present(cmd)
     finally:
@@ -291,6 +291,40 @@ def test_an_untouched_key_is_not_an_edge(ctx):
             bz.poll_events()
             assert not window.was_key_pressed(bz.KEY_F11)
             assert not window.was_mouse_button_pressed(bz.MOUSE_BUTTON_RIGHT)
+    finally:
+        window = None
+
+
+def test_the_input_enums_agree_with_the_bare_ints():
+    """0.23: Key, MouseButton and CursorMode are renames of the GLFW values,
+    exactly as GamepadButton is, so each member equals its old module int.
+    Needs no window — the values are the whole claim."""
+    assert int(bz.Key.W) == bz.KEY_W == 87
+    assert int(bz.Key.ESCAPE) == bz.KEY_ESCAPE
+    assert int(bz.Key.D0) == bz.KEY_0
+    assert int(bz.Key.KP_0) == bz.KEY_KP_0
+    assert int(bz.MouseButton.LEFT) == bz.MOUSE_BUTTON_LEFT
+    assert int(bz.MouseButton.MIDDLE) == bz.MOUSE_BUTTON_MIDDLE
+    assert int(bz.CursorMode.NORMAL) == bz.CURSOR_NORMAL
+    assert int(bz.CursorMode.HIDDEN) == bz.CURSOR_HIDDEN
+    assert int(bz.CursorMode.DISABLED) == bz.CURSOR_DISABLED
+
+
+def test_an_enum_key_queries_like_its_int(ctx):
+    """The queries keep their int signatures and the enum converts through its
+    value, so both spellings must answer the same — this is the conversion
+    smoke test the 0.23 design named."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    try:
+        bz.poll_events()
+        assert window.is_key_pressed(bz.Key.W) == window.is_key_pressed(bz.KEY_W)
+        assert window.was_key_pressed(bz.Key.F11) == window.was_key_pressed(bz.KEY_F11)
+        assert (window.is_mouse_button_pressed(bz.MouseButton.LEFT)
+                == window.is_mouse_button_pressed(bz.MOUSE_BUTTON_LEFT))
+        window.set_cursor_mode(bz.CursorMode.HIDDEN)
+        window.set_cursor_mode(bz.CursorMode.NORMAL)
     finally:
         window = None
 
@@ -407,6 +441,25 @@ def test_the_clipboard_round_trips(ctx):
         # Empty is a value, not a failure.
         bz.set_clipboard("")
         assert bz.get_clipboard() == ""
+    finally:
+        window = None
+
+
+def test_a_fresh_window_is_open_and_retitles(ctx):
+    """The two verbs an application loop starts and ends with. `is_open` is what
+    `while window.is_open()` reads, and a title change is the cheapest thing a
+    program does to a live window (a frame counter, a file name).
+
+    Trivial, and untested until 0.23 for exactly that reason — the api-coverage
+    report is what found them."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    try:
+        assert window.is_open()
+        window.set_title("bazalt retitled")
+        bz.poll_events()
+        assert window.is_open(), "a title change must not close the window"
     finally:
         window = None
 

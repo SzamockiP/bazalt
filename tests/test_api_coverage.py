@@ -17,9 +17,36 @@ def test_the_surface_classifies_each_kind():
     assert surface["Context.__init__"] == "method"
     assert surface["Image.width"] == "property"
     assert surface["Format.RGBA8"] == "enum member"
-    assert surface["KEY_SPACE"] == "constant"
     assert surface["ShaderError"] == "exception"
     assert surface["poll_events"] == "function"
+
+
+def test_the_surface_counts_the_keyboard_once():
+    """0.23 dropped the KEY_*/MOUSE_*/CURSOR_* integers from the count. They are
+    the pre-enum spelling of three enums the census already counts, so keeping
+    both reported the keyboard twice — 116 untouched constants beside 99
+    untouched Key members, one fact, the largest number in the report.
+
+    `Key.SPACE` staying in is the point: the aliases were dropped, not the
+    keyboard."""
+    surface = api_coverage.public_surface()
+
+    assert "KEY_SPACE" not in surface
+    assert "MOUSE_BUTTON_LEFT" not in surface
+    assert surface["Key.SPACE"] == "enum member"
+
+
+def test_the_surface_skips_an_init_that_only_raises():
+    """A class with no py::init still has an `__init__` in its dict — the slot
+    wrapper pybind installs to raise TypeError. Counting it asks for a test that
+    constructs what 0.23 made unconstructible on purpose, and 23 of the 26
+    untouched methods were exactly that."""
+    surface = api_coverage.public_surface()
+
+    assert "RenderTarget.__init__" not in surface
+    assert "SwapchainRenderer.__init__" not in surface
+    assert "Image.__init__" not in surface
+    assert surface["Window.__init__"] == "method"
 
 
 def test_the_surface_holds_no_pybind_boilerplate():

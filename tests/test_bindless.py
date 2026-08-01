@@ -82,11 +82,11 @@ def test_each_slot_holds_its_own_texture(extra_context):
     pixel has to be the colour of the slot that was asked for, which is what
     separates a working array from one that always reads element 0."""
     ctx = bindless_context(extra_context)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     pipeline = array_pipeline(ctx, target, "bindless_push.frag", push_bytes=4)
 
     images = [solid(ctx, rgb) for rgb in SLOT_COLORS]
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=len(images))
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=len(images))
     dset = pool.allocate_set(pipeline, set=0)
     for i, image in enumerate(images):
         dset.set_image(0, image, index=i)
@@ -102,11 +102,11 @@ def test_one_draw_samples_four_textures(extra_context):
     nonuniformEXT in the shader and shaderSampledImageArrayNonUniformIndexing on
     the device, both of which arrive with BINDLESS."""
     ctx = bindless_context(extra_context)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     pipeline = array_pipeline(ctx, target, "bindless_quadrant.frag")
 
     images = [solid(ctx, rgb) for rgb in SLOT_COLORS]
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=len(images))
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=len(images))
     dset = pool.allocate_set(pipeline, set=0)
     for i, image in enumerate(images):
         dset.set_image(0, image, index=i)
@@ -125,10 +125,10 @@ def test_a_partially_written_array_is_legal(extra_context):
     flag, reading the set at all is undefined and the layers say so. The
     fixture is the assertion here; the pixel only proves the draw happened."""
     ctx = bindless_context(extra_context)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     pipeline = array_pipeline(ctx, target, "bindless_push.frag", push_bytes=4)
 
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=2)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=2)
     try:
         dset = pool.allocate_set(pipeline, set=0)
     except bz.ResourceError as exc:
@@ -157,10 +157,10 @@ def test_a_slot_can_be_rewritten_while_a_draw_is_in_flight(extra_context):
     The referee is the fixture, not the pixel: without the flag this is a
     validation error."""
     ctx = bindless_context(extra_context)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     pipeline = array_pipeline(ctx, target, "bindless_push.frag", push_bytes=4)
 
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=8)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=8)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_image(0, solid(ctx, SLOT_COLORS[0]), index=0)
 
@@ -186,10 +186,10 @@ def test_rewriting_a_slot_does_not_grow_the_set(extra_context):
     behaviour — the last write is what gets sampled, and the images the writes
     replaced are collectable."""
     ctx = bindless_context(extra_context)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     pipeline = array_pipeline(ctx, target, "bindless_push.frag", push_bytes=4)
 
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=64)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=64)
     dset = pool.allocate_set(pipeline, set=0)
 
     import weakref
@@ -211,9 +211,9 @@ def test_rewriting_a_slot_does_not_grow_the_set(extra_context):
 
 def test_index_outside_the_declared_count_is_refused(extra_context):
     ctx = bindless_context(extra_context)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     pipeline = array_pipeline(ctx, target, "bindless_push.frag", push_bytes=4)
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=4)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=4)
     dset = pool.allocate_set(pipeline, set=0)
 
     with pytest.raises(bz.ResourceError) as e:
@@ -225,7 +225,7 @@ def test_index_on_a_plain_binding_is_refused(extra_context):
     """count defaults to 1, so index=1 is out of range on an ordinary texture —
     the same check, and the reason it needs no separate rule."""
     ctx = bindless_context(extra_context)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
     pipeline = (ctx.graphics_pipeline()
@@ -233,7 +233,7 @@ def test_index_on_a_plain_binding_is_refused(extra_context):
                 .fragment_shader(frag)
                 .texture(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(target))
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
     dset = pool.allocate_set(pipeline, set=0)
 
     with pytest.raises(bz.ResourceError):
@@ -245,7 +245,7 @@ def test_two_counts_for_one_binding_fail_at_build(extra_context):
     spelled, so the stages merge. Two different counts cannot merge: the layout
     holds one number and one of the two is wrong."""
     ctx = bindless_context(extra_context)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "bindless_push.frag"), bz.ShaderStage.FRAGMENT)
 
@@ -268,11 +268,11 @@ def test_count_without_the_feature_is_refused(ctx):
     here and returns garbage on the next machine."""
     if ctx.supports(bz.Feature.BINDLESS):
         pytest.skip("the session Context enabled BINDLESS after all")
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "bindless_push.frag"), bz.ShaderStage.FRAGMENT)
 
-    with pytest.raises(bz.ShaderError) as e:
+    with pytest.raises(bz.UnsupportedError) as e:
         (ctx.graphics_pipeline()
          .vertex_shader(vert)
          .fragment_shader(frag)

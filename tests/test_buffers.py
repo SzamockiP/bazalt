@@ -141,7 +141,7 @@ def test_a_vertex_buffer_binds_in_either_memory_usage(ctx, memory):
 
     vert = ctx.compile_shader(str(SHADER_DIR / "triangle.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "triangle.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     pipe = (ctx.graphics_pipeline()
             .vertex_shader(vert).fragment_shader(frag)
             .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])

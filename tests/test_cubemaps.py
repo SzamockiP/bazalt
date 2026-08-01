@@ -59,9 +59,9 @@ def test_cubemap_from_arrays_samples_every_face(ctx, fullscreen_vert):
     cube = ctx.create_image(faces, cube=True)
     assert cube.is_cube and cube.array_layers == 6
 
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     pipeline = _cube_sampler(ctx, fullscreen_vert, target)
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_image(0, cube)
 
@@ -116,10 +116,10 @@ def test_empty_cubemap_compute_filled_then_sampled(ctx, fullscreen_vert):
     cube = ctx.create_image(16, 16, bz.Format.RGBA8, cube=True)
     assert cube.is_cube and cube.array_layers == 6
 
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     sampler_pipe = _cube_sampler(ctx, fullscreen_vert, target)
 
-    pool = ctx.create_descriptor_pool(max_sets=2, storage_images=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=2, storage_images=1, textures=1)
     fill_set = pool.allocate_set(fill, set=0)
     fill_set.set_storage_image(0, cube)
     sample_set = pool.allocate_set(sampler_pipe, set=0)
@@ -169,9 +169,9 @@ def test_compute_baked_cubemap_sampled_in_a_later_submit(ctx, fullscreen_vert):
     ctx.submit(bake)
 
     # Sample in separate submits, no regeneration — each face keeps its colour.
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     pipeline = _cube_sampler(ctx, fullscreen_vert, target)
-    sample_set = ctx.create_descriptor_pool(max_sets=1, samplers=1).allocate_set(pipeline, set=0)
+    sample_set = ctx.create_descriptor_pool(max_sets=1, textures=1).allocate_set(pipeline, set=0)
     sample_set.set_image(0, cube)
 
     for i, direction in enumerate(FACE_DIRS):
@@ -208,9 +208,9 @@ def test_manual_barrier_then_auto_sample_in_one_recording(ctx, fullscreen_vert):
     fill = ctx.compute_pipeline().shader(comp).storage_image(0).build()
     cube = ctx.create_image(16, 16, bz.Format.RGBA8, cube=True)
 
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     sampler_pipe = _cube_sampler(ctx, fullscreen_vert, target)
-    pool = ctx.create_descriptor_pool(max_sets=2, storage_images=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=2, storage_images=1, textures=1)
     fill_set = pool.allocate_set(fill, set=0)
     fill_set.set_storage_image(0, cube)
     sample_set = pool.allocate_set(sampler_pipe, set=0)

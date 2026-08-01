@@ -73,7 +73,7 @@ def test_tessellation_level_changes_what_is_drawn(extra_context):
 
     vbuf = ctx.create_buffer(TRIANGLE_ON_CIRCLE, bz.BufferType.VERTEX,
                              bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
-    target = bz.RenderTarget(ctx, 128, 128)
+    target = ctx.create_render_target(128, 128)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .tess_control_shader(tesc)
@@ -115,7 +115,7 @@ def test_patch_list_without_tessellation_shaders_is_refused(extra_context):
     ctx = tess_context(extra_context)
     vert = ctx.compile_shader(str(SHADER_DIR / "pos2.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
 
     with pytest.raises(bz.ShaderError, match="PATCH_LIST"):
         (ctx.graphics_pipeline()
@@ -133,7 +133,7 @@ def test_one_tessellation_stage_without_the_other_is_refused(extra_context):
     vert = ctx.compile_shader(str(SHADER_DIR / "pos2.vert"), bz.ShaderStage.VERTEX)
     tesc = ctx.compile_shader(str(SHADER_DIR / "disc.tesc"), bz.ShaderStage.TESS_CONTROL)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
 
     with pytest.raises(bz.ShaderError, match="BOTH stages"):
         (ctx.graphics_pipeline()
@@ -154,7 +154,7 @@ def test_patch_control_points_must_be_in_range(extra_context):
     tesc = ctx.compile_shader(str(SHADER_DIR / "disc.tesc"), bz.ShaderStage.TESS_CONTROL)
     tese = ctx.compile_shader(str(SHADER_DIR / "disc.tese"), bz.ShaderStage.TESS_EVALUATION)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
 
     def build(count):
         builder = (ctx.graphics_pipeline()
@@ -188,9 +188,9 @@ def test_tessellation_needs_its_feature_at_compile_time(ctx):
     error, some distance from the line that caused it. The session Context never
     asked for TESSELLATION, so this is the ordinary shape of the mistake.
     """
-    with pytest.raises(bz.ShaderError, match="TESSELLATION"):
+    with pytest.raises(bz.UnsupportedError, match="TESSELLATION"):
         ctx.compile_shader(str(SHADER_DIR / "disc.tesc"), bz.ShaderStage.TESS_CONTROL)
-    with pytest.raises(bz.ShaderError, match="TESSELLATION"):
+    with pytest.raises(bz.UnsupportedError, match="TESSELLATION"):
         ctx.compile_shader(str(SHADER_DIR / "disc.tese"), bz.ShaderStage.TESS_EVALUATION)
 
 
@@ -211,9 +211,9 @@ def test_the_pipeline_gate_catches_a_module_from_another_context(ctx, extra_cont
 
     vert = ctx.compile_shader(str(SHADER_DIR / "pos2.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
 
-    with pytest.raises(bz.ShaderError, match="TESSELLATION"):
+    with pytest.raises(bz.UnsupportedError, match="TESSELLATION"):
         (ctx.graphics_pipeline()
          .vertex_shader(vert)
          .tess_control_shader(tesc)
@@ -245,7 +245,7 @@ def test_geometry_shader_turns_points_into_surfaces(extra_context):
 
     vbuf = ctx.create_buffer([0.0, 0.0], bz.BufferType.VERTEX,
                              bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
-    target = bz.RenderTarget(ctx, 128, 128)
+    target = ctx.create_render_target(128, 128)
 
     def draw(with_geometry):
         builder = (ctx.graphics_pipeline()
@@ -281,7 +281,7 @@ def test_geometry_needs_its_feature(ctx):
     """Same reach contract, same compile-time refusal. Also the reason geometry is
     a Feature and not a free stage: Metal has no geometry shaders at all, so
     MoltenVK reports geometryShader false."""
-    with pytest.raises(bz.ShaderError, match="GEOMETRY_SHADER"):
+    with pytest.raises(bz.UnsupportedError, match="GEOMETRY_SHADER"):
         ctx.compile_shader(str(SHADER_DIR / "point_quad.geom"), bz.ShaderStage.GEOMETRY)
 
 
@@ -310,7 +310,7 @@ def test_a_barrier_is_legal_on_a_tessellating_context(extra_context):
                             bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
     vbuf = ctx.create_buffer(TRIANGLE_ON_CIRCLE, bz.BufferType.VERTEX,
                              bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .tess_control_shader(tesc)
@@ -370,7 +370,7 @@ def test_tessellation_stages_reach_a_specialization_constant(extra_context):
 
     vbuf = ctx.create_buffer(TRIANGLE_ON_CIRCLE, bz.BufferType.VERTEX,
                              bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
-    target = bz.RenderTarget(ctx, 128, 128)
+    target = ctx.create_render_target(128, 128)
 
     def draw(level):
         pipeline = (ctx.graphics_pipeline()

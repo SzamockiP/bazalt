@@ -442,7 +442,7 @@ public:
         // mistake instead of letting validation describe the symptom.
         if (image_acquired_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "set_present_mode() recreates the swapchain, so it cannot run between "
                 "acquire() and present(). Call it before ctx.begin_frame(), or after present()."));
         }
@@ -576,14 +576,14 @@ public:
     {
         if (!supports_readback_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_unsupported(
                 "renderer.read_pixels(): this surface does not allow the swapchain images to be copied "
                 "from (the compositor refused VK_IMAGE_USAGE_TRANSFER_SRC_BIT). Render into a "
                 "bz.RenderTarget and read that instead."));
         }
         if (!captured_ || capture_buffer_ == VK_NULL_HANDLE)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "renderer.read_pixels(): no frame has been captured. Ask for one with "
                 "renderer.present(cmd, capture=True) — a presentable image may only be copied while it "
                 "is acquired, so the copy has to ride that frame's own submit."));
@@ -636,7 +636,7 @@ public:
         // may still be in flight, so name them together.
         if (acquired_serial_ == context_->frame_serial())
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "This window already acquired an image for the current frame. Call "
                 "ctx.begin_frame() once per frame, then acquire() once per window."));
         }
@@ -694,7 +694,7 @@ public:
     {
         if (!image_acquired_)
         {
-            return std::unexpected(err_resource(
+            return std::unexpected(err_state(
                 "This window has no acquired swapchain image. Call acquire() first, "
                 "and skip present() when it returns False (minimized or resizing)."));
         }

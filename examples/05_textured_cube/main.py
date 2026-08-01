@@ -50,7 +50,7 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
 window = bz.Window(1024, 720, "Bazalt Demo - Textured Multi-Cube")
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 window.set_cursor_mode(bz.CURSOR_DISABLED)
 
 # Compile shaders
@@ -120,7 +120,7 @@ ubuf = ctx.create_buffer([0.0]*16, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC
 tex1 = ctx.load_image("../assets/wall.png")
 tex2 = ctx.load_image("../assets/container.png")
 
-pool = ctx.create_descriptor_pool(max_sets=4, samplers=2, uniform_buffers=2)
+pool = ctx.create_descriptor_pool(max_sets=4, textures=2, uniform_buffers=2)
 
 frame_set = pool.allocate_frame_set(pipeline, set=0)
 frame_set.set_buffer(0, ubuf)

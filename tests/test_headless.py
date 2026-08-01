@@ -36,12 +36,12 @@ def draw_triangle(ctx, target, shaders, buffers, clear=CLEAR):
 
 
 def test_render_target_reports_its_size(ctx):
-    target = bz.RenderTarget(ctx, 64, 48)
+    target = ctx.create_render_target(64, 48)
     assert (target.width, target.height) == (64, 48)
 
 
 def test_read_pixels_shape_and_dtype(ctx):
-    target = bz.RenderTarget(ctx, 32, 16)
+    target = ctx.create_render_target(32, 16)
     # A clear-only pass counts as rendering; reading a never-rendered target
     # is an error (see test_read_pixels_before_any_render_is_an_error).
     cmd = ctx.create_command_buffer()
@@ -60,7 +60,7 @@ def test_read_pixels_before_any_render_is_an_error(ctx):
     return whatever the driver left in VRAM, which *sometimes* looks right.
 
     read_pixels used to do exactly that (the rendered_ flag was never set)."""
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     with pytest.raises(bz.ResourceError) as info:
         target.color[0].read()
     assert "no contents" in str(info.value)
@@ -68,7 +68,7 @@ def test_read_pixels_before_any_render_is_an_error(ctx):
 
 def test_recorded_but_unsubmitted_commands_do_not_count_as_rendering(ctx):
     """Only a submit flips the rendered flag; recording alone must not."""
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     cmd = ctx.create_command_buffer()
     cmd.begin()
     cmd.begin_rendering(target, clear_color=CLEAR)
@@ -79,13 +79,13 @@ def test_recorded_but_unsubmitted_commands_do_not_count_as_rendering(ctx):
 
 
 def test_clear_colour_reaches_the_image(ctx, triangle_shaders, triangle_buffers):
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pixels = draw_triangle(ctx, target, triangle_shaders, triangle_buffers)
     assert np.allclose(pixels[2, 2, :3], CLEAR_RGB, atol=2)
 
 
 def test_triangle_is_actually_drawn(ctx, triangle_shaders, triangle_buffers):
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pixels = draw_triangle(ctx, target, triangle_shaders, triangle_buffers)
     centre = pixels[32, 32, :3]
     assert not np.allclose(centre, CLEAR_RGB, atol=2), "centre still shows the clear colour"
@@ -94,7 +94,7 @@ def test_triangle_is_actually_drawn(ctx, triangle_shaders, triangle_buffers):
 
 def test_vertex_colours_are_interpolated(ctx, triangle_shaders, triangle_buffers):
     """Red at the top vertex, green bottom-left, blue bottom-right."""
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pixels = draw_triangle(ctx, target, triangle_shaders, triangle_buffers)
 
     near_top = pixels[20, 32, :3]
@@ -107,7 +107,7 @@ def test_vertex_colours_are_interpolated(ctx, triangle_shaders, triangle_buffers
 
 
 def test_depth_target_renders(ctx, triangle_shaders, triangle_buffers):
-    target = bz.RenderTarget(ctx, 64, 64, depth=bz.Format.D32F)
+    target = ctx.create_render_target(64, 64, depth=bz.Format.D32F)
     pixels = draw_triangle(ctx, target, triangle_shaders, triangle_buffers)
     assert not np.allclose(pixels[32, 32, :3], CLEAR_RGB, atol=2)
 
@@ -121,15 +121,15 @@ def test_uint16_indices_draw_correctly(ctx, triangle_shaders, triangle_buffers):
     vbuf, _ = triangle_buffers
     ibuf16 = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC,
                                bz.DataType.UINT16)
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pixels = draw_triangle(ctx, target, triangle_shaders, (vbuf, ibuf16))
     assert not np.allclose(pixels[32, 32, :3], CLEAR_RGB, atol=2)
 
 
 def test_two_targets_from_one_context(ctx, triangle_shaders, triangle_buffers):
     """Multiple render targets coexist — only SwapchainRenderers are restricted."""
-    a = bz.RenderTarget(ctx, 32, 32)
-    b = bz.RenderTarget(ctx, 48, 48)
+    a = ctx.create_render_target(32, 32)
+    b = ctx.create_render_target(48, 48)
     pa = draw_triangle(ctx, a, triangle_shaders, triangle_buffers)
     pb = draw_triangle(ctx, b, triangle_shaders, triangle_buffers)
     assert pa.shape == (32, 32, 4)
@@ -142,7 +142,7 @@ def test_target_is_reusable_after_readback(ctx, triangle_shaders, triangle_buffe
     Also the observable contract of the layout fix: the source barrier now
     declares the true layout instead of UNDEFINED, so the driver may not
     discard the rendered contents between two reads."""
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     first = draw_triangle(ctx, target, triangle_shaders, triangle_buffers)
     second = target.color[0].read()
     assert np.array_equal(first, second)

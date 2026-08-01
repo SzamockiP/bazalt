@@ -163,11 +163,11 @@ def test_blit_image_rejects_the_same_image_twice(ctx):
 def test_blit_image_is_refused_inside_a_rendering_scope(ctx):
     src = ctx.create_image(8, 8, bz.Format.RGBA8)
     dst = ctx.create_image(4, 4, bz.Format.RGBA8)
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
 
     cmd = ctx.create_command_buffer()
     cmd.begin().begin_rendering(target, clear_color=[0, 0, 0, 1])
-    with pytest.raises(bz.ResourceError):
+    with pytest.raises(bz.StateError):
         cmd.blit_image(src, dst)
 
 
@@ -195,7 +195,7 @@ def test_copy_image_copies_the_whole_mip_chain(ctx):
 
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     lod_frag = ctx.compile_shader(str(SHADER_DIR / "sample_lod.frag"), bz.ShaderStage.FRAGMENT)
-    screen = bz.RenderTarget(ctx, 8, 8)
+    screen = ctx.create_render_target(8, 8)
     pipe = (ctx.graphics_pipeline()
             .vertex_shader(fullscreen)
             .fragment_shader(lod_frag)
@@ -203,7 +203,7 @@ def test_copy_image_copies_the_whole_mip_chain(ctx):
             .push_constant(4, bz.ShaderStage.FRAGMENT)
             .build(screen))
 
-    pool = ctx.create_descriptor_pool(max_sets=1, samplers=1)
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, dst, sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
