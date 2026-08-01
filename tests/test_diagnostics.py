@@ -41,6 +41,19 @@ def test_debug_names_are_accepted_and_render_cleanly(ctx):
     assert buf is not None and img is not None
 
 
+def test_a_compute_pipeline_takes_a_name_too(ctx):
+    """Same verb on the other builder. It had no test until the api-coverage
+    report named it, which is the whole argument for measuring the surface: the
+    graphics half was covered and read as if both were."""
+    comp = ctx.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
+    pipeline = (ctx.compute_pipeline()
+                .shader(comp)
+                .storage_buffer(0)
+                .name("doubler")
+                .build())
+    assert pipeline is not None
+
+
 def test_empty_name_is_a_no_op(ctx):
     """The default (no name=) must behave exactly as before."""
     img = ctx.create_image(4, 4)
@@ -278,6 +291,26 @@ def test_occlusion_query_reports_zero_when_nothing_is_drawn(ctx):
         # pair still runs, so a query that always answered zero is still caught.
         pytest.skip(f"this driver counts an empty pass as {q.samples} samples")
     assert q.samples == 0
+
+
+def test_occlusion_query_stops_explicitly(ctx):
+    """`with` is the spelling every other test uses, so `stop()` — the verb the
+    `with` block calls for you — went untested until the api-coverage report
+    said so. A recording split across functions has no block to span, which is
+    the reason the explicit pair exists at all."""
+    target = ctx.create_render_target(8, 8)
+    pipeline = solid_pipeline(ctx, target)
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
+        q = cmd.occlusion_query()
+        cmd.bind_pipeline(pipeline).draw(3)
+        q.stop()
+    ctx.submit(cmd)
+
+    assert q.samples is not None
+    assert q.samples > 0
 
 
 def test_occlusion_query_outside_a_rendering_scope_raises(ctx):

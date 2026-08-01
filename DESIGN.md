@@ -1980,6 +1980,20 @@ entries stay for their reasoning; each carries its outcome.
    `StateError` plus `UnsupportedError`. See "The 0.23 error taxonomy" above for the full
    reasoning and what stayed where.
 
+4. ✅ **`target.layer()` takes `mip` positionally.** Found by the 0.23 release review, after
+   entry 1 above was called done. `layer(0, 2)` is the identical trap to
+   `set_image(0, img, 3)` — two adjacent ints of which the second selects a different axis —
+   and the 3D work in the same release made it worse, because on a target over a volume the
+   FIRST argument is a Z coordinate, so both ints read as position. DONE in 0.23: three test
+   call sites, no example, one `py::kw_only()`.
+
+   **The lesson is about entry 1, not about this signature.** Entry 1 named three verbs and
+   was implemented as those three verbs. The rule it was written from — extras are
+   keyword-only, "one rule, not one exception" — has no such list. A backlog entry that
+   states a rule and then enumerates its known instances gets implemented as the
+   enumeration, and the instance nobody wrote down survives into the freeze. When an entry
+   generalizes, **grep for the shape** and put the result in the entry before it is worked.
+
 ### Ergonomics, additive
 
 Ordered by how often the friction shows up, not by effort.
@@ -2324,8 +2338,11 @@ ceiling to raise, so there is nothing for the five verdicts to grade.
   when 1.0 ships.
 
   **0.23 paid all three**, plus the break the census found hiding in `ShaderError`
-  (capability gates) and the `samplers=` → `textures=` rename that rode along. Nothing
-  breaking remains on the backlog, so 1.0 no longer waits on any signature.
+  (capability gates), the `samplers=` → `textures=` rename that rode along, and a FOURTH
+  signature the release review turned up after the first three were called done:
+  `target.layer(index, mip)` was the same positional-extra trap as `set_image` (backlog
+  entry 4 says why one entry produced two rounds of work). Nothing breaking remains on the
+  backlog, so 1.0 no longer waits on any signature.
 - **Every public symbol from `_core.pyi` is touched by a test.** An unexercised binding is
   an unimplemented binding. 0.22 made this measurable rather than aspirational:
   `pytest --api-coverage` writes `api_coverage.md`, and the answer on the day it was
@@ -2338,6 +2355,33 @@ ceiling to raise, so there is nothing for the five verdicts to grade.
   most of the arithmetic: they are read-only integers, so a test that touches all 127
   proves nothing except that they exist — which `test_stubs.py` already checks. Reading
   the number as one percentage would put 1.0 behind a pointless test.
+
+  **0.23 acted on that paragraph instead of only writing it down, and then the number
+  answered.** The census stopped counting two things it was double-counting or
+  fabricating, and both changes are asserted by `tests/test_api_coverage.py` so neither
+  can quietly come back:
+
+  - the 127 `KEY_*` / `MOUSE_*` / `CURSOR_*` integers, which since 0.23 are the pre-enum
+    spelling of `Key`, `MouseButton` and `CursorMode` — enums the census already counts.
+    Keeping both reported the keyboard TWICE (116 untouched constants beside 99 untouched
+    `Key` members) and made it the largest number in the file for no fact.
+  - `__init__` on a class with no `py::init`. pybind leaves a slot wrapper there that
+    exists to raise `TypeError`, and 0.23 made two more classes unconstructible on
+    purpose. Counting it asks for a test that constructs what cannot be constructed —
+    **23 of the 26 untouched methods were this**, which is why the methods row looked
+    like the problem and was not.
+
+  With the noise gone the real answer is **347 of 506**: methods 136/136, properties
+  64/64, functions 5/5, exceptions 9/9, and enum members 133/292. So the goal is now one
+  row, not five, and the four methods that were genuinely untested
+  (`ComputePipelineBuilder.name`, `OcclusionQuery.stop`, `Window.is_open`,
+  `Window.set_title`) got tests in 0.23 — all four trivial, none previously noticed, which
+  is the argument for the census in one line.
+
+  The remaining 159 are enum members, and they are NOT one job. A `Format` row nobody
+  passed to `create_image` is an untested code path; a `Key` member is a read-only integer
+  that `test_stubs.py` already proves exists — the same argument the constants lost on.
+  Split the row before treating it as the 1.0 test plan.
 - ✅ Add the `KEY_*` and `MOUSE_*` constants to `__all__` in `bazalt/__init__.py` — DONE, and
   it had been done for several releases while this line still asked for it. Found by the 0.20
   audit. A checklist nothing tests is a checklist that drifts.
@@ -2359,6 +2403,15 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
 
 ### API design
 
+- **When the exception type is the contract, the docstring that names it is the contract
+  too** (0.23). The release split `StateError` and `UnsupportedError` out of `ResourceError`
+  and swept the C++ call sites, the tests and the CHANGELOG. It did not sweep the docstrings
+  in `_core.pyi`, so six of them still promised `ResourceError` for a double `acquire()`, a
+  blit this GPU cannot do, an occlusion query outside a pass. A user writes `except` from
+  the file their editor shows them, so the stub was handing out a contract the library no
+  longer honoured — a silent one, because nothing runs a docstring. **Any change to an error
+  taxonomy is a grep of the prose, not only of the code**, and the count is the tell: six
+  wrong lines against about forty correct ones is drift, not a typo.
 - **A second spelling is not a convenience, it is a fork** (0.18), **and the rule catches
   additions as readily as legacy** (0.23). `ctx.create_render_target()` was added beside
   `bz.RenderTarget(ctx, ...)` as "an alias; the class stays", which is how all six of the
@@ -2785,6 +2838,18 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
 - **The Context is session-scoped** (one per process in the fixture) and every resource holds
   its Context, so a per-test Context is a leak trap. A test that needs its own Context asks
   the `extra_context` factory, which applies the same referee.
+- **`test_stubs.py` must pass with no GPU, and something has to say so** (0.23). It is the
+  file `CIBW_TEST_COMMAND` runs on every wheel, and those runners have no Vulkan driver, so
+  one test there that asks for `ctx` fails at SETUP with `InitializationError` and takes all
+  three wheel jobs down — which also cancels the lavapipe and MoltenVK jobs that depend on
+  them. 0.23 shipped exactly that for one commit, and the failure reads like a broken wheel
+  rather than a misplaced test, which is the expensive part. `test_this_module_needs_no_gpu`
+  now asserts that no test in the file takes any parameter at all. The blanket form is
+  deliberate: "not `ctx`" needs a list of which fixtures are safe, and this needs nothing.
+
+  Generally: **when a file is a CI entry point, the constraint that makes it one belongs
+  inside the file as an assertion**, not in a comment and not in the workflow. The person
+  adding a test there is reading the tests, not `build.yml`.
 - **On lavapipe, a deliberately invalid draw is NOT usable as a diagnostic.** Validation does
   not stop execution, and lavapipe segfaults before the Logger drains, so diagnostics for
   validation errors must be host-side.

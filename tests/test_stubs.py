@@ -4,8 +4,10 @@ These tests are cheap and catch the common failure: an API renamed in C++ and
 forgotten in the stub, which silently misleads every user's type checker.
 """
 
+import inspect
 import pathlib
 import re
+import sys
 
 import pytest
 
@@ -16,6 +18,23 @@ PYI = pathlib.Path(bz.__file__).parent / "_core.pyi"
 
 def stub_text():
     return PYI.read_text(encoding="utf-8")
+
+
+def test_this_module_needs_no_gpu():
+    """This file is the only test CI runs on every wheel (CIBW_TEST_COMMAND),
+    and those runners have no Vulkan driver. A test here that asks for the `ctx`
+    fixture fails at SETUP with InitializationError and takes all three wheel
+    jobs with it — 0.23 shipped exactly that for one commit, and the failure
+    reads like a broken wheel rather than a misplaced test.
+
+    The rule is "no parameters" rather than "not ctx" because it needs no
+    maintenance: a driver-free fixture that is genuinely wanted here can be
+    added to this assertion, and the choice becomes deliberate."""
+    for name, function in vars(sys.modules[__name__]).items():
+        if not (name.startswith("test_") and inspect.isfunction(function)):
+            continue
+        taken = list(inspect.signature(function).parameters)
+        assert not taken, f"{name} takes {taken}; test_stubs.py must pass with no GPU"
 
 
 def test_stub_exists_and_package_is_typed():
@@ -152,15 +171,19 @@ def test_the_verbs_0_18_removed_are_gone():
         assert not hasattr(cls, attr), f"{cls.__name__}.{attr} is still bound"
 
 
-def test_the_target_types_are_not_constructible(ctx):
+def test_the_target_types_are_not_constructible():
     """0.23: a RenderTarget and a SwapchainRenderer come from the Context, and
     the constructors are GONE rather than kept beside the factories — a second
     spelling of one call is a fork (the 0.18 audit). The classes stay as types,
-    which is what isinstance and the annotations name."""
+    which is what isinstance and the annotations name.
+
+    No Context here on purpose — see test_this_module_needs_no_gpu. The refusal
+    happens before any argument is looked at, so None is as good as a device,
+    and the factory half of the claim is asserted in test_targets.py where a
+    Context already exists."""
     for cls in (bz.RenderTarget, bz.SwapchainRenderer):
         with pytest.raises(TypeError):
-            cls(ctx, 16, 16)
-    assert isinstance(ctx.create_render_target(16, 16), bz.RenderTarget)
+            cls(None, 16, 16)
 
     # The survivors of the same audit. read_pixels stays on the renderer because
     # a screenshot is different work; the two begin/end pairs stay because a

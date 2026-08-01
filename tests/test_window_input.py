@@ -445,6 +445,25 @@ def test_the_clipboard_round_trips(ctx):
         window = None
 
 
+def test_a_fresh_window_is_open_and_retitles(ctx):
+    """The two verbs an application loop starts and ends with. `is_open` is what
+    `while window.is_open()` reads, and a title change is the cheapest thing a
+    program does to a live window (a frame counter, a file name).
+
+    Trivial, and untested until 0.23 for exactly that reason — the api-coverage
+    report is what found them."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    try:
+        assert window.is_open()
+        window.set_title("bazalt retitled")
+        bz.poll_events()
+        assert window.is_open(), "a title change must not close the window"
+    finally:
+        window = None
+
+
 def test_the_clipboard_needs_a_window():
     """GLFW is initialized with the first Window and shut down with the last, so
     the clipboard says so instead of returning nothing. No `ctx` fixture: this must

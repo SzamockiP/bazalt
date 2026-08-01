@@ -98,6 +98,17 @@ here, so one migration covers them.
   ```
 - **`create_renderer` takes `present_mode`, `samples` and `stencil` as
   keywords.** Every call in the examples and the tests already did.
+- **`target.layer()` takes `mip` as a keyword.** `target.layer(0, 2)` reads as
+  a coordinate, and on a target over a 3D image the first argument IS one — a Z
+  slice. This is the same trap as `set_image(0, img, 3)` and it gets the same
+  rule. No example passed `mip` positionally.
+
+  ```python
+  # before
+  cmd.rendering(target.layer(0, 2))
+  # now
+  cmd.rendering(target.layer(0, mip=2))
+  ```
 - **`blend()` takes everything past `mode` as a keyword**, `attachment=`
   included. `blend(True, MULTIPLY, 1)` reading as "attachment 1" is the same
   trap, and the new factor arguments would make it worse. Every call in the
@@ -117,6 +128,13 @@ here, so one migration covers them.
   layers warn about a layer count of 1 on a `2D_ARRAY_COMPATIBLE` 3D image,
   because a future feature changes what that count means. One example run
   printed ten of those warnings before it drew a frame.
+- **The stub named the wrong exception in six places.** The docstrings still
+  said `ResourceError` for what this release moved to `StateError` (a double
+  `acquire()`, `set_present_mode` while an image is acquired, an occlusion query
+  outside a pass, `read_pixels` with nothing captured) or to `UnsupportedError`
+  (a blit or a mip chain this GPU cannot do, a compositor that refuses a
+  swapchain copy). The exception type is the contract, so the wrong name in the
+  file users read is the wrong contract.
 
 ## [0.22.0] — 2026-07-31
 

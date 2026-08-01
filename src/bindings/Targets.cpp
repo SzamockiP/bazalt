@@ -31,11 +31,18 @@ void bind_targets(py::module_& m)
         // Render-to-layer / render-to-mip: a lightweight view of one subresource.
         // Pass it straight to cmd.rendering(...). Cube face i == layer i, Vulkan
         // order +X, -X, +Y, -Y, +Z, -Z.
+        //
+        // mip is keyword-only since 0.23, by the rule the set_image break wrote:
+        // two adjacent ints of which the second selects a different axis is the
+        // trap that made set_image(0, img, 3) read as "index 3". layer(0, 2) is
+        // worse, because on a 3D target the FIRST int is a Z slice, so both
+        // spellings look like a coordinate.
         .def(
             "layer",
             [](std::shared_ptr<OffscreenTarget> self, std::uint32_t index, std::uint32_t mip)
             { return unwrap(self->layer(index, mip), nullptr); },
             py::arg("index"),
+            py::kw_only(),
             py::arg("mip") = 0)
         // Multiview: one pass into every layer (the shader uses gl_ViewIndex).
         .def("all_layers", [](std::shared_ptr<OffscreenTarget> self) { return unwrap(self->all_layers(), nullptr); });

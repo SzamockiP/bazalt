@@ -16,10 +16,13 @@ method is a plain `method` around a custom function record, not a `PyCFunction`,
 so the interpreter emits no `c_call` event for it and only module-level
 functions would have been seen.
 
-Enum members and the key/button constants are read, never called, so nothing can
-wrap them. They are matched by NAME against the identifiers in the test sources.
-`test_stubs.py` is excluded from that scan: it carries about 110 API names as
-string literals, and every one of them would count as a use.
+Enum members are read, never called, so nothing can wrap them. They are matched
+by NAME against the identifiers in the test sources. `test_stubs.py` is excluded
+from that scan: it carries about 110 API names as string literals, and every one
+of them would count as a use.
+
+Two things are deliberately outside the count, both since 0.23 and both for the
+same reason — they made the number argue with itself. See `public_surface`.
 """
 
 import functools
@@ -52,8 +55,13 @@ def public_surface():
             continue
         obj = getattr(bz, name)
 
+        # The 127 KEY_*, MOUSE_* and CURSOR_* integers are NOT counted (0.23).
+        # They are the pre-enum spelling of Key, MouseButton and CursorMode,
+        # which the census counts as enum members — so counting both reports
+        # the keyboard twice, and it is the biggest number in the file either
+        # way. `test_stubs.py` already asserts every name in `__all__` exists,
+        # which is the whole of what a read-only integer can be wrong about.
         if isinstance(obj, int) and not isinstance(obj, type):
-            surface[name] = "constant"
             continue
 
         if not isinstance(obj, type):
@@ -75,6 +83,16 @@ def public_surface():
 
         for member, value in vars(obj).items():
             if member.startswith("_") and member not in _DUNDERS:
+                continue
+            # A class with no py::init still has an `__init__` in its dict: the
+            # slot wrapper pybind installs to raise TypeError. Counting it asks
+            # for a test that constructs what cannot be constructed, and 23 of
+            # the 26 untouched methods were this before 0.23 measured it.
+            #
+            # The discriminator is the slot wrapper, not pybind's own
+            # `instancemethod`, because Recorder has usually replaced a real
+            # `__init__` with a plain function by the time anything asks.
+            if member == "__init__" and type(value).__name__ == "wrapper_descriptor":
                 continue
             key = f"{name}.{member}"
             if isinstance(value, property):
@@ -148,14 +166,14 @@ def untouched(surface, used, identifiers):
 
 
 def write_report(path, surface, missing):
-    kinds = ["method", "property", "function", "enum member", "constant", "exception"]
+    kinds = ["method", "property", "function", "enum member", "exception"]
     lines = [
         f"# API coverage — bazalt {bz.__version__}",
         "",
         "Written by `pytest --api-coverage`. A symbol counts as touched when a test",
         "calls it (methods, properties, functions) or names it (enum members,",
-        "constants, exception classes). See `tests/api_coverage.py` for why the two",
-        "halves are measured differently.",
+        "exception classes). See `tests/api_coverage.py` for why the two halves are",
+        "measured differently, and for the two things it does not count.",
         "",
         "| Kind | Symbols | Touched | Untouched |",
         "| --- | ---: | ---: | ---: |",

@@ -1,6 +1,6 @@
 """Per-subresource layout tracking: a pass that writes PART of an image.
 
-Until 0.18 an Image held one layout for the whole thing, so `target.layer(0, 1)`
+Until 0.18 an Image held one layout for the whole thing, so `target.layer(0, mip=1)`
 claimed mip 0 had reached the final layout too. The next barrier over the whole
 image then named an oldLayout that was true of one level and a lie about the
 rest. The documented workaround was "render every layer and every mip before you
@@ -49,7 +49,7 @@ def test_read_after_rendering_one_mip(ctx):
     level that was never drawn into — the point is that the readback is legal at
     all, not what it contains."""
     target = ctx.create_render_target(16, 16, color=bz.Format.RGBA8, mip_levels=3)
-    render_into(ctx, target, target.layer(0, 1))
+    render_into(ctx, target, target.layer(0, mip=1))
 
     assert target.color[0].read().shape == (16, 16, 4)
 
@@ -115,7 +115,7 @@ def test_render_one_mip_then_read_it_back_through_a_sample(ctx):
     level directly, so this is the round trip the old whole-image layout made
     impossible."""
     target = ctx.create_render_target(16, 16, color=bz.Format.RGBA8, mip_levels=3)
-    render_into(ctx, target, target.layer(0, 1))
+    render_into(ctx, target, target.layer(0, mip=1))
 
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     lod_frag = ctx.compile_shader(str(SHADER_DIR / "sample_lod.frag"), bz.ShaderStage.FRAGMENT)

@@ -226,19 +226,22 @@ def test_color_attachment_samples_as_a_texture(ctx, triangle_shaders, triangle_b
 # ── the factory and the named views (0.23) ────────────────────────────────
 
 
-def test_create_render_target_is_the_constructor_from_the_context(ctx):
-    """Both spellings share one implementation, so a clear through either
-    reads back the same. The factory exists because every other resource
-    comes from a create_* verb on the Context."""
+def test_create_render_target_is_the_only_way_to_make_one(ctx):
+    """The factory exists because every other resource comes from a create_*
+    verb on the Context, and the constructor is gone rather than kept beside
+    it — a second spelling of one call is a fork (the 0.18 audit).
+
+    The refusal half lives in test_stubs.py, which runs on every wheel with no
+    driver. This is the half that needs a device: the factory returns the class
+    the stub and every annotation name, and the thing it returns draws."""
     made = ctx.create_render_target(8, 8)
-    built = ctx.create_render_target(8, 8)
-    for target in (made, built):
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(target, clear_color=[1, 0, 0, 1])
-        cmd.end_rendering(target)
-        ctx.submit(cmd)
-    np.testing.assert_array_equal(made.color[0].read(), built.color[0].read())
+    assert isinstance(made, bz.RenderTarget)
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.begin_rendering(made, clear_color=[1, 0, 0, 1])
+    cmd.end_rendering(made)
+    ctx.submit(cmd)
+    assert np.all(made.color[0].read()[:, :, 0] == 255)
 
 
 def test_create_render_target_takes_borrowed_images(ctx):

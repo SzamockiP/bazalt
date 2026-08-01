@@ -898,7 +898,7 @@ class RenderTarget(RenderTargetBase):
     @property
     def height(self) -> int: ...
 
-    def layer(self, index: int, mip: int = 0) -> SubresourceTarget:
+    def layer(self, index: int, *, mip: int = 0) -> SubresourceTarget:
         """A view of one array layer / cube face (and optionally one mip) of this
         target, to render into with cmd.rendering(target.layer(i)). `mip=` selects
         a level for a layered AND mipped target (e.g. a mipped cube for prefiltered
@@ -909,7 +909,11 @@ class RenderTarget(RenderTargetBase):
         On a target over a 3D image (0.23) the index is the Z SLICE, and it
         shrinks with the mip: level 1 of a depth-4 volume has 2 slices. Needs
         ctx.supports(Feature.IMAGE_VIEW_2D_ON_3D), which is True everywhere but
-        a portability driver such as MoltenVK."""
+        a portability driver such as MoltenVK.
+
+        `mip` is keyword-only since 0.23: two adjacent ints of which the second
+        selects a different axis is the trap set_image was fixed for, and on a
+        3D target both spellings look like a coordinate."""
         ...
 
     def all_layers(self) -> MultiviewTarget:
@@ -1363,7 +1367,7 @@ class CommandBuffer:
         Mip 0 of every shared layer. Call generate_mipmaps on the destination if
         it needs a chain.
 
-        Raises ResourceError when this GPU cannot blit between the two formats —
+        Raises UnsupportedError when this GPU cannot blit between the two formats —
         BLIT_SRC/BLIT_DST are format features, not a given, and a linear filter
         needs the source to be filterable on top.
 
@@ -1421,8 +1425,9 @@ class CommandBuffer:
         SHADER_WRITE (GENERAL, mip 0 fresh from compute).
 
         Raises ResourceError if the image has a single level (create it with
-        mip_levels>1 or mipmaps=True), if the format can't be blitted/linearly
-        filtered, or if called inside a rendering scope."""
+        mip_levels>1 or mipmaps=True), UnsupportedError if the format can't be
+        blitted/linearly filtered on this GPU, and StateError inside a rendering
+        scope."""
         ...
 
     def push_constants(self, pipeline: Pipeline, offset: int, data: bytes) -> CommandBuffer:
@@ -1489,7 +1494,7 @@ class CommandBuffer:
 
         The handle is the identity, exactly as for timer(). Must sit inside a
         rendering scope — Vulkan requires the query to begin and end within one
-        render pass — and raises ResourceError otherwise.
+        render pass — and raises StateError otherwise.
 
         The count is not requested as precise, because precision needs the
         occlusionQueryPrecise feature and without it the spec allows any non-zero
@@ -2293,7 +2298,7 @@ class SwapchainRenderer(RenderTargetBase):
 
         The mode is a preference, so read present_mode back to see what the
         driver gave you. Call it outside the acquire/present pair: raises
-        ResourceError while an image is acquired, because recreation would
+        StateError while an image is acquired, because recreation would
         destroy the swapchain that image belongs to.
         """
         ...
@@ -2309,7 +2314,7 @@ class SwapchainRenderer(RenderTargetBase):
             if renderer.acquire():
                 renderer.present(cmd)
 
-        Acquiring twice on one frame raises ResourceError; in practice that
+        Acquiring twice on one frame raises StateError; in practice that
         means ctx.begin_frame() was not called.
         """
         ...
@@ -2337,9 +2342,9 @@ class SwapchainRenderer(RenderTargetBase):
         illegal by the spec and the validation layer reports it. The copy has to
         ride the frame's own submit.
 
-        Raises ResourceError when nothing has been captured, or when the
-        compositor refused to let the swapchain images be copied from — render
-        into a bz.RenderTarget and read that instead.
+        Raises StateError when nothing has been captured, and UnsupportedError
+        when the compositor refused to let the swapchain images be copied from —
+        render into a bz.RenderTarget and read that instead.
         """
         ...
 

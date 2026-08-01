@@ -132,8 +132,8 @@ def test_render_into_mip(ctx):
     cmd = ctx.create_command_buffer()
     cmd.begin()
     for m, c in enumerate(colors):
-        cmd.begin_rendering(target.layer(0, m), clear_color=c)  # clear-only, no draw
-        cmd.end_rendering(target.layer(0, m))
+        cmd.begin_rendering(target.layer(0, mip=m), clear_color=c)  # clear-only, no draw
+        cmd.end_rendering(target.layer(0, mip=m))
     ctx.submit(cmd)
 
     screen = ctx.create_render_target(8, 8)
@@ -260,7 +260,15 @@ def test_layer_out_of_range_is_refused(ctx):
 def test_mip_out_of_range_is_refused(ctx):
     target = ctx.create_render_target(16, 16, mip_levels=2)
     with pytest.raises(bz.ResourceError):
-        target.layer(0, 2)
+        target.layer(0, mip=2)
+
+
+def test_mip_is_keyword_only(ctx):
+    """0.23: layer(0, 2) read as a coordinate — and on a 3D target the first
+    int IS one. Same rule as the set_image break, on the same release."""
+    target = ctx.create_render_target(16, 16, mip_levels=2)
+    with pytest.raises(TypeError):
+        target.layer(0, 1)
 
 
 def test_cube_target_makes_a_sampleable_cubemap(ctx):
