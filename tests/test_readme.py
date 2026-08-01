@@ -13,6 +13,7 @@ pipelines, the descriptor sets, the recording) is the README line for line.
 import struct
 
 import numpy as np
+import pytest
 
 import bazalt as bz
 from conftest import SHADER_DIR
@@ -101,3 +102,26 @@ def test_readme_compute_writes_an_image(ctx):
     # pattern.comp writes uv.x into green and uv.y into blue.
     assert int(pixels[H // 2, 0, 1]) < int(pixels[H // 2, W - 1, 1])
     assert int(pixels[0, W // 2, 2]) < int(pixels[H - 1, W // 2, 2])
+
+
+def test_readme_notebook_section(extra_context):
+    """Kept in step with the 'In a notebook' section of README.md.
+
+    The claim the section makes is the ordering one: read the pixels inside the
+    block, because a closed Context refuses. Both halves are asserted here so the
+    advice cannot drift away from the behaviour."""
+    context = extra_context()
+    with context as ctx:
+        target = ctx.create_render_target(64, 64)
+        cmd = ctx.create_command_buffer()
+        cmd.begin()
+        with cmd.rendering(target, clear_color=[0.1, 0.2, 0.3, 1.0]):
+            pass
+        ctx.submit(cmd)
+        pixels = target.color[0].read()
+
+    assert pixels.shape == (64, 64, 4)
+    assert np.allclose(pixels[8, 8, :3], np.array([26, 51, 77]), atol=2)
+
+    with pytest.raises(bz.StateError):
+        target.color[0].read()

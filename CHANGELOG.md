@@ -5,6 +5,77 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.24.0] — 2026-08-02
+
+"Without a window". Bazalt runs in a Jupyter notebook, including one whose
+kernel sits on a server with no display. Most of that already worked, so the
+release is what did not: a Context you can close, a headless path that finally
+has a test, and the bug that test found on its first run.
+
+The rest is the second API review. One barrier the automatic tracker never
+emitted, one CPU core that every non-animating window was burning, and three
+properties that answered `None` for four different reasons each.
+
+### Added
+- **`ctx.close()` and `with bz.Context() as ctx:`.** Both stop the Context's
+  upload worker and hot-reload watcher and wait for its GPU work. Re-running a
+  notebook cell used to leave the previous set of threads running until the
+  garbage collector reached them, which on a shared machine is one more decoder
+  thread per run. `close()` is idempotent and `ctx.closed` reports it.
+
+  It does not free resources you still hold a name for. Those are live children
+  of the device, and destroying it under them is what Vulkan forbids — they go
+  when you drop them. Every verb that would start new work raises `StateError`
+  after a close, including `image.read()`, so read your pixels inside the
+  block.
+- **`bz.wait_events(timeout=None)`.** Sleeps until an OS event arrives, then
+  dispatches it like `poll_events`. Any program that only redraws on input — a
+  model viewer, a parameter editor, `examples/08_pyqt_integration` — held a CPU
+  core at 100% because `poll_events` was the only pump. `timeout` is in
+  seconds; `None` waits indefinitely. A hot-reload edit does not wake it, so
+  pass a timeout if you edit shaders while it runs.
+- **`examples/33_notebook`.** The notebook pattern end to end: a headless
+  render shown with PIL, an `ipywidgets` slider that re-renders, and a compute
+  cell that uses the GPU as a calculator. Needs Jupyter, and CI does not run
+  it, like every example.
+- **A "Vulkan clip space" section in the README.** Why +y points down, and why
+  `proj[1][1] *= -1` corrects your GLM matrix rather than Vulkan.
+
+### Fixed
+- **A recording that only READS a GPU-written buffer now waits for the write.**
+  The automatic tracker keeps its state per recording, so a second CommandBuffer
+  sharing a buffer had no predecessor to name and emitted no barrier.
+  `examples/28_gpu_culling` worked around it with two manual barriers, which are
+  now gone. The first read of a buffer in a recording synchronizes against
+  whatever wrote it, wherever that was. Writes were already covered, so nothing
+  that only writes pays anything new, and a vertex or uniform buffer waits on
+  the transfer stage alone.
+- **A Context on a machine with no display enabled `VK_KHR_swapchain` anyway.**
+  That extension needs `VK_KHR_surface` on the instance, which a headless
+  instance does not have, so every such Context emitted a validation error. It
+  is exactly the configuration a notebook on a remote server runs in. Found by
+  the new `BAZALT_FORCE_HEADLESS` test knob on its first run.
+
+### Changed (breaking)
+- **`Timer.ms` and `OcclusionQuery.samples` raise instead of answering `None`**
+  when the answer will never come. `UnsupportedError` when the GPU reports no
+  usable timestamps, `StateError` when the command buffer has been re-recorded
+  since. `None` now means one thing: the submit has not finished. A loop
+  polling for a number used to spin forever on a device that could not measure.
+- **`renderer.gpu_time_ms` raises `StateError`** when the Context was built
+  without `gpu_timing=True`, and `UnsupportedError` on a device with no usable
+  timestamps. `None` means the frame ring has not cycled once yet.
+
+Both are one release of exposure. If you tested for `None`, test for the
+exception instead.
+
+### Documentation
+- The stub now says that declaring one `(set, binding)` twice merges the
+  stages. It has always worked and reading the stub made it look like a
+  mistake.
+- The `begin_frame` docstring no longer names `DynamicBuffer`, which is not a
+  public symbol.
+
 ## [0.23.0] — 2026-08-01
 
 "3D textures, and the API review". A volume is one more kwarg on

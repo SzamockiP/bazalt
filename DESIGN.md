@@ -54,6 +54,16 @@ These settle most arguments.
    unrelated debt because the debt is old. This one collects work that is all the same
    subject. If a future release wants the same exemption, the test is that question: does
    the work share a subject, or only a mood?
+   **0.24 is not an exception, and it is written down because it nearly was.** The plan
+   called it "the seams" and argued that a cross-recording barrier, `close()`, and a
+   sentinel split share the subject "boundaries bazalt left implicit". That reading is
+   thin — rule 5's test asks whether the work shares a subject or only a mood, and
+   "boundaries" is broad enough to cover almost anything. What actually holds the release
+   together is narrower and worth stating plainly: **the feature is running bazalt without a
+   window**, and the rest is the API review the release was asked for. The barrier fix has
+   no connection to the notebook at all; it is here because it was bought separately. A
+   future release quoting 0.24 as precedent should quote that sentence, not the subject.
+
 6. **An API break is acceptable before 1.0, but you batch the breaks into one release.**
    This is also why 0.20 is not 0.19.1. `CHANGELOG.md` promises that a patch release never
    breaks the API, and removing `.export_values()` deletes about sixty names that were
@@ -1299,6 +1309,49 @@ entry. The release is a label, not the organizing axis.
   parks on a condition variable, so a Context that never loads an image pays a blocked
   thread and nothing else.
 
+### Closing a Context, and who decides what that means (0.24)
+
+- **`close()` stops the threads and does NOT destroy the device**, and the validation layers
+  decided that rather than taste.
+
+  The first version destroyed everything `~Context` destroys. The validation-as-assert
+  fixture refused it in one line — `vkDestroyDevice(): VkDevice has 3 leaked objects` —
+  because a resource the user still holds a name for is a live child of that device. From
+  there the spec allows exactly two moves: free the resource out from under a live Python
+  reference, or refuse to close while any name is bound. The first is a use-after-free with
+  extra steps. The second makes `with` useless in a notebook, where names persist in the
+  cell namespace by design — and the notebook is the whole reason for the feature.
+
+  So the device follows the last `shared_ptr`, as it always did, and `close()` owns what the
+  Context owns exclusively: the hot-reload watcher, the upload worker, and the GPU work in
+  flight. **That contract is more honest than the bigger one, not smaller.** The threads are
+  what accumulate across cell re-runs; the memory is freed when you stop holding it, which is
+  the only moment at which freeing it could ever have been correct.
+
+  A first attempt guarded `defer_destroy` so a resource outliving a closed Context became a
+  no-op. That is the crash-safe version of the wrong semantics: it does not free the handles
+  either, it only hides the leak from the destructor. Deleted.
+
+- **A closed Context refuses reads that could still physically run.** Its device is alive, so
+  `buffer.read()` after `close()` would work. It raises `StateError` anyway, because a
+  "closed" that holds for some verbs and not others is two contracts, and the caller would
+  have to learn which. Cached facts — `device_name`, `frames_in_flight`, `headless` — still
+  answer: they are copies, and a closed Context that cannot say what it WAS is harder to
+  debug rather than safer.
+
+- **The guard sits at the binding layer, one call per verb, not in the headers.** Same
+  address and the same argument as `require_same_context`: it catches a user error where the
+  GIL is held, instead of threading an error channel through every factory. Resources reach
+  it through `owner()`, and they need it — reading a render result outside the `with` block
+  that produced it is the notebook's most natural version of this mistake.
+
+- **`Window.close()` is deliberately absent.** The symmetry is tempting and the case is not
+  there: a notebook on a remote server has no window, and a `Window` in a local notebook is
+  already destroyed deterministically by `del`. The cost is real — some thirty methods that
+  would all need a closed-check — and worse, a `SwapchainRenderer` captures the raw
+  `GLFWwindow*`, which `py::keep_alive` currently makes impossible to outlive. `close()`
+  would open exactly that hole. It comes back if somebody asks.
+
 ### Asynchronous submits
 
 - **`submit(wait=False)` is paced by the ring, not by a fence per submit** (0.18). The
@@ -1832,13 +1885,38 @@ its price stops belonging here and becomes backlog.
   stops at `tracker_.tracks()`. **Price:** skipping the walk above some declared count means
   requiring a manual barrier there, which is a worse API. **Paid by:** nobody measured yet,
   which is the entry's real status.
-- **The tracker orders uses within ONE recording** (0.19, and true since 0.6 — written down
-  when indirect draw made it easy to hit). Two CommandBuffers that share a GPU-written buffer
-  are ordered by nothing the tracker can see, so the second recording needs a manual
-  `cmd.barrier()`; `examples/28_gpu_culling` does exactly that. **Price:** Context-level
-  tracking of which serial last wrote each resource. **Paid by:** correctness, not
-  performance — this is the one entry here whose price is charged in surprise rather than in
-  milliseconds, and it is the strongest candidate of the eight.
+- ✅ **The tracker orders uses within ONE recording** (0.19, and true since 0.6) — CLOSED in
+  0.24, and **the price this entry named was wrong in both directions.** It is worth keeping
+  for that, because the error is the reusable part.
+
+  The entry said the fix costs "Context-level tracking of which serial last wrote each
+  resource". It costs no Context state at all. Order independence comes from the floor being
+  unconditional: if the first READ of a buffer in a recording always synchronizes against
+  everything that could have written it, no record-time knowledge of the other recording is
+  needed, and record order does not have to match submit order. `use_image` had been doing
+  exactly this since 0.6 and `use` never did — the whole bug was that asymmetry.
+
+  It was also wider than the entry claimed. Writes were already covered: `execute()` emits a
+  replay wrap-around barrier at the top of any recording where `tracked_writes_` is set. What
+  nobody noticed is that the flag is per RECORDING, not per buffer, so the uncovered case is
+  a recording that writes *nothing the tracker sees* — an ordinary draw, whose only writes
+  are attachments. Reads, in other words. So the floor fires on reads only, and a writing
+  recording pays nothing new.
+
+  **Two lessons, and the second is the sharper one.** A price nobody has tried to pay drifts:
+  this one was written from the shape of the problem rather than from the code, and the code
+  already had the mechanism. And **the first test written for it passed before the fix** —
+  it used two writing recordings, which the wrap-around barrier already ordered. A test that
+  passes against the unfixed build is not a weak test, it is a test of something else; the
+  fix only became real when the test failed first. See `run_cross_recording_case` in
+  `tests/test_barriers.py`, whose negative control exists for the same reason.
+
+  Cost of the floor: one `vkCmdPipelineBarrier` per distinct buffer READ first in a
+  recording, and the source mask is narrowed by `BufferType`. Every type carries
+  `TRANSFER_DST`, so `copy_buffer` and `fill_buffer` reach any of them — the narrowing that
+  looked obvious, gating the floor on `STORAGE`, is unsound for exactly that reason — but
+  only `STORAGE` carries `VK_BUFFER_USAGE_STORAGE_BUFFER_BIT`. So a vertex, index or uniform
+  buffer waits on `TRANSFER` alone, which is idle in almost every frame.
 
 ---
 
@@ -2055,10 +2133,12 @@ Ordered by how often the friction shows up, not by effort.
    grounds that its first argument is the Window rather than the Context, and that is a
    distinction about the argument list, not about ownership: the renderer is a Context
    resource like the rest, so it is `ctx.create_renderer(window)`. See the decision above.
-9. **No `close()` and no context manager on `Context` or `Window`.** Re-running a notebook
-   cell leaks a device, an upload worker, a VMA allocator and a command pool until the garbage
-   collector gets to it. Rule 4 makes this worse than it looks: the notebook is the prototyping
-   surface.
+9. ✅ **No `close()` and no context manager on `Context` or `Window`.** DONE in 0.24 for
+   `Context`, and **the entry's own list of what leaks was half wrong**, which is what the
+   implementation was decided by. See the decision above. `Window` is deliberately not in
+   it: the notebook case never reaches a window, and closing one whose surface a
+   `SwapchainRenderer` still holds would dangle where `py::keep_alive` makes that impossible
+   today. It comes back as its own entry if somebody asks.
 
 ### Features, additive
 
@@ -2078,18 +2158,20 @@ Ordered by rule 4 — what makes pictures goes first.
 3. ✅ **`VertexFormat` stops at `UINT`.** There is no `UINT2/3/4`, so skinning joint indices
    (`uvec4`) cannot be delivered — `UBYTE4_NORM` carries the weights and nothing carries the
    indices. Add `UINT2/3/4` and `UBYTE4_UINT`. DONE in 0.23.
-4. **`bz.wait_events(timeout=None)`.** Any window that does not animate — a viewer, a
-   parameter editor, `examples/08_pyqt_integration` — spins at 100% CPU because `poll_events`
-   is the only pump. One GLFW call, free function for the reason `poll_events` is one.
+4. ✅ **`bz.wait_events(timeout=None)`.** DONE in 0.24, in the shape the entry gave. One
+   thing the entry did not see, and it is in the docstring: a hot-reload edit does NOT wake
+   it, because the watcher runs on its own thread and its result is applied from
+   `begin_frame()`. A program that only ever waits for input sees the reload at the next
+   click, so pass a timeout there.
 5. **`window.text_input()`.** Dropped files and the clipboard both shipped in 0.19, but there
    is no character callback, so typing a filename inside an application is impossible. Same
    per-cycle rotation as the key edges.
-6. **Y-flip through a negative-height viewport.** `proj[1][1] *= -1` appears in every example
-   and will appear in every user program. Bazalt emits the viewport itself
-   (`src/CommandBuffer.hpp:378`) and negative height has been core since 1.1, under a 1.2
-   baseline. **The catch, which is why this is last and not first:** it flips the winding, so
-   it is a Context-level decision (`Context(y_up=True)`, opt-in) and not a per-draw switch,
-   and every example and shader has to be read once when it lands.
+6. ❌ **Y-flip through a negative-height viewport.** REJECTED in 0.24 — see
+   "Rejected, and why". The entry named the catch correctly (it flips the winding) and drew
+   the wrong conclusion from it: a Context-level opt-in does not contain that cost, it gives
+   `FrontFace` and `CullMode` two meanings. And the line it wanted to remove belongs to GLM
+   rather than to Vulkan, which nobody had checked. The escape hatch already exists
+   (`cmd.set_viewport(0, h, w, -h)`), so what shipped is the explanation.
 
 ### Moved in from the ceilings, by the 0.22 audit
 
@@ -2128,20 +2210,33 @@ used to claim.
 Defects small enough that each is a line, plus one thing the review raised that turned out to
 be fine — recorded so it does not get re-raised.
 
-- `bazalt/_core.pyi:1674` — the `begin_frame` docstring names `DynamicBuffer`, which is not a
+- ✅ `bazalt/_core.pyi` — the `begin_frame` docstring names `DynamicBuffer`, which is not a
   public symbol. It should say "a DYNAMIC buffer". Internal vocabulary leaking into the file
-  users read. (In this file `DynamicBuffer` is correct: this is the developer's document.)
-- The stub does not say that declaring a binding twice merges the stages. See ergonomics 6.
-- `Timer.ms` and `OcclusionQuery.samples` return `None` for four different reasons — no
+  users read. FIXED in 0.24. (In this file `DynamicBuffer` is correct: this is the
+  developer's document.)
+- ✅ The stub does not say that declaring a binding twice merges the stages. FIXED in 0.24 —
+  the documentation half of ergonomics 6, which the entry called the more valuable half.
+- ✅ `Timer.ms` and `OcclusionQuery.samples` return `None` for four different reasons — no
   timestamp support, a re-recorded command buffer, an unfinished submit, no query pool. The
-  caller cannot tell "wait longer" from "this GPU cannot".
-- `renderer.gpu_time_ms` returns `0.0` on MoltenVK and `None` elsewhere for the same
-  question. The `0.0` is a documented HARD ceiling from 0.22, but two sentinels for one
-  answer is a separate problem from the one that forced it.
-- `Image.samples` cannot return anything but 1 to a user: the multisampled image is internal
-  and the exposed ones are the resolves. A property with one possible value.
-- `create_image(array, cube=True)` exists only to raise. An argument whose whole job is an
-  error message.
+  caller cannot tell "wait longer" from "this GPU cannot". FIXED in 0.24, and the 0.23
+  taxonomy is what made it expressible: `UnsupportedError` for the device, `StateError` for
+  the stale handle, `None` for the one remaining meaning. Breaking, in the narrow sense that
+  two `None`s became raises.
+- ✅ `renderer.gpu_time_ms` returns `0.0` on MoltenVK and `None` elsewhere for the same
+  question. FIXED in 0.24 by the same split, and the entry's framing was off: `0.0` is not a
+  sentinel, it is MoltenVK measuring and answering zero, which nothing can distinguish from
+  a fast frame (the HARD ceiling stands). The real defect was the same one above — `None`
+  meant "off", "cannot" and "not yet". `Disabled` joined `QueryStatus` for the first of
+  those, because `gpu_timing=False` is a decision the caller made rather than a limit.
+- **Looked at again in 0.24, and correct as it stands:** `Image.samples`. The entry called it
+  a property with one possible value, which is true, and the docstring has said exactly that
+  since it was written. Deleting it would have to be undone the day the sampleable-MSAA
+  backlog item lands, and until then it answers the question honestly.
+- **Looked at, and kept for the reason it was filed against:** `create_image(array,
+  cube=True)` exists only to raise. The removal was tried in 0.24. Without the parameter the
+  call matches no overload and pybind answers with its own dump of all four signatures,
+  which is where the caller started. An argument that exists to produce one sentence beats no
+  argument that produces forty lines.
 - **Looked at, and correct as it stands:** `create_sampler(anisotropy=True)`. The review filed
   it as a default that silently does nothing without `optional=[ANISOTROPIC_FILTERING]`. It is
   not: `ANISOTROPIC_FILTERING` is on the implicit list (`src/Context.hpp:1350`) and is enabled
@@ -2176,6 +2271,50 @@ UNASKED wearing a costume.
   than here, because the fix is a package to write, not a decision to revisit.
 - **A 2.0 for new hardware capabilities.** Ray tracing and mesh shaders become new entries
   in `Feature` (rule 3). Nothing about them needs a major break.
+
+- **`Context(y_up=True)`** (0.24). It sat in the backlog under "Features, additive" as the
+  biggest single ergonomic left, because `proj[1][1] *= -1` appears in eight examples and
+  will appear in every user program. Rejected once the question "why does Vulkan do this?"
+  got an answer, which is the order the rejection is worth remembering for.
+
+  Vulkan's framebuffer origin is the upper-left corner and NDC +y points down. That agrees
+  with the image memory layout (row 0 is the top row), with texture coordinates,
+  `gl_FragCoord`, `set_scissor`, the offsets `copy_image` and `blit_image` take, and the
+  raster order of a display. OpenGL's lower-left origin agrees with none of them, which is
+  why GL code carries vertical flips everywhere; D3D and Metal are also top-left. Vulkan
+  followed the memory and the majority.
+
+  So `proj[1][1] *= -1` does not correct Vulkan — **it corrects a GLM matrix.**
+  `glm::perspective` emits the OpenGL projection (y-up NDC, z in [-1,1]). Two of its three
+  mismatches go away with `GLM_FORCE_DEPTH_ZERO_TO_ONE`; the third is that sign, and a
+  projection written for Vulkan carries it already.
+
+  A Context flag would therefore compensate in the rasterizer for somebody else's matrix,
+  and charge three things. A negative viewport height mirrors the geometry, so it flips the
+  winding: `FrontFace` and `CullMode` would mean the opposite thing depending on a keyword
+  argument, which is rule 1 broken by a flag. The rasterizer would be y-up while
+  `image.read()`, `copy_image`, `blit_image` and `set_scissor` stay top-left — one Context,
+  two conventions. And every example and shader has to be read once.
+
+  Rule 2 is not at stake, which is what makes this a rejection rather than a ceiling:
+  `cmd.set_viewport(0, h, w, -h)` passes a negative height straight into `VkViewport`
+  (`src/CommandBuffer.hpp`), so a caller who wants the flip already has it. What shipped
+  instead is the explanation — a "Vulkan clip space" section in the README saying whose line
+  the flip is.
+
+- **Inline notebook display (`Image._repr_png_`)** (0.24). **SCOPE, fails the second
+  question.** `img.read()` returns a numpy array and `PIL.Image.fromarray(...)` displays it
+  in any notebook, local or browser-based. No Vulkan glue is involved anywhere in it.
+
+  It is also the same argument that already rejects `image.save(path)` two entries above,
+  and taking one while refusing the other would be a fork in the reasoning rather than in
+  the API. The gamepad precedent does not reach it either: a thin wrapper earns its place
+  when it has decisions in it, and every decision here — which layer, which mip, what a
+  depth or R32F image looks like as a picture — already belongs to the caller through
+  `read(layer=, mip=)`.
+
+  What the notebook actually needed was `close()`, coverage of the headless instance, and an
+  example. Those shipped in 0.24; see the decision above.
 
 - **SCOPE (fails the second question, for the rasterizer half only). Text rendering and a
   debug overlay.** Font rasterization is the ecosystem's (freetype, PIL), and the
@@ -2336,6 +2475,17 @@ ceiling to raise, so there is nothing for the five verdicts to grade.
   So the freeze is not a deadline for the backlog; it is a deadline for three lines of
   signature. Deciding how many releases the rest takes is a separate question from deciding
   when 1.0 ships.
+
+  **0.24 re-opened it, narrowly, and the reason is worth the entry.** 0.23's census looked
+  at SIGNATURES, and these are RETURN CONTRACTS: `Timer.ms`, `OcclusionQuery.samples` and
+  `renderer.gpu_time_ms` each turned two of their `None`s into exceptions. No signature
+  changed, so nothing the 0.23 sweep looked for would have caught them. **The lesson is the
+  0.23 one applied one level up:** an entry that generalizes gets implemented as its
+  enumeration, and "grep for the shape" has to include shapes that are not in the signature.
+  A return type of `Optional[T]` is a shape.
+
+  Two of the three are one release of exposure. Nothing else breaking is open, so 1.0 still
+  waits on no signature.
 
   **0.23 paid all three**, plus the break the census found hiding in `ShaderError`
   (capability gates), the `samplers=` → `textures=` rename that rode along, and a FOURTH
@@ -2966,8 +3116,11 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   ordering, the trigger range, and whether a stick at rest reads near zero. Run the
   example with a pad before trusting any of it.
 
-- **The headless fallback** (no windowing extensions) still has no coverage. It is a separate
-  path from the API version, which CI does cover since 0.15.
+- ✅ **The headless fallback** (no windowing extensions) still has no coverage. COVERED in
+  0.24 by `BAZALT_FORCE_HEADLESS=1`, and it found a bug on the first run: the device enabled
+  `VK_KHR_swapchain` on a headless instance, so every Context on a display-less machine
+  emitted `VUID-vkCreateDevice-ppEnabledExtensionNames-01387`. The knob rides inside the
+  ordinary suite through a fixture, so CI needed no leg of its own.
 - **The windowed path is verified by running the examples, and that is load-bearing.** The
   0.17 depth/stencil layout bug existed only for a target whose depth is scratch — a window —
   and every headless test passed with it in place. Run the new example before calling a

@@ -85,6 +85,28 @@ void main() {
 }
 ```
 
+## Vulkan clip space, and the one line every 3D program writes
+
+Vulkan puts the origin of a framebuffer in the top left corner, and +y in clip space points
+down. That agrees with the memory: row 0 of an image is the top row, texture coordinates
+start at the first texel, `set_scissor` and `copy_image` measure from the same corner, and a
+display scans the same way. OpenGL puts the origin at the bottom left, which is why OpenGL
+code flips images so often.
+
+So a projection matrix from GLM, pyrr or glm-py needs one correction, because those produce
+the **OpenGL** matrix:
+
+```python
+proj = glm.perspective(glm.radians(60.0), width / height, 0.1, 100.0)
+proj[1][1] *= -1        # GLM builds a y-up matrix; Vulkan clip space is y-down
+```
+
+The line belongs to the matrix, not to bazalt. A projection written for Vulkan carries the
+sign already and needs no flip. Bazalt has no `y_up` switch on purpose: a flipped viewport
+also reverses the triangle winding, which would give `CullMode` and `FrontFace` two meanings
+depending on a keyword argument. If you want the flipped viewport anyway,
+`cmd.set_viewport(0, height, width, -height)` gives it to you.
+
 ## Compute writes an image, and you edit it while it runs
 
 A compute shader fills an image texel by texel. A fullscreen triangle then samples that
@@ -214,6 +236,33 @@ ctx.submit(cmd)
 pixels = target.color[0].read()      # numpy (600, 800, 4) uint8
 ```
 
+## In a notebook, and on a machine with no display
+
+The code above is the whole notebook story: render offscreen, read the pixels, show them
+with the library you already use. A remote kernel on a university server works the same
+way, because bazalt starts the window system only when you ask for a `Window`.
+
+Use `with`, so each cell run releases the previous one. Re-running a cell otherwise leaves
+the old Context's worker threads alive until the garbage collector reaches them:
+
+```python
+import bazalt as bz
+from PIL import Image
+
+with bz.Context() as ctx:
+    target = ctx.create_render_target(512, 512)
+    # ...record and submit...
+    pixels = target.color[0].read()
+
+Image.fromarray(pixels)              # the cell shows it
+```
+
+Read the pixels **inside** the block. A Context that is closed starts no new work, and
+`target.color[0].read()` after the block raises `StateError` rather than a black image.
+
+`examples/33_notebook/notebook.ipynb` is the same thing you can run, with a slider that
+re-renders and a compute cell that uses the GPU as a calculator.
+
 ## What you get
 
 - **Vulkan, and not an engine.** You keep the pipelines, the command buffers and the memory.
@@ -281,6 +330,7 @@ Every directory in `examples/` runs on its own.
 | Data in and out | [24_video_texture](examples/24_video_texture) (per-frame updates), [22_instancing](examples/22_instancing) (20000 instances) |
 | Windows and devices | [19_multi_window](examples/19_multi_window), [20_multi_context](examples/20_multi_context) (two GPUs), [21_window_modes](examples/21_window_modes), [08_pyqt_integration](examples/08_pyqt_integration) |
 | Tools | [12_hot_reload](examples/12_hot_reload), [27_drop_and_icon](examples/27_drop_and_icon) (drag a picture onto the window), [30_gamepad](examples/30_gamepad) |
+| Notebooks | [33_notebook](examples/33_notebook) (headless rendering, a slider, GPU compute — needs Jupyter) |
 
 [CHANGELOG.md](CHANGELOG.md) lists what each release added. [DESIGN.md](DESIGN.md) gives the
 reasons behind the API.

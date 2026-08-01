@@ -486,7 +486,7 @@ def test_wait_events_with_a_timeout_returns(ctx):
     """The one thing a test can assert without a user at the keyboard: a timeout
     wakes it. Without the timeout this would block until somebody moved a mouse,
     which is the whole point of the call and also untestable."""
-    window = bz.Window(64, 64, "wait_events")
+    window = a_window()
     start = time.perf_counter()
     bz.wait_events(timeout=0.05)
     elapsed = time.perf_counter() - start
@@ -501,14 +501,14 @@ def test_wait_events_with_a_timeout_returns(ctx):
 def test_wait_events_rotates_the_per_cycle_state(ctx):
     """It is a pump, so the edge queries have to expire on it exactly as they do
     on poll_events — otherwise a program that waits sees a key press twice."""
-    window = bz.Window(64, 64, "wait_events rotation")
+    window = a_window()
     bz.poll_events()
     bz.wait_events(timeout=0.01)
     assert window.was_key_pressed(bz.Key.W) is False
 
 
 def test_wait_events_rejects_a_negative_timeout(ctx):
-    window = bz.Window(64, 64, "wait_events negative")
+    window = a_window()
     with pytest.raises(ValueError, match="negative"):
         bz.wait_events(timeout=-1.0)
 

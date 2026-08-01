@@ -451,7 +451,12 @@ def test_gpu_time_needs_the_flag(extra_context):
     cycled yet" — so a frame loop waiting for a number waited forever and had no
     way to find out."""
     context = extra_context(gpu_timing=False)
-    window = bz.Window(64, 64, "gpu timing off")
+    if context.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    try:
+        window = bz.Window(64, 64, "gpu timing off")
+    except bz.WindowError:
+        pytest.skip("no display available")
     renderer = context.create_renderer(window)
 
     with pytest.raises(bz.StateError, match="gpu_timing"):
@@ -461,7 +466,12 @@ def test_gpu_time_needs_the_flag(extra_context):
 def test_gpu_time_is_none_only_while_it_is_early(ctx):
     """The session Context has gpu_timing=True, so the property answers rather
     than raising — None until the ring cycles, a float after."""
-    window = bz.Window(64, 64, "gpu timing on")
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    try:
+        window = bz.Window(64, 64, "gpu timing on")
+    except bz.WindowError:
+        pytest.skip("no display available")
     renderer = ctx.create_renderer(window)
     value = renderer.gpu_time_ms
     assert value is None or isinstance(value, float)
