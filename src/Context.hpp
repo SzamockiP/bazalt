@@ -1167,6 +1167,18 @@ private:
             inst_builder.enable_extension(extension.c_str());
         }
 
+        // A test knob in the same family as BAZALT_FORCE_VULKAN_1_2, and not
+        // public API: it asks for the headless instance on a machine that has a
+        // display, so the fallback below is reachable where anyone can run it.
+        // Without it that path only executes on a display-less server — which is
+        // exactly where a remote notebook runs, and where nobody was testing.
+        const char* force_headless = std::getenv("BAZALT_FORCE_HEADLESS");
+        const bool forced_headless = force_headless && force_headless[0] == '1';
+        if (forced_headless)
+        {
+            inst_builder.set_headless(true);
+        }
+
         auto inst_ret = inst_builder.build();
 
         // A machine with no display has no windowing extensions, and vk-bootstrap
@@ -1189,6 +1201,10 @@ private:
                         "Vulkan: no windowing extensions present, continuing headless");
                 }
             }
+        }
+        else if (inst_ret && forced_headless)
+        {
+            ctx.headless_ = true;
         }
 
         if (!inst_ret)
@@ -1340,8 +1356,17 @@ private:
 
         // Presentation is optional: a headless or compute-only Context is legitimate.
         // SwapchainRenderer verifies present support at its own creation time.
+        //
+        // And impossible on a headless INSTANCE, which is the half this used to
+        // miss. VK_KHR_swapchain requires VK_KHR_surface at the instance level, so
+        // enabling the device extension without it is
+        // VUID-vkCreateDevice-ppEnabledExtensionNames-01387 — every Context on a
+        // display-less machine emitted that error. The driver advertises the device
+        // extension there regardless, so enable_extension_if_present answers yes and
+        // has no way to know what the instance did. Found by BAZALT_FORCE_HEADLESS on
+        // the first run, which is the argument for the knob in one line.
         ctx.swapchain_supported_ =
-            ctx.vkb_physical_device_.enable_extension_if_present(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+            !ctx.headless_ && ctx.vkb_physical_device_.enable_extension_if_present(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 
         // debugPrintfEXT() compiles to OpExtInst against the NonSemantic.DebugPrintf
         // instruction set, which the device must permit through
