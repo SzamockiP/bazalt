@@ -5,6 +5,81 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.23.0] — 2026-08-01
+
+3D textures, and the API review made real. A volume is one more kwarg on
+`create_image`, and with it come volumetric noise, colour-grading LUTs and
+raymarched clouds — see the two new examples. The rest of the release acts on
+the 0.22 ergonomics review: the keyboard becomes an enum, the descriptor pool
+sizes itself, targets come from the Context like everything else, and the
+error types now say what kind of mistake you made.
+
+This is the pre-1.0 breaking release. The breaks are small and they are all
+here, so one migration covers them.
+
+### Added
+- **3D textures.** `create_image(width, height, depth=n)` makes a
+  `VK_IMAGE_TYPE_3D` volume. A 4-dimensional `(depth, h, w, channels)` numpy
+  array makes one from pixels — a single-channel volume is `arr[..., None]`.
+  The volume works everywhere a 2D image works: `sampler3D` and `image3D` in
+  shaders, `update()` with a `(x, y, z, w, h, d)` region, `read()` shaped
+  `(d, h, w[, c])`, mipmaps whose chain counts the depth axis, `copy_image`,
+  `blit_image` and the cross-Context transfer.
+- **Render-to-slice.** A `RenderTarget` over a volume renders one Z slice at a
+  time through `target.layer(z)`. Needs
+  `ctx.supports(bz.Feature.IMAGE_VIEW_2D_ON_3D)`, which answers True on every
+  full Vulkan driver and False on MoltenVK — fill the volume with a compute
+  shader there. `examples/32_lut_grading` shows both paths.
+- **`bz.Key`, `bz.MouseButton` and `bz.CursorMode`.** The keyboard was the one
+  raw-int corner of the API. The values are GLFW's own, every query takes the
+  enum or the old int, and all the `KEY_*` constants stay valid.
+- **The automatic descriptor pool.** `ctx.create_descriptor_pool()` with no
+  arguments grows blocks sized from the layouts it serves. You stop doing
+  Vulkan's arithmetic, and a bindless array always fits its block. Explicit
+  sizes still give you the old fixed pool.
+- **`bz.StateError` and `bz.UnsupportedError`.** `ResourceError` covered three
+  different questions. Now `ResourceError` means "this resource or data cannot
+  do that", `StateError` means "right call, wrong moment" (a double
+  `acquire()`, a barrier inside a rendering scope), and `UnsupportedError`
+  means "this GPU cannot, with any argument". All three subclass
+  `BazaltError`.
+- **`ctx.create_render_target()`.** The `RenderTarget` constructor, spelled
+  from the Context like every other resource. The class stays.
+- **`SubresourceTarget` and `MultiviewTarget` are named types.**
+  `target.layer()` and `target.all_layers()` used to return an opaque
+  `RenderTargetBase`.
+- **`bz.BlendMode.MULTIPLY`.** The darkening overlay — ambient occlusion,
+  baked shadows — that the three preset modes could not spell.
+- **`VertexFormat.UINT2/3/4` and `UBYTE4_UINT`.** Skinning joint indices are a
+  `uvec4`, and nothing could carry them.
+- **Two examples.** `31_volume_raymarch` fills a 128³ density field in compute
+  and raymarches it as a `sampler3D`. `32_lut_grading` bakes a colour-grading
+  LUT by render-to-slice and applies it as one `sampler3D` lookup.
+
+### Breaking
+- **Capability errors change type.** Everything that fails because this GPU or
+  this Context lacks a capability now raises `bz.UnsupportedError`. Before,
+  the same failures arrived as `ResourceError` or `ShaderError` depending on
+  where they were found. Sequencing mistakes now raise `bz.StateError`.
+- **`index` is keyword-only** on `set_image`, `set_storage_image` and
+  `set_buffer`. `set_image(0, img, 3)` read as "index 3" and passed 3 as a
+  sampler.
+- **`create_buffer` and `Buffer.update` name their first parameter `data`.**
+  It was `list`, `array` or `size_in_bytes` depending on the overload, and
+  two of those shadow builtins.
+- **`create_descriptor_pool` renames `samplers=` to `textures=`.** The
+  builder declares `.texture()`, the pool counted `samplers=`, and both mean
+  `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER`. One name per thing.
+- **A full descriptor pool raises one type.** It raised `OutOfMemoryError` or
+  `ResourceError` depending on which `VkResult` the driver picked. It is
+  `ResourceError` now: the fix is a bigger pool, not freeing memory.
+
+### Fixed
+- **Barriers on a volume name `VK_REMAINING_ARRAY_LAYERS`.** The validation
+  layers warn about a layer count of 1 on a `2D_ARRAY_COMPATIBLE` 3D image,
+  because a future feature changes what that count means. One example run
+  printed ten of those warnings before it drew a frame.
+
 ## [0.22.0] — 2026-07-31
 
 "It runs on a Mac". Bazalt supplies macOS wheels now, and the full test suite

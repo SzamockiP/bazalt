@@ -172,6 +172,18 @@ entry. The release is a label, not the organizing axis.
   The callbacks must never rotate. One that did would mark the generation seen halfway
   through a cycle and hide every later event of the same cycle.
 
+- **The keyboard follows the gamepad: renamed, not translated** (0.23, ergonomics #5).
+  `Key`, `MouseButton` and `CursorMode` are `enum class`es whose values ARE the GLFW
+  ints, exactly as `GamepadButton` has been since 0.21, so the two cannot drift. The
+  query methods keep their `int` signatures — a pybind enum converts through its value —
+  which is what keeps every bare `KEY_*` int valid with zero aliasing code. Three naming
+  decisions worth recording: the top-row digits are `D0..D9` (an identifier cannot start
+  with a digit, and `NUM_*` would read as the keypad, which stays `KP_*`); the C++ member
+  for the delete key is `DEL` because `<windows.h>` defines `DELETE` as a macro, while
+  the Python name stays `DELETE` (the binding names it); and there is no `LAST` member,
+  because `KEY_LAST` is GLFW's array-size sentinel, not a key — the int remains for
+  anyone sizing an array.
+
 - **A gamepad is a free function returning a snapshot** (0.21). `glfwGetGamepadState`
   takes a joystick id and no window, so a pad belongs to the process — the same
   fact that makes `poll_events()` and the clipboard free functions. `get_gamepad`
@@ -457,7 +469,53 @@ entry. The release is a label, not the organizing axis.
   **a container that only ever grows is a leak with a delay.** The size of the
   thing being appended is what decides how long the delay is.
 
+### The 0.23 error taxonomy
+
+- **Three recoverable kinds, split by what the caller fixes** (0.23, breaking #3 plus a
+  wider move the census forced). `ResourceError` means "this resource or data cannot do
+  that" — fix the data. `StateError` means "right call, wrong moment" (a double
+  `acquire()`, a barrier inside a rendering scope, a CommandBuffer submitted twice) — fix
+  the order. `UnsupportedError` means "this GPU cannot, with any argument" — ask
+  `ctx.supports()` or take the escape hatch the message names. Siblings, not subclasses:
+  an `except bz.ResourceError` written for data problems must not swallow the other two.
+  The 0.20 rule (`ValueError` when the argument is wrong on its own) stays untouched
+  underneath.
+
+- **The capability gates moved out of `ShaderError` too** (0.23), which the plan's census
+  did not list and the grep found. `polygon_mode` needing WIREFRAME, `count>1` needing
+  BINDLESS, a tessellation stage needing its feature — all raised `ShaderError` because
+  they happened to be found in a builder or a compile. A missing feature is a fact about
+  the Context, not the file, and the compile-time and build-time gates go through one
+  function, so both now raise `UnsupportedError` and cannot disagree. Pipeline
+  DESCRIPTION errors (a stencil test against a target with no stencil, a missing fragment
+  shader) stay `ShaderError`. Hot reload keeps its contract: a recompile failure is still
+  `ShaderError`, and a feature gate cannot newly fail on reload because the feature set is
+  fixed per Context.
+
+- **A full descriptor pool is `ResourceError`, from either `VkResult`** (0.23).
+  `VK_ERROR_OUT_OF_POOL_MEMORY` mapped to `OutOfMemoryError` and
+  `VK_ERROR_FRAGMENTED_POOL` fell through to `ResourceError`, so one user mistake arrived
+  as two types depending on the driver's mood. The fix for a full pool is a bigger pool
+  (or the automatic one), not freeing memory, so `code_from_vk_result` sends both to
+  `Resource`.
+
 ### Render targets and resources
+
+- **The automatic descriptor pool grows blocks sized from the layout being served**
+  (0.23, ergonomics #1). `create_descriptor_pool()` with no arguments is auto mode: a
+  vector of `VkDescriptorPool` blocks, a new one whenever the current fills
+  (`OUT_OF_POOL_MEMORY` / `FRAGMENTED_POOL`), each sized `max(default, this request)` per
+  descriptor type with array `count=` included. Sizing from the layout is what satisfies
+  MoltenVK, which refuses a pool that cannot hold a whole bindless array even when only
+  some slots are written (0.22) — one mechanism, two reasons. Explicit sizes keep the old
+  fixed single block as the escape hatch, byte-for-byte. The trap the plan predicted was
+  real: a free must return to the block that allocated the set, and the `shared_ptr` alone
+  cannot say which, so every `DescriptorSet` carries its `block_`. The pool kwarg renamed
+  `samplers=` to `textures=` in the same pass (ergonomics #2): the builder's `.texture()`,
+  the pool's `samplers=` and the set's `set_image()` looked like three names for
+  `COMBINED_IMAGE_SAMPLER`, and the audit's answer is that only the first two were — 
+  `set_image` names its ARGUMENT, and `test_stubs.py` already asserts `set_texture` is
+  dead, so resurrecting that name would undo a recorded decision.
 
 - **Subresource rendering is kwargs plus a view handle, not a new verb** (0.13). `layers=` /
   `cube=` / `mip_levels=` on `RenderTarget` mirror `create_image` (rule 1).
@@ -472,6 +530,14 @@ entry. The release is a label, not the organizing axis.
   to the old hard-coded `{0,1,0,1}`, so existing targets do not change, and a per-mip scaled
   `extent()` covers renderArea, viewport and scissor with no extra code. Because both the
   view and the barrier read the same source, they cannot drift apart.
+
+  **The one exception is a 3D slice target** (0.23). Vulkan tracks a volume's layout per
+  mip with exactly one array layer, so `target.layer(z)` on a 3D attachment feeds `z` only
+  into the VIEW (`baseArrayLayer` selects the slice of a `2D_ARRAY_COMPATIBLE` volume) and
+  the barrier names layer 0. Feeding `z` into both — the 0.13 rule applied naively — would
+  index past the layout state. Consequence, documented rather than fought: rendering one
+  slice marks the whole mip, which is the granularity a volume's layout actually has, so a
+  partial render followed by a sample is legal.
 
 - **One layout for a whole image** (0.13, and it holds today). `on_rendering_recorded` marks
   the WHOLE image, because an `Image` holds one `layout_`. Render every layer and every mip
@@ -634,6 +700,53 @@ entry. The release is a label, not the organizing axis.
   says `Access.SHADER_READ` or `Access.SHADER_WRITE`. Both ends finish in `SHADER_READ_ONLY`
   and BOTH are marked on the `Image`, not just the destination: a source that still believed
   it was in `GENERAL` hands a stale `oldLayout` to the next `read()`.
+
+- **A 3D texture is `depth=` on `create_image`, and a numpy volume is ndim 4** (0.23).
+  Rule 1 both times. The empty overload takes `depth=n`; the array overload keeps every
+  existing meaning — ndim 3 is still `(h, w, channels)` — and a volume is `(d, h, w, c)`,
+  with a single-channel volume one `arr[..., None]` away. A `depth=` kwarg on the array
+  overload was rejected because the shape already carries the fact, and a validation-only
+  argument is the `create_image(array, cube=True)` defect the 0.22 review filed. The two
+  error messages that teach the rule are the ndim gate and the unsupported-shape branch,
+  because a raw `(64, 512, 512)` volume lands in the second with its depth read as
+  channels. A volume has exactly one array layer (Vulkan's rule), so `depth=` refuses
+  `layers=`, `cube=` and `samples>1` with the reason.
+
+- **Render-to-slice is the borrowed-images target plus the existing `layer(z)`** (0.23).
+  No new verb and no new kwarg: `layer()` already names the slice axis of an attachment,
+  and on a volume that axis shrinks with the mip (level 1 of a depth-4 volume has 2
+  slices), so the bound follows. The slice view is a 2D view of a 3D image — full Vulkan
+  always allows it, MoltenVK does not — so target creation gates on
+  `Feature::IMAGE_VIEW_2D_ON_3D` (the fourth portability row, enabled implicitly like the
+  other three) and the refusal names the compute escape hatch. Rendering the WHOLE 3D
+  target is refused at the binding layer: its main view is a 3D view, which Vulkan does not
+  accept as an attachment, and the message says `target.layer(z)`. A depth attachment
+  beside a 3D colour is refused as SCOPE — no use of a volume target has asked to z-test
+  into a slice, and the guard is one sentence. `all_layers()` on a volume is refused too:
+  multiview lights array layers, and a volume has one.
+
+- **A barrier on a volume says `VK_REMAINING_ARRAY_LAYERS`** (0.23). The validation layers
+  warn about a layer count of 1 on a `2D_ARRAY_COMPATIBLE` 3D image — with maintenance9
+  that count will mean one Z slice — and the first example run printed ten warnings before
+  drawing a frame. `Image::barrier_layers()` is the one place the choice lives; copy and
+  blit REGIONS keep the real count, because `VkImageSubresourceLayers` does not accept the
+  sentinel. `mark_subresource_contents` clamps the sentinel back to a real count, so the
+  layout state never sees it.
+
+- **`ctx.create_render_target()` is the constructor spelled from the Context** (0.23,
+  ergonomics #8). Buffers, images, samplers, pools and pipelines come from the Context;
+  the target was one of two stragglers, and remembering which types use which convention
+  was a coin flip. No `TargetType` enum: the two forms differ by their arguments (formats
+  plus a size, or images), which is the same overload pattern `create_image` uses, and an
+  enum would duplicate what the arguments already say. Both spellings share one `inline`
+  helper in `bindings/Common.hpp`, so they cannot drift. The class stays — rule 2.
+
+- **`SubresourceTarget` and `MultiviewTarget` are registered, empty, and that is the whole
+  feature** (0.23). The base is polymorphic, so pybind downcasts the existing `layer()` /
+  `all_layers()` returns to the registered derived type by itself. Until then both came
+  back as opaque `RenderTargetBase` and the stub could say nothing about them. No methods:
+  each is a view that exists to be handed to `cmd.rendering(...)`, and the parent keeps
+  every knob.
 
 - **Cross-Context image transfer is the fourth overload of `create_image`** (0.15).
   `create_image` already had three overloads that differ by the type of the first argument
@@ -1791,15 +1904,21 @@ interesting part.
 
 ### Breaking, and therefore before the freeze
 
-1. **`DescriptorSet.set_image` takes `index` positionally.** `set_image(binding, image,
+**All three landed in 0.23**, which is the pre-1.0 break batch rule 6 asked for. The
+entries stay for their reasoning; each carries its outcome.
+
+1. ✅ **`DescriptorSet.set_image` takes `index` positionally.** `set_image(binding, image,
    sampler=None, index=0)` — everywhere else in the API the extras are keyword-only, so
    `set_image(0, img, 3)` reads as "index 3" and passes 3 as a sampler. Make it
    `*, index`. `bazalt/_core.pyi:609`. Shipped in 0.21, so the exposure is one release.
-2. **`create_buffer` and `Buffer.update` name their first parameter `list`, `array` or
+   DONE in 0.23, on all three set verbs — one rule, not one exception.
+2. ✅ **`create_buffer` and `Buffer.update` name their first parameter `list`, `array` or
    `size_in_bytes`.** These are the names an IDE shows, and two of them shadow builtins.
    `data` in all of them. Breaks only a caller who passed by keyword, which nothing in the
-   examples or the tests does. `bazalt/_core.pyi:401` and `:1706`.
-3. **`ResourceError` is the bag for everything.** It covers a strided numpy view, a resource
+   examples or the tests does. `bazalt/_core.pyi:401` and `:1706`. DONE in 0.23 — one name
+   across the overloads is also what makes the keyword spelling work whichever body the
+   argument picks.
+3. ✅ **`ResourceError` is the bag for everything.** It covers a strided numpy view, a resource
    from another Context, a double `acquire()`, `set_present_mode` while an image is acquired,
    an unsupported blit, a query outside a pass, a missing file and an exhausted pool. The
    `BazaltError` docstring divides errors into "bazalt had to ask an object" and "the argument
@@ -1809,11 +1928,17 @@ interesting part.
    first time because `except` clauses freeze at 1.0. Decide before the freeze either way;
    this is the only entry in the file whose cost goes UP if it is deferred.
 
+   DONE in 0.23, and wider than proposed: the census found a THIRD kind hiding in
+   `ShaderError` too (capability gates in the builders and the compiler), so the split is
+   `StateError` plus `UnsupportedError`. See "The 0.23 error taxonomy" above for the full
+   reasoning and what stayed where.
+
 ### Ergonomics, additive
 
 Ordered by how often the friction shows up, not by effort.
 
-1. **The descriptor pool makes the user do Vulkan's arithmetic.**
+1. ✅ **The descriptor pool makes the user do Vulkan's arithmetic.** DONE in 0.23 — the
+   automatic pool, exactly the fix this entry proposed. See the decision above.
    `create_descriptor_pool(max_sets=4, uniform_buffers=8, samplers=4)` asks for per-type
    descriptor counts, and `allocate_frame_set` then consumes `frames_in_flight` sets and
    `frames_in_flight × N` descriptors (`src/DescriptorSet.hpp:499`). So the correct number
@@ -1827,10 +1952,13 @@ Ordered by how often the friction shows up, not by effort.
    SPIR-V"). Layouts stay hand-declared, with the stage they carry and the reload behaviour
    that decision protects. What goes away is only the arithmetic, which the declarators
    already know at build time. Anybody re-reading both entries should not conflate them.
-2. **Three names for one descriptor type.** The builder says `.texture()`, the pool says
+2. ✅ **Three names for one descriptor type.** The builder says `.texture()`, the pool says
    `samplers=`, the set says `set_image()`, and all three mean
    `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER`. Rule 1 says one name per thing. Fold the
-   rename into entry 1, since that call site is being changed anyway.
+   rename into entry 1, since that call site is being changed anyway. DONE in 0.23:
+   `samplers=` became `textures=`. `set_image` stays — it names its argument (an Image),
+   not the descriptor type, and `test_stubs.py` asserts `set_texture` is dead. Two of the
+   three were the same name problem; the third was a different question.
 3. **`bind_descriptor_set` and `push_constants` take a pipeline that is already known.**
    `cmd.bind_descriptor_set(scene_set, scene_pipe, set=0)` passes three arguments of which two
    are derivable: `bound_graphics_pipeline_` and `bound_compute_pipeline_` are already kept as
@@ -1841,7 +1969,8 @@ Ordered by how often the friction shows up, not by effort.
    `begin_rendering`/`end_rendering`, `begin_label`/`end_label` — and this one means "reset and
    start recording" while being named like half of a pair. Add `with ctx.record() as cmd:`;
    `begin()` stays.
-5. **The keyboard is bare ints while the gamepad is an enum.** `bz.KEY_W: int`,
+5. ✅ **The keyboard is bare ints while the gamepad is an enum.** DONE in 0.23, in the
+   backward-compatible shape this entry predicted. See the decision beside the gamepad's. `bz.KEY_W: int`,
    `set_cursor_mode(mode: int)` and `is_mouse_button_pressed(button: int)` sit next to
    `bz.GamepadButton.A`, which got an `IntEnum` in 0.21. Nothing type-checks, nothing
    autocompletes as a group, and `is_key_pressed(bz.MOUSE_BUTTON_LEFT)` compiles. `Key`,
@@ -1855,10 +1984,13 @@ Ordered by how often the friction shows up, not by effort.
    documentation half is worth more than the sugar.
 7. **`set` has no default on the graphics builder and defaults to 0 on the compute one.**
    Same declarator, two contracts.
-8. **Two factory conventions.** Buffers, images, samplers, pools, command buffers and
+8. ✅ **Two factory conventions.** Buffers, images, samplers, pools, command buffers and
    pipelines come from the Context; `RenderTarget` and `SwapchainRenderer` are top-level
    constructors taking the Context as their first argument. Either is fine, both is a coin
-   flip to memorize. `ctx.create_render_target()` as an alias; the class stays.
+   flip to memorize. `ctx.create_render_target()` as an alias; the class stays. DONE in
+   0.23 for the offscreen target. `SwapchainRenderer` stays a constructor: its first
+   argument is the Window, not the Context, so it was never the same coin flip — and a
+   `window.create_renderer()` is a different proposal nobody has made.
 9. **No `close()` and no context manager on `Context` or `Window`.** Re-running a notebook
    cell leaks a device, an upload worker, a VMA allocator and a command pool until the garbage
    collector gets to it. Rule 4 makes this worse than it looks: the notebook is the prototyping
@@ -1868,16 +2000,21 @@ Ordered by how often the friction shows up, not by effort.
 
 Ordered by rule 4 — what makes pictures goes first.
 
-1. **3D textures.** No `image3D` or `sampler3D` anywhere, which rules out 3D LUT colour
+1. ✅ **3D textures.** No `image3D` or `sampler3D` anywhere, which rules out 3D LUT colour
    grading, volumetric noise and every volume renderer. The descriptor type does not change
    (still combined-image-sampler or storage-image), so the work is image creation and a view
-   type: `create_image(w, h, depth=n)`. Best ratio of picture to code on this list.
-2. **A blend escape hatch.** Three preset modes and no way past them. `MULTIPLY` — an AO or
-   shadow overlay — cannot be spelled at all, nor can a min/max blend op. Rule 2 says leave the
-   hatch: `BlendMode.MULTIPLY` first, `blend(enable, src=, dst=, op=)` underneath it.
-3. **`VertexFormat` stops at `UINT`.** There is no `UINT2/3/4`, so skinning joint indices
+   type: `create_image(w, h, depth=n)`. Best ratio of picture to code on this list. DONE in
+   0.23, the release's headline, render-to-slice included — see the decisions above and
+   `examples/31_volume_raymarch` / `32_lut_grading`.
+2. **A blend escape hatch, half done.** Three preset modes and no way past them. `MULTIPLY`
+   — an AO or shadow overlay — cannot be spelled at all, nor can a min/max blend op. Rule 2
+   says leave the hatch: `BlendMode.MULTIPLY` first, `blend(enable, src=, dst=, op=)`
+   underneath it. 0.23 shipped `MULTIPLY`, which was the case somebody actually hit; the
+   factor/op hatch stays here — it needs two new enums and a mixing rule, and nothing has
+   asked past the named mode yet.
+3. ✅ **`VertexFormat` stops at `UINT`.** There is no `UINT2/3/4`, so skinning joint indices
    (`uvec4`) cannot be delivered — `UBYTE4_NORM` carries the weights and nothing carries the
-   indices. Add `UINT2/3/4` and `UBYTE4_UINT`.
+   indices. Add `UINT2/3/4` and `UBYTE4_UINT`. DONE in 0.23.
 4. **`bz.wait_events(timeout=None)`.** Any window that does not animate — a viewer, a
    parameter editor, `examples/08_pyqt_integration` — spins at 100% CPU because `poll_events`
    is the only pump. One GLFW call, free function for the reason `poll_events` is one.
@@ -2129,6 +2266,10 @@ ceiling to raise, so there is nothing for the five verdicts to grade.
   So the freeze is not a deadline for the backlog; it is a deadline for three lines of
   signature. Deciding how many releases the rest takes is a separate question from deciding
   when 1.0 ships.
+
+  **0.23 paid all three**, plus the break the census found hiding in `ShaderError`
+  (capability gates) and the `samplers=` → `textures=` rename that rode along. Nothing
+  breaking remains on the backlog, so 1.0 no longer waits on any signature.
 - **Every public symbol from `_core.pyi` is touched by a test.** An unexercised binding is
   an unimplemented binding. 0.22 made this measurable rather than aspirational:
   `pytest --api-coverage` writes `api_coverage.md`, and the answer on the day it was
