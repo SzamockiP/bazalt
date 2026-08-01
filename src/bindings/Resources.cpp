@@ -9,7 +9,10 @@ void bind_resources(py::module_& m)
         .def(
             "update",
             [](Buffer& buffer, std::string_view data, size_t offset)
-            { unwrap(buffer.update(std::as_bytes(std::span(data.data(), data.size())), offset), nullptr); },
+            {
+                require_open(buffer.owner(), "Buffer.update");
+                unwrap(buffer.update(std::as_bytes(std::span(data.data(), data.size())), offset), nullptr);
+            },
             py::arg("data"),
             py::kw_only(),
             py::arg("offset") = 0)
@@ -17,6 +20,7 @@ void bind_resources(py::module_& m)
             "update",
             [](Buffer& buffer, py::buffer b, size_t offset)
             {
+                require_open(buffer.owner(), "Buffer.update");
                 py::buffer_info info = b.request();
                 const size_t nbytes = contiguous_nbytes(info, "Buffer.update");
                 unwrap(buffer.update({static_cast<const std::byte*>(info.ptr), nbytes}, offset), nullptr);
@@ -28,6 +32,7 @@ void bind_resources(py::module_& m)
             "update",
             [](Buffer& buffer, py::list list, std::optional<DataType> dataType, size_t offset)
             {
+                require_open(buffer.owner(), "Buffer.update");
                 if (list.empty())
                     return;
                 DataType actualType = resolve_data_type(list, dataType, DataType::INT32);
@@ -47,6 +52,7 @@ void bind_resources(py::module_& m)
             "read",
             [](Buffer& self, py::object dtype) -> py::array
             {
+                require_open(self.owner(), "Buffer.read");
                 auto bytes = unwrap(self.read_bytes(), nullptr);
                 const py::dtype dt = py::dtype::from_args(dtype);
                 const auto itemsize = static_cast<size_t>(dt.itemsize());
@@ -74,6 +80,7 @@ void bind_resources(py::module_& m)
             "wait",
             [](Buffer& self)
             {
+                require_open(self.owner(), "Buffer.wait");
                 py::gil_scoped_release release;
                 self.wait();
             });
@@ -130,6 +137,7 @@ void bind_resources(py::module_& m)
             "wait",
             [](Image& self)
             {
+                require_open(self.owner(), "Image.wait");
                 std::expected<void, Error> r;
                 {
                     py::gil_scoped_release release;
@@ -140,7 +148,10 @@ void bind_resources(py::module_& m)
         .def(
             "read",
             [](Image& self, std::uint32_t layer, std::uint32_t mip) -> py::array
-            { return image_to_numpy(self, layer, mip); },
+            {
+                require_open(self.owner(), "Image.read");
+                return image_to_numpy(self, layer, mip);
+            },
             py::kw_only(),
             py::arg("layer") = 0,
             py::arg("mip") = 0)
@@ -163,6 +174,7 @@ void bind_resources(py::module_& m)
                 {
                     raise_error(err_resource("update(): this image has no Context"));
                 }
+                require_open(*context, "Image.update");
                 if (self->samples() != 1)
                 {
                     raise_error(err_resource(

@@ -181,6 +181,43 @@ inline void require_same_context(const Context* a, const Context* b, const char*
     }
 }
 
+// Anything that would start new GPU work is refused once the Context is closed.
+// Same address and the same argument as require_same_context above: a user
+// error, caught where the GIL is held, rather than an error channel threaded
+// through every factory in the headers.
+//
+// StateError because that is what the 0.23 taxonomy created it for — not a bad
+// argument (the arguments are fine) and not a device that cannot (it can, and
+// the device outlives close()), but a call made at the wrong point in a
+// sequence. Refusing a read that could physically still run is deliberate: a
+// "closed" that holds for some verbs and not others is two contracts.
+//
+// The pointer overload is the one resources use — they hold their Context by
+// owner(), and reading a render result after the `with` block that produced it
+// has ended is the notebook's most natural version of this mistake.
+inline void require_open(const Context* context, const char* what);
+
+inline void require_open(const Context& context, const char* what)
+{
+    if (context.closed())
+    {
+        raise_error(err_state(
+            std::format(
+                "{}: this Context is closed. close(), and the end of a `with` block, "
+                "stop its upload worker and wait for the GPU work it started, so it "
+                "begins no more. Build a new Context.",
+                what)));
+    }
+}
+
+inline void require_open(const Context* context, const char* what)
+{
+    if (context != nullptr)
+    {
+        require_open(*context, what);
+    }
+}
+
 // clear_color=None preserves the attachment, and a multisampled target has
 // nothing to preserve: its multisampled image is transient (storeOp
 // DONT_CARE) and the pass result lives in the resolve image, which is not

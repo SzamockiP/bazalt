@@ -2281,6 +2281,40 @@ class Context:
         """
         ...
 
+    def close(self) -> None:
+        """Stop this Context's worker threads and finish its GPU work.
+
+        Use it through `with`, which calls it at the end of the block:
+
+            with bz.Context() as ctx:
+                target = ctx.create_render_target(256, 256)
+                ...
+            pixels = target.color[0].read()   # StateError: the Context is closed
+
+        A notebook is why this exists. Re-running a cell leaves the previous
+        Context's upload worker and hot-reload watcher running until the garbage
+        collector reaches them, so a shared machine collects one decoder thread
+        per run. close() ends them at a point you choose.
+
+        What it does NOT do is free the GPU memory of resources you still hold a
+        name for. Those are live children of the device, and destroying it under
+        them is what the Vulkan spec forbids. They are freed when you drop them,
+        which is the only moment at which freeing them is correct.
+
+        Calling it twice does nothing. Reading a cached property
+        (device_name, frames_in_flight, headless) still works afterwards; every
+        verb that would start new work raises StateError.
+        """
+        ...
+
+    @property
+    def closed(self) -> bool:
+        """True after close(), or after a `with` block over this Context ends."""
+        ...
+
+    def __enter__(self) -> Context: ...
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool: ...
+
 class SwapchainRenderer(RenderTargetBase):
     """Presents to a window. One implementation of a render target.
 
