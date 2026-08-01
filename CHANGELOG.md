@@ -7,7 +7,7 @@ patch versions never do).
 
 ## [0.23.0] — 2026-08-01
 
-3D textures, and the API review made real. A volume is one more kwarg on
+"3D textures, and the API review". A volume is one more kwarg on
 `create_image`, and with it come volumetric noise, colour-grading LUTs and
 raymarched clouds — see the two new examples. The rest of the release acts on
 the 0.22 ergonomics review: the keyboard becomes an enum, the descriptor pool
@@ -72,7 +72,7 @@ here, so one migration covers them.
   and raymarches it as a `sampler3D`. `32_lut_grading` bakes a colour-grading
   LUT by render-to-slice and applies it as one `sampler3D` lookup.
 
-### Breaking
+### Changed (breaking)
 - **Capability errors change type.** Everything that fails because this GPU or
   this Context lacks a capability now raises `bz.UnsupportedError`. Before,
   the same failures arrived as `ResourceError` or `ShaderError` depending on
