@@ -27,7 +27,7 @@ def on_message(msg):
 
 window = bz.Window(800, 600, "Bazalt - Hot Reload (edit the shaders while running)")
 ctx = bz.Context(logger, hot_reload=True)   # <-- the only new line
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 vert = ctx.compile_shader("shader.vert", bz.ShaderStage.VERTEX)
 frag = ctx.compile_shader("shader.frag", bz.ShaderStage.FRAGMENT)

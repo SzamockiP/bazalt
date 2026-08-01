@@ -34,7 +34,7 @@ def on_message(msg):
 
 window = bz.Window(W, H, "Bazalt Demo - Compute Post-processing", logger=logger)
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 # Compute: writes the storage image. No stage arguments, no target.
 gen_shader = ctx.compile_shader("pattern.comp", bz.ShaderStage.COMPUTE)

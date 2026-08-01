@@ -78,7 +78,7 @@ def test_one_draw_paints_every_instance(ctx, instanced):
     """Four quadrants, four colours, one draw — and one instance paints only
     the first, which is what makes this a two-sided test rather than a
     screenshot."""
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pipeline = instanced(target, [bz.VertexFormat.FLOAT2, bz.VertexFormat.FLOAT4])
     vbuf = ctx.create_buffer(QUAD, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
     ibuf = float_instance_buffer(ctx, INSTANCES)
@@ -100,7 +100,7 @@ def test_ubyte4_norm_instance_colour(ctx, instanced):
     The instance rows are packed by hand (2 floats + 4 bytes), which is the
     layout the format list describes.
     """
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pipeline = instanced(target, [bz.VertexFormat.FLOAT2, bz.VertexFormat.UBYTE4_NORM])
     vbuf = ctx.create_buffer(QUAD, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
 
@@ -117,7 +117,7 @@ def test_ubyte4_norm_instance_colour(ctx, instanced):
 
 def test_strip_covers_the_quad_a_list_leaves_half(ctx, instanced):
     """The same four vertices: a strip makes two triangles, a list makes one."""
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     vbuf = ctx.create_buffer(QUAD, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
     ibuf = float_instance_buffer(ctx, INSTANCES[:1])
 
@@ -135,7 +135,7 @@ def test_strip_covers_the_quad_a_list_leaves_half(ctx, instanced):
 
 def test_draw_indexed_takes_an_instance_count(ctx, instanced):
     """draw_indexed(instances=) is what draw_indexed_instanced used to be."""
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pipeline = instanced(target, [bz.VertexFormat.FLOAT2, bz.VertexFormat.FLOAT4],
                          topology=bz.Topology.TRIANGLE_LIST)
     vbuf = ctx.create_buffer(QUAD, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)

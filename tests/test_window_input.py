@@ -117,7 +117,7 @@ def test_the_swapchain_follows_a_mode_change(ctx):
     window = a_window()
     renderer = None
     try:
-        renderer = bz.SwapchainRenderer(window, ctx)
+        renderer = ctx.create_renderer(window)
         pipeline = solid_pipeline(ctx, renderer)
         cmd = ctx.create_command_buffer()
         cmd.begin()
@@ -193,7 +193,7 @@ def test_present_mode_switches_at_runtime(ctx):
     window = a_window()
     renderer = None
     try:
-        renderer = bz.SwapchainRenderer(window, ctx, present_mode=bz.PresentMode.FIFO)
+        renderer = ctx.create_renderer(window, present_mode=bz.PresentMode.FIFO)
         pipeline = solid_pipeline(ctx, renderer)
         cmd = ctx.create_command_buffer()
         cmd.begin()
@@ -221,7 +221,7 @@ def test_present_mode_cannot_change_mid_frame(ctx):
     window = a_window()
     renderer = None
     try:
-        renderer = bz.SwapchainRenderer(window, ctx, present_mode=bz.PresentMode.FIFO)
+        renderer = ctx.create_renderer(window, present_mode=bz.PresentMode.FIFO)
         pipeline = solid_pipeline(ctx, renderer)
         cmd = ctx.create_command_buffer()
         cmd.begin()

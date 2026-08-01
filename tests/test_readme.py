@@ -21,7 +21,7 @@ from conftest import SHADER_DIR
 def test_readme_triangle(ctx):
     """Kept in step with the 'A triangle' and 'The same code, with no window'
     sections of README.md."""
-    target = bz.RenderTarget(ctx, 800, 600, depth=bz.Format.D32F)
+    target = ctx.create_render_target(800, 600, depth=bz.Format.D32F)
 
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(ctx.compile_shader(str(SHADER_DIR / "triangle.vert"),
@@ -67,7 +67,7 @@ def test_readme_compute_writes_an_image(ctx):
                 .push_constant(4)
                 .build())
 
-    target = bz.RenderTarget(ctx, W, H)
+    target = ctx.create_render_target(W, H)
     present = (ctx.graphics_pipeline()
                .vertex_shader(ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"),
                                                  bz.ShaderStage.VERTEX))

@@ -48,7 +48,7 @@ def test_headless_submits_rotate_the_ring(ctx, fullscreen_vert):
     second submit rendered green again: this test pins the fix.
     """
     frag = ctx.compile_shader(str(SHADER_DIR / "ubo.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(fullscreen_vert)
                 .fragment_shader(frag)
@@ -86,7 +86,7 @@ def test_update_before_each_submit_always_wins(ctx, fullscreen_vert):
     must be what that submit renders.
     """
     frag = ctx.compile_shader(str(SHADER_DIR / "ubo.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(fullscreen_vert)
                 .fragment_shader(frag)

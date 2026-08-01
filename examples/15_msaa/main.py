@@ -2,7 +2,7 @@
 
 A spinning cube on a dark background: its silhouette edges alias hard at
 samples=1 and smooth out at samples=4. MSAA lives entirely on the renderer —
-`SwapchainRenderer(window, ctx, samples=4)` — and the pipeline picks the sample
+`ctx.create_renderer(window, samples=4)` — and the pipeline picks the sample
 count off the target it builds against, so nothing else in the frame changes.
 
 If the GPU exposes SAMPLE_RATE_SHADING we also turn on per-sample shading, which
@@ -25,7 +25,7 @@ window = bz.Window(1024, 720, "Bazalt Demo - MSAA")
 ctx = bz.Context(logger, optional=[bz.Feature.SAMPLE_RATE_SHADING])
 
 samples = min(4, ctx.max_samples())
-renderer = bz.SwapchainRenderer(window, ctx, samples=samples)
+renderer = ctx.create_renderer(window, samples=samples)
 print(f"MSAA: {samples}x (GPU max {ctx.max_samples()}x)")
 
 vert_spv = ctx.compile_shader("cube.vert", bz.ShaderStage.VERTEX)

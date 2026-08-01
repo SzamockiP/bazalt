@@ -46,7 +46,7 @@ def draw(cmd, pipeline, rgba):
 
 def test_depth_stencil_target_builds_and_renders(ctx):
     """The plain path first: a target with a stencil aspect still renders."""
-    target = bz.RenderTarget(ctx, 32, 32, color=bz.Format.RGBA8, depth=bz.Format.DEPTH_STENCIL)
+    target = ctx.create_render_target(32, 32, color=bz.Format.RGBA8, depth=bz.Format.DEPTH_STENCIL)
     assert target.depth.format == bz.Format.DEPTH_STENCIL
 
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
@@ -75,7 +75,7 @@ def test_a_mask_written_by_one_pass_gates_the_next(ctx, solid):
     first one marked, so a stencil test that did nothing would fail one of the
     two halves.
     """
-    target = bz.RenderTarget(ctx, 32, 32, color=bz.Format.RGBA8, depth=bz.Format.DEPTH_STENCIL)
+    target = ctx.create_render_target(32, 32, color=bz.Format.RGBA8, depth=bz.Format.DEPTH_STENCIL)
     mark = solid(target, compare=bz.CompareOp.ALWAYS, ref=1, pass_op=bz.StencilOp.REPLACE)
     outside = solid(target, compare=bz.CompareOp.NOT_EQUAL, ref=1)
     inside = solid(target, compare=bz.CompareOp.EQUAL, ref=1)
@@ -98,7 +98,7 @@ def test_a_mask_written_by_one_pass_gates_the_next(ctx, solid):
 def test_write_mask_zero_writes_nothing(ctx, solid):
     """write_mask=0 keeps the test and drops the write, so the second pass sees
     the cleared value and paints."""
-    target = bz.RenderTarget(ctx, 32, 32, color=bz.Format.RGBA8, depth=bz.Format.DEPTH_STENCIL)
+    target = ctx.create_render_target(32, 32, color=bz.Format.RGBA8, depth=bz.Format.DEPTH_STENCIL)
     mark = solid(target, compare=bz.CompareOp.ALWAYS, ref=1,
                  pass_op=bz.StencilOp.REPLACE, write_mask=0)
     outside = solid(target, compare=bz.CompareOp.NOT_EQUAL, ref=1)
@@ -116,7 +116,7 @@ def test_write_mask_zero_writes_nothing(ctx, solid):
 
 def test_clear_stencil_sets_the_starting_value(ctx, solid):
     """clear_stencil=1 makes the pass start where the mask already passes."""
-    target = bz.RenderTarget(ctx, 32, 32, color=bz.Format.RGBA8, depth=bz.Format.DEPTH_STENCIL)
+    target = ctx.create_render_target(32, 32, color=bz.Format.RGBA8, depth=bz.Format.DEPTH_STENCIL)
     equal_one = solid(target, compare=bz.CompareOp.EQUAL, ref=1)
 
     def run(clear_stencil):
@@ -135,7 +135,7 @@ def test_clear_stencil_sets_the_starting_value(ctx, solid):
 def test_stencil_test_without_a_stencil_attachment_is_refused(ctx, solid):
     """Asking for the test on a plain depth target names the fix instead of
     drawing nothing."""
-    target = bz.RenderTarget(ctx, 32, 32, color=bz.Format.RGBA8, depth=bz.Format.D32F)
+    target = ctx.create_render_target(32, 32, color=bz.Format.RGBA8, depth=bz.Format.D32F)
     with pytest.raises(bz.ShaderError, match="DEPTH_STENCIL"):
         solid(target, compare=bz.CompareOp.EQUAL, ref=1)
 
@@ -156,7 +156,7 @@ def test_a_window_can_carry_a_stencil(ctx):
     except bz.WindowError:
         pytest.skip("no display available")
     try:
-        renderer = bz.SwapchainRenderer(window, ctx, stencil=True)
+        renderer = ctx.create_renderer(window, stencil=True)
         vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
         frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
         pipeline = (ctx.graphics_pipeline()
@@ -184,7 +184,7 @@ def test_a_window_can_carry_a_stencil(ctx):
 
 def test_a_combined_format_is_not_readable(ctx):
     """One texel is depth AND stencil, so there is no array shape for it."""
-    target = bz.RenderTarget(ctx, 32, 32, color=bz.Format.RGBA8, depth=bz.Format.DEPTH_STENCIL)
+    target = ctx.create_render_target(32, 32, color=bz.Format.RGBA8, depth=bz.Format.DEPTH_STENCIL)
     cmd = ctx.create_command_buffer()
     cmd.begin()
     with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]):

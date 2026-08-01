@@ -29,7 +29,7 @@ def test_each_slice_gets_its_own_clear(ctx):
     pass landed in the Z slice it named — the whole feature in one claim."""
     depth = 8
     vol = ctx.create_image(4, 4, bz.Format.RGBA8, depth=depth)
-    target = bz.RenderTarget(ctx, color=[vol])
+    target = ctx.create_render_target(color=[vol])
 
     for z in range(depth):
         cmd = ctx.create_command_buffer()
@@ -49,7 +49,7 @@ def test_partial_slice_render_then_read_is_clean(ctx):
     trip validation: one slice render marks the whole mip, by the volume's own
     layout granularity."""
     vol = ctx.create_image(4, 4, bz.Format.RGBA8, depth=8)
-    target = bz.RenderTarget(ctx, color=[vol])
+    target = ctx.create_render_target(color=[vol])
     for z in range(3):
         cmd = ctx.create_command_buffer()
         cmd.begin()
@@ -64,7 +64,7 @@ def test_partial_slice_render_then_read_is_clean(ctx):
 def test_slice_of_a_mip_scales_the_bound(ctx):
     """Level 1 of a depth-4 volume has 2 slices; slice 3 exists only at mip 0."""
     vol = ctx.create_image(8, 8, bz.Format.RGBA8, depth=4, mip_levels=2)
-    target = bz.RenderTarget(ctx, color=[vol])
+    target = ctx.create_render_target(color=[vol])
     st = target.layer(1, mip=1)
     cmd = ctx.create_command_buffer()
     cmd.begin()
@@ -77,7 +77,7 @@ def test_slice_of_a_mip_scales_the_bound(ctx):
 
 def test_whole_3d_target_is_refused_with_the_fix(ctx):
     vol = ctx.create_image(4, 4, bz.Format.RGBA8, depth=4)
-    target = bz.RenderTarget(ctx, color=[vol])
+    target = ctx.create_render_target(color=[vol])
     cmd = ctx.create_command_buffer()
     cmd.begin()
     with pytest.raises(bz.ResourceError, match=r"layer\(z\)"):
@@ -86,7 +86,7 @@ def test_whole_3d_target_is_refused_with_the_fix(ctx):
 
 def test_all_layers_on_a_3d_target_is_refused(ctx):
     vol = ctx.create_image(4, 4, bz.Format.RGBA8, depth=4)
-    target = bz.RenderTarget(ctx, color=[vol])
+    target = ctx.create_render_target(color=[vol])
     with pytest.raises(bz.ResourceError, match="one array layer"):
         target.all_layers()
 
@@ -97,17 +97,17 @@ def test_depth_attachment_beside_a_volume_is_refused(ctx):
     vol = ctx.create_image(4, 4, bz.Format.RGBA8, depth=4)
     zbuf = ctx.create_image(4, 4, bz.Format.D32F)
     with pytest.raises(bz.ResourceError, match="deep"):
-        bz.RenderTarget(ctx, color=[vol], depth=zbuf)
+        ctx.create_render_target(color=[vol], depth=zbuf)
 
 
 def test_mixing_2d_and_3d_attachments_is_refused(ctx):
     vol = ctx.create_image(4, 4, bz.Format.RGBA8, depth=4)
     flat = ctx.create_image(4, 4, bz.Format.RGBA8)
     with pytest.raises(bz.ResourceError, match="deep"):
-        bz.RenderTarget(ctx, color=[vol, flat])
+        ctx.create_render_target(color=[vol, flat])
 
 
 def test_msaa_on_a_volume_is_refused(ctx):
     vol = ctx.create_image(4, 4, bz.Format.RGBA8, depth=4)
     with pytest.raises(bz.ResourceError, match="3D"):
-        bz.RenderTarget(ctx, color=[vol], samples=4)
+        ctx.create_render_target(color=[vol], samples=4)

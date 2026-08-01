@@ -77,7 +77,7 @@ def test_compute_decides_how_many_instances_are_drawn(ctx):
 
     vert = ctx.compile_shader(str(SHADER_DIR / "stripe.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, TARGET, TARGET)
+    target = ctx.create_render_target(TARGET, TARGET)
     draw = (ctx.graphics_pipeline()
             .vertex_shader(vert)
             .fragment_shader(frag)
@@ -129,7 +129,7 @@ def test_a_zero_instance_count_draws_nothing(ctx):
 
     vert = ctx.compile_shader(str(SHADER_DIR / "stripe.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, TARGET, TARGET)
+    target = ctx.create_render_target(TARGET, TARGET)
     draw = (ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
             .push_constant(4, bz.ShaderStage.VERTEX).build(target))
 
@@ -167,7 +167,7 @@ def test_cpu_written_arguments_work_too(ctx):
 
     vert = ctx.compile_shader(str(SHADER_DIR / "stripe.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, TARGET, TARGET)
+    target = ctx.create_render_target(TARGET, TARGET)
     draw = (ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
             .push_constant(4, bz.ShaderStage.VERTEX).build(target))
 
@@ -234,7 +234,7 @@ def test_draw_indexed_indirect_uses_the_index_buffer(ctx):
 
     vert = ctx.compile_shader(str(SHADER_DIR / "stripe.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, TARGET, TARGET)
+    target = ctx.create_render_target(TARGET, TARGET)
     draw = (ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
             .push_constant(4, bz.ShaderStage.VERTEX).build(target))
 
@@ -310,7 +310,7 @@ def test_multi_draw_works_with_the_feature(ctx, extra_context):
 
     vert = multi.compile_shader(str(SHADER_DIR / "stripe.vert"), bz.ShaderStage.VERTEX)
     frag = multi.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(multi, TARGET, TARGET)
+    target = multi.create_render_target(TARGET, TARGET)
     draw = (multi.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
             .push_constant(4, bz.ShaderStage.VERTEX).build(target))
 
@@ -399,7 +399,7 @@ def test_the_count_buffer_decides_how_many_commands_run(extra_context, issued):
     maxDrawCount, differing only in the number sitting in the count buffer. A
     draw that ignored the buffer would paint four stripes both times."""
     ctx = count_context(extra_context)
-    target = bz.RenderTarget(ctx, TARGET, TARGET)
+    target = ctx.create_render_target(TARGET, TARGET)
     draw = stripe_pipeline(ctx, target)
     args = one_stripe_each(ctx, 4)
     counts = count_buffer(ctx, issued)
@@ -422,7 +422,7 @@ def test_the_count_is_clamped_to_the_maximum(extra_context):
     also why check_indirect_ bounds-checks against `count` and not against the
     number in the buffer — the CPU never learns that one."""
     ctx = count_context(extra_context)
-    target = bz.RenderTarget(ctx, TARGET, TARGET)
+    target = ctx.create_render_target(TARGET, TARGET)
     draw = stripe_pipeline(ctx, target)
     args = one_stripe_each(ctx, 4)
     counts = count_buffer(ctx, 4)
@@ -464,7 +464,7 @@ def test_compute_writes_the_count(extra_context):
     dset.set_buffer(0, counts)
     dset.set_buffer(1, candidates)
 
-    target = bz.RenderTarget(ctx, TARGET, TARGET)
+    target = ctx.create_render_target(TARGET, TARGET)
     draw = stripe_pipeline(ctx, target)
     args = one_stripe_each(ctx, TOTAL_STRIPES)
 

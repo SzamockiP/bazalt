@@ -204,7 +204,7 @@ def test_fragment_shader_samples_the_right_slice(ctx):
         pixels[z, :, :, 3] = 255
     vol = ctx.create_image(pixels)
 
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "sample_volume.frag"), bz.ShaderStage.FRAGMENT)
     pipe = (ctx.graphics_pipeline()

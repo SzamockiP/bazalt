@@ -10,7 +10,7 @@ def on_message(msg):
 
 window = bz.Window(800, 600, "Bazalt Demo - Textured Quad")
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 # Compile shaders
 vert_spv = ctx.compile_shader("quad_tex.vert", bz.ShaderStage.VERTEX)

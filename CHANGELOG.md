@@ -43,8 +43,11 @@ here, so one migration covers them.
   `acquire()`, a barrier inside a rendering scope), and `UnsupportedError`
   means "this GPU cannot, with any argument". All three subclass
   `BazaltError`.
-- **`ctx.create_render_target()`.** The `RenderTarget` constructor, spelled
-  from the Context like every other resource. The class stays.
+- **`ctx.create_render_target()` and `ctx.create_renderer()`.** Every resource a
+  Context owns now comes from a `ctx.create_*` verb — buffers, images, samplers,
+  pools, pipelines, command buffers, and now render targets and swapchain
+  renderers as well. `bz.Context` and `bz.Window` stay constructors, because
+  nothing owns them.
 - **`SubresourceTarget` and `MultiviewTarget` are named types.**
   `target.layer()` and `target.all_layers()` used to return an opaque
   `RenderTargetBase`.
@@ -77,6 +80,24 @@ here, so one migration covers them.
 - **`index` is keyword-only** on `set_image`, `set_storage_image` and
   `set_buffer`. `set_image(0, img, 3)` read as "index 3" and passed 3 as a
   sampler.
+- **`bz.RenderTarget(...)` and `bz.SwapchainRenderer(...)` are no longer
+  constructible.** Use `ctx.create_render_target(...)` and
+  `ctx.create_renderer(window, ...)`; the arguments are otherwise the same,
+  minus the Context, which is now the receiver. The classes stay as types, so
+  `isinstance` and your annotations keep working. They are replaced rather than
+  aliased on purpose: two spellings of one call is a fork, and this is the
+  release where such a break is allowed.
+
+  ```python
+  # before
+  renderer = bz.SwapchainRenderer(window, ctx, samples=4)
+  shadow = bz.RenderTarget(ctx, 1024, 1024, color=None, depth=bz.Format.D32F)
+  # now
+  renderer = ctx.create_renderer(window, samples=4)
+  shadow = ctx.create_render_target(1024, 1024, color=None, depth=bz.Format.D32F)
+  ```
+- **`create_renderer` takes `present_mode`, `samples` and `stencil` as
+  keywords.** Every call in the examples and the tests already did.
 - **`blend()` takes everything past `mode` as a keyword**, `attachment=`
   included. `blend(True, MULTIPLY, 1)` reading as "attachment 1" is the same
   trap, and the new factor arguments would make it worse. Every call in the

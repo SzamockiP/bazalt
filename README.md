@@ -29,7 +29,7 @@ import bazalt as bz
 
 window = bz.Window(1024, 720, "Bazalt - triangle")
 ctx = bz.Context()
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 # A pipeline is built against a render target, which supplies the formats.
 # The window is one target. An offscreen image is another. Same call.
@@ -106,7 +106,7 @@ W = H = 512
 
 window = bz.Window(W, H, "Bazalt - compute")
 ctx = bz.Context(hot_reload=True)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 # Compute: no vertices and no fragment shader. One dispatch per frame.
 generate = (ctx.compute_pipeline()
@@ -194,13 +194,14 @@ void main() {
 
 ## The same code, with no window
 
-A `RenderTarget` is an offscreen image with the same interface as the window. Build the
+A render target is an offscreen image with the same interface as the window. Both come from
+the Context, and everything else in this file works the same against either. Build the
 pipeline against it, submit, and read the pixels into NumPy. This runs in a test and in CI,
 where no display exists:
 
 ```python
 ctx = bz.Context()
-target = bz.RenderTarget(ctx, 800, 600, depth=bz.Format.D32F)
+target = ctx.create_render_target(800, 600, depth=bz.Format.D32F)
 
 pipeline = ...   # the triangle pipeline above, built with .build(target)
 

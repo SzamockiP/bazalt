@@ -38,7 +38,7 @@ def test_generate_mipmaps_requires_a_mipped_image(ctx):
 
 def test_generate_mipmaps_refused_inside_a_rendering_scope(ctx):
     img = ctx.create_image(16, 16, bz.Format.RGBA8, mip_levels=5)
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     cmd = ctx.create_command_buffer()
     cmd.begin()
     cmd.begin_rendering(target)
@@ -57,7 +57,7 @@ def test_generate_mipmaps_fills_the_chain(ctx):
 
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "sample_lod.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     sample = (ctx.graphics_pipeline()
               .vertex_shader(vert)
               .fragment_shader(frag)

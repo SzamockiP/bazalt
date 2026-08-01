@@ -24,7 +24,7 @@ def on_message(msg):
 
 window = bz.Window(1024, 720, "Bazalt Demo - Compute Particles", logger=logger)
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 # Simulation: a compute pipeline. No stage arguments, no target.
 sim_shader = ctx.compile_shader("particles.comp", bz.ShaderStage.COMPUTE)

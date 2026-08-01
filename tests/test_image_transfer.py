@@ -74,7 +74,7 @@ def test_a_copy_refuses_a_mismatch(ctx):
 
 
 def test_a_copy_is_refused_inside_a_rendering_scope(ctx):
-    target = bz.RenderTarget(ctx, 16, 16)
+    target = ctx.create_render_target(16, 16)
     src = ctx.create_image(checkerboard())
     dst = ctx.create_image(16, 16, bz.Format.RGBA8)
 
@@ -144,7 +144,7 @@ def test_the_border_colour_is_what_a_sample_outside_the_image_reads(ctx):
     """The shadow-map fix, shown on a colour texture: CLAMP repeats the edge
     texel, CLAMP_TO_BORDER with a white border reads white."""
     texture = ctx.create_image(np.zeros((16, 16, 4), dtype=np.uint8))
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "sample_outside.frag"), bz.ShaderStage.FRAGMENT)
     pipeline = (ctx.graphics_pipeline()

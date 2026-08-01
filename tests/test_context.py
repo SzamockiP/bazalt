@@ -125,11 +125,11 @@ def test_a_layered_multisampled_target_agrees_with_what_the_context_says(ctx):
     if ctx.supports(bz.Feature.MULTISAMPLE_ARRAYS):
         # color[0] is the RESOLVE attachment and stays single-sample: the
         # multisampled image the feature is about is the one behind it.
-        target = bz.RenderTarget(ctx, 32, 32, layers=2, samples=4)
+        target = ctx.create_render_target(32, 32, layers=2, samples=4)
         assert target.color[0].array_layers == 2
     else:
         with pytest.raises(bz.UnsupportedError):
-            bz.RenderTarget(ctx, 32, 32, layers=2, samples=4)
+            ctx.create_render_target(32, 32, layers=2, samples=4)
 
 
 def test_a_bias_of_zero_needs_no_capability(ctx):

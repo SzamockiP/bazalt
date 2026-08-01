@@ -33,7 +33,7 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
 window = bz.Window(1024, 720, "Bazalt Demo - Normals from a geometry shader")
 ctx = bz.Context(logger, features=[bz.Feature.GEOMETRY_SHADER])
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 vert = ctx.compile_shader("mesh.vert", bz.ShaderStage.VERTEX)
 geom = ctx.compile_shader("normals.geom", bz.ShaderStage.GEOMETRY)

@@ -129,7 +129,9 @@ def test_renamed_and_new_api_is_declared():
                      "MULTIPLY = 3", "UINT4 = 8", "UBYTE4_UINT = 9",
                      "class BlendFactor(", "class BlendOp(",
                      "SRC_ALPHA_SATURATE = 10", "REVERSE_SUBTRACT = 2",
-                     "src: Optional[BlendFactor]"):
+                     "src: Optional[BlendFactor]",
+                     # 0.23 — the two constructors that became Context verbs.
+                     "def create_renderer", "win32_hwnd: int"):
         assert expected in text, f"{expected!r} missing from _core.pyi"
 
 
@@ -148,6 +150,17 @@ def test_the_verbs_0_18_removed_are_gone():
                       (bz.Context, "uploads_done"), (bz.Window, "should_close"),
                       (bz.RenderTarget, "read_pixels"), (bz.RenderTarget, "mip")):
         assert not hasattr(cls, attr), f"{cls.__name__}.{attr} is still bound"
+
+
+def test_the_target_types_are_not_constructible(ctx):
+    """0.23: a RenderTarget and a SwapchainRenderer come from the Context, and
+    the constructors are GONE rather than kept beside the factories — a second
+    spelling of one call is a fork (the 0.18 audit). The classes stay as types,
+    which is what isinstance and the annotations name."""
+    for cls in (bz.RenderTarget, bz.SwapchainRenderer):
+        with pytest.raises(TypeError):
+            cls(ctx, 16, 16)
+    assert isinstance(ctx.create_render_target(16, 16), bz.RenderTarget)
 
     # The survivors of the same audit. read_pixels stays on the renderer because
     # a screenshot is different work; the two begin/end pairs stay because a

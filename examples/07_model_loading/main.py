@@ -76,7 +76,7 @@ class DemoApp:
         self.logger.on_message(self.on_message)
         self.window = bz.Window(1024, 720, "Bazalt Demo - Model Loader", logger=self.logger)
         self.ctx = bz.Context(self.logger)
-        self.renderer = bz.SwapchainRenderer(self.window, self.ctx)
+        self.renderer = self.ctx.create_renderer(self.window)
         self.window.set_cursor_mode(bz.CURSOR_DISABLED)
         
         self.camera = Camera()

@@ -34,7 +34,7 @@ def on_message(msg):
 
 window = bz.Window(W, H, "Bazalt Demo - Volume Raymarch", logger=logger)
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 # The volume: 128^3 single-channel density with a full mip chain. The levels
 # start empty — compute writes mip 0, generate_mipmaps fills the rest.

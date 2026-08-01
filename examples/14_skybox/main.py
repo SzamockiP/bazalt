@@ -33,7 +33,7 @@ def on_message(msg):
 
 window = bz.Window(W, H, "Bazalt Demo - Skybox (procedural cubemap)", logger=logger)
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 window.set_cursor_mode(bz.CURSOR_DISABLED)  # mouse-look
 
 # Compute writes the six faces of an empty cubemap.

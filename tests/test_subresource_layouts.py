@@ -36,7 +36,7 @@ def render_into(ctx, target, view):
 def test_read_after_rendering_one_layer(ctx):
     """The direct bug: read() on a partially rendered image used to transition
     the whole thing from a layout only one layer was actually in."""
-    target = bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA8, layers=4)
+    target = ctx.create_render_target(16, 16, color=bz.Format.RGBA8, layers=4)
     render_into(ctx, target, target.layer(0))
 
     pixels = target.color[0].read()
@@ -48,7 +48,7 @@ def test_read_after_rendering_one_mip(ctx):
     """Same for the mip axis. Reading still returns mip 0, and mip 0 here is the
     level that was never drawn into — the point is that the readback is legal at
     all, not what it contains."""
-    target = bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA8, mip_levels=3)
+    target = ctx.create_render_target(16, 16, color=bz.Format.RGBA8, mip_levels=3)
     render_into(ctx, target, target.layer(0, 1))
 
     assert target.color[0].read().shape == (16, 16, 4)
@@ -62,12 +62,12 @@ def test_sampling_a_partially_rendered_layered_target(ctx):
     even-out barrier is for, and without it this is a validation error at the
     sample — a long way from the pass that caused it.
     """
-    target = bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA8, layers=4)
+    target = ctx.create_render_target(16, 16, color=bz.Format.RGBA8, layers=4)
     render_into(ctx, target, target.layer(2))
 
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     view_frag = ctx.compile_shader(str(SHADER_DIR / "array_view.frag"), bz.ShaderStage.FRAGMENT)
-    screen = bz.RenderTarget(ctx, 16, 16)
+    screen = ctx.create_render_target(16, 16)
     pipe = (ctx.graphics_pipeline()
             .vertex_shader(fullscreen)
             .fragment_shader(view_frag)
@@ -103,7 +103,7 @@ def test_rendering_every_layer_still_costs_one_barrier(ctx):
     every face, then sample — pays nothing for the machinery.
 
     Observable only as "this keeps working": the assertion is the fixture."""
-    target = bz.RenderTarget(ctx, 8, 8, color=bz.Format.RGBA8, cube=True)
+    target = ctx.create_render_target(8, 8, color=bz.Format.RGBA8, cube=True)
     for face in range(6):
         render_into(ctx, target, target.layer(face))
 
@@ -114,12 +114,12 @@ def test_render_one_mip_then_read_it_back_through_a_sample(ctx):
     """Rendering into mip 1 and sampling that level. textureLod reaches the
     level directly, so this is the round trip the old whole-image layout made
     impossible."""
-    target = bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA8, mip_levels=3)
+    target = ctx.create_render_target(16, 16, color=bz.Format.RGBA8, mip_levels=3)
     render_into(ctx, target, target.layer(0, 1))
 
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     lod_frag = ctx.compile_shader(str(SHADER_DIR / "sample_lod.frag"), bz.ShaderStage.FRAGMENT)
-    screen = bz.RenderTarget(ctx, 8, 8)
+    screen = ctx.create_render_target(8, 8)
     pipe = (ctx.graphics_pipeline()
             .vertex_shader(fullscreen)
             .fragment_shader(lod_frag)
@@ -147,7 +147,7 @@ def test_depth_of_a_partially_rendered_target_is_sampleable(ctx):
     """Depth follows colour through the same path, and it is the attachment
     whose final layout depends on the format (0.17), so it is the one where an
     even-out barrier naming the wrong layout would show up."""
-    target = bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA8,
+    target = ctx.create_render_target(16, 16, color=bz.Format.RGBA8,
                              depth=bz.Format.D32F, layers=3)
     render_into(ctx, target, target.layer(1))
 

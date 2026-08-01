@@ -46,7 +46,7 @@ def draw(ctx, target, pipeline):
 
 def test_one_shader_two_pipelines_two_results(ctx, spec_pipeline):
     """The same ShaderModule, specialized differently, paints differently."""
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
 
     assert np.allclose(draw(ctx, target, spec_pipeline(target, {0: 1.0, 1: 2}))[:3],
                        [255, 128, 0], atol=2)
@@ -55,20 +55,20 @@ def test_one_shader_two_pipelines_two_results(ctx, spec_pipeline):
 
 
 def test_the_defaults_in_the_shader_stand_when_nothing_is_specialized(ctx, spec_pipeline):
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     assert np.allclose(draw(ctx, target, spec_pipeline(target, {}))[:3], [0, 64, 0], atol=2)
 
 
 def test_a_bool_constant_is_not_an_int(ctx, spec_pipeline):
     """Python's bool IS an int, so the binding has to test it first; otherwise
     True arrives as the integer 1 and a `bool` constant reads the wrong thing."""
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     assert draw(ctx, target, spec_pipeline(target, {2: True}))[2] == 255
     assert draw(ctx, target, spec_pipeline(target, {2: False}))[2] == 0
 
 
 def test_a_constant_must_be_a_number(ctx, spec_pipeline):
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     with pytest.raises(bz.ResourceError, match="bool, an int or a float"):
         spec_pipeline(target, {0: "one"})
 
@@ -107,7 +107,7 @@ def test_compute_takes_constants_without_a_stage(ctx):
 def test_a_hot_reload_keeps_the_constants(ctx, spec_pipeline):
     """A rebuilt pipeline must re-apply the values: they are part of the
     pipeline, not of the SPIR-V, so a recompile cannot recover them."""
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     pipeline = spec_pipeline(target, {0: 1.0, 1: 2})
     before = draw(ctx, target, pipeline)
 
@@ -144,7 +144,7 @@ def test_blend_can_differ_per_attachment(extra_context):
 
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "mrt.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32, color=[bz.Format.RGBA8, bz.Format.RGBA8])
+    target = ctx.create_render_target(32, 32, color=[bz.Format.RGBA8, bz.Format.RGBA8])
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
@@ -175,7 +175,7 @@ def test_a_differing_attachment_needs_independent_blend(ctx):
         pytest.skip("session Context happens to have INDEPENDENT_BLEND enabled")
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "mrt.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32, color=[bz.Format.RGBA8, bz.Format.RGBA8])
+    target = ctx.create_render_target(32, 32, color=[bz.Format.RGBA8, bz.Format.RGBA8])
     with pytest.raises(bz.UnsupportedError, match="INDEPENDENT_BLEND"):
         (ctx.graphics_pipeline()
          .vertex_shader(vert)
@@ -186,7 +186,7 @@ def test_a_differing_attachment_needs_independent_blend(ctx):
 
 def test_color_mask_drops_a_channel(ctx, mrt_pipeline):
     """Masking green off leaves the cleared value in that channel."""
-    target = bz.RenderTarget(ctx, 32, 32, color=[bz.Format.RGBA8, bz.Format.RGBA8])
+    target = ctx.create_render_target(32, 32, color=[bz.Format.RGBA8, bz.Format.RGBA8])
 
     unmasked = mrt_pipeline(target)
     # No attachment= — the mask applies to both, so this needs no feature.
@@ -214,7 +214,7 @@ def test_depth_clamp_needs_its_feature(ctx):
     message a user gets, not a driver-dependent pipeline."""
     if ctx.supports(bz.Feature.DEPTH_CLAMP):
         pytest.skip("session Context happens to have DEPTH_CLAMP enabled")
-    target = bz.RenderTarget(ctx, 32, 32, color=bz.Format.RGBA8, depth=bz.Format.D32F)
+    target = ctx.create_render_target(32, 32, color=bz.Format.RGBA8, depth=bz.Format.D32F)
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "push.frag"), bz.ShaderStage.FRAGMENT)
     with pytest.raises(bz.UnsupportedError, match="DEPTH_CLAMP"):
@@ -233,7 +233,7 @@ def test_depth_clamp_keeps_geometry_behind_the_near_plane(extra_context):
     if not ctx.supports(bz.Feature.DEPTH_CLAMP):
         pytest.skip("this GPU has no depthClamp")
 
-    target = bz.RenderTarget(ctx, 32, 32, color=bz.Format.RGBA8, depth=bz.Format.D32F)
+    target = ctx.create_render_target(32, 32, color=bz.Format.RGBA8, depth=bz.Format.D32F)
     vert = ctx.compile_shader(str(SHADER_DIR / "behind_near.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "push.frag"), bz.ShaderStage.FRAGMENT)
 
@@ -264,7 +264,7 @@ def test_alpha_to_coverage_softens_an_msaa_edge(ctx):
     lands mid-grey instead of full white."""
     if ctx.max_samples() < 4:
         pytest.skip("this GPU has no 4x MSAA")
-    target = bz.RenderTarget(ctx, 32, 32, samples=4)
+    target = ctx.create_render_target(32, 32, samples=4)
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "push.frag"), bz.ShaderStage.FRAGMENT)
 
@@ -296,7 +296,7 @@ def test_the_cache_changes_no_result(ctx):
     """It is on for every Context, so what is testable is that two builds of
     the same description still render identically — the second one comes out of
     the cache."""
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "spec_color.frag"), bz.ShaderStage.FRAGMENT)
 
@@ -320,7 +320,7 @@ def test_uint4_attribute_arrives_unconverted(ctx):
     nothing could carry the indices before UINT4 existed."""
     vert = ctx.compile_shader(str(SHADER_DIR / "joints.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "vertex_color.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 16, 16)
+    target = ctx.create_render_target(16, 16)
     pipe = (ctx.graphics_pipeline()
             .vertex_shader(vert)
             .fragment_shader(frag)

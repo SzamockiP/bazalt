@@ -575,11 +575,15 @@ void bind_context(py::module_& m)
             py::arg("source"),
             py::kw_only(),
             py::arg("name") = "")
-        // The same two bodies as the RenderTarget constructor, spelled from the
-        // Context (0.23): everything else the Context creates comes from a
-        // create_* verb, and the target was one of two stragglers — remembering
-        // which convention each type uses was a coin flip. The class stays; both
-        // spellings share one helper, so they cannot drift.
+        // A render target and a swapchain renderer come from the Context since
+        // 0.23, like every other resource it owns. They were top-level
+        // constructors, which made "which convention does this type use" a coin
+        // flip; the constructors are gone rather than kept beside these, because
+        // a second spelling of one call is a fork (the 0.18 audit).
+        //
+        // Two shapes, disambiguated by arity exactly as the constructor's two
+        // __init__s were: a width and height allocates the attachments, images
+        // borrow them.
         .def(
             "create_render_target",
             [](Context& self,
@@ -615,6 +619,40 @@ void bind_context(py::module_& m)
             py::arg("depth") = py::none(),
             py::arg("samples") = 1,
             py::arg("name") = "")
+        .def(
+            "create_renderer",
+            [](std::shared_ptr<Context> self,
+               Window& window,
+               PresentMode present_mode,
+               std::uint32_t samples,
+               bool stencil)
+            { return make_swapchain_renderer(std::move(self), window, present_mode, samples, stencil); },
+            py::arg("window"),
+            py::kw_only(),
+            py::arg("present_mode") = PresentMode::MAILBOX,
+            py::arg("samples") = 1,
+            py::arg("stencil") = false,
+            // The SurfaceProvider that get_surface_provider() returns captures the raw
+            // GLFWwindow* and a pointer to the Window's own resize flag, and the renderer
+            // keeps it for its whole life. So the Window has to outlive the RENDERER, and
+            // nothing else says so: `del window` alone would leave both pointers dangling.
+            // Nurse 0 is the return value here, where the constructor's was the new
+            // instance — the patient is argument 2, the window (argument 1 is the
+            // Context). The hwnd form captures an integer and needs no such tie.
+            py::keep_alive<0, 2>())
+        .def(
+            "create_renderer",
+            [](std::shared_ptr<Context> self,
+               std::uint64_t hwnd,
+               PresentMode present_mode,
+               std::uint32_t samples,
+               bool stencil)
+            { return make_swapchain_renderer_win32(std::move(self), hwnd, present_mode, samples, stencil); },
+            py::arg("win32_hwnd"),
+            py::kw_only(),
+            py::arg("present_mode") = PresentMode::MAILBOX,
+            py::arg("samples") = 1,
+            py::arg("stencil") = false)
         .def(
             "create_sampler",
             [](Context& self,

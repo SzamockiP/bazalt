@@ -50,7 +50,7 @@ def _render_white_triangle(ctx, triangle_shaders, white_triangle, samples, depth
     resolved pixels (uint8 HxWx4). Optionally attach depth."""
     vert, frag = triangle_shaders
     vbuf, ibuf = white_triangle
-    target = bz.RenderTarget(ctx, 64, 64, color=bz.Format.RGBA8, depth=depth, samples=samples)
+    target = ctx.create_render_target(64, 64, color=bz.Format.RGBA8, depth=depth, samples=samples)
     builder = (ctx.graphics_pipeline()
                .vertex_shader(vert)
                .fragment_shader(frag)
@@ -135,7 +135,7 @@ def test_msaa_depth_resolves_to_sampleable_depth(ctx, triangle_shaders, white_tr
 
 def test_per_attachment_clears(ctx):
     """Two colour attachments cleared to different colours in one pass."""
-    mrt = bz.RenderTarget(ctx, 16, 16, color=[bz.Format.RGBA8, bz.Format.RGBA8])
+    mrt = ctx.create_render_target(16, 16, color=[bz.Format.RGBA8, bz.Format.RGBA8])
     cmd = ctx.create_command_buffer()
     cmd.begin()
     cmd.begin_rendering(mrt, clear_color=[[255, 0, 0, 255], [0, 255, 0, 255]])
@@ -148,7 +148,7 @@ def test_per_attachment_clears(ctx):
 
 def test_single_clear_applies_to_all_attachments(ctx):
     """A single [r,g,b,a] clears every attachment — the pre-existing behaviour."""
-    mrt = bz.RenderTarget(ctx, 16, 16, color=[bz.Format.RGBA8, bz.Format.RGBA8])
+    mrt = ctx.create_render_target(16, 16, color=[bz.Format.RGBA8, bz.Format.RGBA8])
     cmd = ctx.create_command_buffer()
     cmd.begin()
     cmd.begin_rendering(mrt, clear_color=[0, 0, 255, 255])
@@ -164,20 +164,20 @@ def test_single_clear_applies_to_all_attachments(ctx):
 
 def test_non_power_of_two_sample_count_is_refused(ctx):
     with pytest.raises(bz.UnsupportedError) as info:
-        bz.RenderTarget(ctx, 16, 16, samples=3)
+        ctx.create_render_target(16, 16, samples=3)
     assert "max_samples" in str(info.value)
 
 
 def test_sample_count_over_max_is_refused(ctx):
     with pytest.raises(bz.UnsupportedError):
-        bz.RenderTarget(ctx, 16, 16, samples=ctx.max_samples() * 2)
+        ctx.create_render_target(16, 16, samples=ctx.max_samples() * 2)
 
 
 def test_sample_shading_without_feature_is_refused(ctx, triangle_shaders, samples):
     """sample_shading needs the SAMPLE_RATE_SHADING feature; the session Context
     does not enable it, so the build must say so rather than fail in validation."""
     vert, frag = triangle_shaders
-    target = bz.RenderTarget(ctx, 16, 16, samples=samples)
+    target = ctx.create_render_target(16, 16, samples=samples)
     with pytest.raises(bz.UnsupportedError) as info:
         (ctx.graphics_pipeline()
          .vertex_shader(vert)
@@ -191,7 +191,7 @@ def test_sample_shading_without_feature_is_refused(ctx, triangle_shaders, sample
 def test_render_target_debug_name_is_accepted(ctx):
     """name= is additive and must not disturb rendering (the name only shows up
     in validation messages, which this suite already asserts stay silent)."""
-    target = bz.RenderTarget(ctx, 16, 16, color=bz.Format.RGBA8, name="gbuffer")
+    target = ctx.create_render_target(16, 16, color=bz.Format.RGBA8, name="gbuffer")
     cmd = ctx.create_command_buffer()
     cmd.begin()
     cmd.begin_rendering(target, clear_color=[0.2, 0.2, 0.2, 1.0])

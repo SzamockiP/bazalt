@@ -1,6 +1,6 @@
 """A RenderTarget on images you already own (0.19).
 
-`bz.RenderTarget(ctx, color=[image])` renders into images from `create_image`
+`ctx.create_render_target(color=[image])` renders into images from `create_image`
 instead of attachments the target allocates for itself. There is no width or
 height in that signature, and no samples, layers, cube or mip_levels either: every
 one of them is a property of the images now, and a second answer could disagree
@@ -62,8 +62,8 @@ def test_a_pass_samples_what_the_previous_pass_drew(ctx, fullscreen_vert):
     """
     a = ctx.create_image(64, 64, bz.Format.RGBA8, name="ping")
     b = ctx.create_image(64, 64, bz.Format.RGBA8, name="pong")
-    target_a = bz.RenderTarget(ctx, color=[a])
-    target_b = bz.RenderTarget(ctx, color=[b])
+    target_a = ctx.create_render_target(color=[a])
+    target_b = ctx.create_render_target(color=[b])
 
     paint = solid_pipeline(ctx, target_a, fullscreen_vert)
     copy = textured_pipeline(ctx, target_b, fullscreen_vert)
@@ -123,7 +123,7 @@ def test_drawing_over_a_compute_baked_texture(ctx, fullscreen_vert):
     baked = img.read()
     assert baked[32, 32, 1] == pytest.approx(128, abs=2)
 
-    target = bz.RenderTarget(ctx, color=[img])
+    target = ctx.create_render_target(color=[img])
     paint = solid_pipeline(ctx, target, fullscreen_vert)
     cmd = ctx.create_command_buffer()
     cmd.begin()
@@ -149,7 +149,7 @@ def test_drawing_into_an_image_from_another_context(ctx, extra_context, fullscre
     other.wait()
 
     carried = ctx.create_image(source)
-    target = bz.RenderTarget(ctx, color=[carried])
+    target = ctx.create_render_target(color=[carried])
     paint = solid_pipeline(ctx, target, fullscreen_vert)
 
     cmd = ctx.create_command_buffer()
@@ -171,9 +171,9 @@ def test_an_image_from_another_context_is_refused_as_an_attachment(ctx, extra_co
     foreign = other.create_image(32, 32, bz.Format.RGBA8)
 
     with pytest.raises(bz.ResourceError, match="different Context"):
-        bz.RenderTarget(ctx, color=[foreign])
+        ctx.create_render_target(color=[foreign])
     with pytest.raises(bz.ResourceError, match="different Context"):
-        bz.RenderTarget(ctx, depth=foreign)
+        ctx.create_render_target(depth=foreign)
 
 
 # ── the properties the images decide ──────────────────────────────────────────
@@ -182,7 +182,7 @@ def test_size_layers_and_mips_come_off_the_images(ctx):
     """No width, height, layers or mip_levels in this signature, so the target
     reports what the images say."""
     img = ctx.create_image(128, 64, bz.Format.RGBA8, mip_levels=3)
-    target = bz.RenderTarget(ctx, color=[img])
+    target = ctx.create_render_target(color=[img])
 
     assert (target.width, target.height) == (128, 64)
     # The subresource machinery reads the same numbers, so layer/mip slicing works
@@ -201,7 +201,7 @@ def test_the_target_holds_the_images_it_borrows(ctx, fullscreen_vert):
     failed assertion.
     """
     img = ctx.create_image(64, 64, bz.Format.RGBA8)
-    target = bz.RenderTarget(ctx, color=[img])
+    target = ctx.create_render_target(color=[img])
     paint = solid_pipeline(ctx, target, fullscreen_vert)
 
     del img
@@ -227,11 +227,11 @@ def test_mismatched_attachments_are_refused(ctx):
     layered = ctx.create_image(64, 64, bz.Format.RGBA8, layers=2)
 
     with pytest.raises(bz.ResourceError, match="same size"):
-        bz.RenderTarget(ctx, color=[a, small])
+        ctx.create_render_target(color=[a, small])
     with pytest.raises(bz.ResourceError, match="same mip count"):
-        bz.RenderTarget(ctx, color=[a, mipped])
+        ctx.create_render_target(color=[a, mipped])
     with pytest.raises(bz.ResourceError, match="same layer count"):
-        bz.RenderTarget(ctx, color=[a, layered])
+        ctx.create_render_target(color=[a, layered])
 
 
 def test_a_depth_image_in_color_is_refused_and_the_other_way_round(ctx):
@@ -239,11 +239,11 @@ def test_a_depth_image_in_color_is_refused_and_the_other_way_round(ctx):
     depth = ctx.create_image(64, 64, bz.Format.D32F)
 
     with pytest.raises(bz.ResourceError, match="cannot go in color"):
-        bz.RenderTarget(ctx, color=[depth])
+        ctx.create_render_target(color=[depth])
     with pytest.raises(bz.ResourceError, match="depth format"):
-        bz.RenderTarget(ctx, depth=colour)
+        ctx.create_render_target(depth=colour)
     with pytest.raises(bz.ResourceError, match="at least one attachment"):
-        bz.RenderTarget(ctx)
+        ctx.create_render_target()
 
 
 def test_the_two_signatures_do_not_get_confused(ctx):
@@ -253,13 +253,13 @@ def test_the_two_signatures_do_not_get_confused(ctx):
 
     # Images plus a size: the allocating overload matched, and cannot hand off.
     with pytest.raises(bz.ResourceError, match="drop width and height"):
-        bz.RenderTarget(ctx, 64, 64, color=[img])
+        ctx.create_render_target(64, 64, color=[img])
     with pytest.raises(bz.ResourceError, match="drop width and height"):
-        bz.RenderTarget(ctx, 64, 64, color=img)
+        ctx.create_render_target(64, 64, color=img)
 
     # Formats with no size: the borrowing overload matched, same problem mirrored.
     with pytest.raises(bz.ResourceError, match="no width and height"):
-        bz.RenderTarget(ctx, color=[bz.Format.RGBA8])
+        ctx.create_render_target(color=[bz.Format.RGBA8])
 
 
 def test_a_depth_attachment_from_an_owned_image_works(ctx, fullscreen_vert):
@@ -268,7 +268,7 @@ def test_a_depth_attachment_from_an_owned_image_works(ctx, fullscreen_vert):
     from."""
     colour = ctx.create_image(64, 64, bz.Format.RGBA8)
     depth = ctx.create_image(64, 64, bz.Format.D32F)
-    target = bz.RenderTarget(ctx, color=[colour], depth=depth)
+    target = ctx.create_render_target(color=[colour], depth=depth)
 
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
     pipeline = (ctx.graphics_pipeline()
@@ -312,7 +312,7 @@ def _borrowed_triangle(ctx, samples):
     vbuf, ibuf = _white_triangle(ctx)
 
     mine = ctx.create_image(64, 64, bz.Format.RGBA8)
-    target = bz.RenderTarget(ctx, color=[mine], samples=samples)
+    target = ctx.create_render_target(color=[mine], samples=samples)
     pipe = (ctx.graphics_pipeline()
             .vertex_shader(vert).fragment_shader(frag)
             .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
@@ -367,7 +367,7 @@ def test_a_borrowed_msaa_target_resolves_depth_too(ctx):
 
     color = ctx.create_image(64, 64, bz.Format.RGBA8)
     depth = ctx.create_image(64, 64, bz.Format.D32F)
-    target = bz.RenderTarget(ctx, color=[color], depth=depth, samples=n)
+    target = ctx.create_render_target(color=[color], depth=depth, samples=n)
     pipe = (ctx.graphics_pipeline()
             .vertex_shader(vert).fragment_shader(frag)
             .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
@@ -396,10 +396,10 @@ def test_msaa_on_a_mipped_borrowed_image_is_refused(ctx):
         pytest.skip("GPU reports no MSAA support (max_samples == 1)")
     mipped = ctx.create_image(32, 32, bz.Format.RGBA8, mip_levels=3)
     with pytest.raises(bz.ResourceError, match="mip chain"):
-        bz.RenderTarget(ctx, color=[mipped], samples=n)
+        ctx.create_render_target(color=[mipped], samples=n)
 
 
 def test_too_many_samples_is_refused(ctx):
     mine = ctx.create_image(32, 32, bz.Format.RGBA8)
     with pytest.raises(bz.UnsupportedError):
-        bz.RenderTarget(ctx, color=[mine], samples=ctx.max_samples() * 2)
+        ctx.create_render_target(color=[mine], samples=ctx.max_samples() * 2)

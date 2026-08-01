@@ -79,7 +79,7 @@ def test_sampling_without_wait_renders_correctly(ctx, fullscreen_and_textured, t
     tex = ctx.load_image(str(png_path))  # NOT waited on
 
     vert, frag = fullscreen_and_textured
-    target = bz.RenderTarget(ctx, 62, 62)
+    target = ctx.create_render_target(62, 62)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
@@ -110,7 +110,7 @@ def test_unrelated_submits_do_not_wait_for_uploads(ctx, triangle_shaders, triang
 
     vert, frag = triangle_shaders
     vbuf, ibuf = triangle_buffers
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
@@ -186,7 +186,7 @@ def test_drawing_from_a_fresh_buffer_needs_no_wait(ctx, triangle_shaders):
                              bz.MemoryUsage.STATIC)
 
     vert, frag = triangle_shaders
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)

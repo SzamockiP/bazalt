@@ -30,7 +30,7 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
 window = bz.Window(800, 600, "Bazalt Demo - Gamepad")
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 print("plug in a gamepad and move the sticks. ESC or close the window to quit.")
 held = set()

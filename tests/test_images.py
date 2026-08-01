@@ -137,7 +137,7 @@ def test_sampling_with_an_explicit_nearest_sampler(ctx, tmp_path):
 
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 62, 62)
+    target = ctx.create_render_target(62, 62)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)

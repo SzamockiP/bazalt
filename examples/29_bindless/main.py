@@ -33,7 +33,7 @@ ctx = bz.Context(logger, optional=[bz.Feature.BINDLESS], gpu_timing=True)
 if not ctx.supports(bz.Feature.BINDLESS):
     raise SystemExit("this GPU reports no descriptorIndexing, so there is nothing to show")
 
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 vert = ctx.compile_shader("quad.vert", bz.ShaderStage.VERTEX)
 frag = ctx.compile_shader("quad.frag", bz.ShaderStage.FRAGMENT)

@@ -33,7 +33,7 @@ def on_message(msg):
 
 window = bz.Window(W, H, "Bazalt Demo - LUT Grading", logger=logger)
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 fullscreen = ctx.compile_shader("fullscreen.vert", bz.ShaderStage.VERTEX)
 pool = ctx.create_descriptor_pool()  # automatic (0.23)

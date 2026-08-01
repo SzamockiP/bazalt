@@ -62,8 +62,8 @@ culled_window.set_position(60, 90)
 observer_window = bz.Window(760, 560, "Bazalt Demo - observer (fly with WASD)")
 observer_window.set_position(860, 90)
 
-culled_renderer = bz.SwapchainRenderer(culled_window, ctx)
-observer_renderer = bz.SwapchainRenderer(observer_window, ctx)
+culled_renderer = ctx.create_renderer(culled_window)
+observer_renderer = ctx.create_renderer(observer_window)
 
 COUNT = 20000
 INDEX_COUNT = 36

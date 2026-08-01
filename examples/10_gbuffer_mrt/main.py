@@ -19,12 +19,12 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
 window = bz.Window(WIDTH, HEIGHT, "Bazalt Demo - G-Buffer MRT")
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 # The g-buffer: two colour formats in one target, plus depth.
-gbuffer = bz.RenderTarget(ctx, WIDTH, HEIGHT,
-                          color=[bz.Format.RGBA16F, bz.Format.RGBA8],
-                          depth=bz.Format.D32F)
+gbuffer = ctx.create_render_target(WIDTH, HEIGHT,
+                                   color=[bz.Format.RGBA16F, bz.Format.RGBA8],
+                                   depth=bz.Format.D32F)
 
 gbuf_vert = ctx.compile_shader("gbuffer.vert", bz.ShaderStage.VERTEX)
 gbuf_frag = ctx.compile_shader("gbuffer.frag", bz.ShaderStage.FRAGMENT)

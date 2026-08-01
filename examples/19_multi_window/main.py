@@ -46,8 +46,8 @@ for d in bz.list_devices():
 window_a = bz.Window(800, 600, "Bazalt - Window A (MAILBOX)")
 window_b = bz.Window(800, 600, "Bazalt - Window B (FIFO_RELAXED)")
 
-renderer_a = bz.SwapchainRenderer(window_a, ctx, present_mode=bz.PresentMode.MAILBOX)
-renderer_b = bz.SwapchainRenderer(window_b, ctx, present_mode=bz.PresentMode.FIFO_RELAXED)
+renderer_a = ctx.create_renderer(window_a, present_mode=bz.PresentMode.MAILBOX)
+renderer_b = ctx.create_renderer(window_b, present_mode=bz.PresentMode.FIFO_RELAXED)
 print(f"A: {renderer_a.present_mode}   B: {renderer_b.present_mode}")
 
 vert = ctx.compile_shader("scene.vert", bz.ShaderStage.VERTEX)

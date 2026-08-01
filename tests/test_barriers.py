@@ -70,7 +70,7 @@ def test_dispatch_to_dispatch_gets_a_barrier(ctx, double_pipeline, add_one_pipel
 def test_dispatch_to_draw_via_descriptor_read(ctx, fullscreen_vert, double_pipeline):
     """Compute writes an SSBO, the fragment shader reads it — RAW across bind points."""
     frag = ctx.compile_shader(str(SHADER_DIR / "ssbo.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     gfx = (ctx.graphics_pipeline()
            .vertex_shader(fullscreen_vert)
            .fragment_shader(frag)
@@ -107,7 +107,7 @@ def test_dispatch_to_vertex_fetch_hoists_the_barrier(ctx, double_pipeline):
 
     vert = ctx.compile_shader(str(SHADER_DIR / "pos2.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     gfx = (ctx.graphics_pipeline()
            .vertex_shader(vert)
            .fragment_shader(frag)
@@ -139,7 +139,7 @@ def test_draw_then_dispatch_is_write_after_read(ctx, double_pipeline):
 
     vert = ctx.compile_shader(str(SHADER_DIR / "pos2.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     gfx = (ctx.graphics_pipeline()
            .vertex_shader(vert)
            .fragment_shader(frag)
@@ -191,7 +191,7 @@ def test_manual_mode_with_explicit_barriers_is_clean(ctx, double_pipeline, add_o
 def test_barrier_inside_rendering_scope_is_refused(ctx, triangle_shaders, triangle_buffers):
     vert, frag = triangle_shaders
     vbuf, ibuf = triangle_buffers
-    target = bz.RenderTarget(ctx, 16, 16)
+    target = ctx.create_render_target(16, 16)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)

@@ -78,7 +78,7 @@ def test_fill_buffer_refuses_a_wrapping_offset(ctx):
 
 def test_draw_indirect_refuses_a_wrapping_offset(ctx, triangle_shaders):
     vert, frag = triangle_shaders
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)

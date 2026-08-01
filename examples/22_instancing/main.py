@@ -27,7 +27,7 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
 window = bz.Window(1024, 720, "Bazalt Demo - Instancing")
 ctx = bz.Context(logger, optional=[bz.Feature.WIREFRAME], gpu_timing=True)
-renderer = bz.SwapchainRenderer(window, ctx, samples=min(4, ctx.max_samples()))
+renderer = ctx.create_renderer(window, samples=min(4, ctx.max_samples()))
 
 vert = ctx.compile_shader("cube.vert", bz.ShaderStage.VERTEX)
 frag = ctx.compile_shader("cube.frag", bz.ShaderStage.FRAGMENT)

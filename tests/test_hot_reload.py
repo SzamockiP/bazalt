@@ -101,7 +101,7 @@ def make_renderer(ctx, target, pipeline):
 
 def drive_drain(ctx):
     """A clear-only submit whose only purpose is to run the watcher drain."""
-    t = bz.RenderTarget(ctx, 8, 8)
+    t = ctx.create_render_target(8, 8)
     cmd = ctx.create_command_buffer()
     cmd.begin()
     cmd.begin_rendering(t, clear_color=[0, 0, 0, 1])
@@ -116,7 +116,7 @@ def test_editing_a_fragment_shader_rebuilds_the_pipeline(ctx, tmp_path):
     frag_path = tmp_path / "solid.frag"
     frag_path.write_text(solid_frag(1, 0, 0))
     frag = ctx.compile_shader(str(frag_path), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     render = make_renderer(ctx, target, fullscreen_pipeline(ctx, frag, target))
 
     assert is_red(render())
@@ -196,7 +196,7 @@ def test_a_reload_keeps_the_include_dirs(ctx, tmp_path):
         "void main() { o = vec4(TINT, 1.0); }\n")
 
     frag = ctx.compile_shader(str(frag_path), bz.ShaderStage.FRAGMENT, include_dirs=[str(lib)])
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     render = make_renderer(ctx, target, fullscreen_pipeline(ctx, frag, target))
     assert is_red(render())
 
@@ -209,7 +209,7 @@ def test_a_typo_is_logged_and_the_old_pipeline_survives(ctx, tmp_path, messages)
     frag_path = tmp_path / "solid.frag"
     frag_path.write_text(solid_frag(1, 0, 0))
     frag = ctx.compile_shader(str(frag_path), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     render = make_renderer(ctx, target, fullscreen_pipeline(ctx, frag, target))
     assert is_red(render())
 
@@ -243,7 +243,7 @@ def test_editing_an_included_file_rebuilds_dependent_pipelines(ctx, tmp_path):
         "void main() { o = vec4(tint(), 1.0); }\n"
     )
     frag = ctx.compile_shader(str(frag_path), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     render = make_renderer(ctx, target, fullscreen_pipeline(ctx, frag, target))
     assert is_red(render())
 
@@ -263,7 +263,7 @@ def test_dropping_an_include_stops_watching_it(ctx, tmp_path, messages):
         "void main() { o = vec4(tint(), 1.0); }\n"
     )
     frag = ctx.compile_shader(str(frag_path), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     render = make_renderer(ctx, target, fullscreen_pipeline(ctx, frag, target))
     assert is_red(render())
 
@@ -288,7 +288,7 @@ def test_a_dropped_pipeline_is_pruned_not_rebuilt(ctx, tmp_path, messages):
     frag_path = tmp_path / "orphan.frag"
     frag_path.write_text(solid_frag(1, 0, 0))
     frag = ctx.compile_shader(str(frag_path), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 16, 16)
+    target = ctx.create_render_target(16, 16)
     pipeline = fullscreen_pipeline(ctx, frag, target)
     make_renderer(ctx, target, pipeline)()  # render once so it's fully live
 

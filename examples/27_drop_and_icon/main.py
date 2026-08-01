@@ -35,7 +35,7 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
 window = bz.Window(1024, 720, "Bazalt Demo - drop a PNG on me")
 ctx = bz.Context(logger, hot_reload=True)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 vert = ctx.compile_shader("quad.vert", bz.ShaderStage.VERTEX)
 frag = ctx.compile_shader("quad.frag", bz.ShaderStage.FRAGMENT)

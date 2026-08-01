@@ -7,7 +7,7 @@ size around the scene centre (concentric CSM). The scene pass then samples
 shadow.depth as a sampler2DArrayShadow, choosing the cascade per fragment.
 
 The new API is exactly:
-  * shadow = bz.RenderTarget(ctx, S, S, color=None, depth=D32F, layers=3)
+  * shadow = ctx.create_render_target(S, S, color=None, depth=D32F, layers=3)
   * cmd.rendering(shadow.layer(c))  → render this cascade's depth
 
 Each cascade tints the surface (red / green / blue near→far) so the split lines
@@ -78,11 +78,11 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
 window = bz.Window(W, H, "Bazalt Demo - Cascade Shadow Maps (render-to-layer)", logger=logger)
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 window.set_cursor_mode(bz.CURSOR_DISABLED)  # mouse-look
 
 # The shadow array: depth-only, one layer per cascade.
-shadow = bz.RenderTarget(ctx, SHADOW, SHADOW, color=None, depth=bz.Format.D32F, layers=3)
+shadow = ctx.create_render_target(SHADOW, SHADOW, color=None, depth=bz.Format.D32F, layers=3)
 
 depth_vert = ctx.compile_shader("depth.vert", bz.ShaderStage.VERTEX)
 scene_vert = ctx.compile_shader("scene.vert", bz.ShaderStage.VERTEX)

@@ -761,13 +761,32 @@ entry. The release is a label, not the organizing axis.
   sentinel. `mark_subresource_contents` clamps the sentinel back to a real count, so the
   layout state never sees it.
 
-- **`ctx.create_render_target()` is the constructor spelled from the Context** (0.23,
-  ergonomics #8). Buffers, images, samplers, pools and pipelines come from the Context;
-  the target was one of two stragglers, and remembering which types use which convention
-  was a coin flip. No `TargetType` enum: the two forms differ by their arguments (formats
-  plus a size, or images), which is the same overload pattern `create_image` uses, and an
-  enum would duplicate what the arguments already say. Both spellings share one `inline`
-  helper in `bindings/Common.hpp`, so they cannot drift. The class stays — rule 2.
+- **Everything a Context owns comes from a `ctx.create_*` verb, and the two constructors
+  that did not are GONE** (0.23, ergonomics #8). `bz.Context` and `bz.Window` are the roots
+  — nothing owns them — and every resource under them is made by the Context: buffers,
+  images, samplers, pools, pipelines, command buffers, and now render targets
+  (`ctx.create_render_target`) and swapchain renderers (`ctx.create_renderer`). Remembering
+  which of two conventions a type used was a coin flip; now there is no second convention.
+
+  **The first attempt added the factory and kept the constructor, and that was the bug.**
+  An alias is not a migration: it leaves both spellings alive, and this file's own 0.18
+  audit says a second spelling of the same call is a fork, not a convenience — same work,
+  same arguments, one paragraph of documentation explaining which to prefer, and the
+  paragraph is the tell. These would have been the seventh and eighth. The constructors are
+  removed instead, which is legal exactly once: 0.23 is the pre-1.0 break batch. The classes
+  stay registered as TYPES, because `isinstance` and the annotations still name them.
+
+  No `TargetType` enum: the two target forms differ by their arguments (formats plus a size,
+  or images), which is the same overload pattern `create_image` uses, and an enum would
+  duplicate what the arguments already say.
+
+  **The renderer's `keep_alive` had to move, and it is the interesting part.** The
+  constructor tied the Window to the new instance (`keep_alive<1, 2>`), because the
+  `SurfaceProvider` captures the raw `GLFWwindow*` and a pointer to the Window's own resize
+  flag — the 0.20 dangling-pointer bug. On a factory the nurse is the RETURN VALUE, so it is
+  `keep_alive<0, 2>`: argument 1 is the Context, argument 2 the window. Getting that index
+  wrong reintroduces exactly the bug that entry was written about, and nothing in the C++
+  would say so.
 
 - **`SubresourceTarget` and `MultiviewTarget` are registered, empty, and that is the whole
   feature** (0.23). The base is polymorphic, so pybind downcasts the existing `layer()` /
@@ -2016,9 +2035,12 @@ Ordered by how often the friction shows up, not by effort.
    pipelines come from the Context; `RenderTarget` and `SwapchainRenderer` are top-level
    constructors taking the Context as their first argument. Either is fine, both is a coin
    flip to memorize. `ctx.create_render_target()` as an alias; the class stays. DONE in
-   0.23 for the offscreen target. `SwapchainRenderer` stays a constructor: its first
-   argument is the Window, not the Context, so it was never the same coin flip — and a
-   `window.create_renderer()` is a different proposal nobody has made.
+   0.23 for BOTH types — and **the entry's own proposal was wrong about how**. "As an
+   alias" would have kept two spellings alive, which the 0.18 audit calls a fork; the
+   constructors are gone instead. The entry also let `SwapchainRenderer` off on the
+   grounds that its first argument is the Window rather than the Context, and that is a
+   distinction about the argument list, not about ownership: the renderer is a Context
+   resource like the rest, so it is `ctx.create_renderer(window)`. See the decision above.
 9. **No `close()` and no context manager on `Context` or `Window`.** Re-running a notebook
    cell leaks a device, an upload worker, a VMA allocator and a command pool until the garbage
    collector gets to it. Rule 4 makes this worse than it looks: the notebook is the prototyping
@@ -2337,7 +2359,16 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
 
 ### API design
 
-- **A second spelling is not a convenience, it is a fork** (0.18). The audit before
+- **A second spelling is not a convenience, it is a fork** (0.18), **and the rule catches
+  additions as readily as legacy** (0.23). `ctx.create_render_target()` was added beside
+  `bz.RenderTarget(ctx, ...)` as "an alias; the class stays", which is how all six of the
+  0.18 forks began — an ergonomic shortcut next to the general form, both kept because
+  removing either would break someone. The tell showed up immediately: the examples split
+  into two dialects, the new ones using the factory and the old ones the constructor. The
+  fix was to finish the migration rather than document a preference. **When a backlog entry
+  proposes "add X as an alias for Y", read it as "fork Y" and price the removal instead.**
+
+  The audit before
   0.18 found six, and each had the same origin: an ergonomic shortcut added next to the
   general form, both kept because removing either would break someone. `target.read_pixels()`
   was `target.color[0].read()` with the layer and mip choice removed, and its own binding
@@ -2663,6 +2694,13 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   strong reference on the nurse, so `sys.getrefcount(window)` rising by exactly one after
   the renderer is built is the assertion. Dropping the window and presenting is the second
   half, and on its own it is only a probabilistic check — freed memory often still reads.
+
+  **0.23 moved the construction to `ctx.create_renderer(window)` and the annotation had to
+  move with it**: on a factory the nurse is the return value, so `keep_alive<1, 2>` becomes
+  `keep_alive<0, 2>`. The indices are positional and silent — write the constructor's pair
+  on a factory and you have re-created this bug, with the same test still passing if it only
+  checks the refcount of the wrong object. **When a binding changes shape, re-derive its
+  keep_alive indices from what the nurse now is; do not port the numbers.**
 
 - **`offset + length > size` on unsigned operands is a bypass, not a bounds check** (0.20).
   Six of them, and the Python boundary hands the offset straight through, so

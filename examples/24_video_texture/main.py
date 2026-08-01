@@ -43,7 +43,7 @@ def on_message(msg):
 
 window = bz.Window(W, H, "Bazalt Demo - CPU Image Streaming", logger=logger)
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 
 def frame_at(t):

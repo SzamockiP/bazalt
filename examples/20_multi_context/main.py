@@ -86,7 +86,7 @@ print(f"{SIZE}x{SIZE} moved between Contexts in {(time.perf_counter() - start) *
 # ── Context B: a window that draws with it ────────────────────────────────────
 
 window = bz.Window(800, 600, "Bazalt - Multi-context")
-renderer = bz.SwapchainRenderer(window, viewer)
+renderer = viewer.create_renderer(window)
 
 pipeline = (viewer.graphics_pipeline()
     .vertex_shader(viewer.compile_shader("quad.vert", bz.ShaderStage.VERTEX))

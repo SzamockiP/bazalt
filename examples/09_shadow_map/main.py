@@ -20,10 +20,10 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
 window = bz.Window(1024, 720, "Bazalt Demo - Shadow Map")
 ctx = bz.Context(logger)
-renderer = bz.SwapchainRenderer(window, ctx)
+renderer = ctx.create_renderer(window)
 
 # The shadow map: a depth-only target. Its .depth is an ordinary bz.Image.
-shadow = bz.RenderTarget(ctx, SHADOW_SIZE, SHADOW_SIZE, color=None, depth=bz.Format.D32F)
+shadow = ctx.create_render_target(SHADOW_SIZE, SHADOW_SIZE, color=None, depth=bz.Format.D32F)
 
 shadow_vert = ctx.compile_shader("shadow.vert", bz.ShaderStage.VERTEX)
 scene_vert = ctx.compile_shader("scene.vert", bz.ShaderStage.VERTEX)

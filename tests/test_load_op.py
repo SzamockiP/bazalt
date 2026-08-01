@@ -52,7 +52,7 @@ def test_second_pass_keeps_what_the_first_one_drew(ctx, push_pipeline):
     The scissor is what makes the assertion two-sided: the right half can only
     still be red if the load really loaded.
     """
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pipeline = push_pipeline(target)
 
     cmd = ctx.create_command_buffer()
@@ -80,7 +80,7 @@ def test_preserve_survives_a_replay(ctx, push_pipeline):
     previous replay left. Pass 1 still clears, which is what keeps the sequence
     idempotent — and this is the case that would drift if it did not.
     """
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pipeline = push_pipeline(target)
 
     cmd = ctx.create_command_buffer()
@@ -110,7 +110,7 @@ def test_depth_survives_into_the_second_pass(ctx, push_pipeline):
     DONT_CARE depth is *undefined* between passes, and undefined is free to
     happen to hold the old value on any given driver.
     """
-    target = bz.RenderTarget(ctx, 64, 64, depth=bz.Format.D32F)
+    target = ctx.create_render_target(64, 64, depth=bz.Format.D32F)
     near = push_pipeline(target, depth_test=True)
     far = push_pipeline(target, far=True, depth_test=True)
 
@@ -139,7 +139,7 @@ def test_an_empty_clear_list_still_means_black(ctx):
 
     They used to collapse into one empty vector, so this pins the distinction.
     """
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     cmd = ctx.create_command_buffer()
     cmd.begin()
     cmd.begin_rendering(target, clear_color=[])
@@ -155,7 +155,7 @@ def test_multisampled_preserve_is_rejected(ctx):
     if ctx.max_samples() < 2:
         pytest.skip("GPU reports no MSAA support (max_samples == 1)")
 
-    target = bz.RenderTarget(ctx, 64, 64, samples=min(4, ctx.max_samples()))
+    target = ctx.create_render_target(64, 64, samples=min(4, ctx.max_samples()))
     cmd = ctx.create_command_buffer()
     cmd.begin()
 
@@ -173,7 +173,7 @@ def test_a_multisampled_target_still_clears(ctx):
     if ctx.max_samples() < 2:
         pytest.skip("GPU reports no MSAA support (max_samples == 1)")
 
-    target = bz.RenderTarget(ctx, 64, 64, samples=min(4, ctx.max_samples()))
+    target = ctx.create_render_target(64, 64, samples=min(4, ctx.max_samples()))
     cmd = ctx.create_command_buffer()
     cmd.begin()
     cmd.begin_rendering(target, clear_color=RED)

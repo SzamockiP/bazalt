@@ -260,11 +260,22 @@ inline BlendEquation resolve_blend_equation(
     return eq;
 }
 
-// The two bodies of RenderTarget.__init__, shared verbatim by
-// ctx.create_render_target (0.23): buffers, images, samplers, pools and
-// pipelines already come from the Context, and the target was one of two
-// stragglers. One implementation, two spellings — the factory and the
-// constructor cannot drift apart because they are the same call.
+// ── What the Context makes ────────────────────────────────────────────────────
+//
+// One rule with no exceptions since 0.23: `bz.Context` and `bz.Window` are the
+// roots — nothing owns them, so they are constructors — and every resource a
+// Context owns comes from a `ctx.create_*` verb. Buffers, images, samplers,
+// pools, pipelines and command buffers always did; the render target and the
+// swapchain renderer were top-level constructors until 0.23, which made "which
+// convention does this type use" a coin flip to memorize.
+//
+// The constructors are GONE rather than kept as aliases. A second spelling of
+// the same call is a fork, not a convenience (the 0.18 audit), and these two
+// would have been the seventh and eighth: same work, same arguments, one
+// paragraph of documentation explaining which to prefer — which is the tell.
+//
+// The bodies live here rather than inline in ContextBind.cpp because each is
+// sixty lines of argument-shape parsing, and that file is long enough.
 
 // Allocating form: the target creates its attachments from formats.
 inline std::shared_ptr<OffscreenTarget> make_offscreen_target(
@@ -300,7 +311,7 @@ inline std::shared_ptr<OffscreenTarget> make_offscreen_target(
                 {
                     raise_error(err_resource(
                         "to render into images you already own, drop width and height: "
-                        "bz.RenderTarget(ctx, color=[image]) — the size, layers and mip "
+                        "ctx.create_render_target(color=[image]) — the size, layers and mip "
                         "levels come off the images"));
                 }
                 colors.push_back(item.cast<Format>());
@@ -310,7 +321,7 @@ inline std::shared_ptr<OffscreenTarget> make_offscreen_target(
         {
             raise_error(err_resource(
                 "to render into an image you already own, drop width and height: "
-                "bz.RenderTarget(ctx, color=[image]) — the size, layers and mip "
+                "ctx.create_render_target(color=[image]) — the size, layers and mip "
                 "levels come off the images"));
         }
         else
@@ -362,7 +373,7 @@ inline std::shared_ptr<OffscreenTarget> make_offscreen_target_from_images(
                     raise_error(err_resource(
                         "color has pixel formats but no width and height. Pass the size "
                         "to have the target allocate its attachments — "
-                        "bz.RenderTarget(ctx, 512, 512, color=bz.Format.RGBA8) — or pass "
+                        "ctx.create_render_target(512, 512, color=bz.Format.RGBA8) — or pass "
                         "images from ctx.create_image to render into those."));
                 }
                 colors.push_back(item.cast<std::shared_ptr<Image>>());
@@ -397,6 +408,99 @@ inline std::shared_ptr<OffscreenTarget> make_offscreen_target_from_images(
     return unwrap(
         OffscreenTarget::create_from_images(context, std::move(colors), std::move(depth_image), samples, name),
         context.logger().get());
+}
+
+// The swapchain renderer over a bazalt Window. The Context is the receiver
+// (ctx.create_renderer(window)) rather than the second argument, which is the
+// 0.23 rule; the window is what it needs, exactly as an Image is what
+// create_render_target(color=[...]) needs.
+inline std::shared_ptr<SwapchainRenderer> make_swapchain_renderer(
+    std::shared_ptr<Context> context,
+    Window& window,
+    PresentMode present_mode,
+    std::uint32_t samples,
+    bool stencil)
+{
+    auto sp = window.get_surface_provider();
+    return std::shared_ptr<SwapchainRenderer>(unwrap(
+        SwapchainRenderer::create(context, std::move(sp), present_mode, samples, stencil), context->logger().get()));
+}
+
+// The same renderer over a window bazalt did not open: a Qt widget, a wx frame,
+// anything that can hand over an HWND. Windows only, and it says so.
+inline std::shared_ptr<SwapchainRenderer> make_swapchain_renderer_win32(
+    std::shared_ptr<Context> context,
+    std::uint64_t hwnd,
+    PresentMode present_mode,
+    std::uint32_t samples,
+    bool stencil)
+{
+#ifdef _WIN32
+    SurfaceProvider sp;
+    sp.required_instance_extensions = {"VK_KHR_surface", "VK_KHR_win32_surface"};
+
+    sp.create_surface = [hwnd](VkInstance instance) -> VkSurfaceKHR
+    {
+        auto pfnCreateWin32Surface =
+            (PFN_vkCreateWin32SurfaceKHR)vkGetInstanceProcAddr(instance, "vkCreateWin32SurfaceKHR");
+        if (!pfnCreateWin32Surface)
+        {
+            return VK_NULL_HANDLE;
+        }
+        VkWin32SurfaceCreateInfoKHR createInfo{
+            .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+            .pNext = nullptr,
+            .flags = 0,
+            .hinstance = GetModuleHandle(nullptr),
+            .hwnd = (HWND)hwnd};
+        VkSurfaceKHR surface = VK_NULL_HANDLE;
+        if (pfnCreateWin32Surface(instance, &createInfo, nullptr, &surface) != VK_SUCCESS)
+        {
+            return VK_NULL_HANDLE;
+        }
+        return surface;
+    };
+
+    sp.get_framebuffer_size = [hwnd]() -> std::pair<int, int>
+    {
+        RECT rect;
+        if (GetClientRect((HWND)hwnd, &rect))
+        {
+            return {rect.right - rect.left, rect.bottom - rect.top};
+        }
+        return {0, 0};
+    };
+
+    auto last_width = std::make_shared<int>(0);
+    auto last_height = std::make_shared<int>(0);
+
+    sp.consume_resize_flag = [hwnd, last_width, last_height]() -> bool
+    {
+        RECT rect;
+        if (GetClientRect((HWND)hwnd, &rect))
+        {
+            int w = rect.right - rect.left;
+            int h = rect.bottom - rect.top;
+            if (w != *last_width || h != *last_height)
+            {
+                *last_width = w;
+                *last_height = h;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    return std::shared_ptr<SwapchainRenderer>(unwrap(
+        SwapchainRenderer::create(context, std::move(sp), present_mode, samples, stencil), context->logger().get()));
+#else
+    (void)context;
+    (void)hwnd;
+    (void)present_mode;
+    (void)samples;
+    (void)stencil;
+    raise_error(err_window("create_renderer(win32_hwnd=) is only supported on Windows"));
+#endif
 }
 
 // A 3D target is rendered one Z slice at a time: its whole-target view is a 3D

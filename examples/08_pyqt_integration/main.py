@@ -19,7 +19,7 @@ class VulkanWidget(QWidget):
 
         # 2. Initialize Bazalt Context and SwapchainRenderer (connected directly to native Win32 window handle)
         self.ctx = bz.Context(self.logger)
-        self.renderer = bz.SwapchainRenderer(win32_hwnd=int(self.winId()), context=self.ctx)
+        self.renderer = self.ctx.create_renderer(win32_hwnd=int(self.winId()))
 
         self.setup_vulkan()
         

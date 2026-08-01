@@ -22,7 +22,7 @@ def test_debug_names_are_accepted_and_render_cleanly(ctx):
     img = ctx.create_image(8, 8, name="scratch")
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
@@ -144,7 +144,7 @@ def test_gpu_time_ms_is_reported_after_the_ring_cycles(ctx):
         pytest.skip("no display available")
 
     try:
-        renderer = bz.SwapchainRenderer(window, ctx)
+        renderer = ctx.create_renderer(window)
         vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
         frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
         pipeline = (ctx.graphics_pipeline()
@@ -203,7 +203,7 @@ def test_debug_labels_render_cleanly(ctx):
     """As with debug names, the referee is the ctx fixture: an unbalanced
     begin/end pair is a validation error, and that is what could actually break.
     Whether RenderDoc groups the draws is not observable from here."""
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     pipeline = solid_pipeline(ctx, target)
 
     cmd = ctx.create_command_buffer()
@@ -243,7 +243,7 @@ def test_occlusion_query_counts_fragments(ctx):
     query has a known floor. Not an exact equality: without occlusionQueryPrecise
     the spec only promises a non-zero value, and helper invocations can push a
     precise count above the pixel count."""
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     pipeline = solid_pipeline(ctx, target)
 
     cmd = ctx.create_command_buffer()
@@ -260,7 +260,7 @@ def test_occlusion_query_counts_fragments(ctx):
 def test_occlusion_query_reports_zero_when_nothing_is_drawn(ctx):
     """The two-sided half: a query that always answered "lots" would pass the
     test above while measuring nothing."""
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     solid_pipeline(ctx, target)
 
     cmd = ctx.create_command_buffer()
@@ -292,7 +292,7 @@ def test_occlusion_query_outside_a_rendering_scope_raises(ctx):
 def test_stale_occlusion_handle_reads_none(ctx):
     """Same stale-handle contract as a Timer: re-recording gives the slots to a
     different query, so the old handle reports None instead of a wrong number."""
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     pipeline = solid_pipeline(ctx, target)
 
     cmd = ctx.create_command_buffer()
@@ -367,7 +367,7 @@ def test_renderer_read_pixels_captures_the_frame(ctx):
 
     renderer = None
     try:
-        renderer = bz.SwapchainRenderer(window, ctx)
+        renderer = ctx.create_renderer(window)
         vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
         frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
         pipeline = (ctx.graphics_pipeline()

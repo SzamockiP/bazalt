@@ -34,7 +34,7 @@ def test_a_sequencing_error_is_a_state_error(ctx):
     """The same mistake spelled two ways gets the same type: a barrier inside
     a rendering scope is 'right call, wrong moment', not a resource fault."""
     buf = ctx.create_buffer(1024, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-    target = bz.RenderTarget(ctx, 8, 8)
+    target = ctx.create_render_target(8, 8)
     cmd = ctx.create_command_buffer()
     cmd.begin().begin_rendering(target, clear_color=[0, 0, 0, 1])
     with pytest.raises(bz.StateError):
@@ -91,7 +91,7 @@ def test_shader_error_is_recoverable(ctx, tmp_path, triangle_shaders):
         pass
 
     # Still usable afterwards.
-    target = bz.RenderTarget(ctx, 16, 16)
+    target = ctx.create_render_target(16, 16)
     assert target.width == 16
 
 
@@ -139,7 +139,7 @@ def test_descriptor_pool_needs_at_least_one_descriptor(ctx):
 
 
 def test_pipeline_without_shaders_is_a_shader_error(ctx):
-    target = bz.RenderTarget(ctx, 16, 16)
+    target = ctx.create_render_target(16, 16)
     with pytest.raises(bz.ShaderError):
         ctx.graphics_pipeline().build(target)
 
@@ -166,7 +166,7 @@ def test_set_buffer_on_nonexistent_binding_is_a_resource_error(ctx, triangle_sha
     """A typo'd binding index used to be silently *assumed* to be a uniform
     buffer, producing a descriptor write the layout never declared."""
     vert, frag = triangle_shaders
-    target = bz.RenderTarget(ctx, 16, 16)
+    target = ctx.create_render_target(16, 16)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
@@ -184,7 +184,7 @@ def test_set_buffer_on_nonexistent_binding_is_a_resource_error(ctx, triangle_sha
 
 def test_set_buffer_on_image_binding_points_to_set_image(ctx, triangle_shaders):
     vert, frag = triangle_shaders
-    target = bz.RenderTarget(ctx, 16, 16)
+    target = ctx.create_render_target(16, 16)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
@@ -204,7 +204,7 @@ def test_dynamic_buffer_in_static_set_is_a_resource_error(ctx, triangle_shaders)
     """A DYNAMIC buffer has one backing buffer per frame; a static set can only
     point at one of them. The error must steer towards allocate_frame_set."""
     vert, frag = triangle_shaders
-    target = bz.RenderTarget(ctx, 16, 16)
+    target = ctx.create_render_target(16, 16)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)

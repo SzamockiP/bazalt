@@ -879,67 +879,14 @@ class RenderTargetBase:
 class RenderTarget(RenderTargetBase):
     """An offscreen target backed by Images. No window required.
 
+    Comes from `ctx.create_render_target(...)` — since 0.23 there is no
+    constructor, because a target is a resource the Context owns like every
+    other, and two spellings of one call is a fork rather than a convenience.
+
     The attachments are ordinary Images: `target.color[0]` and `target.depth`
     go straight into DescriptorSet.set_image — that is the whole
     render-to-texture and shadow-map API.
-
-    Two ways to build one, and they do different jobs. Pass a width and height and
-    the target allocates its attachments from pixel formats. Pass images from
-    create_image and it renders into those instead — that signature has no size,
-    layers, cube or mip_levels, because the images already answer all of them
-    (0.19).
     """
-
-    @overload
-    def __init__(self, context: Context, *,
-                 color: Optional[Image | Sequence[Image]] = None,
-                 depth: Optional[Image] = None, samples: int = 1,
-                 name: str = "") -> None:
-        """Render into images you already own, rather than attachments the target
-        allocates.
-
-        What this makes reachable: a graphics ping-pong between two textures,
-        drawing over a texture a compute pass baked, and drawing into an image
-        carried from another Context. All three were impossible while a target
-        insisted on owning its attachments.
-
-        Every attachment must be the same size with the same layer and mip count;
-        a mismatch is refused rather than intersected. The target holds the images,
-        so dropping your reference does not take the attachment with it — and it
-        does write to their layout tracking, which is what leaves the result
-        sampleable.
-
-        samples>1 works as it does on the other signature (0.21): the target
-        renders into multisampled attachments it allocates and resolves into the
-        images you passed, so those stay single-sample and sampleable. Not
-        available with a mipped attachment, because a multisampled image has no mip
-        chain.
-        """
-        ...
-
-    @overload
-    def __init__(self, context: Context, width: int, height: int,
-                 color: Optional[Format | Sequence[Format]] = Format.RGBA8,
-                 depth: Optional[Format] = None,
-                 samples: int = 1, *, layers: int = 1, cube: bool = False,
-                 mip_levels: int = 1, name: str = "") -> None:
-        """color=None with depth=D32F makes a depth-only (shadow) target;
-        a list of formats makes an MRT target. At least one attachment is
-        required.
-
-        samples>1 turns on MSAA: the target renders into a multisampled image and
-        resolves into target.color/target.depth (which stay single-sample and
-        sampleable — depth resolves too, via SAMPLE_ZERO). Must be a power of two
-        <= ctx.max_samples(). name labels the attachments in validation messages.
-
-        layers>1 / cube=True / mip_levels>1 make the attachments layered / cube /
-        mipped so a scene can be rasterized into one subresource with
-        .layer(i, mip=m) (render-to-layer / render-to-mip: dynamic env capture,
-        cascade shadows). cube fixes 6 square layers and gives the colour attachment a
-        CUBE view so target.color[0] samples as a cubemap. Single-sample only:
-        samples>1 cannot combine with layers/cube/mip_levels this release.
-        """
-        ...
 
     @property
     def color(self) -> tuple[Image, ...]: ...
@@ -2106,22 +2053,79 @@ class Context:
         nothing to decode and join the batch already submitted."""
         ...
     def create_render_target(self, width: int, height: int,
-                             color: Format | Sequence[Format] | None = Format.RGBA8,
+                             color: Optional[Format | Sequence[Format]] = Format.RGBA8,
                              depth: Optional[Format] = None, samples: int = 1, *,
                              layers: int = 1, cube: bool = False,
-                             mip_levels: int = 1, name: str = "") -> RenderTarget: ...
-    def create_render_target(self, *, color: Image | Sequence[Image] | None = None,
+                             mip_levels: int = 1, name: str = "") -> RenderTarget:
+        """An offscreen target that allocates its attachments (0.23; this was
+        the RenderTarget constructor).
+
+        color=None with depth=D32F makes a depth-only (shadow) target; a list
+        of formats makes an MRT target. At least one attachment is required.
+
+        samples>1 turns on MSAA: the target renders into a multisampled image
+        and resolves into target.color/target.depth (which stay single-sample
+        and sampleable — depth resolves too, via SAMPLE_ZERO). Must be a power
+        of two <= ctx.max_samples(). name labels the attachments in validation
+        messages.
+
+        layers>1 / cube=True / mip_levels>1 make the attachments layered / cube
+        / mipped so a scene can be rasterized into one subresource with
+        .layer(i, mip=m) (render-to-layer / render-to-mip: dynamic env capture,
+        cascade shadows). cube fixes 6 square layers and gives the colour
+        attachment a CUBE view so target.color[0] samples as a cubemap.
+        Single-sample only: samples>1 cannot combine with
+        layers/cube/mip_levels.
+        """
+        ...
+    def create_render_target(self, *, color: Optional[Image | Sequence[Image]] = None,
                              depth: Optional[Image] = None, samples: int = 1,
                              name: str = "") -> RenderTarget:
-        """The RenderTarget constructor, spelled from the Context (0.23).
+        """A target that renders into images you already own.
 
-        Same two forms, same arguments, one implementation: pass a width and
-        height and the target allocates its attachments from formats; pass
-        images from create_image and it renders into those. The class
-        constructor stays — this exists because everything else the Context
-        creates comes from a create_* verb, and remembering which types use
-        which convention was a coin flip.
+        What this makes reachable: a graphics ping-pong between two textures,
+        drawing over a texture a compute pass baked, drawing into an image
+        carried from another Context, and (0.23) rendering into the Z slices of
+        a volume. No width, height, layers, cube or mip_levels here, because
+        the images already answer all of them.
+
+        Every attachment must be the same size with the same layer, mip and
+        depth count; a mismatch is refused rather than intersected. The target
+        holds the images, so dropping your reference does not take the
+        attachment with it.
+
+        samples>1 works as it does on the other form: the target renders into
+        multisampled attachments it allocates and resolves into the images you
+        passed, so those stay single-sample and sampleable. Not available with
+        a mipped or 3D attachment.
         """
+        ...
+
+    def create_renderer(self, window: Window, *,
+                        present_mode: PresentMode = PresentMode.MAILBOX,
+                        samples: int = 1, stencil: bool = False) -> SwapchainRenderer:
+        """The swapchain renderer that presents to `window` (0.23; this was the
+        SwapchainRenderer constructor).
+
+        The renderer keeps the window alive for as long as it lives: it holds
+        pointers into it, so `del window` alone would leave them dangling.
+
+        samples>1 turns on windowed MSAA: rendering goes into a multisampled
+        colour+depth image that resolves into the swapchain image on present.
+        Must be a power of two <= ctx.max_samples().
+
+        stencil=True gives the window's depth buffer a stencil aspect, which is
+        what a masked pass (an outline, a portal) needs on screen. Without it a
+        stencil_test() pipeline can only be built against an offscreen target
+        with depth=Format.DEPTH_STENCIL.
+        """
+        ...
+    def create_renderer(self, *, win32_hwnd: int,
+                        present_mode: PresentMode = PresentMode.MAILBOX,
+                        samples: int = 1, stencil: bool = False) -> SwapchainRenderer:
+        """Attach to a window bazalt did not open — a Qt widget, a wx frame,
+        anything with an HWND. Windows only; elsewhere it raises WindowError.
+        See examples/08_pyqt_integration."""
         ...
     def create_image(self, width: int, height: int,
                      format: Format = Format.RGBA8, *, depth: int = 1,
@@ -2273,25 +2277,11 @@ class Context:
         ...
 
 class SwapchainRenderer(RenderTargetBase):
-    """Presents to a window. One implementation of a render target."""
+    """Presents to a window. One implementation of a render target.
 
-    def __init__(self, window: Window, context: Context,
-                 present_mode: PresentMode = PresentMode.MAILBOX, samples: int = 1,
-                 stencil: bool = False) -> None:
-        """samples>1 turns on windowed MSAA: rendering goes into a multisampled
-        colour+depth image that resolves into the swapchain image on present.
-        Must be a power of two <= ctx.max_samples().
-
-        stencil=True gives the window's depth buffer a stencil aspect, which is
-        what a masked pass (an outline, a portal) needs on screen. Without it a
-        stencil_test() pipeline can only be built against an offscreen
-        RenderTarget with depth=Format.DEPTH_STENCIL."""
-        ...
-    def __init__(self, win32_hwnd: int, context: Context,
-                 present_mode: PresentMode = PresentMode.MAILBOX, samples: int = 1,
-                 stencil: bool = False) -> None:
-        """Attach to an existing native window (Windows only)."""
-        ...
+    Comes from `ctx.create_renderer(window)` — since 0.23 there is no
+    constructor, for the reason RenderTarget has none.
+    """
 
     @property
     def present_mode(self) -> PresentMode:

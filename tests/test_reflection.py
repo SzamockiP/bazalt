@@ -111,7 +111,7 @@ def test_a_fragment_write_is_ordered_against_a_later_read(ctx, extra_context):
     # read+write.
     assert comp.writes == [(0, 1)]
 
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
     img = ctx.create_image(32, 32, bz.Format.RGBA8)
     out = ctx.create_buffer(16, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
 
@@ -161,7 +161,7 @@ def test_a_graphics_write_needs_its_feature(ctx):
     """
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "refl_frag_store.frag"), bz.ShaderStage.FRAGMENT)
-    target = bz.RenderTarget(ctx, 32, 32)
+    target = ctx.create_render_target(32, 32)
 
     if ctx.supports(bz.Feature.FRAGMENT_STORES):
         pytest.skip("the session Context has FRAGMENT_STORES, so it cannot refuse")

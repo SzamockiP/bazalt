@@ -17,7 +17,7 @@ CLEAR = [0.1, 0.2, 0.3, 1.0]
 def test_every_recording_method_returns_the_same_object(ctx, triangle_shaders, triangle_buffers):
     vert, frag = triangle_shaders
     vbuf, ibuf = triangle_buffers
-    target = bz.RenderTarget(ctx, 16, 16)
+    target = ctx.create_render_target(16, 16)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
@@ -48,7 +48,7 @@ def test_chained_and_statement_styles_render_identically(ctx, triangle_shaders, 
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                 .build(target))
 
-    statement_target = bz.RenderTarget(ctx, 64, 64)
+    statement_target = ctx.create_render_target(64, 64)
     pipeline = make_pipeline(statement_target)
     cmd = ctx.create_command_buffer()
     cmd.begin()
@@ -60,7 +60,7 @@ def test_chained_and_statement_styles_render_identically(ctx, triangle_shaders, 
     cmd.end_rendering(statement_target)
     ctx.submit(cmd)
 
-    chained_target = bz.RenderTarget(ctx, 64, 64)
+    chained_target = ctx.create_render_target(64, 64)
     pipeline2 = make_pipeline(chained_target)
     cmd2 = ctx.create_command_buffer()
     (cmd2.begin()
@@ -80,7 +80,7 @@ def test_rendering_scope_records_the_pair(ctx, triangle_shaders, triangle_buffer
     """`with cmd.rendering(...)` is begin_rendering + end_rendering, exactly."""
     vert, frag = triangle_shaders
     vbuf, ibuf = triangle_buffers
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
@@ -103,7 +103,7 @@ def test_rendering_scope_closes_on_exception(ctx, triangle_shaders, triangle_buf
     buffer is left in a consistent state and can be re-recorded and used."""
     vert, frag = triangle_shaders
     vbuf, ibuf = triangle_buffers
-    target = bz.RenderTarget(ctx, 64, 64)
+    target = ctx.create_render_target(64, 64)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
                 .fragment_shader(frag)
