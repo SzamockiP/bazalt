@@ -92,6 +92,10 @@ def test_log_message_is_readable(ctx, messages):
 # full Vulkan always allows, and only a portability subset (MoltenVK on macOS)
 # can take away. The tests therefore assert the AGREEMENT between the answer and
 # the behaviour, which is the same assertion on both kinds of driver.
+#
+# The refusal branch below runs ONLY on a portability driver, so no desktop run
+# can check it. That is how the 0.23 error split reached CI green here and red
+# on macOS: the type these branches expect had changed under them (0.23).
 
 
 def test_a_comparison_sampler_agrees_with_what_the_context_says(ctx):
@@ -101,7 +105,7 @@ def test_a_comparison_sampler_agrees_with_what_the_context_says(ctx):
     if ctx.supports(bz.Feature.COMPARISON_SAMPLER):
         assert ctx.create_sampler(compare=bz.CompareOp.LESS) is not None
     else:
-        with pytest.raises(bz.ResourceError):
+        with pytest.raises(bz.UnsupportedError):
             ctx.create_sampler(compare=bz.CompareOp.LESS)
 
 
@@ -109,7 +113,7 @@ def test_a_mip_lod_bias_agrees_with_what_the_context_says(ctx):
     if ctx.supports(bz.Feature.SAMPLER_MIP_LOD_BIAS):
         assert ctx.create_sampler(mip_lod_bias=1.5) is not None
     else:
-        with pytest.raises(bz.ResourceError):
+        with pytest.raises(bz.UnsupportedError):
             ctx.create_sampler(mip_lod_bias=1.5)
 
 
@@ -124,7 +128,7 @@ def test_a_layered_multisampled_target_agrees_with_what_the_context_says(ctx):
         target = bz.RenderTarget(ctx, 32, 32, layers=2, samples=4)
         assert target.color[0].array_layers == 2
     else:
-        with pytest.raises(bz.ResourceError):
+        with pytest.raises(bz.UnsupportedError):
             bz.RenderTarget(ctx, 32, 32, layers=2, samples=4)
 
 

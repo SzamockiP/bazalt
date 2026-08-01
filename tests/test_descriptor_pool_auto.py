@@ -58,16 +58,28 @@ def test_freed_sets_return_to_their_own_block(ctx):
         ctx.begin_frame()
 
 
-def test_fixed_pool_still_exhausts_with_a_resource_error(ctx):
+def test_a_full_fixed_pool_raises_one_type(ctx):
     """The escape hatch keeps its contract: explicit sizes mean one block, and
-    the pool-full result is ResourceError — one type, whichever VkResult the
-    driver picks (the 0.23 mapping fix)."""
+    a pool-full result is ResourceError — one type, whichever VkResult the
+    driver picks. Before 0.23 the same mistake arrived as OutOfMemoryError from
+    OUT_OF_POOL_MEMORY and as ResourceError from FRAGMENTED_POOL.
+
+    WHETHER a driver refuses at all is its own business: the spec lets an
+    implementation serve more sets than the pool was sized for, and lavapipe
+    does, because its descriptors are host memory. So this probes and skips
+    with what it saw — a skip that names the observation survives a driver
+    changing its mind, which is the rule the 0.22 MoltenVK skips follow."""
     pool = ctx.create_descriptor_pool(max_sets=1, storage_buffers=1)
     pipe = buffer_pipeline(ctx)
-    pool.allocate_set(pipe, set=0)
-    with pytest.raises(bz.ResourceError):
-        for _ in range(4):
-            pool.allocate_set(pipe, set=0)
+    served = []
+    for _ in range(64):
+        try:
+            served.append(pool.allocate_set(pipe, set=0))
+        except bz.OutOfMemoryError:
+            pytest.fail("a full pool must raise ResourceError, not OutOfMemoryError")
+        except bz.ResourceError:
+            return
+    pytest.skip(f"this driver served {len(served)} sets from a pool sized for 1")
 
 
 def test_half_specified_pool_is_a_value_error(ctx):
@@ -76,9 +88,14 @@ def test_half_specified_pool_is_a_value_error(ctx):
 
 
 def test_auto_pool_fits_a_bindless_array(extra_context):
-    """A count=256 array exceeds the default per-type block size, so the block
-    must be sized from the layout — which is also what MoltenVK requires even
-    for partially written arrays (0.22)."""
+    """An array larger than the default per-type block size, so the block must
+    be sized from the layout — which is also what MoltenVK requires even for
+    partially written arrays (0.22).
+
+    80 is chosen between two bounds: above the 64-descriptor default block, so
+    a fixed-size block cannot serve it, and below MoltenVK's
+    maxPerStageDescriptorUpdateAfterBindSamplers of 96, which a first version
+    of this test walked straight through with 256."""
     ctx = extra_context(optional=[bz.Feature.BINDLESS])
     if not ctx.supports(bz.Feature.BINDLESS):
         pytest.skip("GPU reports no descriptorIndexing")
@@ -88,7 +105,7 @@ def test_auto_pool_fits_a_bindless_array(extra_context):
     pipe = (ctx.graphics_pipeline()
             .vertex_shader(vert)
             .fragment_shader(frag)
-            .texture(0, bz.ShaderStage.FRAGMENT, set=0, count=256)
+            .texture(0, bz.ShaderStage.FRAGMENT, set=0, count=80)
             .push_constant(4, bz.ShaderStage.FRAGMENT)
             .build(target))
 
@@ -96,4 +113,4 @@ def test_auto_pool_fits_a_bindless_array(extra_context):
     dset = pool.allocate_set(pipe, set=0)
     pixels = np.zeros((4, 4, 4), dtype=np.uint8)
     pixels[..., 3] = 255
-    dset.set_image(0, ctx.create_image(pixels), index=200)
+    dset.set_image(0, ctx.create_image(pixels), index=79)
