@@ -11,13 +11,19 @@ layout(set = 0, binding = 1) uniform sampler2D depthTex;
 
 layout(push_constant) uniform PC {
     float threshold;
-    float pad0, pad1, pad2;
+    float ceiling;   // the brightest value bloom may carry
+    float pad0, pad1;
 } pc;
 
 void main() {
     vec3 c = texture(sceneTex, uv).rgb;
     float lum = max(max(c.r, c.g), c.b);
-    outBright = vec4(c * smoothstep(pc.threshold, pc.threshold + 1.0, lum), 1.0);
+    // The ceiling is what keeps the sun round. Its disc is ~40 in HDR, and a
+    // blur that wide spreads it into a plateau that tone-maps to flat white
+    // — so the shape you see is the blur kernel, a rectangle. Clamped, the
+    // glow falls off inside the kernel instead of filling it.
+    outBright = vec4(min(c * smoothstep(pc.threshold, pc.threshold + 1.0, lum),
+                         vec3(pc.ceiling)), 1.0);
 
     // Sky pixels keep the cleared depth (1.0): only they feed the god rays,
     // so geometry occludes the shafts by simply not being sky.

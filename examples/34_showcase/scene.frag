@@ -10,6 +10,10 @@ layout(location = 4) flat in uint materialIndex;
 
 layout(location = 0) out vec4 outColor;
 
+// False in the glass pipeline. A specialization constant, so each pipeline
+// carries its own compiled copy and neither pays a branch.
+layout(constant_id = 0) const bool SHARPEN_ALPHA = true;
+
 layout(set = 0, binding = 1) uniform sampler2DShadow shadowMap;
 
 struct Firefly {
@@ -110,5 +114,16 @@ void main() {
 
     // The alpha feeds alpha-to-coverage: MSAA dithers the leaf edges instead
     // of a hard discard cutting them.
-    outColor = vec4(color, albedo.a);
+    //
+    // Dithering PARTIAL coverage is the trap. A mipmapped leaf texture averages
+    // its alpha toward 0.5 with distance, so a whole distant canopy lands in
+    // the partial band and A2C punches holes through all of it. Rescaling
+    // alpha by its own screen-space derivative restores a hard edge at every
+    // mip and leaves only the true silhouette partial. Glass must keep its
+    // flat 0.4, which is what the specialization constant is for.
+    float a = albedo.a;
+    if (SHARPEN_ALPHA) {
+        a = clamp((a - 0.5) / max(fwidth(a), 1e-4) + 0.5, 0.0, 1.0);
+    }
+    outColor = vec4(color, a);
 }

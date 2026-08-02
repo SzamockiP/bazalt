@@ -73,14 +73,14 @@ import numpy as np
 
 import bazalt as bz
 
-W, H = 1600, 900             # internal resolution, fixed for the run
-CAM_FOV = 60.0               # degrees; the AO pass rebuilds positions from these
+W, H = 1920, 1080             # internal resolution, fixed for the run
+CAM_FOV = 90.0               # degrees; the AO pass rebuilds positions from these
 CAM_NEAR, CAM_FAR = 0.1, 500.0
 SHADOW_SIZE = 4096
 SHADOW_RADIUS = 22.0         # the shadow map covers this box around the camera
 FIREFLY_COUNT = 128
 DAY_SECONDS = 240.0          # one full day-night cycle at speed 1
-SUN_AZIMUTH = 0.55           # radians; fixed heading of the sun's arc
+SUN_AZIMUTH = -0.55           # radians; fixed heading of the sun's arc
 CACHE_VERSION = 4            # v4: flipped V, per-slot alpha (glass)
 
 WINDOW_MODES = [bz.WindowMode.WINDOWED, bz.WindowMode.FRAMELESS,
@@ -594,11 +594,13 @@ class DemoApp:
 
         # Glass: the same shaders blended over the opaques. Depth test on so
         # walls hide it, write off so glass never occludes, no coverage
-        # dithering — the alpha comes straight from the material's kd pixel.
+        # dithering — the alpha comes straight from the material's kd pixel,
+        # which is also why the alpha sharpening is switched off here.
         # Unsorted: San Miguel has a handful of vases, not a glass cathedral.
         self.glass_pipe = (scene_builder()
                           .depth_test(True, write=False)
                           .blend(True, mode=bz.BlendMode.ALPHA)
+                          .constant(0, False, bz.ShaderStage.FRAGMENT)
                           .name("glass")
                           .build(self.scene_rt))
 
@@ -701,6 +703,9 @@ class DemoApp:
         self.blur_h_set.set_image(0, self.prepass_rt.color[0], sampler=linear)
         self.blur_v_set = pool.allocate_set(self.blur_pipe, set=0)
         self.blur_v_set.set_image(0, self.blur_b_rt.color[0], sampler=linear)
+        # The second, wider bloom iteration reads back from A.
+        self.blur_h2_set = pool.allocate_set(self.blur_pipe, set=0)
+        self.blur_h2_set.set_image(0, self.blur_a_rt.color[0], sampler=linear)
 
         self.godray_set = pool.allocate_set(self.godray_pipe, set=0)
         self.godray_set.set_image(0, self.prepass_rt.color[1], sampler=linear)
@@ -874,7 +879,7 @@ class DemoApp:
                                       struct.pack("<8f",
                                                   math.tan(math.radians(CAM_FOV) / 2.0),
                                                   W / H, CAM_NEAR, CAM_FAR,
-                                                  0.6, 1.6, 0, 0))
+                                                  1.4, 3.0, 0, 0))  # radius m, strength
                       .draw(3))
                 with cmd.rendering(self.ao_tmp_rt) as c:
                     (c.bind_pipeline(self.blur_pipe)
@@ -891,20 +896,27 @@ class DemoApp:
                 with cmd.rendering(self.prepass_rt) as c:
                     (c.bind_pipeline(self.prepass_pipe)
                       .bind_descriptor_set(self.prepass_set, self.prepass_pipe, set=0)
-                      .push_constants(self.prepass_pipe, 0, struct.pack("<4f", 1.2, 0, 0, 0))
+                      .push_constants(self.prepass_pipe, 0,
+                                      struct.pack("<4f", 1.2, 6.0, 0, 0))
                       .draw(3))
-                with cmd.rendering(self.blur_b_rt) as c:
-                    (c.bind_pipeline(self.blur_pipe)
-                      .bind_descriptor_set(self.blur_h_set, self.blur_pipe, set=0)
-                      .push_constants(self.blur_pipe, 0,
-                                      struct.pack("<4f", 2.0 / hw, 0.0, 0, 0))
-                      .draw(3))
-                with cmd.rendering(self.blur_a_rt) as c:
-                    (c.bind_pipeline(self.blur_pipe)
-                      .bind_descriptor_set(self.blur_v_set, self.blur_pipe, set=0)
-                      .push_constants(self.blur_pipe, 0,
-                                      struct.pack("<4f", 0.0, 2.0 / hh, 0, 0))
-                      .draw(3))
+                # Two gaussian iterations, the second at 3x the step: one
+                # 9-tap pass is too narrow for a glow and widening its step
+                # alone would band.
+                for step in (2.0, 6.0):
+                    with cmd.rendering(self.blur_b_rt) as c:
+                        (c.bind_pipeline(self.blur_pipe)
+                          .bind_descriptor_set(
+                              self.blur_h_set if step == 2.0 else self.blur_h2_set,
+                              self.blur_pipe, set=0)
+                          .push_constants(self.blur_pipe, 0,
+                                          struct.pack("<4f", step / hw, 0.0, 0, 0))
+                          .draw(3))
+                    with cmd.rendering(self.blur_a_rt) as c:
+                        (c.bind_pipeline(self.blur_pipe)
+                          .bind_descriptor_set(self.blur_v_set, self.blur_pipe, set=0)
+                          .push_constants(self.blur_pipe, 0,
+                                          struct.pack("<4f", 0.0, step / hh, 0, 0))
+                          .draw(3))
                 with cmd.rendering(self.godray_rt) as c:
                     (c.bind_pipeline(self.godray_pipe)
                       .bind_descriptor_set(self.godray_set, self.godray_pipe, set=0)
