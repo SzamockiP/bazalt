@@ -46,13 +46,22 @@ properties that answered `None` for four different reasons each.
   `firstInstance` carries the material index, so the shader reads it back as
   `gl_InstanceIndex`. A day-night cycle moves the sun and hands the light and
   the shadow map to the moon at dusk. The scene draws into an HDR target with
-  MSAA and alpha-to-coverage, and a post chain adds SSAO, bloom, god rays, a
-  lens flare and ACES tone mapping. Fireflies fly at night: a compute pass moves
+  MSAA and alpha-to-coverage, and a post chain adds SSAO, bloom, god rays and
+  ACES tone mapping. Fireflies fly at night: a compute pass moves
   them and the scene shader reads the same buffer as a list of point lights.
   Every pass carries a `cmd.label()` and a `cmd.timer()`, and every resource a
   name, so a Nsight or RenderDoc capture reads like the source. The first
   start parses the OBJ and caches it to a `.npz`, later starts load in
   seconds. Needs `Feature.BINDLESS` and `Feature.MULTI_DRAW_INDIRECT`.
+
+### Changed
+- **`set` defaults to 0 on the graphics pipeline builder**, which is what the
+  compute builder always did. The same four declarators asked for the set on
+  one side and assumed it on the other, so a pipeline with one descriptor set
+  wrote `set=0` on every line for nothing. Additive: every existing call still
+  compiles and means the same thing. Name `set=` where a pipeline really has
+  more than one — `examples/34_showcase` keeps it on the bindless material
+  array and drops it everywhere else.
 
 ### Fixed
 - **A recording that only READS a GPU-written buffer now waits for the write.**

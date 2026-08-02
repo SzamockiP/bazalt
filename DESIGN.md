@@ -2121,8 +2121,13 @@ Ordered by how often the friction shows up, not by effort.
    merge is real and deliberate (`src/Pipeline.hpp:591`) but appears nowhere in the stub, so a
    user cannot know it is allowed. Accept a sequence, and document the merge either way — the
    documentation half is worth more than the sugar.
-7. **`set` has no default on the graphics builder and defaults to 0 on the compute one.**
-   Same declarator, two contracts.
+7. ✅ **`set` has no default on the graphics builder and defaults to 0 on the compute one.**
+   Same declarator, two contracts. DONE in 0.24: the graphics declarators default to 0
+   as well. The entry was written from the audit; what settled it was
+   `examples/34_showcase`, where a reader asked why every line said `set=0` — a
+   pipeline with one set now says nothing about it, and the demo's two-set pipelines
+   still name `set=1` where the distinction is real, which is the only place it reads as
+   information. Purely additive: every existing positional and keyword call is unchanged.
 8. ✅ **Two factory conventions.** Buffers, images, samplers, pools, command buffers and
    pipelines come from the Context; `RenderTarget` and `SwapchainRenderer` are top-level
    constructors taking the Context as their first argument. Either is fine, both is a coin

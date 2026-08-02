@@ -1098,13 +1098,16 @@ class GraphicsPipelineBuilder:
     #
     # This has always worked and the stub never said so, which made it look like
     # a mistake (0.24). It applies to every declarator below, not only this one.
-    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
                        update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder: ...
-    def storage_buffer(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+    def storage_buffer(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
                        update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder: ...
-    def texture(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+    def texture(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
                 update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder:
         """A sampled image binding.
+
+        `set` defaults to 0, the same as on the compute builder (0.24). A
+        pipeline with one set says nothing about it.
 
         count > 1 declares a descriptor ARRAY — one binding holding N textures,
         written with DescriptorSet.set_image(binding, image, index=i) and indexed
@@ -1129,7 +1132,7 @@ class GraphicsPipelineBuilder:
         budget, so off is the cheaper side.
         """
         ...
-    def storage_image(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+    def storage_image(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
                       update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder:
         """A read/write image addressed by coordinate (imageLoad/imageStore) in a
         graphics shader.

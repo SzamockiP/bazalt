@@ -190,7 +190,10 @@ void bind_pipelines(py::module_& m)
             { return self.uniform_buffer(binding, stage, set, count, update_after_bind); },
             py::arg("binding"),
             py::arg("stage"),
-            py::arg("set"),
+            // Defaulted to match the compute builder: the same declarator asked
+            // for the set on one side and assumed it on the other, so a
+            // single-set pipeline paid `set=0` on every line for nothing.
+            py::arg("set") = 0,
             py::arg("count") = 1,
             py::arg("update_after_bind") = py::none())
         .def(
@@ -204,7 +207,10 @@ void bind_pipelines(py::module_& m)
             { return self.storage_buffer(binding, stage, set, count, update_after_bind); },
             py::arg("binding"),
             py::arg("stage"),
-            py::arg("set"),
+            // Defaulted to match the compute builder: the same declarator asked
+            // for the set on one side and assumed it on the other, so a
+            // single-set pipeline paid `set=0` on every line for nothing.
+            py::arg("set") = 0,
             py::arg("count") = 1,
             py::arg("update_after_bind") = py::none())
         // count>1 declares a descriptor array: one binding holding N textures,
@@ -220,7 +226,10 @@ void bind_pipelines(py::module_& m)
             { return self.texture(binding, stage, set, count, update_after_bind); },
             py::arg("binding"),
             py::arg("stage"),
-            py::arg("set"),
+            // Defaulted to match the compute builder: the same declarator asked
+            // for the set on one side and assumed it on the other, so a
+            // single-set pipeline paid `set=0` on every line for nothing.
+            py::arg("set") = 0,
             py::arg("count") = 1,
             py::arg("update_after_bind") = py::none())
         .def(
@@ -234,7 +243,10 @@ void bind_pipelines(py::module_& m)
             { return self.storage_image(binding, stage, set, count, update_after_bind); },
             py::arg("binding"),
             py::arg("stage"),
-            py::arg("set"),
+            // Defaulted to match the compute builder: the same declarator asked
+            // for the set on one side and assumed it on the other, so a
+            // single-set pipeline paid `set=0` on every line for nothing.
+            py::arg("set") = 0,
             py::arg("count") = 1,
             py::arg("update_after_bind") = py::none())
         // Takes any RenderTarget. A SwapchainRenderer *is* one, so windowed code
