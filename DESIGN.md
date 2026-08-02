@@ -3178,6 +3178,21 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   without that variable. A symlink into `/usr/local/lib` is what the SDK's own system install
   writes, and it survives everything.
 
+- **`GIT_SHALLOW` with a raw commit SHA works only while that SHA is the branch tip** (0.24).
+  A shallow clone fetches the tip of the default branch and nothing else, so CMake's
+  clone-then-checkout fails with `unable to read tree` for any other commit. stb is pinned to
+  a SHA because it publishes no tags, and the pin was master's tip when it was written, so
+  the combination looked correct for four releases. It broke the day upstream pushed past it,
+  in a build where nothing local had changed — the exact failure the pin was added to
+  prevent, re-entering through the fetch mode.
+
+  Two things generalize. **A configuration that is only correct by coincidence gives no
+  warning while the coincidence holds**, so "it has always worked" is not evidence about a
+  build pin. And the fix is not to move the pin forward: that re-arms the same trap for the
+  next upstream push. The four tagged dependencies keep `GIT_SHALLOW`, because a tag is a
+  name the server resolves and no history is needed to reach it. Only stb pays a full clone,
+  which is 6 MB and one second.
+
 ---
 
 ## Verification — open items

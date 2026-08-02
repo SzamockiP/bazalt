@@ -107,6 +107,13 @@ raising since earlier in this release, because nothing runs the examples.
 - **The `Context` docstring still promised `None` from
   `renderer.gpu_time_ms`** without `gpu_timing=True`. It raises `StateError`,
   which the property's own docstring already said.
+- **stb is fetched with a full clone.** It is pinned to a commit, because stb
+  publishes no tags, and `GIT_SHALLOW TRUE` fetches only the tip of the default
+  branch — so the checkout fails with `unable to read tree` for any other
+  commit. The pin was that tip when it was written, which hid the fault for
+  four releases. Upstream pushed past it on 2026-08-02 and the manylinux wheel
+  stopped building, with no local change. The four tagged dependencies keep
+  their shallow clone: a tag is a name the server resolves.
 
 ### Changed (breaking)
 - **`compile_shader` is two overloads, one per place the code comes from.** It
