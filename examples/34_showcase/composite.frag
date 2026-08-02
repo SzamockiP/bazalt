@@ -13,44 +13,26 @@ layout(set = 0, binding = 2) uniform sampler2D godrayTex;
 layout(set = 0, binding = 3) uniform sampler2D aoTex;
 
 layout(push_constant) uniform PC {
-    vec2  sunPos;   // sun in uv space
-    float sunVis;   // 0..1, zero when the sun is off-frame or set
     float night;    // 0..1
     float exposure;
     float warmth;   // dawn/dusk grade amount
-    float pad0, pad1;
+    float pad0, pad1, pad2, pad3, pad4;
 } pc;
 
 vec3 aces(vec3 x) {
     return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
 }
 
-// Pseudo lens flare (John Chapman's trick): ghosts are the blurred bright
-// buffer sampled at positions mirrored through the screen centre. They slide
-// as the camera turns and cost no extra pass.
-vec3 lens_flare() {
-    vec2 ghostDir = (vec2(0.5) - uv) * 0.6;
-    vec3 acc = vec3(0.0);
-    for (int i = 1; i <= 4; ++i) {
-        vec2 p = uv + ghostDir * float(i);
-        float w = max(1.0 - length(vec2(0.5) - p) * 2.0, 0.0);
-        acc += texture(bloomTex, p).rgb * (w * w);
-    }
-    // A wide halo ring around the centre.
-    vec2 haloP = uv + normalize(ghostDir) * 0.35;
-    acc += texture(bloomTex, haloP).rgb
-         * max(1.0 - length(vec2(0.5) - haloP) * 4.0, 0.0);
-    return acc * pc.sunVis * 0.10 * vec3(0.9, 0.7, 1.0);
-}
-
 void main() {
-    // AO darkens the scene only — bloom, god rays and the flare are light
-    // added on top and stay unoccluded.
+    // AO darkens the scene only — bloom and god rays are light added on top
+    // and stay unoccluded.
     vec3 hdr = texture(sceneTex, uv).rgb * texture(aoTex, uv).r
-             + texture(bloomTex, uv).rgb * 0.55
+             + texture(bloomTex, uv).rgb * 0.45
              + texture(godrayTex, uv).rgb;
-    hdr += lens_flare();
 
+    // The float target is headroom, not a display mode: light sums past 1.0
+    // so the bloom pass has something to find, and this maps it back into
+    // the 0-1 range the swapchain shows.
     vec3 col = aces(hdr * pc.exposure);
 
     // Punch: a saturation lift and a gentle S-curve, or everything reads as
