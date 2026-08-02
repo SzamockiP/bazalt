@@ -7,21 +7,24 @@ patch versions never do).
 
 ## [0.24.0] — 2026-08-02
 
-"Without a window". Bazalt runs in a Jupyter notebook, including one whose
-kernel sits on a server with no display. Most of that already worked, so the
-release is what did not: a Context you can close, a headless path that finally
-has a test, and the bug that test found on its first run.
+"The notebook, and the second API review". Bazalt runs in a Jupyter cell, on a
+kernel that may sit on a server with no display. Headless rendering already
+worked, so the release is what did not: a Context you can close between cell
+runs, an event pump that sleeps instead of burning a core, and the headless bug
+that the first real test found.
 
-The rest is the second API review. One barrier the automatic tracker never
-emitted, one CPU core that every non-animating window was burning, and three
-properties that answered `None` for four different reasons each.
+The rest is the second API review, plus one barrier the automatic tracker never
+emitted. Three properties answered `None` for four different reasons each, so a
+loop waiting for a number could not tell "wait longer" from "never". They raise
+now.
 
-Then a pass over all 34 examples, which found the same shape twice: a parameter
-doing a job its name does not admit to. `compile_shader` took a path it never
-opened, only to read the language off its extension, so it is two overloads now
-and the language is an argument. `set=0` was written three times per descriptor
-set and is the default everywhere. The sweep also found an example that had been
-raising since earlier in this release, because nothing runs the examples.
+Then a pass over all 34 examples, and the questions that reading them raised.
+Both answers have the same shape — one name doing two jobs. `compile_shader`
+took a path it never opened, only to read the language off its extension, and
+is two overloads with a `language=` argument now. `set=0` was written three
+times per descriptor set and is the default everywhere. The pass also found an
+example that had been raising since earlier in this same release, because
+nothing runs the examples.
 
 ### Added
 - **`ctx.close()` and `with bz.Context() as ctx:`.** Both stop the Context's
@@ -41,18 +44,20 @@ raising since earlier in this release, because nothing runs the examples.
   core at 100% because `poll_events` was the only pump. `timeout` is in
   seconds; `None` waits indefinitely. A hot-reload edit does not wake it, so
   pass a timeout if you edit shaders while it runs.
+- **`bz.ShaderLanguage`, and `language=` on `compile_shader`.** The language was
+  an attribute of the file name and nothing else, so a `.frag` holding HLSL had
+  no spelling at all. `language=` overrides the extension, and it reaches every
+  decision the language drives, not only shaderc: the `entry_point=` gate and
+  the reflection follow it too. The module stores it, so a hot reload cannot
+  re-infer it and parse the file the other way.
+
+  Two members, GLSL and HLSL. SPIR-V is neither — it is a compiled format, and
+  it already has two spellings, a `.spv` path and bytes in `source=`.
+  `language=` on either raises `ValueError` rather than being ignored.
 - **`examples/33_notebook`.** The notebook pattern end to end: a headless
   render shown with PIL, an `ipywidgets` slider that re-renders, and a compute
   cell that uses the GPU as a calculator. Needs Jupyter, and CI does not run
   it, like every example.
-- **`bz.ShaderLanguage`, and `language=` on `compile_shader`.** The language was
-  an attribute of the file name and nothing else, so a `.frag` holding HLSL had
-  no spelling at all. `language=` overrides the extension, and it reaches every
-  decision the language drives — the parser, the `entry_point=` gate and the
-  reflection. Two members, GLSL and HLSL. SPIR-V is not one of them: it is a
-  compiled format rather than a language, and it already has two spellings, a
-  `.spv` path and bytes in `source=`. `language=` on either of those raises
-  `ValueError` instead of being ignored.
 - **A "Vulkan clip space" section in the README.** Why +y points down, and why
   `proj[1][1] *= -1` corrects your GLM matrix rather than Vulkan.
 - **`examples/34_showcase`.** One scene that exercises most of the engine at
@@ -78,6 +83,16 @@ raising since earlier in this release, because nothing runs the examples.
   nothing. Additive: every existing call still runs and means the same thing.
   Name `set=` where a pipeline really has more than one — `examples/34_showcase`
   keeps it on the bindless material array and drops it everywhere else.
+- **The examples show the API as it is now, not as it was when each was
+  written.** No example used a removed or renamed call, but many carried the
+  longer spelling of a call that 0.23 or 0.24 shortened. They take the automatic
+  descriptor pool, `bz.Key` and `bz.CursorMode` instead of the `KEY_*` and
+  `CURSOR_*` integers, and no `set=` where the set is 0. Each passes its
+  `Logger` to its `Window`, so a message from window creation reaches the same
+  handler as the rest. The README snippet follows the same shape.
+
+  Examples 01 to 03 lose the frames-per-second block from the title bar. It was
+  a third of the smallest program and taught nothing about bazalt.
 
 ### Fixed
 - **A recording that only READS a GPU-written buffer now waits for the write.**
@@ -107,13 +122,14 @@ raising since earlier in this release, because nothing runs the examples.
 - **The `Context` docstring still promised `None` from
   `renderer.gpu_time_ms`** without `gpu_timing=True`. It raises `StateError`,
   which the property's own docstring already said.
-- **stb is fetched with a full clone.** It is pinned to a commit, because stb
-  publishes no tags, and `GIT_SHALLOW TRUE` fetches only the tip of the default
-  branch — so the checkout fails with `unable to read tree` for any other
-  commit. The pin was that tip when it was written, which hid the fault for
-  four releases. Upstream pushed past it on 2026-08-02 and the manylinux wheel
-  stopped building, with no local change. The four tagged dependencies keep
-  their shallow clone: a tag is a name the server resolves.
+- **A shallow clone of stb stopped containing the commit stb is pinned to.**
+  The manylinux wheel failed with `unable to read tree`, on a push that changed
+  no build file. stb publishes no tags, so the pin is a commit, and
+  `GIT_SHALLOW TRUE` fetches the tip of the default branch and nothing else.
+  The pin WAS that tip when it was written, which hid the fault for four
+  releases. Upstream pushed past it, and every shallow clone lost the commit.
+  stb is cloned in full now — 6 MB and one second. The four tagged dependencies
+  keep their shallow clone, because a tag is a name the server resolves.
 
 ### Changed (breaking)
 - **`compile_shader` is two overloads, one per place the code comes from.** It
@@ -153,8 +169,8 @@ raising since earlier in this release, because nothing runs the examples.
   without `gpu_timing=True`, and `UnsupportedError` on a device with no usable
   timestamps. `None` means the frame ring has not cycled once yet.
 
-Both are one release of exposure. If you tested for `None`, test for the
-exception instead.
+The two `None` changes are one release of exposure. If you tested for `None`,
+test for the exception instead.
 
 ### Documentation
 - The stub now says that declaring one `(set, binding)` twice merges the
@@ -162,15 +178,9 @@ exception instead.
   mistake.
 - The `begin_frame` docstring no longer names `DynamicBuffer`, which is not a
   public symbol.
-- **Every example was read against the API it teaches.** No example used a
-  removed or renamed call, but many showed the older spelling of a call that
-  0.23 and 0.24 made shorter. They all use the automatic descriptor pool now,
-  `bz.Key` and `bz.CursorMode` in place of the `KEY_*` and `CURSOR_*` integers,
-  and no `set=` where the set is 0. Each one also passes its `Logger` to its
-  `Window`, so a message from window creation reaches the same handler as the
-  rest. The README snippet follows the same shape. Examples 01 to 03 lost the
-  frames-per-second block in the title bar: it was a third of the smallest
-  program, and it taught nothing about bazalt.
+- `DESIGN.md` gains debt entry 6: nothing runs the examples. That is why one of
+  them shipped broken inside this release, and the entry says which parts of
+  the problem are testable and which are not.
 
 ## [0.23.0] — 2026-08-01
 
