@@ -52,12 +52,12 @@ class Camera:
 
     def process_keyboard(self, window, dt):
         v = self.speed * dt
-        if window.is_key_pressed(bz.KEY_W): self.pos += v * self.front
-        if window.is_key_pressed(bz.KEY_S): self.pos -= v * self.front
-        if window.is_key_pressed(bz.KEY_A): self.pos -= v * self.right
-        if window.is_key_pressed(bz.KEY_D): self.pos += v * self.right
-        if window.is_key_pressed(bz.KEY_SPACE): self.pos += v * glm.vec3(0.0, 1.0, 0.0)
-        if window.is_key_pressed(bz.KEY_LEFT_SHIFT): self.pos -= v * glm.vec3(0.0, 1.0, 0.0)
+        if window.is_key_pressed(bz.Key.W): self.pos += v * self.front
+        if window.is_key_pressed(bz.Key.S): self.pos -= v * self.front
+        if window.is_key_pressed(bz.Key.A): self.pos -= v * self.right
+        if window.is_key_pressed(bz.Key.D): self.pos += v * self.right
+        if window.is_key_pressed(bz.Key.SPACE): self.pos += v * glm.vec3(0.0, 1.0, 0.0)
+        if window.is_key_pressed(bz.Key.LEFT_SHIFT): self.pos -= v * glm.vec3(0.0, 1.0, 0.0)
 
     def view_proj(self, aspect):
         view = glm.lookAt(self.pos, self.pos + self.front, self.up)
@@ -75,7 +75,7 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 window = bz.Window(W, H, "Bazalt Demo - Multiview Environment Capture", logger=logger)
 ctx = bz.Context(logger)
 renderer = ctx.create_renderer(window)
-window.set_cursor_mode(bz.CURSOR_DISABLED)  # mouse-look
+window.set_cursor_mode(bz.CursorMode.DISABLED)  # mouse-look
 
 if not ctx.supports(bz.Feature.MULTIVIEW):
     print("This GPU does not support multiview; see example 16 for the six-pass version.")
@@ -97,7 +97,7 @@ capture_pipe = (ctx.graphics_pipeline()
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                 .cull_mode(bz.CullMode.NONE, bz.FrontFace.COUNTER_CLOCKWISE)
                 .depth_test(True)
-                .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
+                .uniform_buffer(0, bz.ShaderStage.VERTEX)
                 .build(env.all_layers()))
 
 room_pipe = (ctx.graphics_pipeline()
@@ -115,7 +115,7 @@ reflect_pipe = (ctx.graphics_pipeline()
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                 .depth_test(True)
                 .push_constant(80, bz.ShaderStage.VERTEX)
-                .texture(0, bz.ShaderStage.FRAGMENT, set=0)
+                .texture(0, bz.ShaderStage.FRAGMENT)
                 .build(renderer))
 
 
@@ -186,10 +186,10 @@ for d, u in zip(FACE_DIRS, FACE_UPS):
 faces_ubo = ctx.create_buffer(np.frombuffer(face_bytes, np.float32).copy(),
                               bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
-pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4, textures=2)
-capture_set = pool.allocate_frame_set(capture_pipe, set=0)
+pool = ctx.create_descriptor_pool()
+capture_set = pool.allocate_frame_set(capture_pipe)
 capture_set.set_buffer(0, faces_ubo)
-reflect_set = pool.allocate_set(reflect_pipe, set=0)
+reflect_set = pool.allocate_set(reflect_pipe)
 reflect_set.set_image(0, env.color[0], sampler=ctx.create_sampler(filter=bz.Filter.LINEAR))
 
 
@@ -199,7 +199,7 @@ def record(cmd, eye, camera_vp):
     # Capture: ONE pass, all six faces (multiview).
     with cmd.rendering(env.all_layers(), clear_color=[0, 0, 0, 1]) as c:
         (c.bind_pipeline(capture_pipe)
-          .bind_descriptor_set(capture_set, capture_pipe, set=0)
+          .bind_descriptor_set(capture_set, capture_pipe)
           .bind_vertex_buffer(room_vbuf)
           .bind_index_buffer(room_ibuf)
           .draw_indexed(room_count))
@@ -211,7 +211,7 @@ def record(cmd, eye, camera_vp):
           .bind_index_buffer(room_ibuf)
           .draw_indexed(room_count))
         (c.bind_pipeline(reflect_pipe)
-          .bind_descriptor_set(reflect_set, reflect_pipe, set=0)
+          .bind_descriptor_set(reflect_set, reflect_pipe)
           .push_constants(reflect_pipe, 0,
                           bytes(glm.transpose(camera_vp)) + struct.pack("4f", eye.x, eye.y, eye.z, 0.0))
           .bind_vertex_buffer(cube_vbuf)

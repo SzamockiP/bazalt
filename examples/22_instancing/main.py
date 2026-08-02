@@ -25,7 +25,7 @@ COUNTS = [20000, 5000, 1, 0]
 logger = bz.Logger()
 logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
-window = bz.Window(1024, 720, "Bazalt Demo - Instancing")
+window = bz.Window(1024, 720, "Bazalt Demo - Instancing", logger=logger)
 ctx = bz.Context(logger, optional=[bz.Feature.WIREFRAME], gpu_timing=True)
 renderer = ctx.create_renderer(window, samples=min(4, ctx.max_samples()))
 
@@ -44,7 +44,7 @@ def build(polygon_mode):
                           bz.VertexFormat.UBYTE4_NORM]) # tint, 4 bytes
         .depth_test(True)
         .cull_mode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE)
-        .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0))
+        .uniform_buffer(0, bz.ShaderStage.VERTEX))
     if polygon_mode is not None:
         builder = builder.polygon_mode(polygon_mode)
     return builder.build(renderer)
@@ -110,8 +110,8 @@ instances = ctx.create_buffer(np.frombuffer(b"".join(rows), dtype=np.uint8),
 print(f"instance buffer: {len(rows) * 20 / 1024:.0f} KiB for {len(rows)} cubes")
 
 ubuf = ctx.create_buffer(20 * 4, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
-pool = ctx.create_descriptor_pool(max_sets=2, uniform_buffers=2)
-desc_set = pool.allocate_frame_set(solid, set=0)
+pool = ctx.create_descriptor_pool()
+desc_set = pool.allocate_frame_set(solid)
 desc_set.set_buffer(0, ubuf)
 
 
@@ -122,7 +122,7 @@ def record(pipeline, count):
     cmd.begin()
     with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.05, 1.0]) as c:
         (c.bind_pipeline(pipeline)
-          .bind_descriptor_set(desc_set, pipeline, set=0)
+          .bind_descriptor_set(desc_set, pipeline)
           .bind_vertex_buffer(vbuf)
           .bind_vertex_buffer(instances, binding=1)
           .bind_index_buffer(ibuf)
@@ -144,10 +144,10 @@ fps_timer = time.time()
 while window.is_open():
     bz.poll_events()
 
-    if window.was_key_pressed(bz.KEY_SPACE):
+    if window.was_key_pressed(bz.Key.SPACE):
         count_index = (count_index + 1) % len(COUNTS)
         cmd = record(wireframe if wire else solid, COUNTS[count_index])
-    if window.was_key_pressed(bz.KEY_W):
+    if window.was_key_pressed(bz.Key.W):
         wire = not wire
         cmd = record(wireframe if wire else solid, COUNTS[count_index])
 

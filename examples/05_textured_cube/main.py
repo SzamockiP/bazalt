@@ -30,12 +30,12 @@ class Camera:
 
     def process_keyboard(self, window, dt, right):
         velocity = self.speed * dt
-        if window.is_key_pressed(bz.KEY_W): self.pos += velocity * self.front
-        if window.is_key_pressed(bz.KEY_S): self.pos -= velocity * self.front
-        if window.is_key_pressed(bz.KEY_A): self.pos -= velocity * right
-        if window.is_key_pressed(bz.KEY_D): self.pos += velocity * right
-        if window.is_key_pressed(bz.KEY_SPACE): self.pos += velocity * self.up
-        if window.is_key_pressed(bz.KEY_LEFT_SHIFT): self.pos -= velocity * self.up
+        if window.is_key_pressed(bz.Key.W): self.pos += velocity * self.front
+        if window.is_key_pressed(bz.Key.S): self.pos -= velocity * self.front
+        if window.is_key_pressed(bz.Key.A): self.pos -= velocity * right
+        if window.is_key_pressed(bz.Key.D): self.pos += velocity * right
+        if window.is_key_pressed(bz.Key.SPACE): self.pos += velocity * self.up
+        if window.is_key_pressed(bz.Key.LEFT_SHIFT): self.pos -= velocity * self.up
 
     def get_matrices(self, aspect_ratio):
         view = glm.lookAt(self.pos, self.pos + self.front, self.up)
@@ -48,10 +48,10 @@ class Camera:
 logger = bz.Logger()
 logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
-window = bz.Window(1024, 720, "Bazalt Demo - Textured Multi-Cube")
+window = bz.Window(1024, 720, "Bazalt Demo - Textured Multi-Cube", logger=logger)
 ctx = bz.Context(logger)
 renderer = ctx.create_renderer(window)
-window.set_cursor_mode(bz.CURSOR_DISABLED)
+window.set_cursor_mode(bz.CursorMode.DISABLED)
 
 # Compile shaders
 vert_spv = ctx.compile_shader("cube_tex.vert", bz.ShaderStage.VERTEX)
@@ -120,7 +120,7 @@ ubuf = ctx.create_buffer([0.0]*16, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC
 tex1 = ctx.load_image("../assets/wall.png")
 tex2 = ctx.load_image("../assets/container.png")
 
-pool = ctx.create_descriptor_pool(max_sets=4, textures=2, uniform_buffers=2)
+pool = ctx.create_descriptor_pool()
 
 frame_set = pool.allocate_frame_set(pipeline, set=0)
 frame_set.set_buffer(0, ubuf)
@@ -175,7 +175,7 @@ while window.is_open():
         right_vec = camera.update_mouse(mouse.dx, mouse.dy)
         camera.process_keyboard(window, dt, right_vec)
 
-        view, proj, model = camera.get_matrices(1024.0 / 720.0)
+        view, proj, model = camera.get_matrices(renderer.width / renderer.height)
         mvp = proj * view * model
         
         ubuf.update(bytes(glm.transpose(mvp)))

@@ -54,8 +54,8 @@ for _ in range(N):
 particles = ctx.create_buffer(state, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC,
                               bz.DataType.FLOAT)
 
-pool = ctx.create_descriptor_pool(max_sets=4, storage_buffers=4)
-sim_set = pool.allocate_set(sim, set=0)
+pool = ctx.create_descriptor_pool()
+sim_set = pool.allocate_set(sim)
 sim_set.set_buffer(0, particles)
 
 # Recorded once. The dispatch -> vertex-fetch barrier is hoisted before the
@@ -63,7 +63,7 @@ sim_set.set_buffer(0, particles)
 cmd = ctx.create_command_buffer()
 cmd.begin()
 (cmd.bind_pipeline(sim)
-    .bind_descriptor_set(sim_set, sim, set=0)
+    .bind_descriptor_set(sim_set, sim)
     .push_constants(sim, 0, struct.pack("<f", 1.0 / 60.0))
     .dispatch((N + 63) // 64))
 with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.05, 1.0]) as c:

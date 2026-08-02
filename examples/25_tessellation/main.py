@@ -31,7 +31,7 @@ import bazalt as bz
 logger = bz.Logger()
 logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
-window = bz.Window(1024, 720, "Bazalt Demo - Tessellated terrain")
+window = bz.Window(1024, 720, "Bazalt Demo - Tessellated terrain", logger=logger)
 # TESSELLATION is an optional device feature, like every other capability bazalt
 # negotiates. WIREFRAME is optional too, and only the toggle depends on it.
 ctx = bz.Context(logger, features=[bz.Feature.TESSELLATION],
@@ -55,7 +55,7 @@ def pipeline(polygon):
             # tessellation pipeline can draw. Both are checked at build time.
             .topology(bz.Topology.PATCH_LIST)
             .patch_control_points(4)
-            .uniform_buffer(0, bz.ShaderStage.TESS_EVALUATION, set=0)
+            .uniform_buffer(0, bz.ShaderStage.TESS_EVALUATION)
             .push_constant(32, bz.ShaderStage.TESS_CONTROL)
             .push_constant(32, bz.ShaderStage.TESS_EVALUATION)
             .push_constant(32, bz.ShaderStage.FRAGMENT)
@@ -94,8 +94,8 @@ vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
 patch_vertices = GRID * GRID * 4
 
 ubuf = ctx.create_buffer(16 * 4, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
-pool = ctx.create_descriptor_pool(max_sets=2, uniform_buffers=2)
-desc_set = pool.allocate_frame_set(solid, set=0)
+pool = ctx.create_descriptor_pool()
+desc_set = pool.allocate_frame_set(solid)
 desc_set.set_buffer(0, ubuf)
 
 show_wireframe = False
@@ -114,17 +114,17 @@ fps_timer = start
 while window.is_open():
     bz.poll_events()
 
-    if window.was_key_pressed(bz.KEY_W) and wireframe is not None:
+    if window.was_key_pressed(bz.Key.W) and wireframe is not None:
         show_wireframe = not show_wireframe
-    if window.was_key_pressed(bz.KEY_UP):
+    if window.was_key_pressed(bz.Key.UP):
         lod = min(lod + 0.25, 4.0)
-    if window.was_key_pressed(bz.KEY_DOWN):
+    if window.was_key_pressed(bz.Key.DOWN):
         lod = max(lod - 0.25, 0.25)
-    if window.was_key_pressed(bz.KEY_RIGHT):
+    if window.was_key_pressed(bz.Key.RIGHT):
         height_scale = min(height_scale + 0.2, 4.0)
-    if window.was_key_pressed(bz.KEY_LEFT):
+    if window.was_key_pressed(bz.Key.LEFT):
         height_scale = max(height_scale - 0.2, 0.0)
-    if window.was_key_pressed(bz.KEY_SPACE):
+    if window.was_key_pressed(bz.Key.SPACE):
         paused = not paused
 
     now = time.time()
@@ -151,7 +151,7 @@ while window.is_open():
     cmd.begin()
     with cmd.rendering(renderer, clear_color=[0.05, 0.07, 0.10, 1.0]) as c:
         c.bind_pipeline(active)
-        c.bind_descriptor_set(desc_set, active, set=0)
+        c.bind_descriptor_set(desc_set, active)
         c.push_constants(active, 0, push)
         c.bind_vertex_buffer(vbuf)
         # One draw for the whole terrain. The triangle count it turns into is the

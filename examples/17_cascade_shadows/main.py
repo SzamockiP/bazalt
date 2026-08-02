@@ -54,12 +54,12 @@ class Camera:
 
     def process_keyboard(self, window, dt):
         v = self.speed * dt
-        if window.is_key_pressed(bz.KEY_W): self.pos += v * self.front
-        if window.is_key_pressed(bz.KEY_S): self.pos -= v * self.front
-        if window.is_key_pressed(bz.KEY_A): self.pos -= v * self.right
-        if window.is_key_pressed(bz.KEY_D): self.pos += v * self.right
-        if window.is_key_pressed(bz.KEY_SPACE): self.pos += v * glm.vec3(0.0, 1.0, 0.0)
-        if window.is_key_pressed(bz.KEY_LEFT_SHIFT): self.pos -= v * glm.vec3(0.0, 1.0, 0.0)
+        if window.is_key_pressed(bz.Key.W): self.pos += v * self.front
+        if window.is_key_pressed(bz.Key.S): self.pos -= v * self.front
+        if window.is_key_pressed(bz.Key.A): self.pos -= v * self.right
+        if window.is_key_pressed(bz.Key.D): self.pos += v * self.right
+        if window.is_key_pressed(bz.Key.SPACE): self.pos += v * glm.vec3(0.0, 1.0, 0.0)
+        if window.is_key_pressed(bz.Key.LEFT_SHIFT): self.pos -= v * glm.vec3(0.0, 1.0, 0.0)
 
     def view_proj(self, aspect):
         view = glm.lookAt(self.pos, self.pos + self.front, self.up)
@@ -79,7 +79,7 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 window = bz.Window(W, H, "Bazalt Demo - Cascade Shadow Maps (render-to-layer)", logger=logger)
 ctx = bz.Context(logger)
 renderer = ctx.create_renderer(window)
-window.set_cursor_mode(bz.CURSOR_DISABLED)  # mouse-look
+window.set_cursor_mode(bz.CursorMode.DISABLED)  # mouse-look
 
 # The shadow array: depth-only, one layer per cascade.
 shadow = ctx.create_render_target(SHADOW, SHADOW, color=None, depth=bz.Format.D32F, layers=3)
@@ -103,8 +103,8 @@ scene_pipe = (ctx.graphics_pipeline()
               .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
               .depth_test(True)
               .push_constant(64, bz.ShaderStage.VERTEX)
-              .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
-              .texture(1, bz.ShaderStage.FRAGMENT, set=0)
+              .uniform_buffer(0, bz.ShaderStage.FRAGMENT)
+              .texture(1, bz.ShaderStage.FRAGMENT)
               .build(renderer))
 
 # Concentric ortho cascades around the origin: each is a light-space box of
@@ -130,8 +130,8 @@ cascade_blob = (b"".join(bytes(glm.transpose(vp)) for vp in LIGHT_VP)
 cascade_ubo = ctx.create_buffer(np.frombuffer(cascade_blob, np.float32).copy(),
                                 bz.BufferType.UNIFORM, bz.MemoryUsage.STATIC)
 
-pool = ctx.create_descriptor_pool(max_sets=2, uniform_buffers=2, textures=2)
-scene_set = pool.allocate_set(scene_pipe, set=0)
+pool = ctx.create_descriptor_pool()
+scene_set = pool.allocate_set(scene_pipe)
 scene_set.set_buffer(0, cascade_ubo)
 scene_set.set_image(1, shadow.depth, sampler=ctx.create_sampler(
     filter=bz.Filter.LINEAR, compare=bz.CompareOp.LESS))
@@ -187,7 +187,7 @@ def record(cmd, camera_vp):
     # Scene pass: sample the cascade array.
     with cmd.rendering(renderer, clear_color=[0.05, 0.07, 0.1, 1.0]) as sc:
         (sc.bind_pipeline(scene_pipe)
-           .bind_descriptor_set(scene_set, scene_pipe, set=0)
+           .bind_descriptor_set(scene_set, scene_pipe)
            .push_constants(scene_pipe, 0, bytes(glm.transpose(camera_vp)))
            .bind_vertex_buffer(vbuf)
            .bind_index_buffer(ibuf)

@@ -217,6 +217,20 @@ class ShaderStage(IntEnum):
     #: Needs Feature.GEOMETRY_SHADER. Per primitive, and may change its type.
     GEOMETRY = 5
 
+class ShaderLanguage(IntEnum):
+    """Which parser reads a shader's text.
+
+    compile_shader infers it from the file extension (`.hlsl` is HLSL,
+    everything else GLSL) and takes it as `language=` when the extension is
+    wrong or when there is no file at all.
+
+    There is no SPIRV member. SPIR-V is a compiled format rather than a
+    language, and it already has two spellings of its own: a `.spv` path, or
+    bytes in `source=`.
+    """
+    GLSL = 0
+    HLSL = 1
+
 class VertexFormat(IntEnum):
     """Vertex attribute layout. Renamed from `Format`, which is reserved for
     pixel formats."""
@@ -862,8 +876,8 @@ class DescriptorSet:
     def set_buffer(self, binding: int, buffer: Buffer, *, index: int = 0) -> None: ...
 
 class DescriptorPool:
-    def allocate_set(self, pipeline: Pipeline, set: int) -> DescriptorSet: ...
-    def allocate_frame_set(self, pipeline: Pipeline, set: int) -> DescriptorSet: ...
+    def allocate_set(self, pipeline: Pipeline, set: int = 0) -> DescriptorSet: ...
+    def allocate_frame_set(self, pipeline: Pipeline, set: int = 0) -> DescriptorSet: ...
 
 # ── Render targets ─────────────────────────────────────────────────────
 
@@ -1446,7 +1460,7 @@ class CommandBuffer:
         ...
 
     def bind_descriptor_set(self, descriptor_set: DescriptorSet, pipeline: Pipeline,
-                            set: int) -> CommandBuffer: ...
+                            set: int = 0) -> CommandBuffer: ...
 
     def timer(self) -> Timer:
         """Start a GPU timer and return its handle. Records a timestamp here;
@@ -1904,7 +1918,8 @@ class Context:
                 windowed submit). Off by default because it is a profiling
                 diagnostic — the pool reset and two writes ride in every frame's
                 command buffer, and per-frame queries are not guaranteed free on
-                every GPU. Left off, renderer.gpu_time_ms is always None, no cost.
+                every GPU. Left off, renderer.gpu_time_ms raises StateError and
+                nothing is recorded, so the frame pays nothing.
             shader_printf: deliver debugPrintfEXT() output from your shaders to
                 the logger, as Severity.INFO from Source.SHADER. Write
                 `#extension GL_EXT_debug_printf : enable` in the shader and call
@@ -2009,26 +2024,26 @@ class Context:
     def graphics_pipeline(self) -> GraphicsPipelineBuilder: ...
     def compute_pipeline(self) -> ComputePipelineBuilder: ...
     def compile_shader(self, path: str, stage: ShaderStage, *,
-                       source: Optional[str | bytes] = None,
+                       language: Optional[ShaderLanguage] = None,
                        include_dirs: Sequence[str] = (),
                        entry_point: str = "") -> ShaderModule:
-        """Compile or load a shader. One function for every form: the extension
-        of `path` decides how it is handled.
+        """Compile or load a shader FROM A FILE.
+
+        Without `language=`, the extension decides:
 
         - `.hlsl` — HLSL. Use `[[vk::binding(n, set)]]` on resources; bare
           `register()` piles everything into one Vulkan binding space.
-        - `.spv` — a prebuilt SPIR-V binary: loaded, not compiled. `stage` is
-          verified against the binary's entry points (ShaderError on mismatch).
-        - anything else — GLSL.
+        - anything else — GLSL. That covers .vert/.frag/.comp and whatever
+          else a project calls its files.
 
-        `source=` supplies the content instead of reading a file, and its type
-        says what it is. A `str` is compiled as text. `bytes` is taken as ready
-        SPIR-V words: nothing is compiled, the extension of `path` stops
-        mattering, and the binary gets the same magic-number and stage checks a
-        `.spv` file gets. With `source=`, `path` becomes a virtual name that
-        still picks the language, tags diagnostics (ShaderError.path) and anchors
-        relative #include resolution (a name with no directory resolves includes
-        against the working directory).
+        `language=` overrides that, which is the spelling for a `.frag` holding
+        HLSL. It reaches every decision the language drives, not only shaderc:
+        the entry_point gate below and the reflection both follow it.
+
+        `.spv` is separate and not a language: the file is a prebuilt binary,
+        loaded rather than compiled, and `stage` is verified against its entry
+        points (ShaderError on mismatch). `language=` on a `.spv` path is a
+        ValueError — it describes parsing, and nothing is parsed.
 
         `entry_point=` names an HLSL entry point, for a file that holds several
         (VSMain, PSMain). It is an error for GLSL, whose entry point must be
@@ -2043,8 +2058,32 @@ class Context:
         (the compiler discovered it, and the error is recoverable — fix the
         include and recompile).
 
-        A hot reload recompiles with the include_dirs and entry_point of the
-        first compile.
+        A hot reload recompiles with the language, include_dirs and entry_point
+        of the first compile.
+        """
+        ...
+
+    def compile_shader(self, *, source: str | bytes, stage: ShaderStage,
+                       language: Optional[ShaderLanguage] = None,
+                       name: str = "",
+                       include_dirs: Sequence[str] = (),
+                       entry_point: str = "") -> ShaderModule:
+        """Compile a shader held IN MEMORY. No file, so no path.
+
+        `source` says what it is by its type. A `str` is text, parsed as
+        `language=` says and GLSL by default. `bytes` is taken as ready SPIR-V
+        words: nothing is compiled, the binary gets the same magic-number and
+        stage checks a `.spv` file gets, and `language=` is then a ValueError.
+
+        `name=` is what errors call this shader — it shows up as
+        ShaderError.path and in the compiler's own messages. The default is
+        `<source>`. It is a label and nothing else: unlike the path form, no
+        part of it changes what happens.
+
+        `#include` resolves against `include_dirs=` and the working directory,
+        because there is no including file to sit beside.
+
+        Hot reload never sees these: bazalt watches files, and there is none.
         """
         ...
 

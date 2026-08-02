@@ -26,7 +26,7 @@ import bazalt as bz
 logger = bz.Logger()
 logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
-window = bz.Window(1024, 720, "Bazalt Demo - Stencil outline")
+window = bz.Window(1024, 720, "Bazalt Demo - Stencil outline", logger=logger)
 ctx = bz.Context(logger)
 # The stencil lives on the depth attachment, so it is a renderer option.
 renderer = ctx.create_renderer(window, stencil=True)
@@ -42,7 +42,7 @@ def pipeline(**stencil):
         .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
         .push_constant(20, bz.ShaderStage.VERTEX)
         .push_constant(20, bz.ShaderStage.FRAGMENT)
-        .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
+        .uniform_buffer(0, bz.ShaderStage.VERTEX)
         .cull_mode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE))
     depth = stencil.pop("depth", True)
     return builder.depth_test(depth).stencil_test(True, **stencil).build(renderer)
@@ -97,8 +97,8 @@ ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
 
 # view_proj + model
 ubuf = ctx.create_buffer(32 * 4, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
-pool = ctx.create_descriptor_pool(max_sets=2, uniform_buffers=2)
-desc_set = pool.allocate_frame_set(mark, set=0)
+pool = ctx.create_descriptor_pool()
+desc_set = pool.allocate_frame_set(mark)
 desc_set.set_buffer(0, ubuf)
 
 OBJECTS = [
@@ -120,11 +120,11 @@ fps_timer = time.time()
 while window.is_open():
     bz.poll_events()
 
-    if window.was_key_pressed(bz.KEY_SPACE):
+    if window.was_key_pressed(bz.Key.SPACE):
         selected = (selected + 1) % len(OBJECTS)
-    if window.was_key_pressed(bz.KEY_UP):
+    if window.was_key_pressed(bz.Key.UP):
         width = min(width + 0.02, 0.3)
-    if window.was_key_pressed(bz.KEY_DOWN):
+    if window.was_key_pressed(bz.Key.DOWN):
         width = max(width - 0.02, 0.0)
 
     ctx.begin_frame()
@@ -151,14 +151,14 @@ while window.is_open():
         with cmd.rendering(renderer, clear_color=clear, clear_stencil=0) as c:
             body = mark if index == selected else plain
             c.bind_pipeline(body)
-            c.bind_descriptor_set(desc_set, body, set=0)
+            c.bind_descriptor_set(desc_set, body)
             c.push_constants(body, 0, struct.pack("4ff", *color, 0.0))
             c.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(36)
 
         if index == selected and width > 0.0:
             with cmd.rendering(renderer, clear_color=None) as c:
                 c.bind_pipeline(outline)
-                c.bind_descriptor_set(desc_set, outline, set=0)
+                c.bind_descriptor_set(desc_set, outline)
                 c.push_constants(outline, 0, struct.pack("4ff", *OUTLINE_COLOR, width))
                 c.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(36)
 

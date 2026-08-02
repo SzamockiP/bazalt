@@ -140,12 +140,12 @@ class Camera:
         right, self.up = camera_basis(self.front)
 
         v = self.speed * dt
-        if window.is_key_pressed(bz.KEY_W): self.pos += v * self.front
-        if window.is_key_pressed(bz.KEY_S): self.pos -= v * self.front
-        if window.is_key_pressed(bz.KEY_A): self.pos -= v * right
-        if window.is_key_pressed(bz.KEY_D): self.pos += v * right
-        if window.is_key_pressed(bz.KEY_SPACE): self.pos += v * self.up
-        if window.is_key_pressed(bz.KEY_LEFT_SHIFT): self.pos -= v * self.up
+        if window.is_key_pressed(bz.Key.W): self.pos += v * self.front
+        if window.is_key_pressed(bz.Key.S): self.pos -= v * self.front
+        if window.is_key_pressed(bz.Key.A): self.pos -= v * right
+        if window.is_key_pressed(bz.Key.D): self.pos += v * right
+        if window.is_key_pressed(bz.Key.SPACE): self.pos += v * self.up
+        if window.is_key_pressed(bz.Key.LEFT_SHIFT): self.pos -= v * self.up
 
     def view_proj(self):
         view = glm.lookAt(self.pos, self.pos + self.front, self.up)
@@ -182,16 +182,16 @@ class DayNightCycle:
         self.paused = False
 
     def update(self, window, dt):
-        if window.was_key_pressed(bz.KEY_P):
+        if window.was_key_pressed(bz.Key.P):
             self.paused = not self.paused
-        if window.was_key_pressed(bz.KEY_UP):
+        if window.was_key_pressed(bz.Key.UP):
             self.time_scale = min(self.time_scale * 2.0, 16.0)
-        if window.was_key_pressed(bz.KEY_DOWN):
+        if window.was_key_pressed(bz.Key.DOWN):
             self.time_scale = max(self.time_scale / 2.0, 0.25)
         # Hold to scrub: three in-scene hours per real second.
-        if window.is_key_pressed(bz.KEY_RIGHT):
+        if window.is_key_pressed(bz.Key.RIGHT):
             self.hour += dt * 3.0
-        if window.is_key_pressed(bz.KEY_LEFT):
+        if window.is_key_pressed(bz.Key.LEFT):
             self.hour -= dt * 3.0
         if not self.paused:
             self.hour += dt * self.time_scale * 24.0 / DAY_SECONDS
@@ -715,15 +715,15 @@ class Fireflies:
                               .name("firefly sprites")
                               .build(scene_target))
 
-        self.sim_set = pool.allocate_set(self.sim_pipeline, set=0)
+        self.sim_set = pool.allocate_set(self.sim_pipeline)
         self.sim_set.set_buffer(0, self.buffer)
-        self.draw_set = pool.allocate_frame_set(self.draw_pipeline, set=0)
+        self.draw_set = pool.allocate_frame_set(self.draw_pipeline)
         self.draw_set.set_buffer(0, frame_ubo)
 
     def record_simulation(self, cmd, dt, now):
         lo, hi = self.box
         (cmd.bind_pipeline(self.sim_pipeline)
-            .bind_descriptor_set(self.sim_set, self.sim_pipeline, set=0)
+            .bind_descriptor_set(self.sim_set, self.sim_pipeline)
             .push_constants(self.sim_pipeline, offset=0,
                             data=struct.pack("<8f", lo[0], lo[1], lo[2], dt,
                                              hi[0], hi[1], hi[2], now))
@@ -731,7 +731,7 @@ class Fireflies:
 
     def record_draw(self, c):
         (c.bind_pipeline(self.draw_pipeline)
-          .bind_descriptor_set(self.draw_set, self.draw_pipeline, set=0)
+          .bind_descriptor_set(self.draw_set, self.draw_pipeline)
           .bind_vertex_buffer(self.buffer)
           .draw(FIREFLY_COUNT))
 
@@ -796,12 +796,12 @@ class PostProcessor:
                                      address_mode=bz.AddressMode.CLAMP)
 
         def source_set(pipeline, *images, sampler=linear):
-            dset = pool.allocate_set(pipeline, set=0)
+            dset = pool.allocate_set(pipeline)
             for binding, image in enumerate(images):
                 dset.set_image(binding, image, sampler=sampler)
             return dset
 
-        self.prepass_set = pool.allocate_set(self.prepass_pipe, set=0)
+        self.prepass_set = pool.allocate_set(self.prepass_pipe)
         self.prepass_set.set_image(0, scene_target.color[0], sampler=linear)
         self.prepass_set.set_image(1, scene_target.depth, sampler=nearest)
 
@@ -823,7 +823,7 @@ class PostProcessor:
     def blur(self, cmd, source_set, target, dx, dy):
         with cmd.rendering(target) as c:
             (c.bind_pipeline(self.blur_pipe)
-              .bind_descriptor_set(source_set, self.blur_pipe, set=0)
+              .bind_descriptor_set(source_set, self.blur_pipe)
               .push_constants(self.blur_pipe, offset=0,
                               data=struct.pack("<4f", dx, dy, 0.0, 0.0))
               .draw(3))
@@ -831,7 +831,7 @@ class PostProcessor:
     def fullscreen(self, cmd, pipeline, dset, target, push):
         with cmd.rendering(target) as c:
             (c.bind_pipeline(pipeline)
-              .bind_descriptor_set(dset, pipeline, set=0)
+              .bind_descriptor_set(dset, pipeline)
               .push_constants(pipeline, offset=0, data=push)
               .draw(3))
 
@@ -879,7 +879,7 @@ class DemoApp:
                              "the per-submesh culling has nothing to feed")
 
         self.renderer = self.ctx.create_renderer(self.window)
-        self.window.set_cursor_mode(bz.CURSOR_DISABLED)
+        self.window.set_cursor_mode(bz.CursorMode.DISABLED)
         self.camera = Camera()
         self.day = DayNightCycle()
 
@@ -933,10 +933,13 @@ class DemoApp:
             samples=self.samples, name="scene HDR")
 
     def create_pool(self):
-        # Explicit sizes: the automatic defaults are far below two bindless
-        # arrays of ~240 samplers each. A frame set costs frames_in_flight
-        # sets and that many of each descriptor it holds — the four here
-        # (shadow, scene, sky, firefly) are why a fixed guess ran out.
+        # The one hand-budgeted pool in the examples, so the escape hatch is
+        # shown somewhere: explicit sizes mean one fixed block and a
+        # ResourceError when it runs out. Everything else calls
+        # create_descriptor_pool() with no arguments and lets it size itself.
+        # A frame set costs frames_in_flight sets and that many of each
+        # descriptor it holds, which is the arithmetic the automatic pool
+        # exists to remove.
         frames = self.ctx.frames_in_flight
         self.pool = self.ctx.create_descriptor_pool(
             max_sets=4 * frames + 20,
@@ -1014,7 +1017,7 @@ class DemoApp:
                                       compare=bz.CompareOp.LESS,
                                       border_color=bz.BorderColor.OPAQUE_WHITE)
 
-        self.cull_set = self.pool.allocate_set(self.cull_pipe, set=0)
+        self.cull_set = self.pool.allocate_set(self.cull_pipe)
         self.cull_set.set_buffer(0, self.scene.submesh_boxes)
         self.cull_set.set_buffer(1, self.scene.cull_args)
         self.cull_set.set_buffer(2, self.scene.visible_counter)
@@ -1024,7 +1027,7 @@ class DemoApp:
         self.scene_set.set_image(1, self.shadows.depth, sampler=pcf)
         self.scene_set.set_buffer(2, self.fireflies.buffer)
 
-        self.sky_set = self.pool.allocate_frame_set(self.sky_pipe, set=0)
+        self.sky_set = self.pool.allocate_frame_set(self.sky_pipe)
         self.sky_set.set_buffer(0, self.frame_ubo)
 
         # One bindless set serves the scene, the glass AND the shadow
@@ -1059,7 +1062,7 @@ class DemoApp:
             with cmd.timer() as timers["cull"]:
                 cmd.fill_buffer(self.scene.visible_counter, 0)
                 (cmd.bind_pipeline(self.cull_pipe)
-                    .bind_descriptor_set(self.cull_set, self.cull_pipe, set=0)
+                    .bind_descriptor_set(self.cull_set, self.cull_pipe)
                     .push_constants(self.cull_pipe, offset=0,
                                     data=bytes(glm.transpose(view_proj))
                                     + struct.pack("<I", self.scene.submesh_count))
@@ -1079,7 +1082,7 @@ class DemoApp:
                 # pipeline switches, not passes.
                 with cmd.rendering(self.scene_rt, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
                     (c.bind_pipeline(self.sky_pipe)
-                      .bind_descriptor_set(self.sky_set, self.sky_pipe, set=0)
+                      .bind_descriptor_set(self.sky_set, self.sky_pipe)
                       .push_constants(self.sky_pipe, offset=0,
                                       data=self.camera.sky_push())
                       .draw(3))
@@ -1149,9 +1152,9 @@ class DemoApp:
 
         while self.window.is_open():
             bz.poll_events()
-            if self.window.is_key_pressed(bz.KEY_ESCAPE):
+            if self.window.is_key_pressed(bz.Key.ESCAPE):
                 break
-            if self.window.was_key_pressed(bz.KEY_F):
+            if self.window.was_key_pressed(bz.Key.F):
                 self.mode_index = (self.mode_index + 1) % len(WINDOW_MODES)
                 self.window.set_mode(WINDOW_MODES[self.mode_index])
 

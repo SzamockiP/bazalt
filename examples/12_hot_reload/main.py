@@ -25,8 +25,9 @@ def on_message(msg):
     print(f"[{msg.severity}] {msg.source}: {msg.text}")
 
 
-window = bz.Window(800, 600, "Bazalt - Hot Reload (edit the shaders while running)")
-ctx = bz.Context(logger, hot_reload=True)   # <-- the only new line
+window = bz.Window(800, 600, "Bazalt - Hot Reload (edit the shaders while running)", logger=logger)
+ctx = bz.Context(logger, hot_reload=True,   # <-- hot_reload is the only new line
+                 gpu_timing=True)           # gpu_time_ms below needs this
 renderer = ctx.create_renderer(window)
 
 vert = ctx.compile_shader("shader.vert", bz.ShaderStage.VERTEX)
@@ -36,12 +37,12 @@ texture = ctx.load_image("../assets/wall.png", name="wall")
 pipeline = (ctx.graphics_pipeline()
             .vertex_shader(vert)
             .fragment_shader(frag)
-            .texture(0, bz.ShaderStage.FRAGMENT, set=0)
+            .texture(0, bz.ShaderStage.FRAGMENT)
             .name("hot_reload_pipeline")
             .build(renderer))
 
-pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
-desc_set = pool.allocate_set(pipeline, set=0)
+pool = ctx.create_descriptor_pool()
+desc_set = pool.allocate_set(pipeline)
 # The descriptor set keeps pointing at the same image/view across reloads —
 # an image reload re-uploads in place, so this never needs rewriting.
 desc_set.set_image(0, texture)
@@ -69,7 +70,7 @@ while window.is_open():
         cmd.begin()
         with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.03, 1.0]) as c:
             (c.bind_pipeline(pipeline)
-              .bind_descriptor_set(desc_set, pipeline, set=0)
+              .bind_descriptor_set(desc_set, pipeline)
               .draw(3))
         renderer.present(cmd)
 

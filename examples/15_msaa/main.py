@@ -9,7 +9,6 @@ If the GPU exposes SAMPLE_RATE_SHADING we also turn on per-sample shading, which
 cleans up interior/specular aliasing that plain edge MSAA leaves behind.
 """
 
-import math
 import time
 
 import glm
@@ -20,7 +19,7 @@ import bazalt as bz
 logger = bz.Logger()
 logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
-window = bz.Window(1024, 720, "Bazalt Demo - MSAA")
+window = bz.Window(1024, 720, "Bazalt Demo - MSAA", logger=logger)
 # Ask for sample-rate shading; it's optional, so a GPU without it just skips it.
 ctx = bz.Context(logger, optional=[bz.Feature.SAMPLE_RATE_SHADING])
 
@@ -37,7 +36,7 @@ builder = (ctx.graphics_pipeline()
     .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
     .depth_test(True)
     .cull_mode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE)
-    .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0))
+    .uniform_buffer(0, bz.ShaderStage.VERTEX))
 
 sample_shading = ctx.supports(bz.Feature.SAMPLE_RATE_SHADING) and samples > 1
 if sample_shading:
@@ -87,15 +86,15 @@ ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
 
 ubuf = ctx.create_buffer(np.zeros(16, dtype=np.float32), bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
-pool = ctx.create_descriptor_pool(max_sets=2, uniform_buffers=2)
-desc_set = pool.allocate_frame_set(pipeline, set=0)
+pool = ctx.create_descriptor_pool()
+desc_set = pool.allocate_frame_set(pipeline)
 desc_set.set_buffer(0, ubuf)
 
 cmd = ctx.create_command_buffer()
 cmd.begin()
 with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.04, 1.0]) as c:
     (c.bind_pipeline(pipeline)
-      .bind_descriptor_set(desc_set, pipeline, set=0)
+      .bind_descriptor_set(desc_set, pipeline)
       .bind_vertex_buffer(vbuf)
       .bind_index_buffer(ibuf)
       .draw_indexed(36))

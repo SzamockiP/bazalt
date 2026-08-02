@@ -34,7 +34,7 @@ def on_message(msg):
 window = bz.Window(W, H, "Bazalt Demo - Skybox (procedural cubemap)", logger=logger)
 ctx = bz.Context(logger)
 renderer = ctx.create_renderer(window)
-window.set_cursor_mode(bz.CURSOR_DISABLED)  # mouse-look
+window.set_cursor_mode(bz.CursorMode.DISABLED)  # mouse-look
 
 # Compute writes the six faces of an empty cubemap.
 sky_comp = ctx.compile_shader("sky.comp", bz.ShaderStage.COMPUTE)
@@ -47,15 +47,15 @@ frag = ctx.compile_shader("skybox.frag", bz.ShaderStage.FRAGMENT)
 skybox = (ctx.graphics_pipeline()
           .vertex_shader(vert)
           .fragment_shader(frag)
-          .texture(0, bz.ShaderStage.FRAGMENT, set=0)
+          .texture(0, bz.ShaderStage.FRAGMENT)
           .push_constant(64, bz.ShaderStage.FRAGMENT)
           .build(renderer))
 
 # One image, bound two ways: storage (written) and sampled (read).
-pool = ctx.create_descriptor_pool(max_sets=4, storage_images=4, textures=4)
-gen_set = pool.allocate_set(generate, set=0)
+pool = ctx.create_descriptor_pool()
+gen_set = pool.allocate_set(generate)
 gen_set.set_storage_image(0, cubemap)
-sky_set = pool.allocate_set(skybox, set=0)
+sky_set = pool.allocate_set(skybox)
 sky_set.set_image(0, cubemap)
 
 
@@ -98,7 +98,7 @@ def camera_push(yaw, pitch):
 setup = ctx.create_command_buffer()
 setup.begin()
 (setup.bind_pipeline(generate)
-      .bind_descriptor_set(gen_set, generate, set=0)
+      .bind_descriptor_set(gen_set, generate)
       .dispatch((SKY + 7) // 8, (SKY + 7) // 8, 6))
 setup.barrier(cubemap, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
 ctx.submit(setup)
@@ -108,7 +108,7 @@ def record(cmd, yaw, pitch):
     cmd.begin()
     with cmd.rendering(renderer) as c:
         (c.bind_pipeline(skybox)
-          .bind_descriptor_set(sky_set, skybox, set=0)
+          .bind_descriptor_set(sky_set, skybox)
           .push_constants(skybox, 0, camera_push(yaw, pitch))
           .draw(3))
 

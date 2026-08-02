@@ -28,7 +28,7 @@ COLUMNS, ROWS = 8, 6
 logger = bz.Logger()
 logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
-window = bz.Window(1024, 720, "Bazalt Demo - Bindless")
+window = bz.Window(1024, 720, "Bazalt Demo - Bindless", logger=logger)
 ctx = bz.Context(logger, optional=[bz.Feature.BINDLESS], gpu_timing=True)
 if not ctx.supports(bz.Feature.BINDLESS):
     raise SystemExit("this GPU reports no descriptorIndexing, so there is nothing to show")
@@ -45,7 +45,7 @@ pipeline = (ctx.graphics_pipeline()
             .instance_format([bz.VertexFormat.FLOAT2,   # offset
                               bz.VertexFormat.FLOAT,    # scale
                               bz.VertexFormat.UINT])    # which texture
-            .texture(0, bz.ShaderStage.FRAGMENT, set=0, count=TEXTURE_COUNT)
+            .texture(0, bz.ShaderStage.FRAGMENT, count=TEXTURE_COUNT)
             .build(renderer))
 
 # ── the mesh: one quad ────────────────────────────────────────────────────
@@ -88,9 +88,10 @@ def make_texture(seed):
     return ctx.create_image(pixels, name=f"material {seed}")
 
 
-# One binding of eight, so the pool needs eight sampler descriptors for one set.
-pool = ctx.create_descriptor_pool(max_sets=1, textures=TEXTURE_COUNT)
-desc_set = pool.allocate_set(pipeline, set=0)
+# One binding of eight. The automatic pool reads that count off the layout, so
+# the whole array always fits its block — no arithmetic here.
+pool = ctx.create_descriptor_pool()
+desc_set = pool.allocate_set(pipeline)
 textures = [make_texture(i) for i in range(TEXTURE_COUNT)]
 for i, image in enumerate(textures):
     desc_set.set_image(0, image, index=i)
@@ -99,7 +100,7 @@ cmd = ctx.create_command_buffer()
 cmd.begin()
 with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.05, 1.0]) as c:
     (c.bind_pipeline(pipeline)
-      .bind_descriptor_set(desc_set, pipeline, set=0)
+      .bind_descriptor_set(desc_set, pipeline)
       .bind_vertex_buffer(vbuf)
       .bind_vertex_buffer(instances, binding=1)
       .bind_index_buffer(ibuf)
@@ -115,7 +116,7 @@ fps_timer = time.time()
 while window.is_open():
     bz.poll_events()
 
-    if window.was_key_pressed(bz.KEY_SPACE):
+    if window.was_key_pressed(bz.Key.SPACE):
         # Replaced in place: the recording is not touched and the draw is not
         # re-issued. Legal while earlier frames are still reading the set only
         # because an array binding carries UPDATE_AFTER_BIND.

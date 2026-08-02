@@ -148,16 +148,16 @@ generate = (ctx.compute_pipeline()
 present = (ctx.graphics_pipeline()
     .vertex_shader(ctx.compile_shader("fullscreen.vert", bz.ShaderStage.VERTEX))
     .fragment_shader(ctx.compile_shader("present.frag", bz.ShaderStage.FRAGMENT))
-    .texture(0, bz.ShaderStage.FRAGMENT, set=0)
+    .texture(0, bz.ShaderStage.FRAGMENT)
     .build(renderer))
 
 # One image, bound two ways: written as a storage image, read as a texture.
 image = ctx.create_image(W, H, bz.Format.RGBA8)
 
-pool = ctx.create_descriptor_pool(max_sets=2, textures=1, storage_images=1)
-write_set = pool.allocate_set(generate, set=0)
+pool = ctx.create_descriptor_pool()   # no sizes: it grows from the layouts it serves
+write_set = pool.allocate_set(generate)
 write_set.set_storage_image(0, image)
-read_set = pool.allocate_set(present, set=0)
+read_set = pool.allocate_set(present)
 read_set.set_image(0, image)
 
 cmd = ctx.create_command_buffer()
@@ -171,11 +171,11 @@ while window.is_open():
 
     cmd.begin()
     (cmd.bind_pipeline(generate)
-        .bind_descriptor_set(write_set, generate, set=0)
+        .bind_descriptor_set(write_set, generate)
         .push_constants(generate, 0, struct.pack("<f", time.time() - start))
         .dispatch((W + 7) // 8, (H + 7) // 8))
     with cmd.rendering(renderer) as c:
-        c.bind_pipeline(present).bind_descriptor_set(read_set, present, set=0).draw(3)
+        c.bind_pipeline(present).bind_descriptor_set(read_set, present).draw(3)
 
     renderer.present(cmd)
 ```

@@ -423,7 +423,7 @@ void bind_commands(py::module_& m)
             },
             py::arg("descriptor_set"),
             py::arg("pipeline"),
-            py::arg("set"));
+            py::arg("set") = 0);
 
     py::class_<RenderingScope>(m, "RenderingScope")
         .def(

@@ -32,15 +32,24 @@ enum class ShaderStage
     GEOMETRY
 };
 
-// The content of a shader when it does not come from its path: GLSL or HLSL
-// text, or ready SPIR-V words. One parameter with two types, because from the
+// Which parser shaderc runs over the text. A plain value rather than an
+// optional, because by the time a compile starts the question is answered: the
+// API boundary resolves "not stated" into one of these, from the file extension
+// where there is a file and from the caller where there is not.
+enum class ShaderLanguage
+{
+    GLSL,
+    HLSL
+};
+
+// The content of a shader when it does not come from a file: GLSL or HLSL text,
+// or ready SPIR-V words. One parameter with two types, because from the
 // caller's side both answer the same question — "here is the content instead of
 // the file" — and two mutually exclusive parameters in one signature is the
 // shape 0.15 already rejected for the cross-Context transfer.
 //
-// `path` keeps its other jobs whichever arrives: the language, the diagnostic
-// tag, ShaderError.path and the base directory for #include. With SPIR-V words
-// the extension stops mattering, because nothing is compiled.
+// With SPIR-V words nothing is compiled, so neither the language nor the
+// include dirs nor the entry point have any work to do.
 using ShaderSource = std::variant<std::string, std::vector<std::uint32_t>>;
 
 // Extra directories to resolve #include against, tried in order AFTER the
@@ -106,7 +115,8 @@ public:
         std::vector<uint32_t> spirv,
         IncludeDirs include_dirs = {},
         std::string entry_point = {},
-        ShaderReflection reflection = {})
+        ShaderReflection reflection = {},
+        ShaderLanguage language = ShaderLanguage::GLSL)
         : context_(context),
           module_(module),
           path_(path),
@@ -115,7 +125,8 @@ public:
           spirv_(std::move(spirv)),
           include_dirs_(std::move(include_dirs)),
           entry_point_(std::move(entry_point)),
-          reflection_(std::move(reflection))
+          reflection_(std::move(reflection)),
+          language_(language)
     {
     }
 
@@ -136,7 +147,8 @@ public:
           spirv_(std::move(other.spirv_)),
           include_dirs_(std::move(other.include_dirs_)),
           entry_point_(std::move(other.entry_point_)),
-          reflection_(std::move(other.reflection_))
+          reflection_(std::move(other.reflection_)),
+          language_(other.language_)
     {
         other.module_ = VK_NULL_HANDLE;
     }
@@ -155,6 +167,7 @@ public:
             include_dirs_ = std::move(other.include_dirs_);
             entry_point_ = std::move(other.entry_point_);
             reflection_ = std::move(other.reflection_);
+            language_ = other.language_;
             other.module_ = VK_NULL_HANDLE;
         }
         return *this;
@@ -184,8 +197,10 @@ public:
     {
         return spirv_;
     }
-    // The two compile settings a recompile cannot re-derive from the file. Empty
-    // entry_point means the language default ("main").
+    // The three compile settings a recompile cannot re-derive from the file.
+    // Empty entry_point means the language default ("main"), and the language is
+    // already resolved — a reload must not re-infer it, or a file compiled with
+    // an explicit language= would come back parsed as the other one.
     const IncludeDirs& include_dirs() const
     {
         return include_dirs_;
@@ -193,6 +208,10 @@ public:
     const std::string& entry_point() const
     {
         return entry_point_;
+    }
+    ShaderLanguage language() const
+    {
+        return language_;
     }
     // What the SPIR-V says this shader does — see SpirvReflect.hpp. Read by the
     // barrier tracker through Pipeline::shaders() at record time.
@@ -249,6 +268,7 @@ private:
     IncludeDirs include_dirs_;
     std::string entry_point_;
     ShaderReflection reflection_;
+    ShaderLanguage language_ = ShaderLanguage::GLSL;
 };
 
 // Resolves #include relative to the directory of the INCLUDING file (both "..."
@@ -381,19 +401,37 @@ public:
         ShaderReflection reflection;
     };
 
-    // One entry point for every shader form. The extension of `path` decides how
-    // it is handled (GLSL by default); when `source` is given the file is never
-    // opened and `path` is a virtual name — it still supplies the language, the
-    // diagnostic tag, ShaderError.path, and the base directory for #include.
+    // The rule, in one place: only `.hlsl` is HLSL. Everything else is GLSL,
+    // which covers .vert/.frag/.comp and every other convention a project
+    // invents. The API boundary calls this when the caller named no language,
+    // and never after — see ShaderModule::language().
+    static ShaderLanguage infer_language(const std::string& path)
+    {
+        return lowercase_extension(path) == ".hlsl" ? ShaderLanguage::HLSL : ShaderLanguage::GLSL;
+    }
+
+    // Whether this path names an already-compiled binary rather than something
+    // to parse. A format, not a language, which is why it is a separate question
+    // from infer_language and why ShaderLanguage has no SPIRV member.
+    static bool is_spirv_path(const std::string& path)
+    {
+        return lowercase_extension(path) == ".spv";
+    }
+
+    // One entry point for every shader form. `path` names a file when `source`
+    // is absent and is a diagnostic label when it is present — either way it
+    // tags ShaderError.path and anchors relative #include resolution. The
+    // language arrives resolved, so nothing below re-reads the extension.
     static std::expected<std::shared_ptr<ShaderModule>, Error> compile(
         Context& context,
         const std::string& path,
         ShaderStage stage,
         std::optional<ShaderSource> source = std::nullopt,
+        ShaderLanguage language = ShaderLanguage::GLSL,
         IncludeDirs include_dirs = {},
         const std::string& entry_point = {})
     {
-        auto parts = compile_parts(context, path, stage, std::move(source), include_dirs, entry_point);
+        auto parts = compile_parts(context, path, stage, std::move(source), language, include_dirs, entry_point);
         if (!parts)
         {
             return std::unexpected(parts.error());
@@ -407,7 +445,8 @@ public:
             std::move(parts->spirv),
             std::move(include_dirs),
             entry_point,
-            std::move(parts->reflection));
+            std::move(parts->reflection),
+            language);
     }
 
     static constexpr const char* stage_name(ShaderStage stage)
@@ -485,6 +524,7 @@ public:
         const std::string& path,
         ShaderStage stage,
         std::optional<ShaderSource> source = std::nullopt,
+        ShaderLanguage language = ShaderLanguage::GLSL,
         const IncludeDirs& include_dirs = {},
         const std::string& entry_point = {})
     {
@@ -512,15 +552,11 @@ public:
             return parts_from_spirv(context, std::get<std::vector<std::uint32_t>>(std::move(*source)), stage, path);
         }
 
-        if (lowercase_extension(path) == ".spv")
+        // Only a real file can be a prebuilt binary. With `source` the path is a
+        // label, and a label ending in .spv must not change what happens — that
+        // is the whole reason the two forms were split apart.
+        if (!source && is_spirv_path(path))
         {
-            if (source)
-            {
-                return std::unexpected(err_shader(
-                    "source= gave text for compilation, and .spv is a binary format. Pass a file path, or pass "
-                    "the SPIR-V itself as bytes.",
-                    path));
-            }
             return load_spv(context, path, stage);
         }
 
@@ -529,7 +565,7 @@ public:
         {
             text = std::get<std::string>(std::move(*source));
         }
-        return compile_text(context, path, stage, std::move(text), include_dirs, entry_point);
+        return compile_text(context, path, stage, std::move(text), language, include_dirs, entry_point);
     }
 
 private:
@@ -548,6 +584,7 @@ private:
         const std::string& path,
         ShaderStage stage,
         std::optional<std::string> source,
+        ShaderLanguage language,
         const IncludeDirs& include_dirs,
         const std::string& entry_point)
     {
@@ -594,8 +631,11 @@ private:
         options.SetOptimizationLevel(
             context.shader_printf() ? shaderc_optimization_level_zero : shaderc_optimization_level_performance);
 
-        // Language is an attribute of the file name, not a second API path.
-        const bool hlsl = lowercase_extension(path) == ".hlsl";
+        // The language was decided at the API boundary — either the caller named
+        // it or infer_language read the extension. Everything below keys off this
+        // one value, so an explicit language= reaches the entry-point gate and
+        // the reflection call as well, not only shaderc.
+        const bool hlsl = language == ShaderLanguage::HLSL;
         if (hlsl)
         {
             options.SetSourceLanguage(shaderc_source_language_hlsl);
@@ -608,7 +648,7 @@ private:
         {
             return std::unexpected(err_shader(
                 "entry_point= applies to HLSL. A GLSL entry point must be main, so remove the argument or "
-                "rename the file to .hlsl.",
+                "pass language=bz.ShaderLanguage.HLSL.",
                 path));
         }
 

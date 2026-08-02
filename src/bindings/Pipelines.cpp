@@ -411,7 +411,7 @@ void bind_pipelines(py::module_& m)
                 return py::cast(unwrap(pool.allocate_descriptor_set(pipeline, setIndex), pool.logger().get()));
             },
             py::arg("pipeline"),
-            py::arg("set"))
+            py::arg("set") = 0)
         .def(
             "allocate_frame_set",
             [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object
@@ -420,5 +420,5 @@ void bind_pipelines(py::module_& m)
                 return py::cast(unwrap(pool.allocate_frame_descriptor_set(pipeline, setIndex), pool.logger().get()));
             },
             py::arg("pipeline"),
-            py::arg("set"));
+            py::arg("set") = 0);
 }

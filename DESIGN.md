@@ -829,6 +829,42 @@ entry. The release is a label, not the organizing axis.
 
 ### Shader compilation
 
+- **`compile_shader` is two overloads, and the language is an argument** (0.24). The old
+  signature took `path` and `source=` together, and that made one parameter carry two
+  unrelated meanings at once. With `source=` the file was never opened, yet its extension
+  still chose the parser — so HLSL in a string needed an invented `.hlsl` filename, and a
+  `.frag` file holding HLSL had no spelling at all. The project's own test suite wrote
+  `compile_shader("bad.hlsl", stage, source=...)` against a file that does not exist,
+  which is the tell: when the tests have to lie to the API, the API is asking the wrong
+  question.
+
+  `path` was doing four jobs — choose the language, name the file to open, tag
+  `ShaderError.path`, anchor relative `#include`. Only the second is really about a path.
+  So the split gives each job a parameter that admits to it: `path` (a file), `source=`
+  (the code), `language=` (the parser), `name=` (what errors call it). The path form keeps
+  extension inference, because a project whose files are named correctly should not have to
+  say so, and keeps `#include` anchored to the file's own directory. The source form
+  resolves includes through `include_dirs=`, which is the parameter named for exactly that.
+
+  **`source` must be keyword-only.** A path and GLSL text are both `str`, so a positional
+  string in the second overload could mean either. This is the same trap as the `bytes`
+  ordering below and it gets the same answer: never let one Python type reach two meanings
+  by position.
+
+  **`language=` has to reach more than shaderc.** The extension used to feed three
+  decisions — the parser, the `entry_point=` gate and the reflection's entry-point name —
+  through one `const bool hlsl`. An override that only set the shaderc option would half
+  apply, and `language=HLSL` with `entry_point=` on a `.frag` would be refused by the
+  gate. The resolution happens once at the binding, and `compile_parts` takes the answer.
+  Stored on the `ShaderModule` for the same reason `entry_point` is: a hot reload that
+  re-inferred it would parse the file as the other language.
+
+  **No `SPIRV` member on the enum.** SPIR-V is a compiled format, not a language, and it
+  already has two spellings — a `.spv` path and bytes in `source=`. A third would be the
+  fork rule broken for a value that answers a different question. `language=` on either
+  raises `ValueError` rather than being ignored, because an argument that quietly does
+  nothing is the failure the whole split exists to remove.
+
 - **`source=` is one parameter with two types** (0.16). A `str` is text to compile, `bytes`
   is ready SPIR-V. From the caller's side both answer the same question — "here is the
   content instead of the file" — and two mutually exclusive parameters in one signature is
@@ -853,12 +889,14 @@ entry. The release is a label, not the organizing axis.
   first compile knob that exists for one language, which was the reservation about it — the
   answer is that the knob names something only that language has.
 
-- **A shader carries the settings a recompile cannot re-derive** (0.16). `include_dirs` and
-  `entry_point` live on the `ShaderModule` next to `path` and `stage`, because the hot-reload
-  watcher holds only the module. A recompile that dropped them would resolve a different
-  include or compile a different function, and the failure would read as a broken shader
-  edit. General form: anything a compile depends on that is not in the file has to be stored
-  with the result.
+- **A shader carries the settings a recompile cannot re-derive** (0.16, extended in 0.24).
+  `include_dirs`, `entry_point` and now `language` live on the `ShaderModule` next to `path`
+  and `stage`, because the hot-reload watcher holds only the module. A recompile that
+  dropped them would resolve a different include, compile a different function or parse the
+  file as the other language, and the failure would read as a broken shader edit. General
+  form: anything a compile depends on that is not in the file has to be stored with the
+  result. `language` is the entry that proves the rule was worth writing down — it was
+  added three releases later and the rule said where to put it.
 
 ### Streaming, copies and layouts
 
@@ -1640,6 +1678,27 @@ permanent ceiling.
    wanted by the pNext capabilities. It also found a third customer for it:
    `drawIndirectCount`, which is what a GPU-decided draw *count* needs. So the column now
    has three, and they still arrive together or not at all.
+6. **Nothing runs the examples** — found by the 0.24 example sweep. 34 directories and
+   about 6700 lines of the most-read code in the project, and the only thing CI executes
+   is the README through `tests/test_readme.py`. The sweep found what that costs:
+   `examples/12_hot_reload` had been raising `StateError` after 120 frames since the
+   `gpu_time_ms` contract changed earlier in the same release, and two more examples
+   guarded on a `None` that had become an exception. A test caught none of it, because
+   no test opens these files.
+
+   The honest fix is not "run every example in CI". Most need a window, several need a
+   camera and a person, one needs a 1 GB scene download, and the frame loops do not
+   terminate. What is testable is the setup half: every example builds its Context,
+   compiles its shaders, builds its pipelines and allocates its descriptors before the
+   first `while window.is_open()`. A harness that runs an example to that line on a
+   headless Context and stops would have caught the `StateError` only if it read
+   `gpu_time_ms`, which is in the loop — so even that is partial.
+
+   Two cheaper things cover most of it and are not done either: import every example
+   module under `BAZALT_FORCE_HEADLESS` with the loop guarded, and grep the examples for
+   the calls a release changed, as part of the release checklist. The second is what this
+   sweep did by hand. Target: before 1.0, because "the examples are the documentation" is
+   only true while they run.
 
 ### Ceilings accepted on purpose
 
@@ -2029,8 +2088,10 @@ interesting part.
 
 ### Breaking, and therefore before the freeze
 
-**All three landed in 0.23**, which is the pre-1.0 break batch rule 6 asked for. The
-entries stay for their reasoning; each carries its outcome.
+**The first three landed in 0.23**, which was called the pre-1.0 break batch. Entries 4 and
+5 landed afterwards, which is the honest record: the batch was whatever had been noticed by
+0.23, not everything that needed breaking. The entries stay for their reasoning; each
+carries its outcome.
 
 1. ✅ **`DescriptorSet.set_image` takes `index` positionally.** `set_image(binding, image,
    sampler=None, index=0)` — everywhere else in the API the extras are keyword-only, so
@@ -2071,6 +2132,23 @@ entries stay for their reasoning; each carries its outcome.
    states a rule and then enumerates its known instances gets implemented as the
    enumeration, and the instance nobody wrote down survives into the freeze. When an entry
    generalizes, **grep for the shape** and put the result in the entry before it is worked.
+
+5. ✅ **`compile_shader` takes a path it never opens.** Found by the 0.24 example sweep, from
+   a user question that no amount of reading the stub would have answered: with `source=`,
+   what is `path` for? The honest answer was four things at once, one of which — choosing
+   the parser — nothing in the name suggests. DONE in 0.24 as two overloads plus
+   `bz.ShaderLanguage`; see "Shader compilation" above for the full reasoning.
+
+   **The entry is worth keeping for how it was found.** The API review in 0.22 read this
+   signature and passed it, because every parameter is individually defensible and the
+   docstring explains the rule. What exposed it was somebody asking why, out loud, and
+   being unsatisfied with a correct answer. **A rule that needs a paragraph to justify is a
+   design smell even when the paragraph is true** — the next review should treat "the
+   documentation has to explain this" as evidence rather than as mitigation.
+
+   It also broke the "all three landed in 0.23" claim above, which said the pre-1.0 break
+   batch was closed. Two entries have landed since. The batch was never a batch; it was
+   whatever had been noticed by 0.23.
 
 ### Ergonomics, additive
 
@@ -2128,6 +2206,14 @@ Ordered by how often the friction shows up, not by effort.
    pipeline with one set now says nothing about it, and the demo's two-set pipelines
    still name `set=1` where the distinction is real, which is the only place it reads as
    information. Purely additive: every existing positional and keyword call is unchanged.
+
+   **The first pass fixed half of it**, and the example sweep later in 0.24 found the
+   other half: `allocate_set`, `allocate_frame_set` and `bind_descriptor_set` still
+   REQUIRED `set`, so a one-set program stopped writing `set=0` on the declarator and
+   went on writing it twice per descriptor set anyway. Defaulting only the declarator is
+   the same "same question, two contracts" the entry opened with, moved one call along.
+   All four default to 0 now. The lesson for the next such change: a default belongs on
+   every call that asks for the value, not on the one the audit happened to be reading.
 8. ✅ **Two factory conventions.** Buffers, images, samplers, pools, command buffers and
    pipelines come from the Context; `RenderTarget` and `SwapchainRenderer` are top-level
    constructors taking the Context as their first argument. Either is fine, both is a coin

@@ -106,12 +106,19 @@ public:
             {
                 continue;
             }
-            // The include dirs and the entry point come off the module: a
-            // recompile that dropped them would resolve a different #include or
-            // pick a different HLSL function, and the failure would look like a
-            // shader edit gone wrong rather than a reload losing its settings.
+            // The language, the include dirs and the entry point come off the
+            // module: a recompile that dropped them would parse the file as the
+            // other language, resolve a different #include or pick a different
+            // HLSL function, and the failure would look like a shader edit gone
+            // wrong rather than a reload losing its settings.
             auto parts = ShaderCompiler::compile_parts(
-                context_, module->path(), module->stage(), std::nullopt, module->include_dirs(), module->entry_point());
+                context_,
+                module->path(),
+                module->stage(),
+                std::nullopt,
+                module->language(),
+                module->include_dirs(),
+                module->entry_point());
             if (!parts)
             {
                 log_(parts.error());

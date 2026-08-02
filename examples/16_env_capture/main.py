@@ -56,12 +56,12 @@ class Camera:
 
     def process_keyboard(self, window, dt):
         v = self.speed * dt
-        if window.is_key_pressed(bz.KEY_W): self.pos += v * self.front
-        if window.is_key_pressed(bz.KEY_S): self.pos -= v * self.front
-        if window.is_key_pressed(bz.KEY_A): self.pos -= v * self.right
-        if window.is_key_pressed(bz.KEY_D): self.pos += v * self.right
-        if window.is_key_pressed(bz.KEY_SPACE): self.pos += v * glm.vec3(0.0, 1.0, 0.0)
-        if window.is_key_pressed(bz.KEY_LEFT_SHIFT): self.pos -= v * glm.vec3(0.0, 1.0, 0.0)
+        if window.is_key_pressed(bz.Key.W): self.pos += v * self.front
+        if window.is_key_pressed(bz.Key.S): self.pos -= v * self.front
+        if window.is_key_pressed(bz.Key.A): self.pos -= v * self.right
+        if window.is_key_pressed(bz.Key.D): self.pos += v * self.right
+        if window.is_key_pressed(bz.Key.SPACE): self.pos += v * glm.vec3(0.0, 1.0, 0.0)
+        if window.is_key_pressed(bz.Key.LEFT_SHIFT): self.pos -= v * glm.vec3(0.0, 1.0, 0.0)
 
     def view_proj(self, aspect):
         view = glm.lookAt(self.pos, self.pos + self.front, self.up)
@@ -79,7 +79,7 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 window = bz.Window(W, H, "Bazalt Demo - Environment Capture (render-to-layer)", logger=logger)
 ctx = bz.Context(logger)
 renderer = ctx.create_renderer(window)
-window.set_cursor_mode(bz.CURSOR_DISABLED)  # mouse-look
+window.set_cursor_mode(bz.CursorMode.DISABLED)  # mouse-look
 
 # The environment probe: a cube colour target + a matching cube-shaped depth
 # buffer. color[0] ends up sampleable as a samplerCube.
@@ -114,11 +114,11 @@ reflect_pipe = (ctx.graphics_pipeline()
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                 .depth_test(True)
                 .push_constant(80, bz.ShaderStage.VERTEX)  # mat4 mvp + vec4 camPos
-                .texture(0, bz.ShaderStage.FRAGMENT, set=0)
+                .texture(0, bz.ShaderStage.FRAGMENT)
                 .build(renderer))
 
-pool = ctx.create_descriptor_pool(max_sets=2, textures=2)
-reflect_set = pool.allocate_set(reflect_pipe, set=0)
+pool = ctx.create_descriptor_pool()
+reflect_set = pool.allocate_set(reflect_pipe)
 reflect_set.set_image(0, env.color[0], sampler=ctx.create_sampler(filter=bz.Filter.LINEAR))
 
 
@@ -210,7 +210,7 @@ def record(cmd, eye, camera_vp):
           .bind_index_buffer(room_ibuf)
           .draw_indexed(room_count))
         (c.bind_pipeline(reflect_pipe)
-          .bind_descriptor_set(reflect_set, reflect_pipe, set=0)
+          .bind_descriptor_set(reflect_set, reflect_pipe)
           .push_constants(reflect_pipe, 0,
                           bytes(glm.transpose(camera_vp)) + struct.pack("4f", eye.x, eye.y, eye.z, 0.0))
           .bind_vertex_buffer(cube_vbuf)

@@ -241,23 +241,44 @@ void bind_context(py::module_& m)
                 require_open(self, "compute_pipeline");
                 return std::make_shared<ComputePipelineBuilder>(self);
             })
+        // compile_shader is TWO overloads, one per place the code can come from.
+        // They were one function taking both `path` and `source=` until 0.24, and
+        // the fusion made `path` mean two things at once: with `source=` the file
+        // was never opened, yet its extension still chose the parser. So compiling
+        // HLSL held in a string meant inventing a filename ending in .hlsl, and a
+        // real .vert file holding HLSL had no spelling at all.
+        //
+        // Split, each parameter answers one question: `path` is a file, `source=`
+        // is the code, `language=` is the parser, `name=` is what errors call it.
+        //
+        // The path overload is declared FIRST so pybind tries it first, and
+        // `source` is keyword-only in the other one: both a path and GLSL text are
+        // `str`, so a positional string must never be able to mean either.
         .def(
             "compile_shader",
             [](Context& self,
                const std::string& path,
                ShaderStage stage,
-               const py::object& source,
+               const std::optional<ShaderLanguage>& language,
                const std::vector<std::string>& include_dirs,
                const std::string& entry_point) -> py::object
             {
                 require_open(self, "compile_shader");
-                // Only file-backed shaders are watchable: a source= virtual name may
-                // not exist on disk, and .spv is recompiled from its own path too.
-                const bool from_file = source.is_none();
+                // A .spv file is already compiled, so naming a language for it is
+                // a statement about work that will not happen. Refused rather than
+                // ignored: silently dropping an argument is what this split exists
+                // to stop.
+                if (language && ShaderCompiler::is_spirv_path(path))
+                {
+                    throw py::value_error(
+                        "language= describes how to PARSE a shader, and " + path +
+                        " is already-compiled SPIR-V. Drop the argument.");
+                }
+                const ShaderLanguage resolved = language.value_or(ShaderCompiler::infer_language(path));
                 auto module = unwrap(
-                    ShaderCompiler::compile(self, path, stage, parse_shader_source(source), include_dirs, entry_point),
+                    ShaderCompiler::compile(self, path, stage, std::nullopt, resolved, include_dirs, entry_point),
                     self.logger().get());
-                if (auto* hr = self.hot_reload(); hr && from_file && std::filesystem::exists(path))
+                if (auto* hr = self.hot_reload(); hr && std::filesystem::exists(path))
                 {
                     hr->watch_shader(module);
                 }
@@ -266,7 +287,46 @@ void bind_context(py::module_& m)
             py::arg("path"),
             py::arg("stage"),
             py::kw_only(),
-            py::arg("source") = py::none(),
+            py::arg("language") = py::none(),
+            py::arg("include_dirs") = py::tuple(),
+            py::arg("entry_point") = "")
+        .def(
+            "compile_shader",
+            [](Context& self,
+               const py::object& source,
+               ShaderStage stage,
+               const std::optional<ShaderLanguage>& language,
+               const std::string& name,
+               const std::vector<std::string>& include_dirs,
+               const std::string& entry_point) -> py::object
+            {
+                require_open(self, "compile_shader");
+                auto parsed = parse_shader_source(source);
+                if (language && parsed && std::holds_alternative<std::vector<std::uint32_t>>(*parsed))
+                {
+                    throw py::value_error(
+                        "language= describes how to PARSE a shader, and source= got ready SPIR-V words. "
+                        "Drop the argument, or pass the shader as text.");
+                }
+                // Nothing on disk to watch, so hot reload never sees these — the
+                // same rule load_image(bytes) follows.
+                auto module = unwrap(
+                    ShaderCompiler::compile(
+                        self,
+                        name.empty() ? std::string{"<source>"} : name,
+                        stage,
+                        std::move(parsed),
+                        language.value_or(ShaderLanguage::GLSL),
+                        include_dirs,
+                        entry_point),
+                    self.logger().get());
+                return py::cast(module);
+            },
+            py::kw_only(),
+            py::arg("source"),
+            py::arg("stage"),
+            py::arg("language") = py::none(),
+            py::arg("name") = "",
             py::arg("include_dirs") = py::tuple(),
             py::arg("entry_point") = "")
         // Encoded bytes instead of a path: a PNG off the network, out of a zip,

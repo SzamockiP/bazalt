@@ -32,7 +32,6 @@ degraded demo — two VkDevices are two dispatch tables either way, which is
 exactly what used to break.
 """
 
-import math
 import time
 
 import numpy as np
@@ -64,14 +63,14 @@ bake_pipeline = (baker.compute_pipeline()
     .build())
 
 baked = baker.create_image(SIZE, SIZE)
-bake_pool = baker.create_descriptor_pool(max_sets=1, storage_images=1)
-bake_set = bake_pool.allocate_set(bake_pipeline, set=0)
+bake_pool = baker.create_descriptor_pool()
+bake_set = bake_pool.allocate_set(bake_pipeline)
 bake_set.set_storage_image(0, baked)
 
 cmd = baker.create_command_buffer()
 cmd.begin()
 (cmd.bind_pipeline(bake_pipeline)
-    .bind_descriptor_set(bake_set, bake_pipeline, set=0)
+    .bind_descriptor_set(bake_set, bake_pipeline)
     .push_constants(bake_pipeline, 0, np.float32(1.7).tobytes())
     .dispatch(SIZE // 8, SIZE // 8))
 baker.submit(cmd)
@@ -85,14 +84,14 @@ print(f"{SIZE}x{SIZE} moved between Contexts in {(time.perf_counter() - start) *
 
 # ── Context B: a window that draws with it ────────────────────────────────────
 
-window = bz.Window(800, 600, "Bazalt - Multi-context")
+window = bz.Window(800, 600, "Bazalt - Multi-context", logger=logger)
 renderer = viewer.create_renderer(window)
 
 pipeline = (viewer.graphics_pipeline()
     .vertex_shader(viewer.compile_shader("quad.vert", bz.ShaderStage.VERTEX))
     .fragment_shader(viewer.compile_shader("quad.frag", bz.ShaderStage.FRAGMENT))
     .vertex_format([bz.VertexFormat.FLOAT2, bz.VertexFormat.FLOAT2])
-    .texture(0, bz.ShaderStage.FRAGMENT, set=0)
+    .texture(0, bz.ShaderStage.FRAGMENT)
     .build(renderer))
 
 vertices = [
@@ -105,15 +104,15 @@ vbuf = viewer.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATI
 ibuf = viewer.create_buffer([0, 3, 2, 2, 1, 0], bz.BufferType.INDEX,
                             bz.MemoryUsage.STATIC, bz.DataType.UINT32)
 
-pool = viewer.create_descriptor_pool(max_sets=1, textures=1)
-dset = pool.allocate_set(pipeline, set=0)
+pool = viewer.create_descriptor_pool()
+dset = pool.allocate_set(pipeline)
 dset.set_image(0, texture)
 
 draw = viewer.create_command_buffer()
 draw.begin()
 with draw.rendering(renderer, clear_color=[0.02, 0.02, 0.05, 1.0]) as c:
     (c.bind_pipeline(pipeline)
-      .bind_descriptor_set(dset, pipeline, set=0)
+      .bind_descriptor_set(dset, pipeline)
       .bind_vertex_buffer(vbuf)
       .bind_index_buffer(ibuf)
       .draw_indexed(6))

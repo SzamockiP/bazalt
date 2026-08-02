@@ -43,8 +43,8 @@ for d in bz.list_devices():
     mark = "*" if d.name == ctx.device_name else " "
     print(f" {mark} {d.name} ({d.type}, {d.memory_mb} MB, Vulkan {d.api_version})")
 
-window_a = bz.Window(800, 600, "Bazalt - Window A (MAILBOX)")
-window_b = bz.Window(800, 600, "Bazalt - Window B (FIFO_RELAXED)")
+window_a = bz.Window(800, 600, "Bazalt - Window A (MAILBOX)", logger=logger)
+window_b = bz.Window(800, 600, "Bazalt - Window B (FIFO_RELAXED)", logger=logger)
 
 renderer_a = ctx.create_renderer(window_a, present_mode=bz.PresentMode.MAILBOX)
 renderer_b = ctx.create_renderer(window_b, present_mode=bz.PresentMode.FIFO_RELAXED)
@@ -61,7 +61,7 @@ pipeline = (ctx.graphics_pipeline()
     .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
     .depth_test(True)
     .cull_mode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE)
-    .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
+    .uniform_buffer(0, bz.ShaderStage.VERTEX)
     .push_constant(12, bz.ShaderStage.FRAGMENT)
     .build(renderer_a))
 
@@ -104,7 +104,7 @@ indices = np.array([
 ], dtype=np.uint32)
 ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
 
-pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4)
+pool = ctx.create_descriptor_pool()
 
 
 class View:
@@ -124,14 +124,14 @@ class View:
 
         self.ubuf = ctx.create_buffer(np.zeros(16, dtype=np.float32),
                                       bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
-        self.dset = pool.allocate_frame_set(pipeline, set=0)
+        self.dset = pool.allocate_frame_set(pipeline)
         self.dset.set_buffer(0, self.ubuf)
 
         self.cmd = ctx.create_command_buffer()
         self.cmd.begin()
         with self.cmd.rendering(renderer, clear_color=clear) as c:
             (c.bind_pipeline(pipeline)
-              .bind_descriptor_set(self.dset, pipeline, set=0)
+              .bind_descriptor_set(self.dset, pipeline)
               .push_constants(pipeline, 0, self.tint)
               .bind_vertex_buffer(vbuf)
               .bind_index_buffer(ibuf)

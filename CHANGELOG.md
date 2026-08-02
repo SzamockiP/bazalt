@@ -16,6 +16,13 @@ The rest is the second API review. One barrier the automatic tracker never
 emitted, one CPU core that every non-animating window was burning, and three
 properties that answered `None` for four different reasons each.
 
+Then a pass over all 34 examples, which found the same shape twice: a parameter
+doing a job its name does not admit to. `compile_shader` took a path it never
+opened, only to read the language off its extension, so it is two overloads now
+and the language is an argument. `set=0` was written three times per descriptor
+set and is the default everywhere. The sweep also found an example that had been
+raising since earlier in this release, because nothing runs the examples.
+
 ### Added
 - **`ctx.close()` and `with bz.Context() as ctx:`.** Both stop the Context's
   upload worker and hot-reload watcher and wait for its GPU work. Re-running a
@@ -38,6 +45,14 @@ properties that answered `None` for four different reasons each.
   render shown with PIL, an `ipywidgets` slider that re-renders, and a compute
   cell that uses the GPU as a calculator. Needs Jupyter, and CI does not run
   it, like every example.
+- **`bz.ShaderLanguage`, and `language=` on `compile_shader`.** The language was
+  an attribute of the file name and nothing else, so a `.frag` holding HLSL had
+  no spelling at all. `language=` overrides the extension, and it reaches every
+  decision the language drives — the parser, the `entry_point=` gate and the
+  reflection. Two members, GLSL and HLSL. SPIR-V is not one of them: it is a
+  compiled format rather than a language, and it already has two spellings, a
+  `.spv` path and bytes in `source=`. `language=` on either of those raises
+  `ValueError` instead of being ignored.
 - **A "Vulkan clip space" section in the README.** Why +y points down, and why
   `proj[1][1] *= -1` corrects your GLM matrix rather than Vulkan.
 - **`examples/34_showcase`.** One scene that exercises most of the engine at
@@ -55,13 +70,14 @@ properties that answered `None` for four different reasons each.
   seconds. Needs `Feature.BINDLESS` and `Feature.MULTI_DRAW_INDIRECT`.
 
 ### Changed
-- **`set` defaults to 0 on the graphics pipeline builder**, which is what the
-  compute builder always did. The same four declarators asked for the set on
-  one side and assumed it on the other, so a pipeline with one descriptor set
-  wrote `set=0` on every line for nothing. Additive: every existing call still
-  compiles and means the same thing. Name `set=` where a pipeline really has
-  more than one — `examples/34_showcase` keeps it on the bindless material
-  array and drops it everywhere else.
+- **`set` defaults to 0 everywhere it is asked for.** The graphics pipeline
+  builder now agrees with the compute builder, and so do
+  `DescriptorPool.allocate_set`, `DescriptorPool.allocate_frame_set` and
+  `CommandBuffer.bind_descriptor_set`. A program with one descriptor set wrote
+  `set=0` on the declarator, again on the allocation and again on the bind, for
+  nothing. Additive: every existing call still runs and means the same thing.
+  Name `set=` where a pipeline really has more than one — `examples/34_showcase`
+  keeps it on the bindless material array and drops it everywhere else.
 
 ### Fixed
 - **A recording that only READS a GPU-written buffer now waits for the write.**
@@ -77,8 +93,50 @@ properties that answered `None` for four different reasons each.
   instance does not have, so every such Context emitted a validation error. It
   is exactly the configuration a notebook on a remote server runs in. Found by
   the new `BAZALT_FORCE_HEADLESS` test knob on its first run.
+- **`examples/12_hot_reload` stopped after 120 frames.** It read
+  `renderer.gpu_time_ms` on a Context built without `gpu_timing=True`, which
+  this release changed from `None` to `StateError`. The example asks for the
+  measurement now. Two more examples tested `t.ms is not None` to print
+  "timestamps unsupported", which the same release turned into
+  `UnsupportedError` — `examples/13_compute_postprocess` and
+  `examples/31_volume_raymarch` catch the exception instead.
+- **Four examples built the projection from the size the window opened with.**
+  A resize gave a wrong aspect ratio and stretched the picture until the
+  program closed. They read `renderer.width` and `renderer.height` now, which
+  is what `examples/19_multi_window` and `examples/21_window_modes` always did.
+- **The `Context` docstring still promised `None` from
+  `renderer.gpu_time_ms`** without `gpu_timing=True`. It raises `StateError`,
+  which the property's own docstring already said.
 
 ### Changed (breaking)
+- **`compile_shader` is two overloads, one per place the code comes from.** It
+  took `path` and `source=` together, and that made `path` mean two things at
+  once: with `source=` the file was never opened, and yet its extension still
+  chose the parser. So HLSL held in a string needed an invented filename ending
+  in `.hlsl`, and a name ending in `.spv` changed what happened to text that had
+  nothing to do with SPIR-V.
+
+  ```python
+  # before
+  ctx.compile_shader("ring.vert", bz.ShaderStage.VERTEX, source=TEXT)
+  ctx.compile_shader("bad.hlsl", bz.ShaderStage.FRAGMENT, source=HLSL_TEXT)
+  # now
+  ctx.compile_shader(source=TEXT, stage=bz.ShaderStage.VERTEX)
+  ctx.compile_shader(source=HLSL_TEXT, stage=bz.ShaderStage.FRAGMENT,
+                     language=bz.ShaderLanguage.HLSL)
+  ```
+
+  `source` is keyword-only, because a path and GLSL text are both `str` and a
+  positional string must never be able to mean either. Each parameter answers
+  one question now: `path` is a file, `source=` is the code, `language=` is the
+  parser, and `name=` is what errors call an in-memory shader (`<source>` by
+  default). A `name=` is a label and nothing else — `.hlsl` in it selects no
+  language and `.spv` in it loads no binary.
+
+  The path form keeps every job it had: the extension still infers the language,
+  the directory still anchors relative `#include`, and the file is still what
+  hot reload watches. In-memory code resolves `#include` through
+  `include_dirs=`, which is the parameter named for it.
 - **`Timer.ms` and `OcclusionQuery.samples` raise instead of answering `None`**
   when the answer will never come. `UnsupportedError` when the GPU reports no
   usable timestamps, `StateError` when the command buffer has been re-recorded
@@ -97,6 +155,15 @@ exception instead.
   mistake.
 - The `begin_frame` docstring no longer names `DynamicBuffer`, which is not a
   public symbol.
+- **Every example was read against the API it teaches.** No example used a
+  removed or renamed call, but many showed the older spelling of a call that
+  0.23 and 0.24 made shorter. They all use the automatic descriptor pool now,
+  `bz.Key` and `bz.CursorMode` in place of the `KEY_*` and `CURSOR_*` integers,
+  and no `set=` where the set is 0. Each one also passes its `Logger` to its
+  `Window`, so a message from window creation reaches the same handler as the
+  rest. The README snippet follows the same shape. Examples 01 to 03 lost the
+  frames-per-second block in the title bar: it was a third of the smallest
+  program, and it taught nothing about bazalt.
 
 ## [0.23.0] — 2026-08-01
 

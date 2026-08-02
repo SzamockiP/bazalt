@@ -77,12 +77,12 @@ frag = ctx.compile_shader("present.frag", bz.ShaderStage.FRAGMENT)
 present = (ctx.graphics_pipeline()
            .vertex_shader(vert)
            .fragment_shader(frag)
-           .texture(0, bz.ShaderStage.FRAGMENT, set=0)
+           .texture(0, bz.ShaderStage.FRAGMENT)
            .name("present")
            .build(renderer))
 
-pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
-dset = pool.allocate_set(present, set=0)
+pool = ctx.create_descriptor_pool()
+dset = pool.allocate_set(present)
 # Bound ONCE. update() writes into the same VkImage, so no descriptor set is
 # ever rewritten — that is the difference from creating a new image per frame.
 dset.set_image(0, stream, sampler=ctx.create_sampler(filter=bz.Filter.LINEAR))
@@ -106,7 +106,7 @@ saved = False
 
 while window.is_open():
     bz.poll_events()
-    if window.is_key_pressed(bz.KEY_ESCAPE):
+    if window.is_key_pressed(bz.Key.ESCAPE):
         break
 
     t += 1.0 / 60.0
@@ -118,14 +118,14 @@ while window.is_open():
     # A rectangle, only where the mouse is down. Same verb, one more argument —
     # painting and a sprite atlas are the same operation as a video frame.
     mouse = window.get_mouse_state()
-    if window.is_mouse_button_pressed(bz.MOUSE_BUTTON_LEFT):
+    if window.is_mouse_button_pressed(bz.MouseButton.LEFT):
         x = int(mouse.x / W * TEX) - 8
         y = int(mouse.y / H * TEX) - 8
         x = max(0, min(TEX - 16, x))
         y = max(0, min(TEX - 16, y))
         stream.update(WHITE_PATCH, region=(x, y, 16, 16))
 
-    if window.was_key_pressed(bz.KEY_S):
+    if window.was_key_pressed(bz.Key.S):
         capture_next = True
 
     ctx.begin_frame()
