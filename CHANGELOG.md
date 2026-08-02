@@ -46,8 +46,8 @@ properties that answered `None` for four different reasons each.
   `firstInstance` carries the material index, so the shader reads it back as
   `gl_InstanceIndex`. A day-night cycle moves the sun and hands the light and
   the shadow map to the moon at dusk. The scene draws into an HDR target with
-  MSAA and alpha-to-coverage, and a post chain adds bloom, god rays, a lens
-  flare and ACES tone mapping. Fireflies fly at night: a compute pass moves
+  MSAA and alpha-to-coverage, and a post chain adds SSAO, bloom, god rays, a
+  lens flare and ACES tone mapping. Fireflies fly at night: a compute pass moves
   them and the scene shader reads the same buffer as a list of point lights.
   Every pass carries a `cmd.label()` and a `cmd.timer()`, and every resource a
   name, so a Nsight or RenderDoc capture reads like the source. The first

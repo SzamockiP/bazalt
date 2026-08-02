@@ -74,10 +74,11 @@ vec3 sky_night(vec3 dir, vec3 moon, float time) {
         float twinkle = 0.75 + 0.25 * sin(time * 3.0 + rnd.x * 40.0);
         col += vec3(smoothstep(0.5, 0.0, d)) * (twinkle * smoothstep(0.985, 1.0, rnd.z));
     }
-    // Moon disc with a soft halo.
+    // Moon disc: 0.9 keeps it under the bloom threshold (1.2), so the glow
+    // is only this small halo, not a bloom flare.
     float cosMoon = dot(dir, moon);
-    col += vec3(0.90, 0.95, 1.00) * smoothstep(0.99970, 0.99995, cosMoon) * 2.0;
-    col += vec3(0.25, 0.30, 0.45) * pow(max(cosMoon, 0.0), 64.0) * 0.15;
+    col += vec3(0.90, 0.95, 1.00) * smoothstep(0.99970, 0.99995, cosMoon) * 0.9;
+    col += vec3(0.25, 0.30, 0.45) * pow(max(cosMoon, 0.0), 96.0) * 0.05;
     return col;
 }
 
@@ -113,8 +114,10 @@ void main() {
     float cover = cloud_cover(dir, time);
     float lowSun = 1.0 - clamp(u.sunDir.y * 4.0, 0.0, 1.0);
     vec3 sunlit = mix(vec3(1.05, 1.00, 0.96), vec3(1.00, 0.55, 0.30), lowSun);
-    vec3 cloudCol = mix(sunlit * (0.55 + 0.45 * (1.0 - cover)),
-                        vec3(0.015, 0.020, 0.035), night);
+    // Moonlit at night: clearly brighter than the night sky behind them, or
+    // they vanish.
+    vec3 moonlit = vec3(0.075, 0.085, 0.115) * (0.7 + 0.3 * (1.0 - cover));
+    vec3 cloudCol = mix(sunlit * (0.55 + 0.45 * (1.0 - cover)), moonlit, night);
     col = mix(col, cloudCol, cover * 0.9);
 
     outColor = vec4(col, 1.0);

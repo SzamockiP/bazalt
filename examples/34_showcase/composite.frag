@@ -10,6 +10,7 @@ layout(location = 0) out vec4 outColor;
 layout(set = 0, binding = 0) uniform sampler2D sceneTex;
 layout(set = 0, binding = 1) uniform sampler2D bloomTex;
 layout(set = 0, binding = 2) uniform sampler2D godrayTex;
+layout(set = 0, binding = 3) uniform sampler2D aoTex;
 
 layout(push_constant) uniform PC {
     vec2  sunPos;   // sun in uv space
@@ -43,7 +44,9 @@ vec3 lens_flare() {
 }
 
 void main() {
-    vec3 hdr = texture(sceneTex, uv).rgb
+    // AO darkens the scene only — bloom, god rays and the flare are light
+    // added on top and stay unoccluded.
+    vec3 hdr = texture(sceneTex, uv).rgb * texture(aoTex, uv).r
              + texture(bloomTex, uv).rgb * 0.55
              + texture(godrayTex, uv).rgb;
     hdr += lens_flare();

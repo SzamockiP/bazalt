@@ -28,9 +28,11 @@ One scene exercises the features that examples 09-32 introduce one at a time:
   * The scene renders into an HDR (RGBA16F) target with MSAA and
     alpha-to-coverage. MSAA refuses a preserving second pass, so sky, scene
     and fireflies are three pipelines inside ONE rendering scope.
-  * A post chain adds bloom, god rays, a lens flare, ACES tone mapping, a
-    time-of-day grade and a vignette. The god-ray mask falls out of the depth
-    buffer: sky pixels keep the cleared depth.
+  * A post chain adds SSAO, bloom, god rays, a lens flare, ACES tone
+    mapping, a time-of-day grade and a vignette. The god-ray mask falls out
+    of the depth buffer: sky pixels keep the cleared depth. The AO needs no
+    G-buffer either — view positions come back through the projection
+    constants and the normal from their derivatives.
   * Fireflies fly at night. A compute pass integrates them, a point draw
     renders them, and the scene shader reads the same buffer as a list of
     small point lights.
@@ -72,6 +74,8 @@ import numpy as np
 import bazalt as bz
 
 W, H = 1600, 900             # internal resolution, fixed for the run
+CAM_FOV = 60.0               # degrees; the AO pass rebuilds positions from these
+CAM_NEAR, CAM_FAR = 0.1, 500.0
 SHADOW_SIZE = 4096
 SHADOW_RADIUS = 22.0         # the shadow map covers this box around the camera
 FIREFLY_COUNT = 128
@@ -127,7 +131,7 @@ class Camera:
 
     def view_proj(self):
         view = glm.lookAt(self.pos, self.pos + self.front, self.up)
-        proj = glm.perspectiveRH_ZO(glm.radians(60.0), W / H, 0.1, 500.0)
+        proj = glm.perspectiveRH_ZO(glm.radians(CAM_FOV), W / H, CAM_NEAR, CAM_FAR)
         proj[1][1] *= -1
         return proj * view
 
@@ -516,6 +520,12 @@ class DemoApp:
                                                   name="bloom blur A")
         self.godray_rt = ctx.create_render_target(hw, hh, color=bz.Format.RGBA16F,
                                                   name="god rays")
+        # SSAO ping-pong. Same format and size as the bloom targets on
+        # purpose: the ONE gaussian pipeline serves both blurs.
+        self.ao_rt = ctx.create_render_target(hw, hh, color=bz.Format.RGBA16F,
+                                              name="SSAO")
+        self.ao_tmp_rt = ctx.create_render_target(hw, hh, color=bz.Format.RGBA16F,
+                                                  name="SSAO blur tmp")
 
     def create_pipelines(self, script_dir):
         ctx = self.ctx
@@ -627,7 +637,8 @@ class DemoApp:
         # across cube faces).
         self.blur_pipe = post("blur.frag", 16, "bloom blur", 1, self.blur_b_rt)
         self.godray_pipe = post("godray.frag", 16, "god rays", 1, self.godray_rt)
-        self.composite_pipe = post("composite.frag", 32, "composite", 3, self.renderer)
+        self.ao_pipe = post("ao.frag", 32, "SSAO", 1, self.ao_rt)
+        self.composite_pipe = post("composite.frag", 32, "composite", 4, self.renderer)
 
     def create_descriptors(self):
         ctx = self.ctx
@@ -690,10 +701,18 @@ class DemoApp:
         self.godray_set = pool.allocate_set(self.godray_pipe, set=0)
         self.godray_set.set_image(0, self.prepass_rt.color[1], sampler=linear)
 
+        self.ao_set = pool.allocate_set(self.ao_pipe, set=0)
+        self.ao_set.set_image(0, self.scene_rt.depth, sampler=nearest)
+        self.ao_blur_h_set = pool.allocate_set(self.blur_pipe, set=0)
+        self.ao_blur_h_set.set_image(0, self.ao_rt.color[0], sampler=linear)
+        self.ao_blur_v_set = pool.allocate_set(self.blur_pipe, set=0)
+        self.ao_blur_v_set.set_image(0, self.ao_tmp_rt.color[0], sampler=linear)
+
         self.composite_set = pool.allocate_set(self.composite_pipe, set=0)
         self.composite_set.set_image(0, self.scene_rt.color[0], sampler=linear)
         self.composite_set.set_image(1, self.blur_a_rt.color[0], sampler=linear)
         self.composite_set.set_image(2, self.godray_rt.color[0], sampler=linear)
+        self.composite_set.set_image(3, self.ao_rt.color[0], sampler=linear)
 
     # ── the day-night model (CPU side) ─────────────────────────────────────
 
@@ -844,6 +863,27 @@ class DemoApp:
         hw, hh = W // 2, H // 2
         with cmd.label("post"):
             with cmd.timer() as t:
+                with cmd.rendering(self.ao_rt) as c:
+                    (c.bind_pipeline(self.ao_pipe)
+                      .bind_descriptor_set(self.ao_set, self.ao_pipe, set=0)
+                      .push_constants(self.ao_pipe, 0,
+                                      struct.pack("<8f",
+                                                  math.tan(math.radians(CAM_FOV) / 2.0),
+                                                  W / H, CAM_NEAR, CAM_FAR,
+                                                  0.6, 1.6, 0, 0))
+                      .draw(3))
+                with cmd.rendering(self.ao_tmp_rt) as c:
+                    (c.bind_pipeline(self.blur_pipe)
+                      .bind_descriptor_set(self.ao_blur_h_set, self.blur_pipe, set=0)
+                      .push_constants(self.blur_pipe, 0,
+                                      struct.pack("<4f", 1.0 / hw, 0.0, 0, 0))
+                      .draw(3))
+                with cmd.rendering(self.ao_rt) as c:
+                    (c.bind_pipeline(self.blur_pipe)
+                      .bind_descriptor_set(self.ao_blur_v_set, self.blur_pipe, set=0)
+                      .push_constants(self.blur_pipe, 0,
+                                      struct.pack("<4f", 0.0, 1.0 / hh, 0, 0))
+                      .draw(3))
                 with cmd.rendering(self.prepass_rt) as c:
                     (c.bind_pipeline(self.prepass_pipe)
                       .bind_descriptor_set(self.prepass_set, self.prepass_pipe, set=0)
