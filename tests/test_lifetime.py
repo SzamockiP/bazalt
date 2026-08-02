@@ -138,3 +138,106 @@ def test_a_renderer_keeps_its_window_alive(ctx):
     finally:
         renderer = None
         window = None
+
+
+# ── close(): the end of a lifetime, said out loud (0.24) ─────────────────
+#
+# Every test here goes through `extra_context`, so the validation-as-assert
+# referee still applies. That is the point rather than a formality: destroying a
+# device that still owns live children is exactly what the layers report, so a
+# clean run IS the assertion that close() tore down in the right order.
+
+
+def test_close_frees_and_is_idempotent(extra_context):
+    context = extra_context()
+    assert context.closed is False
+    context.close()
+    assert context.closed is True
+    # Twice, and from a `with` on top, must all be free.
+    context.close()
+    assert context.closed is True
+
+
+def test_with_block_closes_on_exit(extra_context):
+    context = extra_context()
+    with context as entered:
+        assert entered is context
+        assert context.closed is False
+    assert context.closed is True
+
+
+def test_with_block_closes_when_the_body_raises(extra_context):
+    context = extra_context()
+    with pytest.raises(ZeroDivisionError):
+        with context:
+            1 / 0
+    # __exit__ returns False, so the error propagates AND the device still goes.
+    assert context.closed is True
+
+
+def test_resources_may_outlive_a_closed_context(extra_context):
+    """The notebook shape: names created inside the block are still bound after
+    it, and dropping them later must be ordinary.
+
+    This is the test that decided what close() means. Destroying the device in
+    close() made the referee say "vkDestroyDevice(): VkDevice has 3 leaked
+    objects", because a resource the user still names is a live child of it. So
+    the device follows the last shared_ptr instead."""
+    context = extra_context()
+    with context:
+        target = context.create_render_target(32, 32)
+        buffer = context.create_buffer(np.zeros(16, dtype=np.float32),
+                                       bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+        image = context.create_image(np.zeros((8, 8, 4), dtype=np.uint8))
+
+    assert context.closed is True
+    del target, buffer, image
+    gc.collect()
+
+
+def test_using_a_closed_context_raises_state_error(extra_context):
+    context = extra_context()
+    context.close()
+
+    with pytest.raises(bz.StateError, match="closed"):
+        context.create_buffer(64, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    with pytest.raises(bz.StateError, match="closed"):
+        context.create_render_target(8, 8)
+    with pytest.raises(bz.StateError, match="closed"):
+        context.create_command_buffer()
+    with pytest.raises(bz.StateError, match="closed"):
+        context.graphics_pipeline()
+    with pytest.raises(bz.StateError, match="closed"):
+        context.wait()
+    with pytest.raises(bz.StateError, match="closed"):
+        context.max_samples()
+
+
+def test_reading_a_resource_after_its_context_closed_raises(extra_context):
+    """Reading the render result outside the `with` block that produced it is the
+    most natural version of this mistake, so it gets the message rather than the
+    crash."""
+    context = extra_context()
+    with context:
+        target = context.create_render_target(16, 16)
+        buffer = context.create_buffer(np.zeros(4, dtype=np.float32),
+                                       bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+
+    with pytest.raises(bz.StateError, match="closed"):
+        target.color[0].read()
+    with pytest.raises(bz.StateError, match="closed"):
+        buffer.read(np.float32)
+
+
+def test_cached_properties_still_answer_after_close(extra_context):
+    """What survives is what was already a copy. Nothing here needs the device,
+    and a closed Context that cannot say what it WAS would be harder to debug,
+    not safer."""
+    context = extra_context()
+    name = context.device_name
+    frames = context.frames_in_flight
+    context.close()
+
+    assert context.device_name == name
+    assert context.frames_in_flight == frames
+    assert isinstance(context.headless, bool)

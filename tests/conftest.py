@@ -244,7 +244,7 @@ def printf_compiles():
     if not context.shader_printf:
         return False
     try:
-        shader = context.compile_shader("probe.comp", bz.ShaderStage.COMPUTE, source=PRINTF_PROBE)
+        shader = context.compile_shader(source=PRINTF_PROBE, stage=bz.ShaderStage.COMPUTE)
         context.compute_pipeline().shader(shader).build()
         return True
     except bz.BazaltError:

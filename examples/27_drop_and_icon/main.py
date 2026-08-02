@@ -11,7 +11,7 @@ The four small things a prototype keeps needing and bazalt had no way to do:
      system default. macOS and Wayland take the icon from elsewhere and will
      ignore this — a request, not a guarantee.
   3. **Cursor position.** Hold the right mouse button to look around, and press
-     HOME to snap the cursor back to the centre. Holding uses CURSOR_DISABLED,
+     HOME to snap the cursor back to the centre. Holding uses CursorMode.DISABLED,
      which does its own recentring; `set_cursor_position` is the deliberate
      one-shot move, and a warp is never mistaken for the user moving the mouse.
   4. **The clipboard.** C copies the current texture's path, V loads whatever
@@ -23,7 +23,6 @@ the cursor, right mouse HELD looks around.
 """
 
 import pathlib
-import struct
 
 import glm
 import numpy as np
@@ -33,7 +32,7 @@ import bazalt as bz
 logger = bz.Logger()
 logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
-window = bz.Window(1024, 720, "Bazalt Demo - drop a PNG on me")
+window = bz.Window(1024, 720, "Bazalt Demo - drop a PNG on me", logger=logger)
 ctx = bz.Context(logger, hot_reload=True)
 renderer = ctx.create_renderer(window)
 
@@ -43,14 +42,14 @@ frag = ctx.compile_shader("quad.frag", bz.ShaderStage.FRAGMENT)
 pipeline = (ctx.graphics_pipeline()
             .vertex_shader(vert)
             .fragment_shader(frag)
-            .texture(0, bz.ShaderStage.FRAGMENT, set=0)
+            .texture(0, bz.ShaderStage.FRAGMENT)
             .push_constant(64, bz.ShaderStage.VERTEX)
             .cull_mode(bz.CullMode.NONE, bz.FrontFace.COUNTER_CLOCKWISE)
             .build(renderer))
 
 sampler = ctx.create_sampler()
-pool = ctx.create_descriptor_pool(max_sets=4, textures=4)
-desc_set = pool.allocate_set(pipeline, set=0)
+pool = ctx.create_descriptor_pool()
+desc_set = pool.allocate_set(pipeline)
 
 # A checkerboard until something is dropped, so there is always a texture bound.
 checker = np.zeros((64, 64, 4), dtype=np.uint8)
@@ -105,9 +104,6 @@ yaw = 0.0
 pitch = 0.0
 looking = False
 
-proj = glm.perspectiveRH_ZO(glm.radians(50.0), 1024.0 / 720.0, 0.1, 100.0)
-proj[1][1] *= -1
-
 while window.is_open():
     bz.poll_events()
 
@@ -117,10 +113,10 @@ while window.is_open():
         load(path)
 
     # 4. The clipboard, as a pair of free functions.
-    if window.was_key_pressed(bz.KEY_C):
+    if window.was_key_pressed(bz.Key.C):
         bz.set_clipboard(texture_path)
         print(f"[copy] {texture_path}")
-    if window.was_key_pressed(bz.KEY_V):
+    if window.was_key_pressed(bz.Key.V):
         pasted = bz.get_clipboard().strip().strip('"')
         if pasted:
             load(pasted)
@@ -128,36 +124,36 @@ while window.is_open():
             print("[paste] the clipboard has no text")
 
     # 2. The window icon.
-    if window.was_key_pressed(bz.KEY_I):
+    if window.was_key_pressed(bz.Key.I):
         window.set_icon(icon_from(texture))
         print("[icon] set from the current texture")
-    if window.was_key_pressed(bz.KEY_O):
+    if window.was_key_pressed(bz.Key.O):
         window.set_icon(None)
         print("[icon] back to the system default")
 
-    # 3. Look around while the right button is HELD. CURSOR_DISABLED hides the
+    # 3. Look around while the right button is HELD. CursorMode.DISABLED hides the
     #    cursor and hands out unbounded virtual motion, doing its own recentring —
     #    so there is nothing here to warp, and get_mouse_state().dx/dy is the
     #    movement.
-    if window.is_mouse_button_pressed(bz.MOUSE_BUTTON_RIGHT):
+    if window.is_mouse_button_pressed(bz.MouseButton.RIGHT):
         if not looking:
-            window.set_cursor_mode(bz.CURSOR_DISABLED)
+            window.set_cursor_mode(bz.CursorMode.DISABLED)
             looking = True
         mouse = window.get_mouse_state()
         yaw += mouse.dx * 0.25
         pitch = max(min(pitch + mouse.dy * 0.25, 85.0), -85.0)
     elif looking:
-        window.set_cursor_mode(bz.CURSOR_NORMAL)
+        window.set_cursor_mode(bz.CursorMode.NORMAL)
         looking = False
 
     #    set_cursor_position is for putting the cursor somewhere on purpose, which
-    #    is what HOME does here. It must NOT be combined with CURSOR_DISABLED and a
+    #    is what HOME does here. It must NOT be combined with CursorMode.DISABLED and a
     #    per-frame warp: bazalt re-arms its first-event suppression on a warp, so
     #    that a warp is never mistaken for the user moving the mouse — and warping
     #    every frame therefore cancels every frame's delta. That suppression is what
     #    makes the hidden-cursor recentring pattern work, and what makes this
     #    one-shot snap leave the camera alone.
-    if window.was_key_pressed(bz.KEY_HOME):
+    if window.was_key_pressed(bz.Key.HOME):
         window.set_cursor_position(window.width / 2, window.height / 2)
         print("[cursor] snapped to the centre")
 
@@ -165,6 +161,10 @@ while window.is_open():
     if not renderer.acquire():
         continue
 
+    # Built per frame from the renderer, so a resize does not stretch the quad.
+    proj = glm.perspectiveRH_ZO(glm.radians(50.0), renderer.width / renderer.height,
+                                0.1, 100.0)
+    proj[1][1] *= -1
     view = glm.lookAt(glm.vec3(0, 0, 2.6), glm.vec3(0, 0, 0), glm.vec3(0, 1, 0))
     model = glm.rotate(glm.mat4(1.0), glm.radians(yaw), glm.vec3(0, 1, 0))
     model = glm.rotate(model, glm.radians(pitch), glm.vec3(1, 0, 0))
@@ -173,7 +173,7 @@ while window.is_open():
     cmd.begin()
     with cmd.rendering(renderer, clear_color=[0.05, 0.06, 0.09, 1.0]) as c:
         c.bind_pipeline(pipeline)
-        c.bind_descriptor_set(desc_set, pipeline, set=0)
+        c.bind_descriptor_set(desc_set, pipeline)
         c.push_constants(pipeline, 0, bytes(glm.transpose(proj * view * model)))
         c.draw(6)
     renderer.present(cmd)

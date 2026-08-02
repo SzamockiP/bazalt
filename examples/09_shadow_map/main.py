@@ -18,7 +18,7 @@ SHADOW_SIZE = 2048
 logger = bz.Logger()
 logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
-window = bz.Window(1024, 720, "Bazalt Demo - Shadow Map")
+window = bz.Window(1024, 720, "Bazalt Demo - Shadow Map", logger=logger)
 ctx = bz.Context(logger)
 renderer = ctx.create_renderer(window)
 
@@ -35,7 +35,7 @@ shadow_pipe = (ctx.graphics_pipeline()
                .vertex_shader(shadow_vert)
                .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                .depth_test(True)
-               .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
+               .uniform_buffer(0, bz.ShaderStage.VERTEX)
                .build(shadow))
 
 scene_pipe = (ctx.graphics_pipeline()
@@ -43,8 +43,8 @@ scene_pipe = (ctx.graphics_pipeline()
               .fragment_shader(scene_frag)
               .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
               .depth_test(True)
-              .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
-              .texture(1, bz.ShaderStage.FRAGMENT, set=0)
+              .uniform_buffer(0, bz.ShaderStage.VERTEX)
+              .texture(1, bz.ShaderStage.FRAGMENT)
               .build(renderer))
 
 
@@ -89,12 +89,12 @@ index_count = len(idx)
 ubuf = ctx.create_buffer(np.zeros(32, dtype=np.float32),
                          bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
-pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=8, textures=4)
+pool = ctx.create_descriptor_pool()
 
-shadow_set = pool.allocate_frame_set(shadow_pipe, set=0)
+shadow_set = pool.allocate_frame_set(shadow_pipe)
 shadow_set.set_buffer(0, ubuf)
 
-scene_set = pool.allocate_frame_set(scene_pipe, set=0)
+scene_set = pool.allocate_frame_set(scene_pipe)
 scene_set.set_buffer(0, ubuf)
 # NEAREST: linear filtering of depth formats is not universally supported.
 # LINEAR + compare = hardware PCF: the sampler compares the reference depth
@@ -116,14 +116,14 @@ cmd.begin()
 
 with cmd.rendering(shadow) as c:
     (c.bind_pipeline(shadow_pipe)
-      .bind_descriptor_set(shadow_set, shadow_pipe, set=0)
+      .bind_descriptor_set(shadow_set, shadow_pipe)
       .bind_vertex_buffer(vbuf)
       .bind_index_buffer(ibuf)
       .draw_indexed(index_count))
 
 with cmd.rendering(renderer, clear_color=[0.05, 0.07, 0.1, 1.0]) as c:
     (c.bind_pipeline(scene_pipe)
-      .bind_descriptor_set(scene_set, scene_pipe, set=0)
+      .bind_descriptor_set(scene_set, scene_pipe)
       .bind_vertex_buffer(vbuf)
       .bind_index_buffer(ibuf)
       .draw_indexed(index_count))

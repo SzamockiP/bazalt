@@ -65,13 +65,24 @@ endif()
 #stb
 # A commit, not a branch. stb publishes no tags, so `master` used to be the only
 # spelling available -- and it made an upstream push able to break a build here
-# with no local change, which is the one failure nobody can reproduce. GitHub
-# serves a shallow fetch of an explicit SHA, so pinning costs no clone time.
+# with no local change, which is the one failure nobody can reproduce.
+#
+# NO GIT_SHALLOW here, unlike the four above, and the difference is the pin. A
+# shallow clone fetches the tip of the default branch and nothing else, so
+# checking out any other commit fails with "unable to read tree". While the pin
+# WAS master's tip that never showed, which is why this stood for four releases
+# and then broke on a day nothing here changed: stb pushed 2c980bb5 on
+# 2026-08-02 and every shallow clone stopped containing 31c1ad37.
+#
+# The four tagged dependencies keep GIT_SHALLOW because CMake clones a tag by
+# name, which the server resolves. Only a raw SHA needs the history. GitHub
+# does serve `git fetch --depth 1 origin <sha>`, but CMake's shallow path does
+# not ask that way -- it clones, then checks out. The full clone is 6 MB and one
+# second, which is the whole price of never seeing this again.
 FetchContent_Declare(
     stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
     GIT_TAG 31c1ad37456438565541f4919958214b6e762fb4
-    GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(stb)
 

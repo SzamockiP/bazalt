@@ -181,6 +181,82 @@ inline void require_same_context(const Context* a, const Context* b, const char*
     }
 }
 
+// Anything that would start new GPU work is refused once the Context is closed.
+// Same address and the same argument as require_same_context above: a user
+// error, caught where the GIL is held, rather than an error channel threaded
+// through every factory in the headers.
+//
+// StateError because that is what the 0.23 taxonomy created it for — not a bad
+// argument (the arguments are fine) and not a device that cannot (it can, and
+// the device outlives close()), but a call made at the wrong point in a
+// sequence. Refusing a read that could physically still run is deliberate: a
+// "closed" that holds for some verbs and not others is two contracts.
+//
+// The pointer overload is the one resources use — they hold their Context by
+// owner(), and reading a render result after the `with` block that produced it
+// has ended is the notebook's most natural version of this mistake.
+inline void require_open(const Context* context, const char* what);
+
+inline void require_open(const Context& context, const char* what)
+{
+    if (context.closed())
+    {
+        raise_error(err_state(
+            std::format(
+                "{}: this Context is closed. close(), and the end of a `with` block, "
+                "stop its upload worker and wait for the GPU work it started, so it "
+                "begins no more. Build a new Context.",
+                what)));
+    }
+}
+
+inline void require_open(const Context* context, const char* what)
+{
+    if (context != nullptr)
+    {
+        require_open(*context, what);
+    }
+}
+
+// Turns a query's reason-for-no-answer into the exception the 0.23 taxonomy
+// gives it. Ok and NotReady return; the caller then produces the number or None.
+//
+// The split exists because one sentinel for four reasons is a question the
+// caller cannot answer. "Wait longer" and "this GPU cannot" want opposite
+// reactions, and a loop that polls Timer.ms would spin forever on a device with
+// no timestamps.
+inline void raise_for_query_status(QueryStatus status, const char* what)
+{
+    if (status == QueryStatus::Unsupported)
+    {
+        raise_error(err_unsupported(
+            std::format(
+                "{}: this GPU reports no usable timestamps (timestampPeriod or "
+                "timestampValidBits is zero on the graphics queue), so it can never "
+                "measure GPU time here. Measure on the CPU instead.",
+                what)));
+    }
+    if (status == QueryStatus::Disabled)
+    {
+        raise_error(err_state(
+            std::format(
+                "{}: this Context was built without gpu_timing=True, so no timestamps "
+                "are recorded. Pass Context(gpu_timing=True) to measure frames — it is "
+                "opt-in because it costs a timestamp pair per frame.",
+                what)));
+    }
+    if (status == QueryStatus::Superseded)
+    {
+        raise_error(err_state(
+            std::format(
+                "{}: this handle is from a recording that cmd.begin() has since "
+                "replaced, so its query slots now hold different data. Read the "
+                "result before re-recording, or keep the handle from the current "
+                "recording.",
+                what)));
+    }
+}
+
 // clear_color=None preserves the attachment, and a multisampled target has
 // nothing to preserve: its multisampled image is transient (storeOp
 // DONT_CARE) and the pass result lives in the resolve image, which is not

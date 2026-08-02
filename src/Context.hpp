@@ -66,6 +66,36 @@ class ShaderModule;
 class Pipeline;
 class Image;
 
+// Why a GPU query has no number yet, or no number at all (0.24). One nullopt
+// used to cover all of these, so a caller could not tell "wait longer" from
+// "this GPU cannot" — and the two want opposite reactions. The binding layer
+// turns the first three into exceptions and leaves None meaning exactly one
+// thing.
+//
+// Here rather than on CommandBuffer because both askers need it and Renderer.hpp
+// only forward-declares CommandBuffer. Namespace scope in the header that owns
+// the subject, like Access in ResourceTracker.hpp — and Context is the owner:
+// it holds the timeline the answers are paced by and the gpu_timing flag that
+// produces Disabled.
+enum class QueryStatus
+{
+    Ok,
+    // The device has no usable timestamps: timestampPeriod is 0, or the graphics
+    // family reports timestampValidBits == 0. Never true of an occlusion query,
+    // which is core with no feature behind it.
+    Unsupported,
+    // The device could, but nobody asked: Context(gpu_timing=True) is what turns
+    // the swapchain renderer's per-frame timestamps on. Only
+    // SwapchainRenderer.gpu_time_ms produces this — cmd.timer() needs no flag,
+    // because it costs nothing until a recording asks for a timer.
+    Disabled,
+    // The handle predates a begin(), so its slots now hold a different query's
+    // data. A sequencing mistake, not a device limit.
+    Superseded,
+    // The submit has not finished. The one answer that means "ask again".
+    NotReady
+};
+
 // The hot-reload file watcher, seen from the Context's side — same abstract
 // interface trick as UploadManagerBase (the concrete HotReloadWatcher lives in
 // HotReload.hpp, which needs the full Pipeline/ShaderModule/Image/UploadManager
@@ -190,25 +220,15 @@ public:
 
     ~Context()
     {
-        // Before anything it observes goes away: stop the watcher thread. It
-        // touches no Vulkan and no Python (errors go through the Logger's own
-        // queue), so joining it is unconditional and needs no atexit dance — the
-        // jthread destructor requests the stop and joins.
-        hot_reload_.reset();
+        // Stops the threads and finishes the GPU work, if close() has not
+        // already. What is left below is the device itself and the objects this
+        // Context owns outright, which only the destructor may take: by the time
+        // it runs, every resource has released its shared_ptr to us.
+        close();
 
-        // First: stop the upload worker. Its destructor abandons undecoded jobs
-        // (the process is going away; decoding more would only delay exit),
-        // finishes at most one in-flight submit, joins, and destroys its command
-        // pool — all of which needs the device still alive.
-        upload_manager_.reset();
-
-        if (vkb_device_.device)
-        {
-            vk_.vkDeviceWaitIdle(vkb_device_.device);
-        }
-
-        // Everything is complete now; run whatever is still queued before the
-        // pool and allocator below disappear out from under the lambdas.
+        // Resources that died AFTER close() queued their handles here, and this
+        // is the drain that frees them — before the pool and the allocator below
+        // disappear out from under the lambdas.
         for (auto& [serial, fn] : deletion_queue_)
         {
             fn();
@@ -243,6 +263,77 @@ public:
 
         vkb::destroy_device(vkb_device_);
         vkb::destroy_instance(vkb_instance_);
+    }
+
+    // Deterministic teardown of everything this Context owns EXCLUSIVELY: the
+    // hot-reload watcher, the upload worker, and the GPU work still in flight.
+    // Idempotent, and `with bz.Context() as ctx:` is a call to it at the end of
+    // the block.
+    //
+    // What it deliberately does NOT do is destroy the device. The first version
+    // did, and the validation-as-assert referee refused it in one line —
+    // "vkDestroyDevice(): VkDevice has 3 leaked objects" — because a resource
+    // the user still holds a name for is a live child of that device. There are
+    // only two ways to satisfy the spec there: free the resource out from under
+    // a live Python reference, or refuse to close while any name is bound. The
+    // first is a use-after-free with extra steps and the second makes `with`
+    // useless in a notebook, which is the surface this feature exists for. So
+    // the device follows shared_ptr: it goes when the last resource built from
+    // it is dropped, which is what the destructor above is.
+    //
+    // That leaves an honest contract rather than a smaller one. The threads are
+    // what actually accumulate across notebook cell re-runs — a second decoder
+    // and a second watcher per run, each with a queue — and they go now. The
+    // memory goes when you stop holding it, which is the only point at which
+    // freeing it could ever have been correct.
+    void close()
+    {
+        if (closed_)
+        {
+            return;
+        }
+
+        // Before anything it observes goes away: stop the watcher thread. It
+        // touches no Vulkan and no Python (errors go through the Logger's own
+        // queue), so joining it is unconditional and needs no atexit dance — the
+        // jthread destructor requests the stop and joins.
+        hot_reload_.reset();
+
+        // Then the upload worker. Its destructor abandons undecoded jobs,
+        // finishes at most one in-flight submit, joins, and destroys its command
+        // pool — all of which needs the device still alive.
+        upload_manager_.reset();
+
+        if (vkb_device_.device)
+        {
+            vk_.vkDeviceWaitIdle(vkb_device_.device);
+        }
+
+        // Everything is complete, so drain the queue outright rather than
+        // through flush_deletion_queue(): that one asks the timeline how far the
+        // GPU got, and a Context whose construction failed has no device to ask.
+        // (It reaches here through ~Context — see test_printf_needs_the_
+        // validation_layers, which is the caller that found this.) An empty queue
+        // makes the loop a no-op, which is exactly that case.
+        for (auto& [serial, fn] : deletion_queue_)
+        {
+            fn();
+        }
+        deletion_queue_.clear();
+
+        // The queue stays usable afterwards: a resource dropped after close()
+        // still parks its handles here, and the destructor drains them again.
+        closed_ = true;
+    }
+
+    // True once close() has run. Cached values (frames_in_flight, device_name,
+    // headless) still answer; anything that would start new GPU work is refused
+    // at the binding layer with StateError. Some of it could still physically
+    // run — the device outlives close() — and refusing anyway is the point:
+    // "closed" that means closed for some verbs and not others is two contracts.
+    bool closed() const
+    {
+        return closed_;
     }
 
     Context(const Context&) = delete;
@@ -1106,6 +1197,18 @@ private:
             inst_builder.enable_extension(extension.c_str());
         }
 
+        // A test knob in the same family as BAZALT_FORCE_VULKAN_1_2, and not
+        // public API: it asks for the headless instance on a machine that has a
+        // display, so the fallback below is reachable where anyone can run it.
+        // Without it that path only executes on a display-less server — which is
+        // exactly where a remote notebook runs, and where nobody was testing.
+        const char* force_headless = std::getenv("BAZALT_FORCE_HEADLESS");
+        const bool forced_headless = force_headless && force_headless[0] == '1';
+        if (forced_headless)
+        {
+            inst_builder.set_headless(true);
+        }
+
         auto inst_ret = inst_builder.build();
 
         // A machine with no display has no windowing extensions, and vk-bootstrap
@@ -1128,6 +1231,10 @@ private:
                         "Vulkan: no windowing extensions present, continuing headless");
                 }
             }
+        }
+        else if (inst_ret && forced_headless)
+        {
+            ctx.headless_ = true;
         }
 
         if (!inst_ret)
@@ -1279,8 +1386,17 @@ private:
 
         // Presentation is optional: a headless or compute-only Context is legitimate.
         // SwapchainRenderer verifies present support at its own creation time.
+        //
+        // And impossible on a headless INSTANCE, which is the half this used to
+        // miss. VK_KHR_swapchain requires VK_KHR_surface at the instance level, so
+        // enabling the device extension without it is
+        // VUID-vkCreateDevice-ppEnabledExtensionNames-01387 — every Context on a
+        // display-less machine emitted that error. The driver advertises the device
+        // extension there regardless, so enable_extension_if_present answers yes and
+        // has no way to know what the instance did. Found by BAZALT_FORCE_HEADLESS on
+        // the first run, which is the argument for the knob in one line.
         ctx.swapchain_supported_ =
-            ctx.vkb_physical_device_.enable_extension_if_present(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+            !ctx.headless_ && ctx.vkb_physical_device_.enable_extension_if_present(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 
         // debugPrintfEXT() compiles to OpExtInst against the NonSemantic.DebugPrintf
         // instruction set, which the device must permit through
@@ -1716,6 +1832,7 @@ private:
     // Python asks about and the structs the device was built with cannot drift.
     DeviceFeatures negotiated_features_;
     bool headless_ = false;
+    std::atomic<bool> closed_ = false;
     bool swapchain_supported_ = false;
     bool dynamic_rendering_khr_ = false;
     // Whether the device is a Vulkan portability subset (MoltenVK on macOS is the

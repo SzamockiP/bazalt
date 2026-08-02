@@ -1,0 +1,32 @@
+#version 450
+// One half-resolution MRT pass feeds the whole post chain: attachment 0 is
+// the bloom bright-pass, attachment 1 is the god-ray occlusion mask.
+
+layout(location = 0) in vec2 uv;
+layout(location = 0) out vec4 outBright;
+layout(location = 1) out vec4 outMask;
+
+layout(set = 0, binding = 0) uniform sampler2D sceneTex;
+layout(set = 0, binding = 1) uniform sampler2D depthTex;
+
+layout(push_constant) uniform PC {
+    float threshold;
+    float ceiling;   // the brightest value bloom may carry
+    float pad0, pad1;
+} pc;
+
+void main() {
+    vec3 c = texture(sceneTex, uv).rgb;
+    float lum = max(max(c.r, c.g), c.b);
+    // The ceiling is what keeps the sun round. Its disc is ~40 in HDR, and a
+    // blur that wide spreads it into a plateau that tone-maps to flat white
+    // — so the shape you see is the blur kernel, a rectangle. Clamped, the
+    // glow falls off inside the kernel instead of filling it.
+    outBright = vec4(min(c * smoothstep(pc.threshold, pc.threshold + 1.0, lum),
+                         vec3(pc.ceiling)), 1.0);
+
+    // Sky pixels keep the cleared depth (1.0): only they feed the god rays,
+    // so geometry occludes the shafts by simply not being sky.
+    float depth = texture(depthTex, uv).r;
+    outMask = vec4(c * step(0.999999, depth), 1.0);
+}

@@ -81,8 +81,7 @@ def test_foreign_spirv_is_not_trusted(ctx):
     native = compute(ctx, "refl_store.comp")
     assert not native.writes_unknown
 
-    foreign = ctx.compile_shader("from_bytes.comp", bz.ShaderStage.COMPUTE,
-                                 source=bytes(native.spirv))
+    foreign = ctx.compile_shader(source=bytes(native.spirv), stage=bz.ShaderStage.COMPUTE)
     assert foreign.writes_unknown
 
 

@@ -402,6 +402,11 @@ jobs:
       # alias to either. A bazalt-side knob rather than MESA_VK_VERSION_OVERRIDE
       # so the same leg is reproducible on any driver, including a dev GPU.
       #
+      # BAZALT_FORCE_HEADLESS (0.24) needs no leg of its own and gets none. It
+      # is set per-Context by the fixture in tests/test_headless.py, so the
+      # headless-INSTANCE path — the one a display-less server takes, and the one
+      # that had no coverage at all — is exercised inside the ordinary run.
+      #
       # --api-coverage on one leg only: it patches every public callable to
       # record the call, and one measurement of the same suite is enough. It
       # reports here and gates nowhere — the gate needs a run with no skips, and

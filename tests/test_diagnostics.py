@@ -120,9 +120,13 @@ def test_timer_handle_reports_positive_time_headless(ctx):
         assert whole.ms >= inner.ms  # the outer scope contains the inner one
 
 
-def test_stale_timer_handle_reads_none(ctx):
-    """A handle from a superseded recording reports None instead of a stale
-    number: begin() bumps the recording generation."""
+def test_stale_timer_handle_raises_state_error(ctx):
+    """A handle from a superseded recording raises instead of reporting a stale
+    number: begin() bumps the recording generation.
+
+    It reported None until 0.24, which made it indistinguishable from "the
+    submit has not finished" — and those want opposite reactions, so a polling
+    loop on a stale handle never terminated."""
     pipeline = _double_pipeline(ctx)
     import numpy as np
     sbuf = ctx.create_buffer(np.arange(64, dtype=np.float32),
@@ -142,7 +146,8 @@ def test_stale_timer_handle_reads_none(ctx):
         cmd.bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1)
     ctx.submit(cmd)
 
-    assert old.ms is None
+    with pytest.raises(bz.StateError, match="superseded|replaced"):
+        old.ms
 
 
 def test_gpu_time_ms_is_reported_after_the_ring_cycles(ctx):
@@ -322,9 +327,9 @@ def test_occlusion_query_outside_a_rendering_scope_raises(ctx):
         cmd.occlusion_query()
 
 
-def test_stale_occlusion_handle_reads_none(ctx):
+def test_stale_occlusion_handle_raises_state_error(ctx):
     """Same stale-handle contract as a Timer: re-recording gives the slots to a
-    different query, so the old handle reports None instead of a wrong number."""
+    different query, so the old handle raises rather than answering wrongly."""
     target = ctx.create_render_target(8, 8)
     pipeline = solid_pipeline(ctx, target)
 
@@ -338,7 +343,8 @@ def test_stale_occlusion_handle_reads_none(ctx):
 
     cmd.begin()
     ctx.submit(cmd)
-    assert q.samples is None
+    with pytest.raises(bz.StateError, match="superseded|replaced"):
+        q.samples
 
 
 def test_memory_stats_grow_with_an_allocation(ctx):
@@ -436,3 +442,36 @@ def test_renderer_read_pixels_captures_the_frame(ctx):
         renderer = None
         window = None
         gc.collect()
+
+
+def test_gpu_time_needs_the_flag(extra_context):
+    """A Context without gpu_timing=True raises rather than answering None.
+
+    It answered None until 0.24, which is the same reply as "the ring has not
+    cycled yet" — so a frame loop waiting for a number waited forever and had no
+    way to find out."""
+    context = extra_context(gpu_timing=False)
+    if context.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    try:
+        window = bz.Window(64, 64, "gpu timing off")
+    except bz.WindowError:
+        pytest.skip("no display available")
+    renderer = context.create_renderer(window)
+
+    with pytest.raises(bz.StateError, match="gpu_timing"):
+        renderer.gpu_time_ms
+
+
+def test_gpu_time_is_none_only_while_it_is_early(ctx):
+    """The session Context has gpu_timing=True, so the property answers rather
+    than raising — None until the ring cycles, a float after."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    try:
+        window = bz.Window(64, 64, "gpu timing on")
+    except bz.WindowError:
+        pytest.skip("no display available")
+    renderer = ctx.create_renderer(window)
+    value = renderer.gpu_time_ms
+    assert value is None or isinstance(value, float)

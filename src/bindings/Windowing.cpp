@@ -179,6 +179,34 @@ void bind_windowing(py::module_& m)
         "lives in the queries (is_key_pressed, is_open, renderer.acquire).\n"
         "Raises WindowError when no window exists.");
 
+    // The sleeping half of the same pump. The GIL goes, because the whole point
+    // is that this call blocks — holding it would freeze every other Python
+    // thread for as long as the user does not move the mouse.
+    m.def(
+        "wait_events",
+        [](std::optional<double> timeout)
+        {
+            // ValueError, not WindowError: nothing has to be asked of a window to
+            // know that a negative number of seconds is not a duration. See
+            // "Which exception a user error gets" in DESIGN.md.
+            if (timeout.has_value() && !(*timeout >= 0.0))
+            {
+                throw py::value_error(
+                    std::format("wait_events(timeout={}): the timeout is in seconds and cannot be negative", *timeout));
+            }
+            std::expected<void, Error> r;
+            {
+                py::gil_scoped_release release;
+                r = wait_events(timeout);
+            }
+            unwrap(std::move(r), nullptr);
+        },
+        py::arg("timeout") = py::none(),
+        "Sleep until an OS event arrives, then dispatch it like poll_events().\n"
+        "timeout is in seconds; None waits indefinitely. Use it for a program that\n"
+        "only redraws on input — with poll_events as the only pump, such a program\n"
+        "spins a CPU core. Raises WindowError when no window exists.");
+
     // Free functions for the same reason poll_events is one: the clipboard belongs
     // to the process and the GLFW calls take no window.
     m.def(

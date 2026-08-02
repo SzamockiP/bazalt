@@ -33,12 +33,12 @@ class Camera:
 
     def process_keyboard(self, window, dt, right):
         velocity = self.speed * dt
-        if window.is_key_pressed(bz.KEY_W): self.pos += velocity * self.front
-        if window.is_key_pressed(bz.KEY_S): self.pos -= velocity * self.front
-        if window.is_key_pressed(bz.KEY_A): self.pos -= velocity * right
-        if window.is_key_pressed(bz.KEY_D): self.pos += velocity * right
-        if window.is_key_pressed(bz.KEY_SPACE): self.pos += velocity * self.up
-        if window.is_key_pressed(bz.KEY_LEFT_SHIFT): self.pos -= velocity * self.up
+        if window.is_key_pressed(bz.Key.W): self.pos += velocity * self.front
+        if window.is_key_pressed(bz.Key.S): self.pos -= velocity * self.front
+        if window.is_key_pressed(bz.Key.A): self.pos -= velocity * right
+        if window.is_key_pressed(bz.Key.D): self.pos += velocity * right
+        if window.is_key_pressed(bz.Key.SPACE): self.pos += velocity * self.up
+        if window.is_key_pressed(bz.Key.LEFT_SHIFT): self.pos -= velocity * self.up
 
     def get_matrices(self, aspect_ratio):
         view = glm.lookAt(self.pos, self.pos + self.front, self.up)
@@ -77,7 +77,7 @@ class DemoApp:
         self.window = bz.Window(1024, 720, "Bazalt Demo - Model Loader", logger=self.logger)
         self.ctx = bz.Context(self.logger)
         self.renderer = self.ctx.create_renderer(self.window)
-        self.window.set_cursor_mode(bz.CURSOR_DISABLED)
+        self.window.set_cursor_mode(bz.CursorMode.DISABLED)
         
         self.camera = Camera()
         self.last_time = time.time()
@@ -193,12 +193,10 @@ class DemoApp:
         self.ibuf = self.ctx.create_buffer(np.concatenate(all_faces).flatten().astype(np.uint32), bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
 
     def setup_descriptors(self):
-        # Create Descriptor Pool and allocate descriptor set
-        self.pool = self.ctx.create_descriptor_pool(
-            max_sets=3 + len(self.loaded_textures), 
-            uniform_buffers=2, 
-            textures=1 + len(self.loaded_textures)
-        )
+        # Create Descriptor Pool and allocate descriptor set. The pool sizes
+        # itself from the layouts, so the texture count is no longer arithmetic
+        # this call has to get right.
+        self.pool = self.ctx.create_descriptor_pool()
         self.frame_set = self.pool.allocate_frame_set(self.pipeline, set=0)
         self.frame_set.set_buffer(0, self.ubuf)
 
@@ -251,7 +249,8 @@ class DemoApp:
                 right_vec = self.camera.update_mouse(mouse.dx, mouse.dy)
                 self.camera.process_keyboard(self.window, dt, right_vec)
                 
-                view, proj, model = self.camera.get_matrices(1024.0 / 720.0)
+                view, proj, model = self.camera.get_matrices(
+                    self.renderer.width / self.renderer.height)
                 self.ubuf.update(view.to_bytes() + proj.to_bytes() + model.to_bytes())
                 
                 self.renderer.present(self.cmd)

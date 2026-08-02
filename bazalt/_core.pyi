@@ -217,6 +217,20 @@ class ShaderStage(IntEnum):
     #: Needs Feature.GEOMETRY_SHADER. Per primitive, and may change its type.
     GEOMETRY = 5
 
+class ShaderLanguage(IntEnum):
+    """Which parser reads a shader's text.
+
+    compile_shader infers it from the file extension (`.hlsl` is HLSL,
+    everything else GLSL) and takes it as `language=` when the extension is
+    wrong or when there is no file at all.
+
+    There is no SPIRV member. SPIR-V is a compiled format rather than a
+    language, and it already has two spellings of its own: a `.spv` path, or
+    bytes in `source=`.
+    """
+    GLSL = 0
+    HLSL = 1
+
 class VertexFormat(IntEnum):
     """Vertex attribute layout. Renamed from `Format`, which is reserved for
     pixel formats."""
@@ -862,8 +876,8 @@ class DescriptorSet:
     def set_buffer(self, binding: int, buffer: Buffer, *, index: int = 0) -> None: ...
 
 class DescriptorPool:
-    def allocate_set(self, pipeline: Pipeline, set: int) -> DescriptorSet: ...
-    def allocate_frame_set(self, pipeline: Pipeline, set: int) -> DescriptorSet: ...
+    def allocate_set(self, pipeline: Pipeline, set: int = 0) -> DescriptorSet: ...
+    def allocate_frame_set(self, pipeline: Pipeline, set: int = 0) -> DescriptorSet: ...
 
 # ── Render targets ─────────────────────────────────────────────────────
 
@@ -1090,13 +1104,24 @@ class GraphicsPipelineBuilder:
         here."""
         ...
     def push_constant(self, size: int, stage: ShaderStage) -> GraphicsPipelineBuilder: ...
-    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+    # Declaring the same (set, binding) twice MERGES the stages rather than
+    # conflicting, so a camera UBO that both stages read is spelled:
+    #
+    #     .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
+    #     .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
+    #
+    # This has always worked and the stub never said so, which made it look like
+    # a mistake (0.24). It applies to every declarator below, not only this one.
+    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
                        update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder: ...
-    def storage_buffer(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+    def storage_buffer(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
                        update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder: ...
-    def texture(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+    def texture(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
                 update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder:
         """A sampled image binding.
+
+        `set` defaults to 0, the same as on the compute builder (0.24). A
+        pipeline with one set says nothing about it.
 
         count > 1 declares a descriptor ARRAY — one binding holding N textures,
         written with DescriptorSet.set_image(binding, image, index=i) and indexed
@@ -1121,7 +1146,7 @@ class GraphicsPipelineBuilder:
         budget, so off is the cheaper side.
         """
         ...
-    def storage_image(self, binding: int, stage: ShaderStage, set: int, count: int = 1,
+    def storage_image(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
                       update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder:
         """A read/write image addressed by coordinate (imageLoad/imageStore) in a
         graphics shader.
@@ -1435,7 +1460,7 @@ class CommandBuffer:
         ...
 
     def bind_descriptor_set(self, descriptor_set: DescriptorSet, pipeline: Pipeline,
-                            set: int) -> CommandBuffer: ...
+                            set: int = 0) -> CommandBuffer: ...
 
     def timer(self) -> Timer:
         """Start a GPU timer and return its handle. Records a timestamp here;
@@ -1517,11 +1542,17 @@ class OcclusionQuery:
         ...
     @property
     def samples(self) -> Optional[int]:
-        """Fragments that passed the depth and stencil tests, or None if the
-        command buffer was re-recorded since (the handle is stale) or the submit
-        has not completed. Read it after the submit you measured has finished —
-        the default submit(wait=True) is enough; submit(wait=False) needs a
-        ctx.wait() first."""
+        """Fragments that passed the depth and stencil tests.
+
+        None means one thing: the submit has not completed. Read it after the
+        submit you measured has finished — the default submit(wait=True) is
+        enough; submit(wait=False) needs a ctx.wait() first.
+
+        Raises StateError when the command buffer has been re-recorded since, so
+        this handle's query slots now hold a different query's data. That used to
+        be another None (0.24), which made "wait longer" and "this answer is gone"
+        the same reply.
+        """
         ...
     def __enter__(self) -> OcclusionQuery: ...
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
@@ -1542,11 +1573,18 @@ class Timer:
         ...
     @property
     def ms(self) -> Optional[float]:
-        """Measured GPU time in milliseconds, or None if timestamps are
-        unsupported, the command buffer was re-recorded since (the handle is
-        stale), or the submit has not completed. Read it after the submit you
-        timed has finished — the default submit(wait=True) is enough;
-        submit(wait=False) needs a ctx.wait() first."""
+        """Measured GPU time in milliseconds.
+
+        None means one thing: the submit has not completed. Read it after the
+        submit you timed has finished — the default submit(wait=True) is enough;
+        submit(wait=False) needs a ctx.wait() first.
+
+        Raises UnsupportedError when the GPU reports no usable timestamps, and
+        StateError when the command buffer has been re-recorded since. All three
+        answers were one None until 0.24, so a loop polling this could not tell
+        "wait longer" from "this device will never answer" — and spun forever on
+        the second.
+        """
         ...
     def __enter__(self) -> Timer: ...
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
@@ -1716,6 +1754,33 @@ def poll_events() -> None:
     """
     ...
 
+def wait_events(timeout: float | None = None) -> None:
+    """Sleep until an OS event arrives, then dispatch it like poll_events (0.24).
+
+    Use this instead of poll_events in a program that only redraws on input — a
+    model viewer, a parameter editor, a Qt application. With poll_events as the
+    only pump, such a program runs a full-speed loop over frames identical to
+    the last one and holds a CPU core at 100%:
+
+        while window.is_open:
+            bz.wait_events()          # sleeps until the user does something
+            if renderer.acquire():
+                ...
+                renderer.present(cmd)
+
+    timeout is in seconds. None waits indefinitely; a number caps the sleep, so
+    give one when something other than input has to wake the loop — an animation
+    that runs only sometimes, or a watchdog.
+
+    A hot-reload edit does NOT wake it. The watcher runs on its own thread and
+    its result is applied from ctx.begin_frame(), so a program that only ever
+    waits for input sees the reload at the next click. Pass a timeout there.
+
+    Raises WindowError when no window exists, like poll_events, and ValueError
+    for a negative timeout.
+    """
+    ...
+
 def get_clipboard() -> str:
     """The system clipboard as text (0.19).
 
@@ -1853,7 +1918,8 @@ class Context:
                 windowed submit). Off by default because it is a profiling
                 diagnostic — the pool reset and two writes ride in every frame's
                 command buffer, and per-frame queries are not guaranteed free on
-                every GPU. Left off, renderer.gpu_time_ms is always None, no cost.
+                every GPU. Left off, renderer.gpu_time_ms raises StateError and
+                nothing is recorded, so the frame pays nothing.
             shader_printf: deliver debugPrintfEXT() output from your shaders to
                 the logger, as Severity.INFO from Source.SHADER. Write
                 `#extension GL_EXT_debug_printf : enable` in the shader and call
@@ -1903,7 +1969,7 @@ class Context:
     def begin_frame(self) -> None:
         """Open one logical frame — the frame verb of a windowed loop.
 
-        Advances the ring slot that CommandBuffer, DynamicBuffer and the
+        Advances the ring slot that CommandBuffer, a DYNAMIC buffer and the
         per-frame descriptor sets index, applies pending hot reloads, and
         reclaims deferred handles. All of that is Context-owned, so it happens
         once per frame no matter how many windows draw into it:
@@ -1958,26 +2024,26 @@ class Context:
     def graphics_pipeline(self) -> GraphicsPipelineBuilder: ...
     def compute_pipeline(self) -> ComputePipelineBuilder: ...
     def compile_shader(self, path: str, stage: ShaderStage, *,
-                       source: Optional[str | bytes] = None,
+                       language: Optional[ShaderLanguage] = None,
                        include_dirs: Sequence[str] = (),
                        entry_point: str = "") -> ShaderModule:
-        """Compile or load a shader. One function for every form: the extension
-        of `path` decides how it is handled.
+        """Compile or load a shader FROM A FILE.
+
+        Without `language=`, the extension decides:
 
         - `.hlsl` — HLSL. Use `[[vk::binding(n, set)]]` on resources; bare
           `register()` piles everything into one Vulkan binding space.
-        - `.spv` — a prebuilt SPIR-V binary: loaded, not compiled. `stage` is
-          verified against the binary's entry points (ShaderError on mismatch).
-        - anything else — GLSL.
+        - anything else — GLSL. That covers .vert/.frag/.comp and whatever
+          else a project calls its files.
 
-        `source=` supplies the content instead of reading a file, and its type
-        says what it is. A `str` is compiled as text. `bytes` is taken as ready
-        SPIR-V words: nothing is compiled, the extension of `path` stops
-        mattering, and the binary gets the same magic-number and stage checks a
-        `.spv` file gets. With `source=`, `path` becomes a virtual name that
-        still picks the language, tags diagnostics (ShaderError.path) and anchors
-        relative #include resolution (a name with no directory resolves includes
-        against the working directory).
+        `language=` overrides that, which is the spelling for a `.frag` holding
+        HLSL. It reaches every decision the language drives, not only shaderc:
+        the entry_point gate below and the reflection both follow it.
+
+        `.spv` is separate and not a language: the file is a prebuilt binary,
+        loaded rather than compiled, and `stage` is verified against its entry
+        points (ShaderError on mismatch). `language=` on a `.spv` path is a
+        ValueError — it describes parsing, and nothing is parsed.
 
         `entry_point=` names an HLSL entry point, for a file that holds several
         (VSMain, PSMain). It is an error for GLSL, whose entry point must be
@@ -1992,8 +2058,32 @@ class Context:
         (the compiler discovered it, and the error is recoverable — fix the
         include and recompile).
 
-        A hot reload recompiles with the include_dirs and entry_point of the
-        first compile.
+        A hot reload recompiles with the language, include_dirs and entry_point
+        of the first compile.
+        """
+        ...
+
+    def compile_shader(self, *, source: str | bytes, stage: ShaderStage,
+                       language: Optional[ShaderLanguage] = None,
+                       name: str = "",
+                       include_dirs: Sequence[str] = (),
+                       entry_point: str = "") -> ShaderModule:
+        """Compile a shader held IN MEMORY. No file, so no path.
+
+        `source` says what it is by its type. A `str` is text, parsed as
+        `language=` says and GLSL by default. `bytes` is taken as ready SPIR-V
+        words: nothing is compiled, the binary gets the same magic-number and
+        stage checks a `.spv` file gets, and `language=` is then a ValueError.
+
+        `name=` is what errors call this shader — it shows up as
+        ShaderError.path and in the compiler's own messages. The default is
+        `<source>`. It is a label and nothing else: unlike the path form, no
+        part of it changes what happens.
+
+        `#include` resolves against `include_dirs=` and the working directory,
+        because there is no including file to sit beside.
+
+        Hot reload never sees these: bazalt watches files, and there is none.
         """
         ...
 
@@ -2281,6 +2371,40 @@ class Context:
         """
         ...
 
+    def close(self) -> None:
+        """Stop this Context's worker threads and finish its GPU work.
+
+        Use it through `with`, which calls it at the end of the block:
+
+            with bz.Context() as ctx:
+                target = ctx.create_render_target(256, 256)
+                ...
+            pixels = target.color[0].read()   # StateError: the Context is closed
+
+        A notebook is why this exists. Re-running a cell leaves the previous
+        Context's upload worker and hot-reload watcher running until the garbage
+        collector reaches them, so a shared machine collects one decoder thread
+        per run. close() ends them at a point you choose.
+
+        What it does NOT do is free the GPU memory of resources you still hold a
+        name for. Those are live children of the device, and destroying it under
+        them is what the Vulkan spec forbids. They are freed when you drop them,
+        which is the only moment at which freeing them is correct.
+
+        Calling it twice does nothing. Reading a cached property
+        (device_name, frames_in_flight, headless) still works afterwards; every
+        verb that would start new work raises StateError.
+        """
+        ...
+
+    @property
+    def closed(self) -> bool:
+        """True after close(), or after a `with` block over this Context ends."""
+        ...
+
+    def __enter__(self) -> Context: ...
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool: ...
+
 class SwapchainRenderer(RenderTargetBase):
     """Presents to a window. One implementation of a render target.
 
@@ -2352,9 +2476,19 @@ class SwapchainRenderer(RenderTargetBase):
     def gpu_time_ms(self) -> Optional[float]:
         """GPU time in milliseconds of the frame submitted frames_in_flight ago
         (a timestamp pair around each submit, read back once its fence signals).
-        None unless the Context was created with gpu_timing=True; also None
-        until the ring has cycled once, and on devices without timestamp
-        support."""
+
+        None means one thing: the ring has not cycled once yet, so read it every
+        frame and use it when it arrives.
+
+        Raises StateError when the Context was built without gpu_timing=True, and
+        UnsupportedError when the GPU reports no usable timestamps. Same split
+        and same reason as Timer.ms (0.24): a frame loop reading this needs to
+        know whether to keep asking.
+
+        A driver that measures and answers 0.0 is a measurement, not a sentinel.
+        MoltenVK on a paravirtual device does exactly that, and nothing can
+        distinguish it from a genuinely fast frame — see DESIGN.md.
+        """
         ...
 
     @property

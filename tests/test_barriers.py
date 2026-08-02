@@ -220,15 +220,18 @@ def test_context_wide_manual_mode_is_inherited(ctx):
 # ── sync validation: the proof that manual mode is really manual ─────────
 
 
-def run_sync_case(mode):
-    """One dispatch-pair recording under a sync-validation Context, returning the
-    hazards the layer reported.
+def sync_setup(auto):
+    """A sync-validation Context plus one compute pipeline over one storage buffer.
 
     In-process since 0.15. This used to be a script-in-a-string run through
     subprocess, purely because sync validation needs its own Context and only one
     could be alive per process — so this doubles as the sharpest proof that two
     Contexts with different validation settings now coexist: the session Context
     is right here, on "auto", while this one runs the sync layer.
+
+    Returns the pieces rather than a result, because the recordings built on top
+    of it differ: one recording with two dispatches, or two recordings with one
+    each.
     """
     hazards = []
     log = bz.Logger(min_severity=bz.Severity.INFO)
@@ -240,7 +243,6 @@ def run_sync_case(mode):
         if msg.source == bz.Source.VALIDATION and "hazard" in msg.text.lower():
             hazards.append(msg.text)
 
-    auto = mode == "auto"
     context = bz.Context(log, validation="sync", auto_barriers=auto)
     assert context.auto_barriers is auto
 
@@ -251,6 +253,12 @@ def run_sync_case(mode):
     pool = context.create_descriptor_pool(max_sets=8, storage_buffers=8)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, sbuf)
+    return context, log, hazards, pipeline, sbuf, dset
+
+
+def run_sync_case(mode):
+    """One dispatch-pair recording, returning the hazards the layer reported."""
+    context, log, hazards, pipeline, sbuf, dset = sync_setup(auto=mode == "auto")
 
     cmd = context.create_command_buffer()
     cmd.begin()
@@ -262,6 +270,56 @@ def run_sync_case(mode):
         cmd.barrier(sbuf, bz.Access.SHADER_WRITE, bz.Access.SHADER_WRITE)
     cmd.dispatch(1)
     context.submit(cmd)
+
+    log.flush()
+    return hazards
+
+
+def run_cross_recording_case(auto):
+    """A compute recording that WRITES a buffer, then a graphics recording that
+    only READS it, as two separate CommandBuffers.
+
+    The read-only half is the point, and it took a wrong test to find out why. The
+    replay wrap-around barrier at the top of execute() (0.19) already covers a
+    recording that writes anything tracked, so two writing recordings are ordered
+    and prove nothing. `tracked_writes_` is per RECORDING, not per buffer, so the
+    hole is exactly a recording that writes nothing the tracker sees — a draw,
+    whose only writes are attachments. That is the shape of
+    examples/28_gpu_culling, which is why that example carried a manual barrier.
+
+    Both submits are asynchronous, so the queue really does have both in flight; a
+    blocking submit would resolve the dependency by waiting and prove nothing
+    either.
+    """
+    context, log, hazards, pipeline, sbuf, dset = sync_setup(auto)
+
+    writer = context.create_command_buffer()
+    writer.begin()
+    writer.bind_pipeline(pipeline)
+    writer.bind_descriptor_set(dset, pipeline, set=0)
+    writer.dispatch(1)
+
+    # The reader draws straight out of the storage buffer: BufferType.STORAGE
+    # carries VERTEX_BUFFER_BIT, so no second resource is needed to express
+    # "compute produced these vertices".
+    vert = context.compile_shader(str(SHADER_DIR / "triangle.vert"), bz.ShaderStage.VERTEX)
+    frag = context.compile_shader(str(SHADER_DIR / "triangle.frag"), bz.ShaderStage.FRAGMENT)
+    target = context.create_render_target(16, 16)
+    draw_pipeline = (context.graphics_pipeline()
+                     .vertex_shader(vert)
+                     .fragment_shader(frag)
+                     .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+                     .build(target))
+    reader = context.create_command_buffer()
+    reader.begin()
+    with reader.rendering(target):
+        reader.bind_pipeline(draw_pipeline)
+        reader.bind_vertex_buffer(sbuf)
+        reader.draw(3)
+
+    context.submit(writer, wait=False)
+    context.submit(reader, wait=False)
+    context.wait()
 
     log.flush()
     return hazards
@@ -293,3 +351,26 @@ def test_auto_barriers_satisfy_sync_validation(ctx):
     """The auto tracker's barriers hold up under the same referee that catches
     the missing ones — not just under core validation, which is blind here."""
     assert run_sync_case("auto") == []
+
+
+# ── the first-use floor: hazards from OUTSIDE one recording (0.24) ───────
+
+
+@pytest.mark.skipif(
+    os.environ.get("BAZALT_SYNCVAL_UNSUPPORTED") == "1",
+    reason="this environment's validation layer cannot report shader-access "
+           "sync hazards (see the skip on the manual-mode case above)")
+def test_cross_recording_hazard_is_real_in_manual_mode(ctx):
+    """The negative control, and the whole test below depends on it.
+
+    Without it, a clean auto-mode run would be indistinguishable from a layer that
+    does not look across command buffers at all — the shape of proof the 0.19
+    lesson names, where the safe direction of being wrong silently reports
+    success."""
+    assert run_cross_recording_case(auto=False)
+
+
+def test_cross_recording_hazard_is_barriered_automatically(ctx):
+    """A read-only recording is ordered against a write it cannot see. The
+    first-use floor is what covers it, and before 0.24 this reported a hazard."""
+    assert run_cross_recording_case(auto=True) == []

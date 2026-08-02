@@ -232,6 +232,13 @@ void bind_enums(py::module_& m)
         .value("TESS_EVALUATION", ShaderStage::TESS_EVALUATION)
         .value("GEOMETRY", ShaderStage::GEOMETRY);
 
+    // Which parser reads the text. Two members and no SPIRV one: SPIR-V is a
+    // compiled format rather than a language, and it already has its own two
+    // spellings — a .spv path, or bytes in source=.
+    py::enum_<ShaderLanguage>(m, "ShaderLanguage")
+        .value("GLSL", ShaderLanguage::GLSL)
+        .value("HLSL", ShaderLanguage::HLSL);
+
     py::enum_<VertexFormat>(m, "VertexFormat")
         .value("FLOAT2", VertexFormat::FLOAT2)
         .value("FLOAT3", VertexFormat::FLOAT3)

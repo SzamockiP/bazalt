@@ -5,10 +5,14 @@ recorded commands took a SwapchainRenderer&, so drawing anywhere other than a
 window was impossible — and so was testing any of this.
 """
 
+import pathlib
+
 import numpy as np
 import pytest
 
 import bazalt as bz
+
+SHADER_DIR = pathlib.Path(__file__).parent / "shaders"
 
 CLEAR = [0.1, 0.2, 0.3, 1.0]
 CLEAR_RGB = np.array([26, 51, 77])
@@ -148,3 +152,65 @@ def test_target_is_reusable_after_readback(ctx, triangle_shaders, triangle_buffe
     assert np.array_equal(first, second)
     assert not np.allclose(first[16, 16, :3], CLEAR_RGB, atol=2), \
         "both reads agreeing on a blank image would prove nothing"
+
+
+# ── the headless INSTANCE, which is a different thing (0.24) ─────────────
+#
+# Every test above renders without a window, on an instance that still has the
+# windowing extensions loaded. A display-less machine cannot build that instance
+# at all, and Context falls back to a headless one — the path a notebook on a
+# remote server takes, and the one nothing exercised until this knob existed.
+#
+# BAZALT_FORCE_HEADLESS is a test knob like BAZALT_FORCE_VULKAN_1_2, not public
+# API: the Python surface stays at `ctx.headless`, which reports the answer.
+
+
+@pytest.fixture
+def headless_context(extra_context, monkeypatch):
+    monkeypatch.setenv("BAZALT_FORCE_HEADLESS", "1")
+    return extra_context()
+
+
+def test_forced_headless_context_says_so(headless_context):
+    assert headless_context.headless is True
+
+
+def test_a_headless_instance_still_renders_and_reads_back(headless_context):
+    """The claim the fallback makes: no windowing extensions costs you a window
+    and nothing else.
+
+    The shaders and buffers are built here rather than through the shared
+    fixtures because those belong to the session Context, and a resource cannot
+    cross Contexts."""
+    context = headless_context
+    shaders = (context.compile_shader(str(SHADER_DIR / "triangle.vert"), bz.ShaderStage.VERTEX),
+               context.compile_shader(str(SHADER_DIR / "triangle.frag"), bz.ShaderStage.FRAGMENT))
+    vertices = [
+        +0.0, -0.5, 0.0, 1.0, 0.0, 0.0,
+        -0.5, +0.5, 0.0, 0.0, 1.0, 0.0,
+        +0.5, +0.5, 0.0, 0.0, 0.0, 1.0,
+    ]
+    buffers = (context.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC,
+                                     bz.DataType.FLOAT),
+               context.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC,
+                                     bz.DataType.UINT32))
+
+    target = context.create_render_target(64, 64)
+    pixels = draw_triangle(context, target, shaders, buffers)
+
+    assert pixels.shape == (64, 64, 4)
+    assert np.allclose(pixels[2, 2, :3], CLEAR_RGB, atol=2)
+    # The triangle really drew, so this is a render and not a clear.
+    assert not np.allclose(pixels[32, 32, :3], CLEAR_RGB, atol=2)
+
+
+def test_a_windowed_context_is_not_headless(ctx):
+    """The other side of the same property, so `headless` cannot silently become
+    a constant.
+
+    Skipped where it is genuinely constant: a CI runner with no display has no
+    windowing extensions, so every Context there is headless and the assertion
+    would be testing the machine rather than the library."""
+    if ctx.headless:
+        pytest.skip("no windowing extensions on this machine, so every Context is headless")
+    assert ctx.headless is False

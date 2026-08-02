@@ -31,7 +31,7 @@ import bazalt as bz
 logger = bz.Logger()
 logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
-window = bz.Window(1024, 720, "Bazalt Demo - Normals from a geometry shader")
+window = bz.Window(1024, 720, "Bazalt Demo - Normals from a geometry shader", logger=logger)
 ctx = bz.Context(logger, features=[bz.Feature.GEOMETRY_SHADER])
 renderer = ctx.create_renderer(window)
 
@@ -51,8 +51,8 @@ def with_camera(builder):
     bazalt ORs the flags for a repeated binding index.
     """
     return (builder
-            .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
-            .uniform_buffer(0, bz.ShaderStage.GEOMETRY, set=0))
+            .uniform_buffer(0, bz.ShaderStage.VERTEX)
+            .uniform_buffer(0, bz.ShaderStage.GEOMETRY))
 
 
 # The shaded sphere: an ordinary vertex + fragment pipeline.
@@ -101,8 +101,8 @@ index_count = len(indices)
 
 # view_proj + model
 ubuf = ctx.create_buffer(32 * 4, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
-pool = ctx.create_descriptor_pool(max_sets=2, uniform_buffers=2)
-desc_set = pool.allocate_frame_set(solid, set=0)
+pool = ctx.create_descriptor_pool()
+desc_set = pool.allocate_frame_set(solid)
 desc_set.set_buffer(0, ubuf)
 
 show_normals = True
@@ -117,11 +117,11 @@ fps_timer = start
 while window.is_open():
     bz.poll_events()
 
-    if window.was_key_pressed(bz.KEY_SPACE):
+    if window.was_key_pressed(bz.Key.SPACE):
         show_normals = not show_normals
-    if window.was_key_pressed(bz.KEY_UP):
+    if window.was_key_pressed(bz.Key.UP):
         normal_length = min(normal_length + 0.05, 1.0)
-    if window.was_key_pressed(bz.KEY_DOWN):
+    if window.was_key_pressed(bz.Key.DOWN):
         normal_length = max(normal_length - 0.05, 0.0)
 
     ctx.begin_frame()
@@ -139,7 +139,7 @@ while window.is_open():
     cmd.begin()
     with cmd.rendering(renderer, clear_color=[0.04, 0.05, 0.08, 1.0]) as c:
         c.bind_pipeline(solid)
-        c.bind_descriptor_set(desc_set, solid, set=0)
+        c.bind_descriptor_set(desc_set, solid)
         c.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(index_count)
     if show_normals and normal_length > 0.0:
         # A second pass that preserves what the first drew: the lines sit on top of
@@ -147,7 +147,7 @@ while window.is_open():
         # are hidden by the sphere.
         with cmd.rendering(renderer, clear_color=None) as c:
             c.bind_pipeline(normals)
-            c.bind_descriptor_set(desc_set, normals, set=0)
+            c.bind_descriptor_set(desc_set, normals)
             c.push_constants(normals, 0, struct.pack("f", normal_length))
             c.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(index_count)
     renderer.present(cmd)

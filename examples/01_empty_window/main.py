@@ -1,5 +1,4 @@
 import bazalt as bz
-import time
 
 # Create window, logger, and renderer
 logger = bz.Logger()
@@ -17,28 +16,10 @@ cmd.begin()
 with cmd.rendering(renderer, clear_color=[0.1, 0.1, 0.1, 1.0]):
     pass  # nothing to draw — the pass just clears the swapchain
 
-# Main loop
-last_time = time.time()
-frame_count = 0
-fps_timer = 0.0
-
+# Main loop. acquire() answers False while the window is minimized or resizing,
+# and the frame is skipped — that is the whole windowed contract.
 while window.is_open():
     bz.poll_events()
-
     ctx.begin_frame()
-
     if renderer.acquire():
-        current_time = time.time()
-        dt = current_time - last_time
-        last_time = current_time
-
-        frame_count += 1
-        fps_timer += dt
-
-        if fps_timer >= 1.0:
-            avg_fps = frame_count / fps_timer
-            window.set_title(f"Bazalt Demo - Empty | {1000.0/avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
-            frame_count = 0
-            fps_timer = 0.0
-
         renderer.present(cmd)

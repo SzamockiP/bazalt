@@ -423,7 +423,7 @@ void bind_commands(py::module_& m)
             },
             py::arg("descriptor_set"),
             py::arg("pipeline"),
-            py::arg("set"));
+            py::arg("set") = 0);
 
     py::class_<RenderingScope>(m, "RenderingScope")
         .def(
@@ -467,9 +467,21 @@ void bind_commands(py::module_& m)
                 self.stop();
                 return false; // never swallow exceptions
             })
+        // None means one thing now: the submit has not finished. A stale handle
+        // raises instead — see the Timer below for the argument, which is the
+        // same one.
         .def_property_readonly(
             "samples",
-            [](const OcclusionQuery& self) { return self.cmd->read_occlusion_query(self.index, self.generation); });
+            [](const OcclusionQuery& self) -> py::object
+            {
+                const auto reading = self.cmd->read_occlusion_query(self.index, self.generation);
+                raise_for_query_status(reading.status, "OcclusionQuery.samples");
+                if (reading.status != QueryStatus::Ok)
+                {
+                    return py::none();
+                }
+                return py::cast(reading.samples);
+            });
 
     py::class_<Timer, std::shared_ptr<Timer>>(m, "Timer")
         .def("stop", [](Timer& self) { self.stop(); })
@@ -481,6 +493,21 @@ void bind_commands(py::module_& m)
                 self.stop();
                 return false; // never swallow exceptions
             })
+        // Three answers, three shapes. UnsupportedError when the device has no
+        // usable timestamps, StateError when the handle predates a begin(), and
+        // None only for "the submit is still running". They used to be one
+        // nullopt, and a caller could not tell "wait longer" from "this GPU
+        // cannot" — which are opposite reactions.
         .def_property_readonly(
-            "ms", [](const Timer& self) { return self.cmd->read_timer(self.index, self.generation); });
+            "ms",
+            [](const Timer& self) -> py::object
+            {
+                const auto reading = self.cmd->read_timer(self.index, self.generation);
+                raise_for_query_status(reading.status, "Timer.ms");
+                if (reading.status != QueryStatus::Ok)
+                {
+                    return py::none();
+                }
+                return py::cast(reading.ms);
+            });
 }

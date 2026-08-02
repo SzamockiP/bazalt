@@ -50,7 +50,7 @@ frag = ctx.compile_shader("present.frag", bz.ShaderStage.FRAGMENT)
 present = (ctx.graphics_pipeline()
            .vertex_shader(vert)
            .fragment_shader(frag)
-           .texture(0, bz.ShaderStage.FRAGMENT, set=0)
+           .texture(0, bz.ShaderStage.FRAGMENT)
            .build(renderer))
 
 # One image, bound two ways: as a storage image to the compute set (written),
@@ -58,21 +58,21 @@ present = (ctx.graphics_pipeline()
 # image, so it sees both uses and transitions the layout between them.
 image = ctx.create_image(W, H, bz.Format.RGBA8)
 
-pool = ctx.create_descriptor_pool(max_sets=4, storage_images=4, textures=4)
-gen_set = pool.allocate_set(generate, set=0)
+pool = ctx.create_descriptor_pool()
+gen_set = pool.allocate_set(generate)
 gen_set.set_storage_image(0, image)
-present_set = pool.allocate_set(present, set=0)
+present_set = pool.allocate_set(present)
 present_set.set_image(0, image)
 
 
 def record(cmd, t):
     cmd.begin()
     (cmd.bind_pipeline(generate)
-        .bind_descriptor_set(gen_set, generate, set=0)
+        .bind_descriptor_set(gen_set, generate)
         .push_constants(generate, 0, struct.pack("<f", t))
         .dispatch((W + 7) // 8, (H + 7) // 8))
     with cmd.rendering(renderer) as c:
-        c.bind_pipeline(present).bind_descriptor_set(present_set, present, set=0).draw(3)
+        c.bind_pipeline(present).bind_descriptor_set(present_set, present).draw(3)
 
 
 # Measure the compute cost with one blocking headless submit — the timer reads
@@ -81,12 +81,16 @@ measure = ctx.create_command_buffer()
 measure.begin()
 with measure.timer() as t:
     (measure.bind_pipeline(generate)
-        .bind_descriptor_set(gen_set, generate, set=0)
+        .bind_descriptor_set(gen_set, generate)
         .push_constants(generate, 0, struct.pack("<f", 0.0))
         .dispatch((W + 7) // 8, (H + 7) // 8))
 ctx.submit(measure)
-print(f"compute generate ({W}x{H}): {t.ms:.4f} ms" if t.ms is not None
-      else "compute generate: timestamps unsupported on this device")
+# Since 0.24 a device that can never measure says so with UnsupportedError.
+# The submit above was blocking, so t.ms is never None here.
+try:
+    print(f"compute generate ({W}x{H}): {t.ms:.4f} ms")
+except bz.UnsupportedError:
+    print("compute generate: timestamps unsupported on this device")
 
 cmd = ctx.create_command_buffer()
 start = time.time()

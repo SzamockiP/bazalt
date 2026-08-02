@@ -101,7 +101,35 @@ void bind_context(py::module_& m)
             py::arg("shader_printf") = false)
         .def_property_readonly("auto_barriers", &Context::auto_barriers)
         .def_property_readonly("shader_printf", &Context::shader_printf)
-        .def("memory_stats", &Context::memory_stats)
+        .def(
+            "memory_stats",
+            [](Context& self)
+            {
+                require_open(self, "memory_stats");
+                return self.memory_stats();
+            })
+        // Deterministic teardown, and the reason it exists is the notebook: a
+        // re-run cell leaves the old Context's upload worker and hot-reload
+        // watcher running until the collector gets to them, which on a shared
+        // machine is one more decoder thread per run. `with bz.Context() as ctx:`
+        // is the same call at the end of the block.
+        //
+        // The device is NOT destroyed here — see Context::close for why the
+        // validation layers get the last word on that. Resources therefore keep
+        // working as memory; what they stop doing is starting new work, which
+        // every verb below refuses with StateError.
+        .def("close", &Context::close)
+        .def_property_readonly("closed", &Context::closed)
+        .def("__enter__", [](py::object self) { return self; })
+        .def(
+            "__exit__",
+            [](Context& self, const py::object&, const py::object&, const py::object&)
+            {
+                self.close();
+                // False: an exception inside the block propagates. The block owns
+                // the device, not the error handling.
+                return false;
+            })
         .def_property_readonly("subgroup_size", &Context::subgroup_size)
         .def_property_readonly("frames_in_flight", &Context::frames_in_flight)
         // The frame verb of a windowed loop: opens one logical frame for every
@@ -109,11 +137,23 @@ void bind_context(py::module_& m)
         // DynamicBuffer and the per-frame descriptor sets index, applies pending
         // hot reloads and reclaims deferred handles — all Context-owned, hence
         // once per frame rather than once per window.
-        .def("begin_frame", &Context::begin_frame)
+        .def(
+            "begin_frame",
+            [](Context& self)
+            {
+                require_open(self, "begin_frame");
+                self.begin_frame();
+            })
         .def_property_readonly("frame_index", &Context::frame_index)
         .def_property_readonly("logger", &Context::logger)
         .def("supports", &Context::supports, py::arg("feature"))
-        .def("max_samples", &Context::max_samples)
+        .def(
+            "max_samples",
+            [](Context& self)
+            {
+                require_open(self, "max_samples");
+                return self.max_samples();
+            })
         .def_property_readonly("device_name", &Context::device_name)
         .def_property_readonly(
             "api_version", [](const Context& self) { return api_version_string(self.api_version()); })
@@ -127,6 +167,7 @@ void bind_context(py::module_& m)
                std::optional<DataType> dataType,
                const std::string& name) -> py::object
             {
+                require_open(self, "create_buffer");
                 if (list.empty())
                 {
                     raise_error(err_resource("Cannot create buffer from empty list"));
@@ -158,6 +199,7 @@ void bind_context(py::module_& m)
             "create_buffer",
             [](Context& self, py::buffer b, BufferType type, MemoryUsage usage, const std::string& name) -> py::object
             {
+                require_open(self, "create_buffer");
                 py::buffer_info info = b.request();
                 auto buffer = unwrap(
                     Buffer::create(self, info.ptr, contiguous_nbytes(info, "create_buffer"), type, usage),
@@ -175,6 +217,7 @@ void bind_context(py::module_& m)
             [](Context& self, size_t size_in_bytes, BufferType type, MemoryUsage usage, const std::string& name)
                 -> py::object
             {
+                require_open(self, "create_buffer");
                 auto buffer = unwrap(Buffer::create(self, nullptr, size_in_bytes, type, usage), self.logger().get());
                 name_buffer(self, buffer, name);
                 return py::cast(buffer);
@@ -187,27 +230,55 @@ void bind_context(py::module_& m)
         .def(
             "graphics_pipeline",
             [](Context& self) -> std::shared_ptr<GraphicsPipelineBuilder>
-            { return std::make_shared<GraphicsPipelineBuilder>(self); })
+            {
+                require_open(self, "graphics_pipeline");
+                return std::make_shared<GraphicsPipelineBuilder>(self);
+            })
         .def(
             "compute_pipeline",
             [](Context& self) -> std::shared_ptr<ComputePipelineBuilder>
-            { return std::make_shared<ComputePipelineBuilder>(self); })
+            {
+                require_open(self, "compute_pipeline");
+                return std::make_shared<ComputePipelineBuilder>(self);
+            })
+        // compile_shader is TWO overloads, one per place the code can come from.
+        // They were one function taking both `path` and `source=` until 0.24, and
+        // the fusion made `path` mean two things at once: with `source=` the file
+        // was never opened, yet its extension still chose the parser. So compiling
+        // HLSL held in a string meant inventing a filename ending in .hlsl, and a
+        // real .vert file holding HLSL had no spelling at all.
+        //
+        // Split, each parameter answers one question: `path` is a file, `source=`
+        // is the code, `language=` is the parser, `name=` is what errors call it.
+        //
+        // The path overload is declared FIRST so pybind tries it first, and
+        // `source` is keyword-only in the other one: both a path and GLSL text are
+        // `str`, so a positional string must never be able to mean either.
         .def(
             "compile_shader",
             [](Context& self,
                const std::string& path,
                ShaderStage stage,
-               const py::object& source,
+               const std::optional<ShaderLanguage>& language,
                const std::vector<std::string>& include_dirs,
                const std::string& entry_point) -> py::object
             {
-                // Only file-backed shaders are watchable: a source= virtual name may
-                // not exist on disk, and .spv is recompiled from its own path too.
-                const bool from_file = source.is_none();
+                require_open(self, "compile_shader");
+                // A .spv file is already compiled, so naming a language for it is
+                // a statement about work that will not happen. Refused rather than
+                // ignored: silently dropping an argument is what this split exists
+                // to stop.
+                if (language && ShaderCompiler::is_spirv_path(path))
+                {
+                    throw py::value_error(
+                        "language= describes how to PARSE a shader, and " + path +
+                        " is already-compiled SPIR-V. Drop the argument.");
+                }
+                const ShaderLanguage resolved = language.value_or(ShaderCompiler::infer_language(path));
                 auto module = unwrap(
-                    ShaderCompiler::compile(self, path, stage, parse_shader_source(source), include_dirs, entry_point),
+                    ShaderCompiler::compile(self, path, stage, std::nullopt, resolved, include_dirs, entry_point),
                     self.logger().get());
-                if (auto* hr = self.hot_reload(); hr && from_file && std::filesystem::exists(path))
+                if (auto* hr = self.hot_reload(); hr && std::filesystem::exists(path))
                 {
                     hr->watch_shader(module);
                 }
@@ -216,7 +287,46 @@ void bind_context(py::module_& m)
             py::arg("path"),
             py::arg("stage"),
             py::kw_only(),
-            py::arg("source") = py::none(),
+            py::arg("language") = py::none(),
+            py::arg("include_dirs") = py::tuple(),
+            py::arg("entry_point") = "")
+        .def(
+            "compile_shader",
+            [](Context& self,
+               const py::object& source,
+               ShaderStage stage,
+               const std::optional<ShaderLanguage>& language,
+               const std::string& name,
+               const std::vector<std::string>& include_dirs,
+               const std::string& entry_point) -> py::object
+            {
+                require_open(self, "compile_shader");
+                auto parsed = parse_shader_source(source);
+                if (language && parsed && std::holds_alternative<std::vector<std::uint32_t>>(*parsed))
+                {
+                    throw py::value_error(
+                        "language= describes how to PARSE a shader, and source= got ready SPIR-V words. "
+                        "Drop the argument, or pass the shader as text.");
+                }
+                // Nothing on disk to watch, so hot reload never sees these — the
+                // same rule load_image(bytes) follows.
+                auto module = unwrap(
+                    ShaderCompiler::compile(
+                        self,
+                        name.empty() ? std::string{"<source>"} : name,
+                        stage,
+                        std::move(parsed),
+                        language.value_or(ShaderLanguage::GLSL),
+                        include_dirs,
+                        entry_point),
+                    self.logger().get());
+                return py::cast(module);
+            },
+            py::kw_only(),
+            py::arg("source"),
+            py::arg("stage"),
+            py::arg("language") = py::none(),
+            py::arg("name") = "",
             py::arg("include_dirs") = py::tuple(),
             py::arg("entry_point") = "")
         // Encoded bytes instead of a path: a PNG off the network, out of a zip,
@@ -231,6 +341,7 @@ void bind_context(py::module_& m)
             "load_image",
             [](Context& self, const py::bytes& blob, bool mipmaps, const std::string& name) -> py::object
             {
+                require_open(self, "load_image");
                 auto* manager = static_cast<UploadManager*>(self.upload_manager());
                 const std::string_view view = blob;
                 std::vector<std::byte> bytes(view.size());
@@ -247,6 +358,7 @@ void bind_context(py::module_& m)
             "load_image",
             [](Context& self, const std::string& path, bool mipmaps, const std::string& name) -> py::object
             {
+                require_open(self, "load_image");
                 // sRGB with a full mip chain by default: files are pictures. Arrays go
                 // through create_image and stay UNORM (arrays are data). `mipmaps` can
                 // turn the chain off (e.g. a UI sprite sampled 1:1 wants no minified
@@ -279,6 +391,7 @@ void bind_context(py::module_& m)
             [](Context& self, const std::vector<std::string>& paths, bool cube, bool mipmaps, const std::string& name)
                 -> py::object
             {
+                require_open(self, "load_image");
                 auto* manager = static_cast<UploadManager*>(self.upload_manager());
                 auto image = unwrap(manager->load_layered(paths, cube, mipmaps), self.logger().get());
                 name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
@@ -313,6 +426,7 @@ void bind_context(py::module_& m)
                uint32_t mip_levels,
                const std::string& name) -> py::object
             {
+                require_open(self, "create_image");
                 // depth= is the Z extent of a 3D image, and Vulkan gives a
                 // volume exactly one array layer — so the combinations are
                 // refused here with the fix, before create_empty re-guards.
@@ -376,10 +490,18 @@ void bind_context(py::module_& m)
             py::arg("name") = "")
         // A single (h,w[,c]) array → a 2D image. cube=True here is a mistake: a
         // cubemap needs six faces, so point the caller at the list form.
+        //
+        // The 0.22 review filed this parameter as "an argument whose whole job is
+        // an error message" and 0.24 kept it, having tried the removal. Without
+        // it, create_image(array, cube=True) matches no overload, and pybind
+        // answers with its own dump of all four signatures — which is where the
+        // caller started. An argument that exists to produce one sentence is
+        // better than no argument that produces forty lines.
         .def(
             "create_image",
             [](Context& self, py::buffer b, bool mipmaps, bool cube, const std::string& name) -> py::object
             {
+                require_open(self, "create_image");
                 if (cube)
                 {
                     raise_error(err_resource(
@@ -409,6 +531,7 @@ void bind_context(py::module_& m)
             "create_image",
             [](Context& self, py::list images, bool mipmaps, bool cube, const std::string& name) -> py::object
             {
+                require_open(self, "create_image");
                 const size_t layers = images.size();
                 if (layers == 0)
                 {
@@ -497,6 +620,7 @@ void bind_context(py::module_& m)
             "create_image",
             [](Context& self, std::shared_ptr<Image> source, std::string name) -> py::object
             {
+                require_open(self, "create_image");
                 const bool mipmaps = source->mip_levels() > 1;
                 const std::uint32_t layers = source->array_layers();
                 std::expected<std::vector<std::byte>, Error> bytes;
@@ -597,6 +721,7 @@ void bind_context(py::module_& m)
                std::uint32_t mip_levels,
                const std::string& name)
             {
+                require_open(self, "create_render_target");
                 return make_offscreen_target(
                     self, width, height, color, depth, samples, layers, cube, mip_levels, name);
             },
@@ -613,7 +738,10 @@ void bind_context(py::module_& m)
         .def(
             "create_render_target",
             [](Context& self, py::object color, py::object depth, std::uint32_t samples, const std::string& name)
-            { return make_offscreen_target_from_images(self, color, depth, samples, name); },
+            {
+                require_open(self, "create_render_target");
+                return make_offscreen_target_from_images(self, color, depth, samples, name);
+            },
             py::kw_only(),
             py::arg("color") = py::none(),
             py::arg("depth") = py::none(),
@@ -626,7 +754,10 @@ void bind_context(py::module_& m)
                PresentMode present_mode,
                std::uint32_t samples,
                bool stencil)
-            { return make_swapchain_renderer(std::move(self), window, present_mode, samples, stencil); },
+            {
+                require_open(*self, "create_renderer");
+                return make_swapchain_renderer(std::move(self), window, present_mode, samples, stencil);
+            },
             py::arg("window"),
             py::kw_only(),
             py::arg("present_mode") = PresentMode::MAILBOX,
@@ -647,7 +778,10 @@ void bind_context(py::module_& m)
                PresentMode present_mode,
                std::uint32_t samples,
                bool stencil)
-            { return make_swapchain_renderer_win32(std::move(self), hwnd, present_mode, samples, stencil); },
+            {
+                require_open(*self, "create_renderer");
+                return make_swapchain_renderer_win32(std::move(self), hwnd, present_mode, samples, stencil);
+            },
             py::arg("win32_hwnd"),
             py::kw_only(),
             py::arg("present_mode") = PresentMode::MAILBOX,
@@ -664,6 +798,7 @@ void bind_context(py::module_& m)
                float mip_lod_bias,
                const std::string& name) -> py::object
             {
+                require_open(self, "create_sampler");
                 // Cached: identical descriptions return the identical object.
                 // Which is why name= accumulates rather than replacing — see
                 // Sampler::add_debug_name.
@@ -688,6 +823,7 @@ void bind_context(py::module_& m)
                std::optional<uint32_t> storageBuffers,
                std::optional<uint32_t> storageImages) -> py::object
             {
+                require_open(self, "create_descriptor_pool");
                 // No sizes at all is the automatic pool (0.23): it grows a block
                 // whenever one fills, each sized from the layout being served,
                 // so the caller stops doing arithmetic that depended on
@@ -728,13 +864,17 @@ void bind_context(py::module_& m)
         .def(
             "create_command_buffer",
             [](Context& self, std::optional<bool> auto_barriers) -> py::object
-            { return py::cast(unwrap(CommandBuffer::create(self, auto_barriers), self.logger().get())); },
+            {
+                require_open(self, "create_command_buffer");
+                return py::cast(unwrap(CommandBuffer::create(self, auto_barriers), self.logger().get()));
+            },
             py::arg("auto_barriers") = py::none())
         // The headless counterpart of renderer.present(): no swapchain, no present.
         .def(
             "submit",
             [](Context& self, std::shared_ptr<CommandBuffer> cmd, bool wait)
             {
+                require_open(self, "submit");
                 std::expected<void, Error> r;
                 {
                     // May block (wait-idle inside when wait=True, and the ring
@@ -756,6 +896,7 @@ void bind_context(py::module_& m)
             "wait",
             [](Context& self)
             {
+                require_open(self, "wait");
                 std::expected<void, Error> r;
                 {
                     py::gil_scoped_release release;

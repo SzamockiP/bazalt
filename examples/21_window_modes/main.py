@@ -45,7 +45,7 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 # refuse to start over a debug view.
 ctx = bz.Context(logger, optional=[bz.Feature.WIREFRAME])
 
-window = bz.Window(900, 600, "Bazalt - Window Modes")
+window = bz.Window(900, 600, "Bazalt - Window Modes", logger=logger)
 renderer = ctx.create_renderer(window, present_mode=bz.PresentMode.FIFO)
 
 scene_vert = ctx.compile_shader("scene.vert", bz.ShaderStage.VERTEX)
@@ -62,7 +62,7 @@ def scene_pipeline(polygon_mode):
         .depth_test(True)
         .polygon_mode(polygon_mode)
         .cull_mode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE)
-        .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
+        .uniform_buffer(0, bz.ShaderStage.VERTEX)
         .build(renderer))
 
 
@@ -121,8 +121,8 @@ ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
 
 ubuf = ctx.create_buffer(np.zeros(16, dtype=np.float32),
                          bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
-pool = ctx.create_descriptor_pool(max_sets=2, uniform_buffers=2)
-dset = pool.allocate_frame_set(filled, set=0)
+pool = ctx.create_descriptor_pool()
+dset = pool.allocate_frame_set(filled)
 dset.set_buffer(0, ubuf)
 
 MODES = [bz.WindowMode.WINDOWED, bz.WindowMode.FRAMELESS,
@@ -143,7 +143,7 @@ def record(scene):
     # Pass 1 clears and owns the depth.
     with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.05, 1.0]) as c:
         (c.bind_pipeline(scene)
-          .bind_descriptor_set(dset, scene, set=0)
+          .bind_descriptor_set(dset, scene)
           .bind_vertex_buffer(vbuf)
           .bind_index_buffer(ibuf)
           .draw_indexed(36))
@@ -189,30 +189,30 @@ if wireframe is None:
 while window.is_open():
     bz.poll_events()
 
-    if window.is_key_pressed(bz.KEY_ESCAPE):
+    if window.is_key_pressed(bz.Key.ESCAPE):
         break
 
     # The edge, not the level: is_key_pressed would cycle the mode every frame
     # the key stays down.
-    if window.was_key_pressed(bz.KEY_F11):
+    if window.was_key_pressed(bz.Key.F11):
         mode_index = (mode_index + 1) % len(MODES)
         window.set_mode(MODES[mode_index])
         print(f"mode: {MODE_NAMES[mode_index]}")
 
-    if window.was_key_pressed(bz.KEY_L) and wireframe is not None:
+    if window.was_key_pressed(bz.Key.L) and wireframe is not None:
         use_wireframe = not use_wireframe
 
-    if window.was_key_pressed(bz.KEY_V):
+    if window.was_key_pressed(bz.Key.V):
         vsync = not vsync
         renderer.set_present_mode(bz.PresentMode.FIFO if vsync else bz.PresentMode.IMMEDIATE)
         # A request is a preference: the driver may not have the mode.
         print(f"present mode: {renderer.present_mode}")
 
-    if window.was_key_pressed(bz.KEY_T):
+    if window.was_key_pressed(bz.Key.T):
         window.set_always_on_top(not window.always_on_top)
         print(f"always on top: {window.always_on_top}")
 
-    if window.was_key_pressed(bz.KEY_O):
+    if window.was_key_pressed(bz.Key.O):
         opacity_index = (opacity_index + 1) % len(OPACITIES)
         window.set_opacity(OPACITIES[opacity_index])
 
@@ -220,7 +220,7 @@ while window.is_open():
 
     # dx/dy are this cycle's delta, so there is nothing to subtract. Left button
     # held to look, so the cursor stays usable everywhere else.
-    if window.is_mouse_button_pressed(bz.MOUSE_BUTTON_LEFT):
+    if window.is_mouse_button_pressed(bz.MouseButton.LEFT):
         camera_yaw += mouse.dx * 0.005
         camera_pitch = max(-1.4, min(1.4, camera_pitch + mouse.dy * 0.005))
 

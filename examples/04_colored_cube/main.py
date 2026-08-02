@@ -31,12 +31,12 @@ class Camera:
 
     def process_keyboard(self, window, dt, right):
         velocity = self.speed * dt
-        if window.is_key_pressed(bz.KEY_W): self.pos += velocity * self.front
-        if window.is_key_pressed(bz.KEY_S): self.pos -= velocity * self.front
-        if window.is_key_pressed(bz.KEY_A): self.pos -= velocity * right
-        if window.is_key_pressed(bz.KEY_D): self.pos += velocity * right
-        if window.is_key_pressed(bz.KEY_SPACE): self.pos += velocity * self.up
-        if window.is_key_pressed(bz.KEY_LEFT_SHIFT): self.pos -= velocity * self.up
+        if window.is_key_pressed(bz.Key.W): self.pos += velocity * self.front
+        if window.is_key_pressed(bz.Key.S): self.pos -= velocity * self.front
+        if window.is_key_pressed(bz.Key.A): self.pos -= velocity * right
+        if window.is_key_pressed(bz.Key.D): self.pos += velocity * right
+        if window.is_key_pressed(bz.Key.SPACE): self.pos += velocity * self.up
+        if window.is_key_pressed(bz.Key.LEFT_SHIFT): self.pos -= velocity * self.up
 
     def get_matrices(self, aspect_ratio):
         view = glm.lookAt(self.pos, self.pos + self.front, self.up)
@@ -49,10 +49,10 @@ class Camera:
 logger = bz.Logger()
 logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
-window = bz.Window(1024, 720, "Bazalt Demo - 3D Cube")
+window = bz.Window(1024, 720, "Bazalt Demo - 3D Cube", logger=logger)
 ctx = bz.Context(logger)
 renderer = ctx.create_renderer(window)
-window.set_cursor_mode(bz.CURSOR_DISABLED)
+window.set_cursor_mode(bz.CursorMode.DISABLED)
 
 # Compile shaders
 vert_spv = ctx.compile_shader("cube.vert", bz.ShaderStage.VERTEX)
@@ -66,7 +66,7 @@ pipeline = (ctx.graphics_pipeline()
     .depth_test(True)
     .cull_mode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE)
     .blend(False)
-    .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
+    .uniform_buffer(0, bz.ShaderStage.VERTEX)
     .build(renderer))
 
 # Vertex data: pos (x,y,z), normal (nx,ny,nz)
@@ -117,8 +117,8 @@ ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
 ubuf = ctx.create_buffer(np.zeros(16, dtype=np.float32), bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
 # Descriptors
-pool = ctx.create_descriptor_pool(max_sets=2, uniform_buffers=2)
-desc_set = pool.allocate_frame_set(pipeline, set=0)
+pool = ctx.create_descriptor_pool()
+desc_set = pool.allocate_frame_set(pipeline)
 desc_set.set_buffer(0, ubuf)
 
 # Record commands
@@ -126,7 +126,7 @@ cmd = ctx.create_command_buffer()
 cmd.begin()
 with cmd.rendering(renderer, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
     (c.bind_pipeline(pipeline)
-      .bind_descriptor_set(desc_set, pipeline, set=0)
+      .bind_descriptor_set(desc_set, pipeline)
       .bind_vertex_buffer(vbuf)
       .bind_index_buffer(ibuf)
       .draw_indexed(36))
@@ -160,7 +160,9 @@ while window.is_open():
         right_vec = camera.update_mouse(mouse.dx, mouse.dy)
         camera.process_keyboard(window, dt, right_vec)
 
-        view, proj, model = camera.get_matrices(1024.0 / 720.0)
+        # From the renderer, not the size the window opened with: a resize
+        # rebuilds the swapchain and a stale ratio stretches the cube.
+        view, proj, model = camera.get_matrices(renderer.width / renderer.height)
         mvp = proj * view * model
         
         ubuf.update(bytes(glm.transpose(mvp)))

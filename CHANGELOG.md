@@ -5,6 +5,183 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.24.0] — 2026-08-02
+
+"The notebook, and the second API review". Bazalt runs in a Jupyter cell, on a
+kernel that may sit on a server with no display. Headless rendering already
+worked, so the release is what did not: a Context you can close between cell
+runs, an event pump that sleeps instead of burning a core, and the headless bug
+that the first real test found.
+
+The rest is the second API review, plus one barrier the automatic tracker never
+emitted. Three properties answered `None` for four different reasons each, so a
+loop waiting for a number could not tell "wait longer" from "never". They raise
+now.
+
+Then a pass over all 34 examples, and the questions that reading them raised.
+Both answers have the same shape — one name doing two jobs. `compile_shader`
+took a path it never opened, only to read the language off its extension, and
+is two overloads with a `language=` argument now. `set=0` was written three
+times per descriptor set and is the default everywhere. The pass also found an
+example that had been raising since earlier in this same release, because
+nothing runs the examples.
+
+### Added
+- **`ctx.close()` and `with bz.Context() as ctx:`.** Both stop the Context's
+  upload worker and hot-reload watcher and wait for its GPU work. Re-running a
+  notebook cell used to leave the previous set of threads running until the
+  garbage collector reached them, which on a shared machine is one more decoder
+  thread per run. `close()` is idempotent and `ctx.closed` reports it.
+
+  It does not free resources you still hold a name for. Those are live children
+  of the device, and destroying it under them is what Vulkan forbids — they go
+  when you drop them. Every verb that would start new work raises `StateError`
+  after a close, including `image.read()`, so read your pixels inside the
+  block.
+- **`bz.wait_events(timeout=None)`.** Sleeps until an OS event arrives, then
+  dispatches it like `poll_events`. Any program that only redraws on input — a
+  model viewer, a parameter editor, `examples/08_pyqt_integration` — held a CPU
+  core at 100% because `poll_events` was the only pump. `timeout` is in
+  seconds; `None` waits indefinitely. A hot-reload edit does not wake it, so
+  pass a timeout if you edit shaders while it runs.
+- **`bz.ShaderLanguage`, and `language=` on `compile_shader`.** The language was
+  an attribute of the file name and nothing else, so a `.frag` holding HLSL had
+  no spelling at all. `language=` overrides the extension, and it reaches every
+  decision the language drives, not only shaderc: the `entry_point=` gate and
+  the reflection follow it too. The module stores it, so a hot reload cannot
+  re-infer it and parse the file the other way.
+
+  Two members, GLSL and HLSL. SPIR-V is neither — it is a compiled format, and
+  it already has two spellings, a `.spv` path and bytes in `source=`.
+  `language=` on either raises `ValueError` rather than being ignored.
+- **`examples/33_notebook`.** The notebook pattern end to end: a headless
+  render shown with PIL, an `ipywidgets` slider that re-renders, and a compute
+  cell that uses the GPU as a calculator. Needs Jupyter, and CI does not run
+  it, like every example.
+- **A "Vulkan clip space" section in the README.** Why +y points down, and why
+  `proj[1][1] *= -1` corrects your GLM matrix rather than Vulkan.
+- **`examples/34_showcase`.** One scene that exercises most of the engine at
+  once. San Miguel renders through a GPU frustum cull into a multi-draw
+  indirect buffer, with one bindless array for every material — the command's
+  `firstInstance` carries the material index, so the shader reads it back as
+  `gl_InstanceIndex`. A day-night cycle moves the sun and hands the light and
+  the shadow map to the moon at dusk. The scene draws into an HDR target with
+  MSAA and alpha-to-coverage, and a post chain adds SSAO, bloom, god rays and
+  ACES tone mapping. Fireflies fly at night: a compute pass moves
+  them and the scene shader reads the same buffer as a list of point lights.
+  Every pass carries a `cmd.label()` and a `cmd.timer()`, and every resource a
+  name, so a Nsight or RenderDoc capture reads like the source. The first
+  start parses the OBJ and caches it to a `.npz`, later starts load in
+  seconds. Needs `Feature.BINDLESS` and `Feature.MULTI_DRAW_INDIRECT`.
+
+### Changed
+- **`set` defaults to 0 everywhere it is asked for.** The graphics pipeline
+  builder now agrees with the compute builder, and so do
+  `DescriptorPool.allocate_set`, `DescriptorPool.allocate_frame_set` and
+  `CommandBuffer.bind_descriptor_set`. A program with one descriptor set wrote
+  `set=0` on the declarator, again on the allocation and again on the bind, for
+  nothing. Additive: every existing call still runs and means the same thing.
+  Name `set=` where a pipeline really has more than one — `examples/34_showcase`
+  keeps it on the bindless material array and drops it everywhere else.
+- **The examples show the API as it is now, not as it was when each was
+  written.** No example used a removed or renamed call, but many carried the
+  longer spelling of a call that 0.23 or 0.24 shortened. They take the automatic
+  descriptor pool, `bz.Key` and `bz.CursorMode` instead of the `KEY_*` and
+  `CURSOR_*` integers, and no `set=` where the set is 0. Each passes its
+  `Logger` to its `Window`, so a message from window creation reaches the same
+  handler as the rest. The README snippet follows the same shape.
+
+  Examples 01 to 03 lose the frames-per-second block from the title bar. It was
+  a third of the smallest program and taught nothing about bazalt.
+
+### Fixed
+- **A recording that only READS a GPU-written buffer now waits for the write.**
+  The automatic tracker keeps its state per recording, so a second CommandBuffer
+  sharing a buffer had no predecessor to name and emitted no barrier.
+  `examples/28_gpu_culling` worked around it with two manual barriers, which are
+  now gone. The first read of a buffer in a recording synchronizes against
+  whatever wrote it, wherever that was. Writes were already covered, so nothing
+  that only writes pays anything new, and a vertex or uniform buffer waits on
+  the transfer stage alone.
+- **A Context on a machine with no display enabled `VK_KHR_swapchain` anyway.**
+  That extension needs `VK_KHR_surface` on the instance, which a headless
+  instance does not have, so every such Context emitted a validation error. It
+  is exactly the configuration a notebook on a remote server runs in. Found by
+  the new `BAZALT_FORCE_HEADLESS` test knob on its first run.
+- **`examples/12_hot_reload` stopped after 120 frames.** It read
+  `renderer.gpu_time_ms` on a Context built without `gpu_timing=True`, which
+  this release changed from `None` to `StateError`. The example asks for the
+  measurement now. Two more examples tested `t.ms is not None` to print
+  "timestamps unsupported", which the same release turned into
+  `UnsupportedError` — `examples/13_compute_postprocess` and
+  `examples/31_volume_raymarch` catch the exception instead.
+- **Four examples built the projection from the size the window opened with.**
+  A resize gave a wrong aspect ratio and stretched the picture until the
+  program closed. They read `renderer.width` and `renderer.height` now, which
+  is what `examples/19_multi_window` and `examples/21_window_modes` always did.
+- **The `Context` docstring still promised `None` from
+  `renderer.gpu_time_ms`** without `gpu_timing=True`. It raises `StateError`,
+  which the property's own docstring already said.
+- **A shallow clone of stb stopped containing the commit stb is pinned to.**
+  The manylinux wheel failed with `unable to read tree`, on a push that changed
+  no build file. stb publishes no tags, so the pin is a commit, and
+  `GIT_SHALLOW TRUE` fetches the tip of the default branch and nothing else.
+  The pin WAS that tip when it was written, which hid the fault for four
+  releases. Upstream pushed past it, and every shallow clone lost the commit.
+  stb is cloned in full now — 6 MB and one second. The four tagged dependencies
+  keep their shallow clone, because a tag is a name the server resolves.
+
+### Changed (breaking)
+- **`compile_shader` is two overloads, one per place the code comes from.** It
+  took `path` and `source=` together, and that made `path` mean two things at
+  once: with `source=` the file was never opened, and yet its extension still
+  chose the parser. So HLSL held in a string needed an invented filename ending
+  in `.hlsl`, and a name ending in `.spv` changed what happened to text that had
+  nothing to do with SPIR-V.
+
+  ```python
+  # before
+  ctx.compile_shader("ring.vert", bz.ShaderStage.VERTEX, source=TEXT)
+  ctx.compile_shader("bad.hlsl", bz.ShaderStage.FRAGMENT, source=HLSL_TEXT)
+  # now
+  ctx.compile_shader(source=TEXT, stage=bz.ShaderStage.VERTEX)
+  ctx.compile_shader(source=HLSL_TEXT, stage=bz.ShaderStage.FRAGMENT,
+                     language=bz.ShaderLanguage.HLSL)
+  ```
+
+  `source` is keyword-only, because a path and GLSL text are both `str` and a
+  positional string must never be able to mean either. Each parameter answers
+  one question now: `path` is a file, `source=` is the code, `language=` is the
+  parser, and `name=` is what errors call an in-memory shader (`<source>` by
+  default). A `name=` is a label and nothing else — `.hlsl` in it selects no
+  language and `.spv` in it loads no binary.
+
+  The path form keeps every job it had: the extension still infers the language,
+  the directory still anchors relative `#include`, and the file is still what
+  hot reload watches. In-memory code resolves `#include` through
+  `include_dirs=`, which is the parameter named for it.
+- **`Timer.ms` and `OcclusionQuery.samples` raise instead of answering `None`**
+  when the answer will never come. `UnsupportedError` when the GPU reports no
+  usable timestamps, `StateError` when the command buffer has been re-recorded
+  since. `None` now means one thing: the submit has not finished. A loop
+  polling for a number used to spin forever on a device that could not measure.
+- **`renderer.gpu_time_ms` raises `StateError`** when the Context was built
+  without `gpu_timing=True`, and `UnsupportedError` on a device with no usable
+  timestamps. `None` means the frame ring has not cycled once yet.
+
+The two `None` changes are one release of exposure. If you tested for `None`,
+test for the exception instead.
+
+### Documentation
+- The stub now says that declaring one `(set, binding)` twice merges the
+  stages. It has always worked and reading the stub made it look like a
+  mistake.
+- The `begin_frame` docstring no longer names `DynamicBuffer`, which is not a
+  public symbol.
+- `DESIGN.md` gains debt entry 6: nothing runs the examples. That is why one of
+  them shipped broken inside this release, and the entry says which parts of
+  the problem are testable and which are not.
+
 ## [0.23.0] — 2026-08-01
 
 "3D textures, and the API review". A volume is one more kwarg on

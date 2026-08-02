@@ -28,7 +28,7 @@ DEADZONE = 0.15
 logger = bz.Logger()
 logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
-window = bz.Window(800, 600, "Bazalt Demo - Gamepad")
+window = bz.Window(800, 600, "Bazalt Demo - Gamepad", logger=logger)
 ctx = bz.Context(logger)
 renderer = ctx.create_renderer(window)
 
@@ -38,7 +38,7 @@ announced = False
 
 while window.is_open():
     bz.poll_events()
-    if window.is_key_pressed(bz.KEY_ESCAPE):
+    if window.is_key_pressed(bz.Key.ESCAPE):
         break
 
     pad = bz.get_gamepad(0, deadzone=DEADZONE)

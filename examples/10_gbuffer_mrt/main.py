@@ -17,7 +17,7 @@ WIDTH, HEIGHT = 1024, 720
 logger = bz.Logger()
 logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
-window = bz.Window(WIDTH, HEIGHT, "Bazalt Demo - G-Buffer MRT")
+window = bz.Window(WIDTH, HEIGHT, "Bazalt Demo - G-Buffer MRT", logger=logger)
 ctx = bz.Context(logger)
 renderer = ctx.create_renderer(window)
 
@@ -36,14 +36,14 @@ gbuf_pipe = (ctx.graphics_pipeline()
              .fragment_shader(gbuf_frag)
              .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
              .depth_test(True)
-             .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
+             .uniform_buffer(0, bz.ShaderStage.VERTEX)
              .build(gbuffer))
 
 comp_pipe = (ctx.graphics_pipeline()
              .vertex_shader(comp_vert)
              .fragment_shader(comp_frag)
-             .texture(0, bz.ShaderStage.FRAGMENT, set=0)
-             .texture(1, bz.ShaderStage.FRAGMENT, set=0)
+             .texture(0, bz.ShaderStage.FRAGMENT)
+             .texture(1, bz.ShaderStage.FRAGMENT)
              .build(renderer))
 
 # Cube geometry: pos + normal (same layout as example 04).
@@ -72,12 +72,12 @@ ibuf = ctx.create_buffer(np.array(idx, dtype=np.uint32),
 ubuf = ctx.create_buffer(np.zeros(32, dtype=np.float32),
                          bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
-pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4, textures=8)
+pool = ctx.create_descriptor_pool()
 
-gbuf_set = pool.allocate_frame_set(gbuf_pipe, set=0)
+gbuf_set = pool.allocate_frame_set(gbuf_pipe)
 gbuf_set.set_buffer(0, ubuf)
 
-comp_set = pool.allocate_set(comp_pipe, set=0)
+comp_set = pool.allocate_set(comp_pipe)
 comp_set.set_image(0, gbuffer.color[0])  # normals
 comp_set.set_image(1, gbuffer.color[1])  # albedo
 
@@ -87,14 +87,14 @@ cmd.begin()
 
 with cmd.rendering(gbuffer, clear_color=[0.0, 0.0, 0.0, 0.0]) as c:
     (c.bind_pipeline(gbuf_pipe)
-      .bind_descriptor_set(gbuf_set, gbuf_pipe, set=0)
+      .bind_descriptor_set(gbuf_set, gbuf_pipe)
       .bind_vertex_buffer(vbuf)
       .bind_index_buffer(ibuf)
       .draw_indexed(len(idx)))
 
 with cmd.rendering(renderer, clear_color=[0.05, 0.07, 0.1, 1.0]) as c:
     (c.bind_pipeline(comp_pipe)
-      .bind_descriptor_set(comp_set, comp_pipe, set=0)
+      .bind_descriptor_set(comp_set, comp_pipe)
       .draw(3))
 
 proj = glm.perspectiveRH_ZO(glm.radians(45.0), WIDTH / HEIGHT, 0.1, 100.0)

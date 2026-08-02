@@ -11,7 +11,8 @@ Two windows, one Context, one culled scene:
 The observer is the whole point. From inside the culled camera nothing looks
 culled — that is what culling means, and it is measurable: the culled view renders
 PIXEL-IDENTICAL with culling on and off, while the observer's pixel count drops
-from about 99,000 to about 13,000. Fly out to the side and you can see the scene
+by roughly a factor of seven (about 99,000 to about 13,000 on the machine this
+was written on — press P to get your own). Fly out to the side and you can see the scene
 has been cut to a wedge: cubes exist inside the yellow frustum and nowhere else,
 and the wedge swings around as the culling camera turns.
 
@@ -41,7 +42,11 @@ same mesh. Use a count buffer when the survivors need DIFFERENT commands, e.g. o
 per mesh or per LOD.
 
 Keys: WASD + QE move the observer, hold RIGHT MOUSE to look, SPACE pauses the
-culling camera, C toggles culling off. Close either window to exit.
+culling camera, C toggles culling off, P prints the observer's drawn-pixel count.
+Close either window to exit.
+
+Press P from outside the frustum with culling on, then C and P again: the two
+numbers are the claim above, measured on your machine rather than remembered.
 """
 
 import struct
@@ -57,9 +62,9 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
 ctx = bz.Context(logger)
 
-culled_window = bz.Window(760, 560, "Bazalt Demo - culled view (the frustum)")
+culled_window = bz.Window(760, 560, "Bazalt Demo - culled view (the frustum)", logger=logger)
 culled_window.set_position(60, 90)
-observer_window = bz.Window(760, 560, "Bazalt Demo - observer (fly with WASD)")
+observer_window = bz.Window(760, 560, "Bazalt Demo - observer (fly with WASD)", logger=logger)
 observer_window.set_position(860, 90)
 
 culled_renderer = ctx.create_renderer(culled_window)
@@ -144,9 +149,9 @@ frustum_lines = ctx.create_buffer(len(FRUSTUM_EDGES) * 2 * 3 * 4,
 comp = ctx.compile_shader("cull.comp", bz.ShaderStage.COMPUTE)
 cull = (ctx.compute_pipeline()
         .shader(comp)
-        .storage_buffer(0, set=0)   # draw arguments
-        .storage_buffer(1, set=0)   # candidates
-        .storage_buffer(2, set=0)   # compacted survivors
+        .storage_buffer(0)   # draw arguments
+        .storage_buffer(1)   # candidates
+        .storage_buffer(2)   # compacted survivors
         .push_constant(72)          # mat4 + 2 uints
         .build())
 
@@ -161,7 +166,7 @@ def cube_pipeline(renderer):
             .vertex_shader(vert)
             .fragment_shader(frag)
             .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
-            .storage_buffer(0, bz.ShaderStage.VERTEX, set=0)
+            .storage_buffer(0, bz.ShaderStage.VERTEX)
             .push_constant(64, bz.ShaderStage.VERTEX)
             .depth_test(True)
             .cull_mode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE)
@@ -183,16 +188,16 @@ culled_pipeline = cube_pipeline(culled_renderer)
 observer_pipeline = cube_pipeline(observer_renderer)
 observer_lines = line_pipeline(observer_renderer)
 
-pool = ctx.create_descriptor_pool(max_sets=8, storage_buffers=16)
-cull_set = pool.allocate_set(cull, set=0)
+pool = ctx.create_descriptor_pool()
+cull_set = pool.allocate_set(cull)
 cull_set.set_buffer(0, args)
 cull_set.set_buffer(1, candidates)
 cull_set.set_buffer(2, visible)
 # The two cube pipelines are built from the same declarators, so they share a
 # descriptor set layout and one set per SOURCE buffer serves both windows.
-draw_set = pool.allocate_set(culled_pipeline, set=0)
+draw_set = pool.allocate_set(culled_pipeline)
 draw_set.set_buffer(0, visible)
-no_cull_set = pool.allocate_set(culled_pipeline, set=0)
+no_cull_set = pool.allocate_set(culled_pipeline)
 no_cull_set.set_buffer(0, all_visible)
 
 # Each window needs its own CommandBuffer: one holds a single command buffer per
@@ -263,10 +268,15 @@ def upload_frustum(view_proj):
 while culled_window.is_open() and observer_window.is_open():
     bz.poll_events()
 
-    if culled_window.was_key_pressed(bz.KEY_SPACE) or observer_window.was_key_pressed(bz.KEY_SPACE):
+    if culled_window.was_key_pressed(bz.Key.SPACE) or observer_window.was_key_pressed(bz.Key.SPACE):
         paused = not paused
-    if culled_window.was_key_pressed(bz.KEY_C) or observer_window.was_key_pressed(bz.KEY_C):
+    if culled_window.was_key_pressed(bz.Key.C) or observer_window.was_key_pressed(bz.Key.C):
         culling = not culling
+    # P measures instead of asking you to look. The docstring's numbers used to be
+    # a measurement somebody took once and wrote down; this is the same
+    # measurement, on your machine, from the frame you are looking at.
+    measure = (culled_window.was_key_pressed(bz.Key.P)
+               or observer_window.was_key_pressed(bz.Key.P))
 
     now = time.time()
     dt = now - last
@@ -275,11 +285,11 @@ while culled_window.is_open() and observer_window.is_open():
         cull_angle += dt * 0.35
 
     # ── the observer's free camera ────────────────────────────────────────
-    if observer_window.is_mouse_button_pressed(bz.MOUSE_BUTTON_RIGHT):
+    if observer_window.is_mouse_button_pressed(bz.MouseButton.RIGHT):
         if not looking:
-            observer_window.set_cursor_mode(bz.CURSOR_DISABLED)
+            observer_window.set_cursor_mode(bz.CursorMode.DISABLED)
             looking = True
-        # CURSOR_DISABLED already gives unbounded virtual motion and does its own
+        # CursorMode.DISABLED already gives unbounded virtual motion and does its own
         # recentring, so there is nothing to warp here. Calling set_cursor_position
         # every frame on top of it is the HIDDEN-cursor pattern, and mixing the two
         # cancels the look entirely: bazalt re-arms its first-event suppression on a
@@ -289,23 +299,23 @@ while culled_window.is_open() and observer_window.is_open():
         obs_yaw += mouse.dx * 0.15
         obs_pitch = max(min(obs_pitch + mouse.dy * 0.15, 89.0), -89.0)
     elif looking:
-        observer_window.set_cursor_mode(bz.CURSOR_NORMAL)
+        observer_window.set_cursor_mode(bz.CursorMode.NORMAL)
         looking = False
 
     speed = 30.0 * dt
     forward = observer_forward()
     right = glm.normalize(glm.cross(forward, glm.vec3(0, 1, 0)))
-    if observer_window.is_key_pressed(bz.KEY_W):
+    if observer_window.is_key_pressed(bz.Key.W):
         obs_pos += forward * speed
-    if observer_window.is_key_pressed(bz.KEY_S):
+    if observer_window.is_key_pressed(bz.Key.S):
         obs_pos -= forward * speed
-    if observer_window.is_key_pressed(bz.KEY_A):
+    if observer_window.is_key_pressed(bz.Key.A):
         obs_pos -= right * speed
-    if observer_window.is_key_pressed(bz.KEY_D):
+    if observer_window.is_key_pressed(bz.Key.D):
         obs_pos += right * speed
-    if observer_window.is_key_pressed(bz.KEY_E):
+    if observer_window.is_key_pressed(bz.Key.E):
         obs_pos += glm.vec3(0, 1, 0) * speed
-    if observer_window.is_key_pressed(bz.KEY_Q):
+    if observer_window.is_key_pressed(bz.Key.Q):
         obs_pos -= glm.vec3(0, 1, 0) * speed
 
     ctx.begin_frame()
@@ -323,12 +333,12 @@ while culled_window.is_open() and observer_window.is_open():
         if culling:
             culled_cmd.fill_buffer(args, 0)
             culled_cmd.bind_pipeline(cull)
-            culled_cmd.bind_descriptor_set(cull_set, cull, set=0)
+            culled_cmd.bind_descriptor_set(cull_set, cull)
             culled_cmd.push_constants(cull, 0, cull_vp_bytes + struct.pack("II", COUNT, INDEX_COUNT))
             culled_cmd.dispatch((COUNT + 63) // 64)
         with culled_cmd.rendering(culled_renderer, clear_color=[0.03, 0.04, 0.07, 1.0]) as c:
             c.bind_pipeline(culled_pipeline)
-            c.bind_descriptor_set(source_set, culled_pipeline, set=0)
+            c.bind_descriptor_set(source_set, culled_pipeline)
             c.push_constants(culled_pipeline, 0, cull_vp_bytes)
             c.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf)
             c.draw_indexed_indirect(source_args)
@@ -339,17 +349,16 @@ while culled_window.is_open() and observer_window.is_open():
         obs_vp = bytes(glm.transpose(
             observer_view_proj(observer_window.width / max(observer_window.height, 1))))
         observer_cmd.begin()
-        if culling:
-            # The compute pass that filled these ran in the OTHER window's
-            # recording, and the automatic tracker orders uses within ONE recording
-            # only — it cannot see across two. So this recording says out loud what
-            # it is waiting for. Access.INDIRECT_READ (0.19) is the one that matters:
-            # the command processor reads the arguments earlier than any shader.
-            observer_cmd.barrier(args, bz.Access.SHADER_WRITE, bz.Access.INDIRECT_READ)
-            observer_cmd.barrier(visible, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
+        # The compute pass that fills `args` and `visible` runs in the OTHER
+        # window's recording, and this one only reads them. Until 0.24 that needed
+        # two manual barriers here, because the tracker's state is per recording
+        # and this recording writes nothing it can see. It is automatic now: the
+        # first READ of a buffer in a recording waits for whatever wrote it last,
+        # wherever that was. cmd.barrier() is still there for the cases the
+        # tracker cannot reach.
         with observer_cmd.rendering(observer_renderer, clear_color=[0.05, 0.05, 0.09, 1.0]) as c:
             c.bind_pipeline(observer_pipeline)
-            c.bind_descriptor_set(source_set, observer_pipeline, set=0)
+            c.bind_descriptor_set(source_set, observer_pipeline)
             c.push_constants(observer_pipeline, 0, obs_vp)
             c.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf)
             c.draw_indexed_indirect(source_args)
@@ -358,7 +367,27 @@ while culled_window.is_open() and observer_window.is_open():
             c.push_constants(observer_lines, 0, obs_vp)
             c.bind_vertex_buffer(frustum_lines)
             c.draw(len(FRUSTUM_EDGES) * 2)
-        observer_renderer.present(observer_cmd)
+        observer_renderer.present(observer_cmd, capture=measure)
+        if measure:
+            # The readback stalls the frame, which is why this sits on a key
+            # rather than in the loop.
+            try:
+                pixels = observer_renderer.read_pixels()
+            except bz.ResourceError as error:
+                print(f"cannot measure: {error}")
+            else:
+                # Background is whatever colour covers most of the frame, not the
+                # clear colour worked out by hand: the swapchain is sRGB, so 0.05
+                # does not arrive as 13. Taking the mode asks the picture instead
+                # of reproducing the driver's transfer function.
+                rgb = pixels[:, :, :3].reshape(-1, 3)
+                packed = (rgb[:, 0].astype(np.uint32) << 16
+                          | rgb[:, 1].astype(np.uint32) << 8
+                          | rgb[:, 2])
+                counts = np.unique(packed, return_counts=True)[1]
+                drawn = int(packed.size - counts.max())
+                state = "on" if culling else "OFF"
+                print(f"observer: {drawn} drawn pixels of {packed.size}, culling {state}")
 
     frames += 1
     if time.time() - fps_timer >= 1.0:

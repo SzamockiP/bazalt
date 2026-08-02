@@ -49,15 +49,15 @@ fill = (ctx.compute_pipeline()
 march = (ctx.graphics_pipeline()
          .vertex_shader(ctx.compile_shader("fullscreen.vert", bz.ShaderStage.VERTEX))
          .fragment_shader(ctx.compile_shader("raymarch.frag", bz.ShaderStage.FRAGMENT))
-         .texture(0, bz.ShaderStage.FRAGMENT, set=0)
+         .texture(0, bz.ShaderStage.FRAGMENT)
          .push_constant(4, bz.ShaderStage.FRAGMENT)
          .build(renderer))
 
 # No sizes: the pool grows blocks from the layouts it serves (0.23).
 pool = ctx.create_descriptor_pool()
-fill_set = pool.allocate_set(fill, set=0)
+fill_set = pool.allocate_set(fill)
 fill_set.set_storage_image(0, volume)
-march_set = pool.allocate_set(march, set=0)
+march_set = pool.allocate_set(march)
 march_set.set_image(0, volume)
 
 # Fill once at startup: dispatch over the whole volume, then build the mip
@@ -68,12 +68,16 @@ setup = ctx.create_command_buffer()
 setup.begin()
 with setup.timer() as t:
     (setup.bind_pipeline(fill)
-          .bind_descriptor_set(fill_set, fill, set=0)
+          .bind_descriptor_set(fill_set, fill)
           .dispatch(groups, groups, groups))
     setup.generate_mipmaps(volume, src=bz.Access.SHADER_WRITE)
 ctx.submit(setup)
-print(f"fill + mips ({VOLUME_SIZE}^3): {t.ms:.2f} ms" if t.ms is not None
-      else "fill + mips: timestamps unsupported on this device")
+# Since 0.24 a device that can never measure says so with UnsupportedError.
+# The submit above was blocking, so t.ms is never None here.
+try:
+    print(f"fill + mips ({VOLUME_SIZE}^3): {t.ms:.2f} ms")
+except bz.UnsupportedError:
+    print("fill + mips: timestamps unsupported on this device")
 
 cmd = ctx.create_command_buffer()
 start = time.time()
@@ -98,7 +102,7 @@ while window.is_open():
 
     cmd.begin()
     with cmd.rendering(renderer) as c:
-        c.bind_pipeline(march).bind_descriptor_set(march_set, march, set=0)
+        c.bind_pipeline(march).bind_descriptor_set(march_set, march)
         c.push_constants(march, 0, struct.pack("<f", now - start))
         c.draw(3)
     renderer.present(cmd)

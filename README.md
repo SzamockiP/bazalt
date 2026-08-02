@@ -85,6 +85,35 @@ void main() {
 }
 ```
 
+## Vulkan clip space, and the one line every 3D program writes
+
+Vulkan puts the origin of a framebuffer in the top left corner, and +y in clip space points
+down. That agrees with the memory: row 0 of an image is the top row, texture coordinates
+start at the first texel, `set_scissor` and `copy_image` measure from the same corner, and a
+display scans the same way. OpenGL puts the origin at the bottom left, which is why OpenGL
+code flips images so often.
+
+A projection matrix from GLM or pyrr therefore disagrees with Vulkan twice, because those
+build the **OpenGL** matrix. `glm.perspective` puts depth in -1 to 1, where Vulkan wants 0
+to 1, and it points +y up. Correct both:
+
+```python
+# perspectiveRH_ZO, not perspective: the ZO is the 0-to-1 depth range Vulkan uses.
+proj = glm.perspectiveRH_ZO(glm.radians(60.0), width / height, 0.1, 100.0)
+proj[1][1] *= -1        # GLM builds a y-up matrix; Vulkan clip space is y-down
+```
+
+Every example in `examples/` does exactly this. Both lines belong to the matrix, not to
+bazalt: a projection written for Vulkan carries the range and the sign already, and needs
+neither.
+
+That is why bazalt has no `y_up` switch. A flipped viewport reverses the triangle winding,
+so `CullMode` and `FrontFace` would mean opposite things depending on a keyword argument,
+and the rasterizer would point up while `image.read()`, `copy_image` and `set_scissor` still
+measure from the top left. If you want a flipped viewport anyway, nothing stops you:
+`cmd.set_viewport(0, height, width, -height)` inside the rendering scope overrides the one
+bazalt emits.
+
 ## Compute writes an image, and you edit it while it runs
 
 A compute shader fills an image texel by texel. A fullscreen triangle then samples that
@@ -119,16 +148,16 @@ generate = (ctx.compute_pipeline()
 present = (ctx.graphics_pipeline()
     .vertex_shader(ctx.compile_shader("fullscreen.vert", bz.ShaderStage.VERTEX))
     .fragment_shader(ctx.compile_shader("present.frag", bz.ShaderStage.FRAGMENT))
-    .texture(0, bz.ShaderStage.FRAGMENT, set=0)
+    .texture(0, bz.ShaderStage.FRAGMENT)
     .build(renderer))
 
 # One image, bound two ways: written as a storage image, read as a texture.
 image = ctx.create_image(W, H, bz.Format.RGBA8)
 
-pool = ctx.create_descriptor_pool(max_sets=2, textures=1, storage_images=1)
-write_set = pool.allocate_set(generate, set=0)
+pool = ctx.create_descriptor_pool()   # no sizes: it grows from the layouts it serves
+write_set = pool.allocate_set(generate)
 write_set.set_storage_image(0, image)
-read_set = pool.allocate_set(present, set=0)
+read_set = pool.allocate_set(present)
 read_set.set_image(0, image)
 
 cmd = ctx.create_command_buffer()
@@ -142,11 +171,11 @@ while window.is_open():
 
     cmd.begin()
     (cmd.bind_pipeline(generate)
-        .bind_descriptor_set(write_set, generate, set=0)
+        .bind_descriptor_set(write_set, generate)
         .push_constants(generate, 0, struct.pack("<f", time.time() - start))
         .dispatch((W + 7) // 8, (H + 7) // 8))
     with cmd.rendering(renderer) as c:
-        c.bind_pipeline(present).bind_descriptor_set(read_set, present, set=0).draw(3)
+        c.bind_pipeline(present).bind_descriptor_set(read_set, present).draw(3)
 
     renderer.present(cmd)
 ```
@@ -214,6 +243,40 @@ ctx.submit(cmd)
 pixels = target.color[0].read()      # numpy (600, 800, 4) uint8
 ```
 
+## In a notebook, and on a machine with no display
+
+The code above is the whole notebook story: render offscreen, read the pixels, show them
+with the library you already use. A remote kernel on a university server works the same
+way, because bazalt starts the window system only when you ask for a `Window`.
+
+Use `with`. Without it, a re-run cell leaves the previous Context's upload worker and
+hot-reload watcher running until the garbage collector reaches them, so a shared machine
+collects one set of threads per run:
+
+```python
+import bazalt as bz
+from PIL import Image
+
+with bz.Context() as ctx:
+    target = ctx.create_render_target(512, 512)
+    # ...record and submit...
+    pixels = target.color[0].read()
+
+Image.fromarray(pixels)              # the cell shows it
+```
+
+Read the pixels **inside** the block. A Context that is closed starts no new work, and
+`target.color[0].read()` after the block raises `StateError` rather than a black image.
+
+**For anything interactive, build the Context once.** A device costs tens of milliseconds,
+so a slider that calls the function above per event queues work faster than it finishes and
+the notebook stops responding. Build the Context, the pipeline and the target once, and let
+a redraw be a record, a submit and a read — a few milliseconds. That Context outlives the
+cell, which is what `ctx.close()` is for.
+
+`examples/33_notebook/notebook.ipynb` shows both shapes, plus a compute cell that uses the
+GPU as a calculator.
+
 ## What you get
 
 - **Vulkan, and not an engine.** You keep the pipelines, the command buffers and the memory.
@@ -237,12 +300,15 @@ pixels = target.color[0].read()      # numpy (600, 800, 4) uint8
   nothing to give you until the bytes arrive.
 - **Hot reload.** Bazalt watches the shaders you loaded, their `#include` files and your
   images, then applies the edits in place. A mistake does not stop the application.
-- **Headless.** Draw into an offscreen target and read the pixels as a NumPy array. You need
-  no window and no display.
+- **Headless, and notebook-ready.** Draw into an offscreen target and read the pixels as a
+  NumPy array — no window and no display, so a Jupyter kernel on a remote server works.
+  `with bz.Context() as ctx:` releases the device's worker threads when the block ends,
+  instead of when the garbage collector notices.
 - **The window, and what arrives through it.** Keys, the mouse and the scroll wheel, plus
   files dropped on the window, the clipboard through `bz.get_clipboard()` and
   `bz.set_clipboard()`, an icon through `window.set_icon()` and the cursor through
-  `window.set_cursor_position()`.
+  `window.set_cursor_position()`. `bz.poll_events()` pumps a program that animates;
+  `bz.wait_events()` sleeps until something happens, for one that does not.
 - **Tools for a picture that looks wrong.** The validation layers report through a Python
   logger. `Context(shader_printf=True)` sends `debugPrintfEXT()` from a shader to that
   logger. `Context(gpu_timing=True)` and `cmd.timer()` measure a frame or one slice of a
@@ -281,6 +347,8 @@ Every directory in `examples/` runs on its own.
 | Data in and out | [24_video_texture](examples/24_video_texture) (per-frame updates), [22_instancing](examples/22_instancing) (20000 instances) |
 | Windows and devices | [19_multi_window](examples/19_multi_window), [20_multi_context](examples/20_multi_context) (two GPUs), [21_window_modes](examples/21_window_modes), [08_pyqt_integration](examples/08_pyqt_integration) |
 | Tools | [12_hot_reload](examples/12_hot_reload), [27_drop_and_icon](examples/27_drop_and_icon) (drag a picture onto the window), [30_gamepad](examples/30_gamepad) |
+| Notebooks | [33_notebook](examples/33_notebook) (headless rendering, a slider, GPU compute — needs Jupyter) |
+| Showcase | [34_showcase](examples/34_showcase) (San Miguel with GPU culling, bindless materials, a day-night cycle, PCF shadows, MSAA and an HDR post chain) |
 
 [CHANGELOG.md](CHANGELOG.md) lists what each release added. [DESIGN.md](DESIGN.md) gives the
 reasons behind the API.

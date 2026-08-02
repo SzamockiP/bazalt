@@ -41,7 +41,7 @@ def dispatch_printf(context):
     seen = []
     context.logger.on_message(seen.append)
 
-    shader = context.compile_shader("printf.comp", bz.ShaderStage.COMPUTE, source=PRINTF_COMPUTE)
+    shader = context.compile_shader(source=PRINTF_COMPUTE, stage=bz.ShaderStage.COMPUTE)
     pipeline = context.compute_pipeline().shader(shader).build()
 
     cmd = context.create_command_buffer()
@@ -114,7 +114,7 @@ def test_a_context_with_printf_still_runs_ordinary_shaders(extra_context):
     ordinary path has to keep working — that switch is the one thing about this
     feature that touches shaders which never print."""
     context = extra_context(shader_printf=True)
-    shader = context.compile_shader("plain.comp", bz.ShaderStage.COMPUTE, source=PLAIN_COMPUTE)
+    shader = context.compile_shader(source=PLAIN_COMPUTE, stage=bz.ShaderStage.COMPUTE)
     pipeline = context.compute_pipeline().shader(shader).storage_buffer(0).build()
 
     buf = context.create_buffer([0, 0, 0, 0], bz.BufferType.STORAGE, bz.MemoryUsage.STATIC,

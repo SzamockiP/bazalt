@@ -1,5 +1,3 @@
-import time
-
 import bazalt as bz
 
 # Create window, logger, and renderer
@@ -43,25 +41,10 @@ with cmd.rendering(renderer, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
       .bind_index_buffer(ibuf)
       .draw_indexed(3))
 
-# Main loop
-last_time = time.time()
-frame_count = 0
-fps_timer = 0.0
-
+# Main loop. One recording, replayed every frame: the command buffer holds
+# lambdas, not a frame's worth of state, so nothing here needs re-recording.
 while window.is_open():
     bz.poll_events()
     ctx.begin_frame()
     if renderer.acquire():
-        current_time = time.time()
-        dt = current_time - last_time
-        last_time = current_time
-
-        frame_count += 1
-        fps_timer += dt
-        if fps_timer >= 1.0:
-            avg_fps = frame_count / fps_timer
-            window.set_title(f"Bazalt Demo - Triangle | {1000.0 / avg_fps:.2f} ms/frame | {avg_fps:.1f} FPS")
-            frame_count = 0
-            fps_timer = 0.0
-
         renderer.present(cmd)
