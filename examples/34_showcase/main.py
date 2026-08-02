@@ -643,12 +643,16 @@ class DemoApp:
     def create_descriptors(self):
         ctx = self.ctx
         # Explicit sizes: the automatic pool defaults are far below two
-        # bindless arrays of ~240 samplers each.
+        # bindless arrays of ~240 samplers each. A frame set costs
+        # frames_in_flight sets and that many of each descriptor it holds —
+        # the four here (shadow, scene, sky, firefly) are why a fixed guess
+        # ran out on the machine with the deeper ring.
+        frames = ctx.frames_in_flight
         pool = self.pool = ctx.create_descriptor_pool(
-            max_sets=16,
-            textures=2 * len(self.textures) + 16,
-            uniform_buffers=8,
-            storage_buffers=8)
+            max_sets=4 * frames + 16,
+            textures=2 * len(self.textures) + 4 * frames + 16,
+            uniform_buffers=4 * frames + 4,
+            storage_buffers=2 * frames + 8)
 
         linear = ctx.create_sampler(filter=bz.Filter.LINEAR, address_mode=bz.AddressMode.CLAMP)
         nearest = ctx.create_sampler(filter=bz.Filter.NEAREST, address_mode=bz.AddressMode.CLAMP)
