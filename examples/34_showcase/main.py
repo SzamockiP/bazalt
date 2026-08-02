@@ -10,10 +10,16 @@ One scene exercises the features that examples 09-32 introduce one at a time:
     firstInstance carries the material index, so the shader reads it back as
     gl_InstanceIndex — no gl_DrawID, no per-draw descriptor binds.
   * A day-night cycle moves the sun. At night the moon takes over the light
-    and the shadow map. The sky is procedural: gradient and sun disc by day,
-    stars and a moon by night.
-  * PCF shadows from one 4096 depth-only pass, with depth_bias() on the caster
-    pipeline and alpha discard so leaves cast leaf-shaped shadows.
+    and the shadow map. The sky is procedural: gradient, drifting fbm clouds
+    and the sun disc by day, stars and a moon by night.
+  * PCF shadows from one 4096 depth-only pass with depth_bias() and alpha
+    discard, so leaves cast leaf-shaped shadows. The light's ortho FOLLOWS
+    the camera (a 30 m window, texel-snapped) instead of covering the scene —
+    one map keeps the texel density cascades exist for.
+  * Normal mapping from the .mtl's map_Bump entries through a second bindless
+    array. The tangent frame comes from screen-space derivatives, so no
+    vertex attribute carries it. Grayscale bump maps turn into normal maps
+    through a height gradient at load.
   * The scene renders into an HDR (RGBA16F) target with MSAA and
     alpha-to-coverage. MSAA refuses a preserving second pass, so sky, scene
     and fireflies are three pipelines inside ONE rendering scope.
@@ -34,7 +40,9 @@ Get the model with examples/assets/download_san_miguel.py. Expect roughly
 
 Deliberate shortcuts: the internal resolution is fixed at the start-up window
 size (resizing only stretches the composite), leaf opacity comes from the
-diffuse texture's alpha (map_d is ignored), and fireflies cast no shadows.
+diffuse texture's alpha (map_d is ignored), fireflies cast no shadows, and
+geometry more than ~30 m from the camera renders unshadowed (the map's white
+border).
 
 Requires Feature.BINDLESS and Feature.MULTI_DRAW_INDIRECT; the demo exits
 with a message without them. Hot reload is on — edit any shader (sky.frag,
@@ -60,10 +68,11 @@ import bazalt as bz
 
 W, H = 1600, 900             # internal resolution, fixed for the run
 SHADOW_SIZE = 4096
+SHADOW_RADIUS = 30.0         # the shadow map covers this box around the camera
 FIREFLY_COUNT = 128
 DAY_SECONDS = 240.0          # one full day-night cycle at speed 1
 SUN_AZIMUTH = 0.55           # radians; fixed heading of the sun's arc
-CACHE_VERSION = 1
+CACHE_VERSION = 2            # v2 added the bump-map slot table
 
 WINDOW_MODES = [bz.WindowMode.WINDOWED, bz.WindowMode.FRAMELESS,
                 bz.WindowMode.FULLSCREEN, bz.WindowMode.FULLSCREEN_WINDOWED]
@@ -135,6 +144,8 @@ def load_materials(mtl_path):
                 materials[current]["color"] = [float(parts[0]), float(parts[1]), float(parts[2])]
             elif line.startswith("map_Kd ") and current:
                 materials[current]["texture"] = line.split(" ", 1)[1].strip().replace("\\", "/")
+            elif line.lower().startswith("map_bump ") and current:
+                materials[current]["bump"] = line.split(" ", 1)[1].strip().replace("\\", "/")
     return materials
 
 
@@ -155,7 +166,11 @@ def parse_obj(obj_path):
     scene = trimesh.load(obj_path, process=False)
 
     slots = {}          # key -> slot index
-    tex_paths, kd_colors = [], []
+    tex_paths, kd_colors, bump_paths = [], [], []
+
+    def bump_for(mat_info):
+        rel = os.path.normpath(mat_info.get("bump") or "") if mat_info else ""
+        return rel if rel and os.path.exists(os.path.join(obj_dir, rel)) else ""
 
     def slot_for(mat_info):
         if mat_info and mat_info["texture"]:
@@ -166,6 +181,7 @@ def parse_obj(obj_path):
                     slots[key] = len(tex_paths)
                     tex_paths.append(rel)
                     kd_colors.append([1.0, 1.0, 1.0])
+                    bump_paths.append(bump_for(mat_info))
                 return slots[key]
         color = mat_info["color"] if mat_info else [1.0, 1.0, 1.0]
         key = ("kd", tuple(round(c, 3) for c in color))
@@ -173,6 +189,7 @@ def parse_obj(obj_path):
             slots[key] = len(tex_paths)
             tex_paths.append("")
             kd_colors.append(list(color))
+            bump_paths.append(bump_for(mat_info))
         return slots[key]
 
     verts, faces = [], []
@@ -231,6 +248,7 @@ def parse_obj(obj_path):
         "aabb_max": np.array(aabb_max, dtype=np.float32),
         "tex_paths": np.array(tex_paths),
         "kd_colors": np.array(kd_colors, dtype=np.float32),
+        "bump_paths": np.array(bump_paths),
     }
 
 
@@ -363,7 +381,9 @@ class DemoApp:
                 pixel = np.array([[[int(kd[0] * 255), int(kd[1] * 255),
                                     int(kd[2] * 255), 255]]], dtype=np.uint8)
                 self.textures.append(ctx.create_image(pixel, name=f"kd colour {i}"))
-        print(f"{n} submeshes, {len(self.textures)} material slots.")
+        self.normal_maps = self.load_normal_maps(obj_dir, data["bump_paths"])
+        print(f"{n} submeshes, {len(self.textures)} material slots, "
+              f"{sum(1 for p in data['bump_paths'] if p)} bump maps.")
 
         # World bounds: the light's ortho fits these corners every frame, and
         # the fireflies roam a shrunken box near the ground.
@@ -395,6 +415,40 @@ class DemoApp:
 
         self.frame_ubo = ctx.create_buffer(208, bz.BufferType.UNIFORM,
                                            bz.MemoryUsage.DYNAMIC, name="frame UBO")
+
+    def load_normal_maps(self, obj_dir, bump_paths):
+        """One normal map per material slot, flat where the .mtl has none.
+
+        These go through PIL and create_image, NOT load_image: load_image
+        decodes as sRGB, which would bend the vectors. Grayscale bump maps
+        become normal maps through a height gradient.
+        """
+        from PIL import Image as PILImage
+
+        flat = self.ctx.create_image(np.array([[[128, 128, 255, 255]]], dtype=np.uint8),
+                                     name="flat normal")
+        loaded = {}
+        maps = []
+        for path in bump_paths:
+            p = str(path)
+            if not p:
+                maps.append(flat)
+                continue
+            if p not in loaded:
+                img = np.asarray(PILImage.open(os.path.join(obj_dir, p)).convert("RGB"),
+                                 dtype=np.uint8)
+                spread = np.abs(img.astype(np.int16) - img[:, :, :1]).max()
+                if spread < 8:  # grayscale height map — derive the normal
+                    h = img[:, :, 0].astype(np.float32) / 255.0
+                    gy, gx = np.gradient(h)
+                    nrm = np.dstack([-gx * 4.0, -gy * 4.0, np.ones_like(h)])
+                    nrm /= np.linalg.norm(nrm, axis=2, keepdims=True)
+                    img = ((nrm * 0.5 + 0.5) * 255.0).astype(np.uint8)
+                rgba = np.dstack([img, np.full(img.shape[:2], 255, dtype=np.uint8)])
+                loaded[p] = self.ctx.create_image(rgba, mipmaps=True,
+                                                  name=os.path.basename(p))
+            maps.append(loaded[p])
+        return maps
 
     # ── GPU objects ────────────────────────────────────────────────────────
 
@@ -452,7 +506,11 @@ class DemoApp:
                             .cull_mode(bz.CullMode.NONE, bz.FrontFace.COUNTER_CLOCKWISE)
                             .depth_bias(1.25, slope=1.75)
                             .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
+                            # Both set=1 bindings, so the ONE bindless set is
+                            # layout-compatible here and in the scene pipeline
+                            # (the shadow shader only reads binding 0).
                             .texture(0, bz.ShaderStage.FRAGMENT, set=1, count=tex_count)
+                            .texture(1, bz.ShaderStage.FRAGMENT, set=1, count=tex_count)
                             .name("shadow depth")
                             .build(self.shadow_rt))
 
@@ -461,7 +519,10 @@ class DemoApp:
                  .fragment_shader(sh("scene.frag", bz.ShaderStage.FRAGMENT))
                  .vertex_format(vertex3)
                  .depth_test(True)
-                 .cull_mode(bz.CullMode.BACK, bz.FrontFace.COUNTER_CLOCKWISE)
+                 # NONE, not BACK: San Miguel's leaves are single-sided quads
+                 # and must render from both sides (the shader flips the
+                 # normal on gl_FrontFacing).
+                 .cull_mode(bz.CullMode.NONE, bz.FrontFace.COUNTER_CLOCKWISE)
                  # Declaring one binding for two stages is two declarations —
                  # the builder ORs the stage flags of a repeated binding.
                  .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
@@ -469,6 +530,7 @@ class DemoApp:
                  .texture(1, bz.ShaderStage.FRAGMENT, set=0)
                  .storage_buffer(2, bz.ShaderStage.FRAGMENT, set=0)
                  .texture(0, bz.ShaderStage.FRAGMENT, set=1, count=tex_count)
+                 .texture(1, bz.ShaderStage.FRAGMENT, set=1, count=tex_count)
                  .name("scene"))
         if self.samples > 1:
             scene = scene.alpha_to_coverage(True)
@@ -513,7 +575,13 @@ class DemoApp:
 
     def create_descriptors(self):
         ctx = self.ctx
-        pool = self.pool = ctx.create_descriptor_pool()
+        # Explicit sizes: the automatic pool defaults are far below two
+        # bindless arrays of ~240 samplers each.
+        pool = self.pool = ctx.create_descriptor_pool(
+            max_sets=16,
+            textures=2 * len(self.textures) + 16,
+            uniform_buffers=8,
+            storage_buffers=8)
 
         linear = ctx.create_sampler(filter=bz.Filter.LINEAR, address_mode=bz.AddressMode.CLAMP)
         nearest = ctx.create_sampler(filter=bz.Filter.NEAREST, address_mode=bz.AddressMode.CLAMP)
@@ -551,6 +619,8 @@ class DemoApp:
         self.bindless_set = pool.allocate_set(self.scene_pipe, set=1)
         for i, tex in enumerate(self.textures):
             self.bindless_set.set_image(0, tex, index=i)
+        for i, tex in enumerate(self.normal_maps):
+            self.bindless_set.set_image(1, tex, index=i)
 
         self.prepass_set = pool.allocate_set(self.prepass_pipe, set=0)
         self.prepass_set.set_image(0, self.scene_rt.color[0], sampler=linear)
@@ -578,21 +648,38 @@ class DemoApp:
                                       math.cos(phi) * math.sin(SUN_AZIMUTH)))
 
     def light_matrix(self, light_dir):
-        """An ortho fitted to the scene AABB, seen from the active light."""
-        eye = self.scene_center + light_dir * self.scene_radius
+        """An ortho that FOLLOWS the camera instead of covering the scene.
+
+        A fixed SHADOW_RADIUS box around a point ahead of the camera keeps
+        the texel density high wherever the player looks — one map does what
+        a whole-scene fit needs cascades for. The depth range still spans the
+        scene AABB, so casters outside the box (a wall between the light and
+        the box) still occlude. Geometry past the box samples the map's
+        OPAQUE_WHITE border and renders lit. The window is snapped to the
+        texel grid, so walking does not make the shadow edges shimmer.
+        """
+        focus = self.camera.pos + self.camera.front * (SHADOW_RADIUS * 0.5)
+        eye = focus + light_dir * self.scene_radius
         up = glm.vec3(0, 1, 0) if abs(light_dir.y) < 0.95 else glm.vec3(1, 0, 0)
-        view = glm.lookAt(eye, self.scene_center, up)
-        lo = glm.vec3(1e9)
-        hi = glm.vec3(-1e9)
+        view = glm.lookAt(eye, focus, up)
+        lo_z = 1e9
+        hi_z = -1e9
         for corner in self.aabb_corners:
-            p = glm.vec3(view * glm.vec4(corner, 1.0))
-            lo = glm.min(lo, p)
-            hi = glm.max(hi, p)
-        # The usual `proj[1][1] *= -1` flips the scale but not the offset, so
-        # it is only correct for a SYMMETRIC frustum. This ortho is fitted and
-        # asymmetric — swapping bottom and top flips y properly.
-        proj = glm.orthoRH_ZO(lo.x, hi.x, hi.y, lo.y, -hi.z, -lo.z)
-        return proj * view
+            z = (view * glm.vec4(corner, 1.0)).z
+            lo_z = min(lo_z, z)
+            hi_z = max(hi_z, z)
+        r = SHADOW_RADIUS
+        # The usual `proj[1][1] *= -1` flips the scale but not the offset —
+        # swapping bottom and top flips y correctly for any window.
+        proj = glm.orthoRH_ZO(-r, r, r, -r, -hi_z, -lo_z)
+        lvp = proj * view
+        # Texel snap: shift the window so the world origin lands on a texel
+        # centre. Ortho w is 1, so a clip-space translate is exact.
+        origin = lvp * glm.vec4(0.0, 0.0, 0.0, 1.0)
+        half = SHADOW_SIZE / 2.0
+        snap = glm.vec3(round(origin.x * half) / half - origin.x,
+                        round(origin.y * half) / half - origin.y, 0.0)
+        return glm.translate(glm.mat4(1.0), snap) * lvp
 
     def day_night(self, now):
         """Everything the UBO and the post pushes need for this time of day."""

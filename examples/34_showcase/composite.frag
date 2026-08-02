@@ -50,6 +50,12 @@ void main() {
 
     vec3 col = aces(hdr * pc.exposure);
 
+    // Punch: a saturation lift and a gentle S-curve, or everything reads as
+    // bare albedo.
+    float grey0 = dot(col, vec3(0.299, 0.587, 0.114));
+    col = clamp(mix(vec3(grey0), col, 1.22), 0.0, 1.0);
+    col = mix(col, col * col * (3.0 - 2.0 * col), 0.35);
+
     // Grade: warm dawns and dusks, cool desaturated nights.
     col = mix(col, col * vec3(1.08, 0.97, 0.88), pc.warmth);
     float grey = dot(col, vec3(0.299, 0.587, 0.114));

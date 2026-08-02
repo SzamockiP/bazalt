@@ -16,7 +16,10 @@ void main() {
     worldPos = inPos;
     normal = inNormal;
     uv = inUV;
-    // The same matrix the shadow pass rasterized with (example 09's contract).
-    lightSpacePos = u.lightVP * vec4(inPos, 1.0);
+    // The same matrix the shadow pass rasterized with (example 09's
+    // contract), sampled a couple of centimetres along the normal — the
+    // normal-offset trick kills the acne the depth bias alone leaves on
+    // slopes (~2 texels of the 30 m shadow window).
+    lightSpacePos = u.lightVP * vec4(inPos + inNormal * 0.03, 1.0);
     materialIndex = uint(gl_InstanceIndex);
 }

@@ -19,6 +19,24 @@ struct Firefly {
 layout(std430, set = 0, binding = 2) readonly buffer Fireflies { Firefly flies[]; };
 
 layout(set = 1, binding = 0) uniform sampler2D materials[];
+layout(set = 1, binding = 1) uniform sampler2D normalMaps[];
+
+// Cotangent frame from screen-space derivatives (Schüler) — normal mapping
+// with no tangent attribute, so the vertex format and the OBJ parse never
+// heard of it. Slots without a bump map hold a flat 1x1 and fall through
+// unchanged.
+vec3 perturb_normal(vec3 n, vec3 viewVec, vec2 texUv, vec3 mapN) {
+    vec3 dp1 = dFdx(viewVec);
+    vec3 dp2 = dFdy(viewVec);
+    vec2 duv1 = dFdx(texUv);
+    vec2 duv2 = dFdy(texUv);
+    vec3 dp2perp = cross(dp2, n);
+    vec3 dp1perp = cross(n, dp1);
+    vec3 t = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 b = dp2perp * duv1.y + dp1perp * duv2.y;
+    float invmax = inversesqrt(max(dot(t, t), dot(b, b)));
+    return normalize(mat3(t * invmax, b * invmax, n) * mapN);
+}
 
 // 3x3 taps over the hardware 2x2 PCF — nine compares, each already filtered.
 // The sampler clamps to an OPAQUE_WHITE border, so outside the map means lit
@@ -63,9 +81,18 @@ void main() {
     if (!gl_FrontFacing) {
         n = -n; // leaves are single-sided geometry lit from either side
     }
+    vec3 viewVec = u.camPos.xyz - worldPos;
+    vec3 mapN = texture(normalMaps[nonuniformEXT(materialIndex)], uv).rgb * 2.0 - 1.0;
+    n = perturb_normal(n, viewVec, uv, mapN);
 
+    float shadow = shadow_factor();
     float ndl = max(dot(n, u.lightDir.xyz), 0.0);
-    vec3 color = albedo.rgb * (u.ambient.rgb + u.lightColor.rgb * (ndl * shadow_factor()));
+    // Blinn-Phong off the sun/moon — the asset carries almost no specular
+    // maps, so one uniform gloss stands in for all of them.
+    vec3 halfVec = normalize(u.lightDir.xyz + normalize(viewVec));
+    float spec = pow(max(dot(n, halfVec), 0.0), 48.0) * 0.25;
+    vec3 color = albedo.rgb * (u.ambient.rgb + u.lightColor.rgb * (ndl * shadow))
+               + u.lightColor.rgb * (spec * shadow);
     if (u.lightColor.w > 0.001) {
         color += albedo.rgb * firefly_light(n);
     }
