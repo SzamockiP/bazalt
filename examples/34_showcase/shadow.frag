@@ -10,7 +10,9 @@ layout(location = 1) flat in uint materialIndex;
 layout(set = 1, binding = 0) uniform sampler2D materials[];
 
 void main() {
-    if (texture(materials[nonuniformEXT(materialIndex)], uv).a < 0.5) {
+    // 0.55, not 0.5: glass carries its transparency in the material pixel's
+    // alpha (0.4-0.5), and a vase should not cast a solid shadow.
+    if (texture(materials[nonuniformEXT(materialIndex)], uv).a < 0.55) {
         discard;
     }
 }

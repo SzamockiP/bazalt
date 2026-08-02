@@ -14,8 +14,13 @@ One scene exercises the features that examples 09-32 introduce one at a time:
     and the sun disc by day, stars and a moon by night.
   * PCF shadows from one 4096 depth-only pass with depth_bias() and alpha
     discard, so leaves cast leaf-shaped shadows. The light's ortho FOLLOWS
-    the camera (a 30 m window, texel-snapped) instead of covering the scene —
-    one map keeps the texel density cascades exist for.
+    the camera (a 22 m window, texel-snapped) instead of covering the scene —
+    one map keeps the texel density cascades exist for. The receiver samples
+    a rotated Poisson disk over the hardware PCF.
+  * Glass renders in a second blended pass over the opaques. The .mtl's
+    dissolve/illum-4 transparency lands in the material pixel's alpha, the
+    glass commands leave the opaque indirect buffer (their indexCount is 0
+    there), and the shadow shader's discard drops them.
   * Normal mapping from the .mtl's map_Bump entries through a second bindless
     array. The tangent frame comes from screen-space derivatives, so no
     vertex attribute carries it. Grayscale bump maps turn into normal maps
@@ -40,9 +45,9 @@ Get the model with examples/assets/download_san_miguel.py. Expect roughly
 
 Deliberate shortcuts: the internal resolution is fixed at the start-up window
 size (resizing only stretches the composite), leaf opacity comes from the
-diffuse texture's alpha (map_d is ignored), fireflies cast no shadows, and
-geometry more than ~30 m from the camera renders unshadowed (the map's white
-border).
+diffuse texture's alpha (map_d is ignored), fireflies cast no shadows,
+geometry more than ~22 m from the camera renders unshadowed (the map's white
+border), and the glass pass draws unsorted.
 
 Requires Feature.BINDLESS and Feature.MULTI_DRAW_INDIRECT; the demo exits
 with a message without them. Hot reload is on — edit any shader (sky.frag,
@@ -68,11 +73,11 @@ import bazalt as bz
 
 W, H = 1600, 900             # internal resolution, fixed for the run
 SHADOW_SIZE = 4096
-SHADOW_RADIUS = 30.0         # the shadow map covers this box around the camera
+SHADOW_RADIUS = 22.0         # the shadow map covers this box around the camera
 FIREFLY_COUNT = 128
 DAY_SECONDS = 240.0          # one full day-night cycle at speed 1
 SUN_AZIMUTH = 0.55           # radians; fixed heading of the sun's arc
-CACHE_VERSION = 3            # v3: the bump-map slot table, empty slots fixed
+CACHE_VERSION = 4            # v4: flipped V, per-slot alpha (glass)
 
 WINDOW_MODES = [bz.WindowMode.WINDOWED, bz.WindowMode.FRAMELESS,
                 bz.WindowMode.FULLSCREEN, bz.WindowMode.FULLSCREEN_WINDOWED]
@@ -128,7 +133,7 @@ class Camera:
 
 
 def load_materials(mtl_path):
-    """Kd / map_Kd per material, same 19 lines as example 07."""
+    """Kd / map_Kd / map_Bump / transparency per material (07's parser grown)."""
     materials = {}
     if not os.path.exists(mtl_path):
         return materials
@@ -138,7 +143,8 @@ def load_materials(mtl_path):
             line = line.strip()
             if line.startswith("newmtl "):
                 current = line.split(" ", 1)[1].strip()
-                materials[current] = {"texture": None, "color": [1.0, 1.0, 1.0]}
+                materials[current] = {"texture": None, "color": [1.0, 1.0, 1.0],
+                                      "alpha": 1.0}
             elif line.startswith("Kd ") and current:
                 parts = line.split()[1:]
                 materials[current]["color"] = [float(parts[0]), float(parts[1]), float(parts[2])]
@@ -146,6 +152,15 @@ def load_materials(mtl_path):
                 materials[current]["texture"] = line.split(" ", 1)[1].strip().replace("\\", "/")
             elif line.lower().startswith("map_bump ") and current:
                 materials[current]["bump"] = line.split(" ", 1)[1].strip().replace("\\", "/")
+            elif line.startswith("d ") and current:
+                d = float(line.split()[1])
+                if d < 0.999:
+                    materials[current]["alpha"] = d
+            elif line.startswith("illum 4") and current:
+                # illum 4 is the "transparency: glass on" model. The .mtl's Tf
+                # values are mush, so glass gets one flat alpha.
+                if materials[current]["alpha"] >= 0.999:
+                    materials[current]["alpha"] = 0.4
     return materials
 
 
@@ -166,7 +181,7 @@ def parse_obj(obj_path):
     scene = trimesh.load(obj_path, process=False)
 
     slots = {}          # key -> slot index
-    tex_paths, kd_colors, bump_paths = [], [], []
+    tex_paths, kd_colors, kd_alphas, bump_paths = [], [], [], []
 
     def bump_for(mat_info):
         rel = (mat_info or {}).get("bump")
@@ -184,14 +199,17 @@ def parse_obj(obj_path):
                     slots[key] = len(tex_paths)
                     tex_paths.append(rel)
                     kd_colors.append([1.0, 1.0, 1.0])
+                    kd_alphas.append(1.0)
                     bump_paths.append(bump_for(mat_info))
                 return slots[key]
         color = mat_info["color"] if mat_info else [1.0, 1.0, 1.0]
-        key = ("kd", tuple(round(c, 3) for c in color))
+        alpha = mat_info["alpha"] if mat_info else 1.0
+        key = ("kd", tuple(round(c, 3) for c in color), round(alpha, 3))
         if key not in slots:
             slots[key] = len(tex_paths)
             tex_paths.append("")
             kd_colors.append(list(color))
+            kd_alphas.append(alpha)
             bump_paths.append(bump_for(mat_info))
         return slots[key]
 
@@ -215,7 +233,10 @@ def parse_obj(obj_path):
             n[:, 1] = 1.0
 
         if hasattr(geom.visual, "uv") and geom.visual.uv is not None and len(geom.visual.uv) == len(v):
-            uv = np.asarray(geom.visual.uv, dtype=np.float32)
+            uv = np.asarray(geom.visual.uv, dtype=np.float32).copy()
+            # OBJ puts v=0 at the BOTTOM of the image; Vulkan samples row 0 at
+            # the top. Without this flip every texture stands on its head.
+            uv[:, 1] = 1.0 - uv[:, 1]
         else:
             uv = np.zeros((len(v), 2), dtype=np.float32)
 
@@ -251,6 +272,7 @@ def parse_obj(obj_path):
         "aabb_max": np.array(aabb_max, dtype=np.float32),
         "tex_paths": np.array(tex_paths),
         "kd_colors": np.array(kd_colors, dtype=np.float32),
+        "kd_alphas": np.array(kd_alphas, dtype=np.float32),
         "bump_paths": np.array(bump_paths),
     }
 
@@ -359,11 +381,25 @@ class DemoApp:
         cmds["first_index"] = data["first_index"]
         cmds["vertex_offset"] = data["vertex_offset"]
         cmds["first_instance"] = data["tex_slot"]
-        self.cull_args = ctx.create_buffer(np.frombuffer(cmds.tobytes(), dtype=np.uint8),
+
+        # Glass leaves the opaque path: its commands keep indexCount 0 there
+        # (the cull compute may set instanceCount, a zero-index draw is free)
+        # and a small static list draws it blended after the opaques.
+        transparent = data["kd_alphas"][data["tex_slot"]] < 0.999
+        opaque_cmds = cmds.copy()
+        opaque_cmds["index_count"][transparent] = 0
+        self.cull_args = ctx.create_buffer(np.frombuffer(opaque_cmds.tobytes(), dtype=np.uint8),
                                            bz.BufferType.STORAGE, bz.MemoryUsage.STATIC,
                                            name="culled draw args")
-        # The shadow pass draws everything: the sun's ortho sees the whole
-        # courtyard, so culling would save nothing. Same commands, all live.
+        glass_cmds = cmds[transparent].copy()
+        glass_cmds["instance_count"] = 1
+        self.glass_count = len(glass_cmds)
+        self.glass_args = ctx.create_buffer(
+            np.frombuffer(glass_cmds.tobytes(), dtype=np.uint8) if self.glass_count
+            else 20, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC, name="glass draw args")
+        # The shadow pass draws everything: the light window's depth range
+        # spans the scene, so culling would save nothing. Same commands, all
+        # live — the shadow shader's alpha discard drops the glass.
         cmds["instance_count"] = 1
         self.shadow_args = ctx.create_buffer(np.frombuffer(cmds.tobytes(), dtype=np.uint8),
                                              bz.BufferType.STORAGE, bz.MemoryUsage.STATIC,
@@ -376,17 +412,20 @@ class DemoApp:
         # each texture-less Kd colour (cheaper than the vertex-colour channel
         # example 07 tiles over every vertex).
         self.textures = []
-        for i, (path, kd) in enumerate(zip(data["tex_paths"], data["kd_colors"])):
+        for i, (path, kd, alpha) in enumerate(zip(data["tex_paths"], data["kd_colors"],
+                                                  data["kd_alphas"])):
             if path:
                 self.textures.append(ctx.load_image(os.path.join(obj_dir, str(path)),
                                                     name=os.path.basename(str(path))))
             else:
+                # The material's transparency rides in this pixel's alpha; the
+                # glass pass blends with it and the shadow pass discards on it.
                 pixel = np.array([[[int(kd[0] * 255), int(kd[1] * 255),
-                                    int(kd[2] * 255), 255]]], dtype=np.uint8)
+                                    int(kd[2] * 255), int(alpha * 255)]]], dtype=np.uint8)
                 self.textures.append(ctx.create_image(pixel, name=f"kd colour {i}"))
         self.normal_maps = self.load_normal_maps(obj_dir, data["bump_paths"])
-        print(f"{n} submeshes, {len(self.textures)} material slots, "
-              f"{sum(1 for p in data['bump_paths'] if p)} bump maps.")
+        print(f"{n} submeshes ({self.glass_count} glass), {len(self.textures)} material "
+              f"slots, {sum(1 for p in data['bump_paths'] if p)} bump maps.")
 
         # World bounds: the light's ortho fits these corners every frame, and
         # the fireflies roam a shrunken box near the ground.
@@ -517,27 +556,41 @@ class DemoApp:
                             .name("shadow depth")
                             .build(self.shadow_rt))
 
-        scene = (ctx.graphics_pipeline()
-                 .vertex_shader(sh("scene.vert", bz.ShaderStage.VERTEX))
-                 .fragment_shader(sh("scene.frag", bz.ShaderStage.FRAGMENT))
-                 .vertex_format(vertex3)
-                 .depth_test(True)
-                 # NONE, not BACK: San Miguel's leaves are single-sided quads
-                 # and must render from both sides (the shader flips the
-                 # normal on gl_FrontFacing).
-                 .cull_mode(bz.CullMode.NONE, bz.FrontFace.COUNTER_CLOCKWISE)
-                 # Declaring one binding for two stages is two declarations —
-                 # the builder ORs the stage flags of a repeated binding.
-                 .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
-                 .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
-                 .texture(1, bz.ShaderStage.FRAGMENT, set=0)
-                 .storage_buffer(2, bz.ShaderStage.FRAGMENT, set=0)
-                 .texture(0, bz.ShaderStage.FRAGMENT, set=1, count=tex_count)
-                 .texture(1, bz.ShaderStage.FRAGMENT, set=1, count=tex_count)
-                 .name("scene"))
+        scene_vert = sh("scene.vert", bz.ShaderStage.VERTEX)
+        scene_frag = sh("scene.frag", bz.ShaderStage.FRAGMENT)
+
+        def scene_builder():
+            return (ctx.graphics_pipeline()
+                    .vertex_shader(scene_vert)
+                    .fragment_shader(scene_frag)
+                    .vertex_format(vertex3)
+                    # NONE, not BACK: San Miguel's leaves are single-sided
+                    # quads and must render from both sides (the shader flips
+                    # the normal on gl_FrontFacing).
+                    .cull_mode(bz.CullMode.NONE, bz.FrontFace.COUNTER_CLOCKWISE)
+                    # Declaring one binding for two stages is two declarations
+                    # — the builder ORs the stage flags of a repeated binding.
+                    .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
+                    .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
+                    .texture(1, bz.ShaderStage.FRAGMENT, set=0)
+                    .storage_buffer(2, bz.ShaderStage.FRAGMENT, set=0)
+                    .texture(0, bz.ShaderStage.FRAGMENT, set=1, count=tex_count)
+                    .texture(1, bz.ShaderStage.FRAGMENT, set=1, count=tex_count))
+
+        scene = scene_builder().depth_test(True).name("scene")
         if self.samples > 1:
             scene = scene.alpha_to_coverage(True)
         self.scene_pipe = scene.build(self.scene_rt)
+
+        # Glass: the same shaders blended over the opaques. Depth test on so
+        # walls hide it, write off so glass never occludes, no coverage
+        # dithering — the alpha comes straight from the material's kd pixel.
+        # Unsorted: San Miguel has a handful of vases, not a glass cathedral.
+        self.glass_pipe = (scene_builder()
+                          .depth_test(True, write=False)
+                          .blend(True, mode=bz.BlendMode.ALPHA)
+                          .name("glass")
+                          .build(self.scene_rt))
 
         self.sky_pipe = (ctx.graphics_pipeline()
                          .vertex_shader(fullscreen)
@@ -777,6 +830,11 @@ class DemoApp:
                       .bind_vertex_buffer(self.vbuf)
                       .bind_index_buffer(self.ibuf)
                       .draw_indexed_indirect(self.cull_args, count=self.submesh_count))
+                    if self.glass_count:
+                        (c.bind_pipeline(self.glass_pipe)
+                          .bind_descriptor_set(self.scene_set, self.glass_pipe, set=0)
+                          .bind_descriptor_set(self.bindless_set, self.glass_pipe, set=1)
+                          .draw_indexed_indirect(self.glass_args, count=self.glass_count))
                     (c.bind_pipeline(self.firefly_pipe)
                       .bind_descriptor_set(self.firefly_set, self.firefly_pipe, set=0)
                       .bind_vertex_buffer(self.firefly_buf)

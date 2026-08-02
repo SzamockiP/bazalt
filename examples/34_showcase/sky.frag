@@ -68,11 +68,11 @@ vec3 sky_night(vec3 dir, vec3 moon, float time) {
     vec3 sp = dir * 500.0;
     vec3 cell = floor(sp);
     vec3 rnd = hash33(cell);
-    if (rnd.z > 0.85 && dir.y > 0.02) {
+    if (rnd.z > 0.985 && dir.y > 0.02) {
         vec3 centre = cell + 0.5 + (rnd - 0.5) * 0.5;
         float d = length(sp - centre);
         float twinkle = 0.75 + 0.25 * sin(time * 3.0 + rnd.x * 40.0);
-        col += vec3(smoothstep(0.5, 0.0, d)) * (twinkle * smoothstep(0.85, 1.0, rnd.z));
+        col += vec3(smoothstep(0.5, 0.0, d)) * (twinkle * smoothstep(0.985, 1.0, rnd.z));
     }
     // Moon disc with a soft halo.
     float cosMoon = dot(dir, moon);

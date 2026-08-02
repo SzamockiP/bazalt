@@ -38,21 +38,32 @@ vec3 perturb_normal(vec3 n, vec3 viewVec, vec2 texUv, vec3 mapN) {
     return normalize(mat3(t * invmax, b * invmax, n) * mapN);
 }
 
-// 3x3 taps over the hardware 2x2 PCF — nine compares, each already filtered.
-// The sampler clamps to an OPAQUE_WHITE border, so outside the map means lit
-// and no uv guard is needed. Depth bias lives on the caster pipeline.
+// Twelve Poisson-disk taps over the hardware 2x2 PCF, the disk rotated by a
+// per-pixel hash — the noise trades the blocky texel staircase for grain the
+// eye forgives. The sampler clamps to an OPAQUE_WHITE border, so outside the
+// map means lit and no uv guard is needed. Depth bias lives on the caster
+// pipeline.
 float shadow_factor() {
+    const vec2 POISSON[12] = vec2[](
+        vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696,  0.457),
+        vec2(-0.203,  0.621), vec2( 0.962, -0.195), vec2( 0.473, -0.480),
+        vec2( 0.519,  0.767), vec2( 0.185, -0.893), vec2( 0.507,  0.064),
+        vec2( 0.896,  0.412), vec2(-0.322, -0.933), vec2(-0.792, -0.598));
+
     vec3 proj = lightSpacePos.xyz / lightSpacePos.w;
     vec2 suv = proj.xy * 0.5 + 0.5;
     vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
+
+    float angle = 6.2832 * fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    mat2 rot = mat2(cos(angle), -sin(angle), sin(angle), cos(angle));
+
     float lit = 0.0;
-    for (int x = -1; x <= 1; ++x) {
-        for (int y = -1; y <= 1; ++y) {
-            lit += texture(shadowMap, vec3(suv + vec2(x, y) * texel, proj.z));
-        }
+    for (int i = 0; i < 12; ++i) {
+        vec2 offset = rot * POISSON[i] * (texel * 2.5);
+        lit += texture(shadowMap, vec3(suv + offset, proj.z));
     }
     // lightDir.w fades to zero around the sun/moon handover, hiding the flip.
-    return mix(1.0, lit / 9.0, u.lightDir.w);
+    return mix(1.0, lit / 12.0, u.lightDir.w);
 }
 
 // Every firefly is a small warm point light. The night factor gates the whole
