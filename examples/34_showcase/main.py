@@ -72,7 +72,7 @@ SHADOW_RADIUS = 30.0         # the shadow map covers this box around the camera
 FIREFLY_COUNT = 128
 DAY_SECONDS = 240.0          # one full day-night cycle at speed 1
 SUN_AZIMUTH = 0.55           # radians; fixed heading of the sun's arc
-CACHE_VERSION = 2            # v2 added the bump-map slot table
+CACHE_VERSION = 3            # v3: the bump-map slot table, empty slots fixed
 
 WINDOW_MODES = [bz.WindowMode.WINDOWED, bz.WindowMode.FRAMELESS,
                 bz.WindowMode.FULLSCREEN, bz.WindowMode.FULLSCREEN_WINDOWED]
@@ -169,8 +169,11 @@ def parse_obj(obj_path):
     tex_paths, kd_colors, bump_paths = [], [], []
 
     def bump_for(mat_info):
-        rel = os.path.normpath(mat_info.get("bump") or "") if mat_info else ""
-        return rel if rel and os.path.exists(os.path.join(obj_dir, rel)) else ""
+        rel = (mat_info or {}).get("bump")
+        if not rel:
+            return ""  # normpath("") would be "." — a directory that "exists"
+        rel = os.path.normpath(rel)
+        return rel if os.path.isfile(os.path.join(obj_dir, rel)) else ""
 
     def slot_for(mat_info):
         if mat_info and mat_info["texture"]:
@@ -431,7 +434,7 @@ class DemoApp:
         maps = []
         for path in bump_paths:
             p = str(path)
-            if not p:
+            if not p or not os.path.isfile(os.path.join(obj_dir, p)):
                 maps.append(flat)
                 continue
             if p not in loaded:
