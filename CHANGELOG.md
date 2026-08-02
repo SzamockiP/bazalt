@@ -40,6 +40,19 @@ properties that answered `None` for four different reasons each.
   it, like every example.
 - **A "Vulkan clip space" section in the README.** Why +y points down, and why
   `proj[1][1] *= -1` corrects your GLM matrix rather than Vulkan.
+- **`examples/34_showcase`.** One scene that exercises most of the engine at
+  once. San Miguel renders through a GPU frustum cull into a multi-draw
+  indirect buffer, with one bindless array for every material — the command's
+  `firstInstance` carries the material index, so the shader reads it back as
+  `gl_InstanceIndex`. A day-night cycle moves the sun and hands the light and
+  the shadow map to the moon at dusk. The scene draws into an HDR target with
+  MSAA and alpha-to-coverage, and a post chain adds bloom, god rays, a lens
+  flare and ACES tone mapping. Fireflies fly at night: a compute pass moves
+  them and the scene shader reads the same buffer as a list of point lights.
+  Every pass carries a `cmd.label()` and a `cmd.timer()`, and every resource a
+  name, so a Nsight or RenderDoc capture reads like the source. The first
+  start parses the OBJ and caches it to a `.npz`, later starts load in
+  seconds. Needs `Feature.BINDLESS` and `Feature.MULTI_DRAW_INDIRECT`.
 
 ### Fixed
 - **A recording that only READS a GPU-written buffer now waits for the write.**

@@ -1,0 +1,68 @@
+#version 450
+// Frustum culling per SUBMESH. Example 28 culls spheres into ONE command whose
+// instanceCount an atomic compacts; here every submesh already owns a
+// pre-filled VkDrawIndexedIndirectCommand (material index riding in
+// firstInstance) and this shader only flips each instanceCount between 0 and
+// 1. A zero-instance draw costs the GPU almost nothing, so nothing needs
+// compacting and no DRAW_INDIRECT_COUNT feature is involved.
+layout(local_size_x = 64) in;
+
+struct Submesh {
+    vec4 centre;  // xyz world-space AABB centre; w unused
+    vec4 extents; // xyz half-size; w unused
+};
+layout(std430, set = 0, binding = 0) readonly buffer Submeshes { Submesh sub[]; };
+
+// Exactly VkDrawIndexedIndirectCommand. vertexOffset is signed.
+struct DrawCmd {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance; // material index — the draw reads it back as gl_InstanceIndex
+};
+layout(std430, set = 0, binding = 1) buffer Args { DrawCmd cmds[]; };
+
+// Survivor count, zeroed by fill_buffer each frame. Only the window title
+// reads it — the draws never do.
+layout(std430, set = 0, binding = 2) buffer Stats { uint visibleCount; };
+
+layout(push_constant) uniform Push {
+    mat4 view_proj;
+    uint count;
+} push;
+
+// Planes come out of the view-projection ROWS — GLSL indexes a mat4 by
+// COLUMN, so transpose first (the full story is in example 28's cull.comp).
+// An AABB is outside when it sits fully behind any one plane; the abs() term
+// is the box's projected radius onto the plane normal.
+bool visible_aabb(vec3 centre, vec3 extents) {
+    mat4 m = transpose(push.view_proj);
+    vec4 planes[6];
+    planes[0] = m[3] + m[0];
+    planes[1] = m[3] - m[0];
+    planes[2] = m[3] + m[1];
+    planes[3] = m[3] - m[1];
+    planes[4] = m[3] + m[2];
+    planes[5] = m[3] - m[2];
+
+    for (int i = 0; i < 6; ++i) {
+        vec4 p = planes[i];
+        if (dot(p.xyz, centre) + p.w + dot(abs(p.xyz), extents) < 0.0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.count) {
+        return;
+    }
+    bool vis = visible_aabb(sub[i].centre.xyz, sub[i].extents.xyz);
+    cmds[i].instanceCount = vis ? 1u : 0u;
+    if (vis) {
+        atomicAdd(visibleCount, 1u);
+    }
+}

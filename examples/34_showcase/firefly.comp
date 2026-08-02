@@ -1,0 +1,44 @@
+#version 450
+// Wandering fireflies. Forces come from per-firefly sine noise, so the flight
+// is smooth and the state is just {pos, vel}. The same buffer is the point
+// draw's vertex buffer AND the scene shader's light list.
+layout(local_size_x = 64) in;
+
+struct Firefly {
+    vec4 pos; // xyz; w: flicker phase
+    vec4 vel; // xyz; w: seed
+};
+layout(std430, set = 0, binding = 0) buffer Fireflies { Firefly flies[]; };
+
+layout(push_constant) uniform Push {
+    vec4 bounds_min; // xyz roam box; w: dt
+    vec4 bounds_max; // xyz roam box; w: time in seconds
+} push;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= flies.length()) {
+        return;
+    }
+    Firefly f = flies[i];
+    float dt = push.bounds_min.w;
+    float t  = push.bounds_max.w;
+    float s  = f.vel.w;
+
+    vec3 force = vec3(
+        sin(t * 0.9 + s * 17.0),
+        sin(t * 1.3 + s * 29.0) * 0.5,
+        sin(t * 1.1 + s * 23.0));
+    // Steer back toward the box instead of bouncing off it — no visible wall
+    // hits, just a drift home.
+    force += (step(f.pos.xyz, push.bounds_min.xyz)
+            - step(push.bounds_max.xyz, f.pos.xyz)) * 4.0;
+
+    f.vel.xyz = (f.vel.xyz + force * dt) * 0.995;
+    float speed = length(f.vel.xyz);
+    if (speed > 1.5) {
+        f.vel.xyz *= 1.5 / speed;
+    }
+    f.pos.xyz += f.vel.xyz * dt;
+    flies[i] = f;
+}

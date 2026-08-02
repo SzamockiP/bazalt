@@ -348,6 +348,7 @@ Every directory in `examples/` runs on its own.
 | Windows and devices | [19_multi_window](examples/19_multi_window), [20_multi_context](examples/20_multi_context) (two GPUs), [21_window_modes](examples/21_window_modes), [08_pyqt_integration](examples/08_pyqt_integration) |
 | Tools | [12_hot_reload](examples/12_hot_reload), [27_drop_and_icon](examples/27_drop_and_icon) (drag a picture onto the window), [30_gamepad](examples/30_gamepad) |
 | Notebooks | [33_notebook](examples/33_notebook) (headless rendering, a slider, GPU compute — needs Jupyter) |
+| Showcase | [34_showcase](examples/34_showcase) (San Miguel with GPU culling, bindless materials, a day-night cycle, PCF shadows, MSAA and an HDR post chain) |
 
 [CHANGELOG.md](CHANGELOG.md) lists what each release added. [DESIGN.md](DESIGN.md) gives the
 reasons behind the API.
