@@ -2589,13 +2589,29 @@ used to claim.
   True on every full Vulkan driver without anybody asking. The refusal names the shape that
   works everywhere: the same geometry as an indexed `TRIANGLE_LIST`.
 
-  Two things the addition changed beside itself. The restart guard now accepts a fan — a
-  restart index ends a fan and the next one takes a new centre, which the Vulkan rule allows
-  and the first version of the guard did not. And `examples/38_primitive_restart` grew a
-  second GEOMETRY rather than a second pipeline: drawing blade vertices with a fan topology
-  is legal, produces a mess, and teaches nothing. **A demo of a topology has to use the shape
-  that topology is for** — so the strip mode draws blades and the fan mode draws flower
-  heads, and the wireframe shows the difference in one look.
+  The restart guard changed beside it: a restart index ends a fan and the next one takes a
+  new centre, which the Vulkan rule allows and the first version of the guard did not.
+
+  **The example took three tries, and the two failures are the useful part.** The first
+  bolted a fan onto the blade geometry a strip was built for. That is legal, produces a
+  tangle of diagonals converging on the root corner, and teaches nothing — the owner's report
+  was "the blades look the same", which is what a picture with no readable difference looks
+  like. The second gave the fan its own flower geometry, which was readable and answered a
+  question nobody asked: the two modes then differed in SHAPE as well as topology, so the
+  topology was no longer what the example was about.
+
+  What works is the owner's design: **one blade, three times, from the same vertices** — a
+  list on the left, a fan in the middle, a strip on the right. The three pictures are
+  identical to the pixel (14174 each) and cost 30, 12 and 12 indices, so the only variable
+  left is the index list. Two things had to go for it to be true. The taper is LINEAR,
+  because a fan is only a valid triangulation of a CONVEX outline. And the sway animation is
+  gone, because a bent blade is not convex, so the fan and the strip would cover different
+  areas and the comparison would quietly be a lie.
+
+  **The general rule, and it is why this is in the file:** a demo of a topology must vary the
+  topology and nothing else. Restart moved out to `examples/40_primitive_restart` for the
+  same reason — three topologies are three pipelines and three draws, and restart is a
+  question about ONE draw, so the two do not belong in one program.
 - ✅ **`monitor=` and video-mode enumeration for fullscreen** (was UNASKED) — DONE in 0.25.
   **~300 lines, and the estimate was the interesting part and it was right:** this reads
   like a kwarg and is not one. Choosing needs the monitors and their modes *visible* from

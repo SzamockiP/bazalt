@@ -83,12 +83,16 @@ structs.
   bar counts the fragments that survived. Occlusion queries had no example at
   all before this, and `Feature.PRECISE_OCCLUSION` is what decides whether the
   number is a count or only "something got through".
-- **`examples/38_primitive_restart`.** Three blades of grass, each a triangle
-  strip, in ONE indexed draw. Press R to drop the restart index and watch the
-  strip run on from the tip of one blade into the root of the next — the ribbon
-  between them is the thing restart exists to prevent. Press F for three flower
-  heads instead: the fan's own shape, where the wireframe shows every edge
-  running back to one centre.
+- **`examples/38_topologies`.** One blade of grass, drawn three times from the
+  same vertices: a TRIANGLE_LIST on the left, a TRIANGLE_FAN in the middle, a
+  TRIANGLE_STRIP on the right. The three pictures are identical to the pixel and
+  cost 30, 12 and 12 indices for the same ten triangles. Press W and the
+  wireframe shows what actually differs — the list and the strip cut the blade
+  into the same zigzag, the fan into slices that meet at the root corner.
+- **`examples/40_primitive_restart`.** The opposite question: three blades of the
+  SAME topology in one draw. Press R to drop the restart index and the strip runs
+  on from the tip of one blade into the root of the next — the ribbon between
+  them is the thing restart exists to prevent.
 - **`examples/39_two_sided_stencil`.** The camera flies in and out of a cube and
   the screen glows while it is inside, decided entirely by the stencil buffer:
   front faces increment, back faces decrement, and the two cancel from outside.
