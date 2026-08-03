@@ -24,3 +24,6 @@ dist/
 # scikit-build
 _skbuild/
 
+
+# ImGui writes its window layout beside the example that ran (0.25).
+imgui.ini

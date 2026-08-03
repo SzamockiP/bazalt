@@ -525,3 +525,69 @@ def test_a_count_offset_must_be_aligned_and_inside_the_buffer(extra_context):
         cmd.draw_indirect(args, count_buffer=counts, count_offset=8)
     with pytest.raises(bz.ResourceError, match="count buffer is 8"):
         cmd.draw_indirect(args, count_buffer=counts, count_offset=2**64 - 4)
+
+
+# ── stride= (0.25) ───────────────────────────────────────────────────────
+
+
+def test_indirect_stride_steps_over_per_draw_data(extra_context):
+    """stride= is what lets draw arguments be INTERLEAVED with per-draw data
+    instead of living in their own packed array. Two commands 32 bytes apart,
+    with 16 bytes of the caller's own payload between them — the same two stripes
+    the packed multi-draw above produces, so a stride the driver read wrongly
+    would paint something else."""
+    multi = extra_context(optional=[bz.Feature.MULTI_DRAW_INDIRECT])
+    if not multi.supports(bz.Feature.MULTI_DRAW_INDIRECT):
+        pytest.skip("GPU reports no multiDrawIndirect")
+
+    # VkDrawIndirectCommand is 4 words; the 4 after each are the caller's.
+    words = np.zeros(12, dtype=np.uint32)
+    words[0:4] = [6, 1, 0, 0]
+    words[4:8] = [0xDEAD, 0, 0, 0]
+    words[8:12] = [6, 2, 0, 0]
+    args = multi.create_buffer(words, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+
+    vert = multi.compile_shader(str(SHADER_DIR / "stripe.vert"), bz.ShaderStage.VERTEX)
+    frag = multi.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
+    target = multi.create_render_target(TARGET, TARGET)
+    draw = (multi.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
+            .push_constant(4, bz.ShaderStage.VERTEX).build(target))
+
+    cmd = multi.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
+        c.bind_pipeline(draw)
+        c.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
+        c.draw_indirect(args, count=2, stride=32)
+    multi.submit(cmd)
+    multi.wait()
+
+    # The same picture the packed version above produces: both commands start at
+    # instance 0, so the union is stripes 0 and 1. A stride the driver read
+    # differently would paint some other number of them.
+    assert painted(target) == 2 * STRIPE_PIXELS
+
+
+def test_a_stride_smaller_than_the_struct_is_refused(ctx):
+    """stride= exists to leave room BETWEEN the argument structs, so it can only
+    be larger. Smaller would make consecutive commands overlap."""
+    buffer = ctx.create_buffer(256, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with pytest.raises(bz.ResourceError, match="stride"):
+        cmd.draw_indirect(buffer, count=2, stride=8)
+    with pytest.raises(bz.ResourceError, match="multiple of 4"):
+        cmd.draw_indirect(buffer, count=2, stride=17)
+
+
+def test_the_last_command_needs_only_its_own_struct(extra_context):
+    """A buffer sized exactly for the data must not be refused: the padding a
+    stride leaves is between commands, and the last one has nothing after it."""
+    multi = extra_context(optional=[bz.Feature.MULTI_DRAW_INDIRECT])
+    if not multi.supports(bz.Feature.MULTI_DRAW_INDIRECT):
+        pytest.skip("GPU reports no multiDrawIndirect")
+    # Two 16-byte commands at a stride of 32 need 32 + 16 = 48 bytes, not 64.
+    buffer = multi.create_buffer(48, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    cmd = multi.create_command_buffer()
+    cmd.begin()
+    cmd.draw_indirect(buffer, count=2, stride=32)

@@ -33,6 +33,23 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(volk)
 if(TARGET volk)
     set_target_properties(volk PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+    # PUBLIC, and on VOLK rather than on _core, because the platform macro changes
+    # the LAYOUT of VolkDeviceTable: every win32-only entry point is behind
+    # `#if defined(VK_USE_PLATFORM_WIN32_KHR)` in volk.h. Defining it for _core
+    # alone gave the two translation units two different structs — one definition
+    # rule broken, and every field after the guarded ones read at the wrong
+    # offset. Found in 0.25 by the first call that needed one of those entry
+    # points (vkAcquireFullScreenExclusiveModeEXT), which crashed.
+    #
+    # PUBLIC propagates to everything that links volk, so the definition cannot
+    # drift between them again.
+    if(WIN32)
+        target_compile_definitions(volk PUBLIC VK_USE_PLATFORM_WIN32_KHR)
+    elseif(APPLE)
+        # The same rule for the Metal surface entry point.
+        target_compile_definitions(volk PUBLIC VK_USE_PLATFORM_METAL_EXT)
+    endif()
 endif()
 
 #vma
@@ -157,16 +174,13 @@ else()
     target_compile_options(_core PRIVATE -Wno-interference-size)
 endif()
 
-if(WIN32)
-    target_compile_definitions(_core PRIVATE VK_USE_PLATFORM_WIN32_KHR)
-endif()
-
-# The macOS mirror of the line above: it makes volk load vkCreateMetalSurfaceEXT,
-# which is the surface entry point vk-bootstrap enables there. Nothing else about
-# the platform needs code -- vk-bootstrap adds VK_KHR_portability_enumeration and
-# the instance flag by itself, and enables VK_KHR_portability_subset on the device.
+# VK_USE_PLATFORM_WIN32_KHR / VK_USE_PLATFORM_METAL_EXT are defined on the volk
+# target as PUBLIC (see above), so they reach this target too and both agree on
+# what VolkDeviceTable looks like. They make volk load the platform surface entry
+# points vk-bootstrap enables. Nothing else about macOS needs code -- vk-bootstrap
+# adds VK_KHR_portability_enumeration and the instance flag by itself, and enables
+# VK_KHR_portability_subset on the device.
 if(APPLE)
-    target_compile_definitions(_core PRIVATE VK_USE_PLATFORM_METAL_EXT)
 
     # libc++ annotates <format> and the floating-point std::to_chars it calls with
     # availability, so a deployment target below 13.3 fails to compile every

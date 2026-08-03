@@ -6,6 +6,7 @@
 #include <format>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // Optional GPU capabilities, addressed by what they *do* rather than by which
 // Vulkan version or extension happens to spell them on a given driver.
@@ -43,6 +44,11 @@ enum class Feature
     // and independentBlend.
     FRAGMENT_STORES,     // fragmentStoresAndAtomics
     VERTEX_STAGE_STORES, // vertexPipelineStoresAndAtomics — vertex, tessellation, geometry
+    // occlusionQueryPrecise — an occlusion query counts SAMPLES rather than
+    // answering "something passed". Without it the spec allows any non-zero
+    // value, so `query.samples` would mean two things depending on the driver:
+    // this row is what lets a caller ask which one they are getting.
+    PRECISE_OCCLUSION,
     // The three rows below live in a pNext struct rather than in
     // VkPhysicalDeviceFeatures, which is why the table has three columns as of
     // 0.21 and had one before.
@@ -57,7 +63,12 @@ enum class Feature
     COMPARISON_SAMPLER,   // mutableComparisonSamplers — create_sampler(compare=)
     SAMPLER_MIP_LOD_BIAS, // samplerMipLodBias — create_sampler(mip_lod_bias=)
     MULTISAMPLE_ARRAYS,   // multisampleArrayImage — samples > 1 together with layers > 1
-    IMAGE_VIEW_2D_ON_3D   // imageView2DOn3DImage — target.layer(z) on a 3D image
+    IMAGE_VIEW_2D_ON_3D,  // imageView2DOn3DImage — target.layer(z) on a 3D image
+    TRIANGLE_FANS,        // triangleFans — Topology::TRIANGLE_FAN
+    // The first capability that is an EXTENSION rather than a feature bit
+    // (0.25). VK_EXT_full_screen_exclusive is Win32-only in practice, so this
+    // answers False everywhere else — which is what the row is for.
+    EXCLUSIVE_FULLSCREEN
 };
 
 // The feature structs bazalt reads, as one value with no pNext links between the
@@ -76,6 +87,13 @@ struct DeviceFeatures
     VkPhysicalDevicePortabilitySubsetFeaturesKHR portability{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR};
     bool portability_subset = false;
+
+    // Which device extensions this GPU offers, for the rows whose capability is
+    // an extension rather than a feature bit (0.25). A vector of names rather
+    // than a bool per extension: the table below is the list of the ones bazalt
+    // cares about, and a second list here would be a place for the two to
+    // disagree.
+    std::vector<std::string> extensions;
 };
 
 // One query for all three structs. Both callers used to build this chain by hand
@@ -106,18 +124,38 @@ inline DeviceFeatures query_device_features(
     features.v11.pNext = nullptr;
     features.v12.pNext = nullptr;
     features.portability.pNext = nullptr;
+
+    std::uint32_t extension_count = 0;
+    if (vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &extension_count, nullptr) == VK_SUCCESS &&
+        extension_count > 0)
+    {
+        std::vector<VkExtensionProperties> properties(extension_count);
+        if (vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &extension_count, properties.data()) ==
+            VK_SUCCESS)
+        {
+            features.extensions.reserve(properties.size());
+            for (const auto& property : properties)
+            {
+                features.extensions.emplace_back(property.extensionName);
+            }
+        }
+    }
     return features;
 }
 
 // A Feature is one boolean in one of the three structs above, so the table is a
 // name plus three optional pointers-to-member of which exactly one is set.
 //
-// Three columns rather than a union or a variant: the table stays constexpr and
+// Four columns rather than a union or a variant: the table stays constexpr and
 // stays an aggregate initializer, and the cost of a row that sets none is a
 // feature that always reports false — loud the first time anyone asks for it.
-// Capabilities that need an extension (ray tracing, mesh shaders) get a fourth
-// column when there is API in bazalt to actually use them; advertising them
-// before that would be a hollow promise.
+//
+// The fourth column arrived in 0.25 and this comment predicted it: a capability
+// whose Vulkan spelling is an EXTENSION rather than a feature bit (exclusive
+// fullscreen, and ray tracing or mesh shaders if they ever come) names the
+// extension instead. It is deliberately not a fifth kind of thing at the call
+// sites — feature_available and configure_features_ each grew one branch, and
+// ctx.supports() reads the same for every row.
 struct FeatureInfo
 {
     Feature feature;
@@ -126,6 +164,7 @@ struct FeatureInfo
     VkBool32 VkPhysicalDeviceVulkan11Features::* v11 = nullptr;
     VkBool32 VkPhysicalDeviceVulkan12Features::* v12 = nullptr;
     VkBool32 VkPhysicalDevicePortabilitySubsetFeaturesKHR::* portability = nullptr;
+    const char* extension = nullptr;
 };
 
 // std::to_array, not std::array<FeatureInfo, N>: the extent was a hardcoded 8 and
@@ -144,6 +183,7 @@ inline constexpr auto kFeatureTable = std::to_array<FeatureInfo>({
     {Feature::GEOMETRY_SHADER, "GEOMETRY_SHADER", &VkPhysicalDeviceFeatures::geometryShader},
     {Feature::FRAGMENT_STORES, "FRAGMENT_STORES", &VkPhysicalDeviceFeatures::fragmentStoresAndAtomics},
     {Feature::VERTEX_STAGE_STORES, "VERTEX_STAGE_STORES", &VkPhysicalDeviceFeatures::vertexPipelineStoresAndAtomics},
+    {Feature::PRECISE_OCCLUSION, "PRECISE_OCCLUSION", &VkPhysicalDeviceFeatures::occlusionQueryPrecise},
     {.feature = Feature::MULTIVIEW, .name = "MULTIVIEW", .v11 = &VkPhysicalDeviceVulkan11Features::multiview},
     {.feature = Feature::BINDLESS, .name = "BINDLESS", .v12 = &VkPhysicalDeviceVulkan12Features::descriptorIndexing},
     {.feature = Feature::DRAW_INDIRECT_COUNT,
@@ -161,6 +201,13 @@ inline constexpr auto kFeatureTable = std::to_array<FeatureInfo>({
     {.feature = Feature::IMAGE_VIEW_2D_ON_3D,
      .name = "IMAGE_VIEW_2D_ON_3D",
      .portability = &VkPhysicalDevicePortabilitySubsetFeaturesKHR::imageView2DOn3DImage},
+    {.feature = Feature::TRIANGLE_FANS,
+     .name = "TRIANGLE_FANS",
+     .portability = &VkPhysicalDevicePortabilitySubsetFeaturesKHR::triangleFans},
+    // The first row whose Vulkan spelling is an extension rather than a bit.
+    {.feature = Feature::EXCLUSIVE_FULLSCREEN,
+     .name = "EXCLUSIVE_FULLSCREEN",
+     .extension = "VK_EXT_full_screen_exclusive"},
 });
 
 inline constexpr const FeatureInfo& feature_info(Feature feature)
@@ -177,7 +224,9 @@ inline constexpr std::string_view feature_name(Feature feature)
     return feature_info(feature).name;
 }
 
-inline constexpr bool feature_available(const DeviceFeatures& available, Feature feature)
+// Not constexpr since 0.25: an extension row compares strings in a vector, which
+// no caller evaluates at compile time anyway.
+inline bool feature_available(const DeviceFeatures& available, Feature feature)
 {
     const FeatureInfo& info = feature_info(feature);
     if (info.core)
@@ -198,6 +247,10 @@ inline constexpr bool feature_available(const DeviceFeatures& available, Feature
         // device still do the thing full Vulkan always does", so a driver that
         // never claimed to be a subset answers yes without being asked.
         return !available.portability_subset || available.portability.*(info.portability) == VK_TRUE;
+    }
+    if (info.extension)
+    {
+        return std::ranges::find(available.extensions, std::string_view(info.extension)) != available.extensions.end();
     }
     return false;
 }

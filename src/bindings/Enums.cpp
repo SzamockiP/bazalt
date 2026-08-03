@@ -34,6 +34,7 @@ void bind_enums(py::module_& m)
         .value("GEOMETRY_SHADER", Feature::GEOMETRY_SHADER)
         .value("FRAGMENT_STORES", Feature::FRAGMENT_STORES)
         .value("VERTEX_STAGE_STORES", Feature::VERTEX_STAGE_STORES)
+        .value("PRECISE_OCCLUSION", Feature::PRECISE_OCCLUSION)
         .value("MULTIVIEW", Feature::MULTIVIEW)
         .value("BINDLESS", Feature::BINDLESS)
         .value("DRAW_INDIRECT_COUNT", Feature::DRAW_INDIRECT_COUNT)
@@ -42,7 +43,10 @@ void bind_enums(py::module_& m)
         .value("COMPARISON_SAMPLER", Feature::COMPARISON_SAMPLER)
         .value("SAMPLER_MIP_LOD_BIAS", Feature::SAMPLER_MIP_LOD_BIAS)
         .value("MULTISAMPLE_ARRAYS", Feature::MULTISAMPLE_ARRAYS)
-        .value("IMAGE_VIEW_2D_ON_3D", Feature::IMAGE_VIEW_2D_ON_3D);
+        .value("IMAGE_VIEW_2D_ON_3D", Feature::IMAGE_VIEW_2D_ON_3D)
+        .value("TRIANGLE_FANS", Feature::TRIANGLE_FANS)
+        // The first row backed by an extension rather than a feature bit.
+        .value("EXCLUSIVE_FULLSCREEN", Feature::EXCLUSIVE_FULLSCREEN);
 
     // The gamepad layout GLFW maps every known pad onto, renamed rather than
     // translated: the values ARE the GLFW ones, so the two cannot drift.
@@ -212,6 +216,20 @@ void bind_enums(py::module_& m)
         .value("HIDDEN", CursorMode::HIDDEN)
         .value("DISABLED", CursorMode::DISABLED);
 
+    // What the pointer draws, which set_cursor takes. CursorMode answers whether
+    // it is visible at all, so the two compose instead of overlapping.
+    py::enum_<Cursor>(m, "Cursor")
+        .value("ARROW", Cursor::ARROW)
+        .value("IBEAM", Cursor::IBEAM)
+        .value("CROSSHAIR", Cursor::CROSSHAIR)
+        .value("POINTING_HAND", Cursor::POINTING_HAND)
+        .value("RESIZE_EW", Cursor::RESIZE_EW)
+        .value("RESIZE_NS", Cursor::RESIZE_NS)
+        .value("RESIZE_NWSE", Cursor::RESIZE_NWSE)
+        .value("RESIZE_NESW", Cursor::RESIZE_NESW)
+        .value("RESIZE_ALL", Cursor::RESIZE_ALL)
+        .value("NOT_ALLOWED", Cursor::NOT_ALLOWED);
+
     py::enum_<BufferType>(m, "BufferType")
         .value("VERTEX", BufferType::VERTEX)
         .value("INDEX", BufferType::INDEX)
@@ -257,6 +275,7 @@ void bind_enums(py::module_& m)
         .value("LINE_LIST", Topology::LINE_LIST)
         .value("TRIANGLE_STRIP", Topology::TRIANGLE_STRIP)
         .value("LINE_STRIP", Topology::LINE_STRIP)
+        .value("TRIANGLE_FAN", Topology::TRIANGLE_FAN)
         .value("PATCH_LIST", Topology::PATCH_LIST);
 
     // The vocabulary of cmd.barrier() in manual mode (auto_barriers=False).
@@ -358,6 +377,14 @@ void bind_enums(py::module_& m)
     py::enum_<FrontFace>(m, "FrontFace")
         .value("CLOCKWISE", FrontFace::CLOCKWISE)
         .value("COUNTER_CLOCKWISE", FrontFace::COUNTER_CLOCKWISE);
+
+    // Which side of a triangle a stencil state applies to. One enable bit and two
+    // op-states is what Vulkan has, so this names the pair rather than splitting
+    // stencil_test into two verbs of eight parameters each.
+    py::enum_<Face>(m, "Face")
+        .value("FRONT_AND_BACK", Face::FRONT_AND_BACK)
+        .value("FRONT", Face::FRONT)
+        .value("BACK", Face::BACK);
 
     py::enum_<MemoryUsage>(m, "MemoryUsage")
         .value("STATIC", MemoryUsage::STATIC)

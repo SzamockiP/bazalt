@@ -45,12 +45,13 @@ def white_triangle(ctx):
     return vbuf, ibuf
 
 
-def _render_white_triangle(ctx, triangle_shaders, white_triangle, samples, depth=None):
+def _render_white_triangle(ctx, triangle_shaders, white_triangle, samples, depth=None, keep_samples=False):
     """Render the solid-white triangle on black into a fresh target, return the
     resolved pixels (uint8 HxWx4). Optionally attach depth."""
     vert, frag = triangle_shaders
     vbuf, ibuf = white_triangle
-    target = ctx.create_render_target(64, 64, color=bz.Format.RGBA8, depth=depth, samples=samples)
+    target = ctx.create_render_target(
+        64, 64, color=bz.Format.RGBA8, depth=depth, samples=samples, keep_samples=keep_samples)
     builder = (ctx.graphics_pipeline()
                .vertex_shader(vert)
                .fragment_shader(frag)
@@ -114,6 +115,77 @@ def test_msaa_resolved_image_is_readable(ctx, triangle_shaders, white_triangle, 
     px = target.color[0].read()
     assert px.shape == (64, 64, 4)
     assert px.dtype == np.uint8
+
+
+# ── the multisampled attachment itself (custom resolve) ──────────────────────
+
+
+def test_multisampled_attachments_need_keep_samples(ctx, triangle_shaders, white_triangle, samples):
+    """target.multisampled_color / .multisampled_depth are the images rendered
+    into; target.color / .depth stay the resolve. They only appear with
+    keep_samples=True, because without it the pass discards them."""
+    plain = _render_white_triangle(ctx, triangle_shaders, white_triangle, samples=1, keep_samples=True)
+    assert plain.multisampled_color == (), "no MSAA means nothing to keep"
+    assert plain.multisampled_depth is None
+
+    discarded = _render_white_triangle(ctx, triangle_shaders, white_triangle, samples=samples)
+    assert discarded.multisampled_color == (), "the samples were discarded, so there is nothing to hand out"
+    assert discarded.multisampled_depth is None
+
+    target = _render_white_triangle(
+        ctx, triangle_shaders, white_triangle, samples=samples, depth=bz.Format.D32F, keep_samples=True)
+    assert len(target.multisampled_color) == 1
+    assert target.multisampled_color[0].samples == samples
+    assert target.color[0].samples == 1
+    assert target.multisampled_depth.samples == samples
+    assert target.depth.samples == 1
+
+
+def test_custom_resolve_reads_individual_samples(ctx, triangle_shaders, white_triangle, samples):
+    """The point of the feature: bind the multisampled image to a sampler2DMS and
+    resolve it by hand. Sample 0 alone stays hard-edged where the average is grey,
+    which nothing but per-sample access can produce.
+
+    The barriers are what this really tests — the multisampled attachment has to
+    leave the pass in a layout a shader can read, and the validation layers are
+    the referee for that (see conftest)."""
+    if samples != 4:
+        pytest.skip("resolve_ms.frag averages exactly four samples")
+
+    target = _render_white_triangle(ctx, triangle_shaders, white_triangle, samples=samples, keep_samples=True)
+
+    fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+    resolve = ctx.compile_shader(str(SHADER_DIR / "resolve_ms.frag"), bz.ShaderStage.FRAGMENT)
+    screen = ctx.create_render_target(64, 64)
+    pipe = (ctx.graphics_pipeline()
+            .vertex_shader(fullscreen)
+            .fragment_shader(resolve)
+            .texture(0, bz.ShaderStage.FRAGMENT)
+            .build(screen))
+
+    pool = ctx.create_descriptor_pool(max_sets=4, textures=4)
+    dset = pool.allocate_set(pipe)
+    # NEAREST because a multisampled image is fetched, never filtered.
+    dset.set_image(0, target.multisampled_color[0], sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
+
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    cmd.begin_rendering(screen, clear_color=[0, 0, 0, 1])
+    cmd.bind_pipeline(pipe)
+    cmd.bind_descriptor_set(dset, pipe)
+    cmd.draw(3)
+    cmd.end_rendering(screen)
+    ctx.submit(cmd)
+
+    pixels = screen.color[0].read()
+    single = pixels[:, :, 0].astype(np.int32)
+    averaged = pixels[:, :, 1].astype(np.int32)
+
+    assert list(pixels[32, 32][:2]) == [255, 255], "triangle interior covers every sample"
+    assert list(pixels[2, 2][:2]) == [0, 0], "a corner covers none of them"
+    assert _grey_edge_pixels(pixels) == 0, "sample 0 on its own must stay hard-edged"
+    assert int(np.count_nonzero((averaged > 20) & (averaged < 235))) > 0, "the average must find partial coverage"
+    assert int(np.count_nonzero(single != averaged)) > 0, "the samples must differ from their own average"
 
 
 # ── depth resolve (SAMPLE_ZERO) ──────────────────────────────────────────────

@@ -549,3 +549,116 @@ def test_line_mode_draws_edges_and_leaves_the_interior(extra_context):
     painted = lambda px: int(np.count_nonzero(px[:, :, :3].any(axis=2)))
     assert 0 < painted(lined) < painted(filled) // 2, \
         f"line {painted(lined)} px vs fill {painted(filled)} px"
+
+
+# ── primitive restart and per-face stencil (0.25) ────────────────────────
+
+
+def test_primitive_restart_builds_on_a_strip(ctx, triangle_shaders):
+    """Opt-in, because it takes the largest index value away from being an index.
+    The pipeline is the whole feature — there is no draw-time knob."""
+    vert, frag = triangle_shaders
+    target = ctx.create_render_target(16, 16)
+    pipe = (ctx.graphics_pipeline()
+            .vertex_shader(vert)
+            .fragment_shader(frag)
+            .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+            .topology(bz.Topology.TRIANGLE_STRIP, restart=True)
+            .build(target))
+    assert pipe is not None
+
+
+def test_primitive_restart_needs_a_strip_or_a_fan(ctx, triangle_shaders):
+    """A restart index ends a primitive that runs vertices together, and a list
+    has none to end. Refused with the reason rather than left to
+    VUID-VkPipelineInputAssemblyStateCreateInfo-topology-06252."""
+    vert, frag = triangle_shaders
+    target = ctx.create_render_target(16, 16)
+    with pytest.raises(bz.ShaderError, match="strip or a fan"):
+        (ctx.graphics_pipeline()
+         .vertex_shader(vert)
+         .fragment_shader(frag)
+         .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+         .topology(bz.Topology.TRIANGLE_LIST, restart=True)
+         .build(target))
+
+
+def test_stencil_state_can_differ_per_face(ctx, triangle_shaders):
+    """Two calls spell a two-sided test — the shadow-volume shape, where one side
+    increments and the other decrements. `enable` is not per face, because Vulkan
+    has one stencilTestEnable and two op-states."""
+    vert, frag = triangle_shaders
+    target = ctx.create_render_target(16, 16, depth=bz.Format.DEPTH_STENCIL)
+    pipe = (ctx.graphics_pipeline()
+            .vertex_shader(vert)
+            .fragment_shader(frag)
+            .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+            .cull_mode(bz.CullMode.NONE)
+            # FRONT_AND_BACK first, so the two-sided calls below are visibly an
+            # override of one state rather than two halves of nothing.
+            .stencil_test(True, compare=bz.CompareOp.ALWAYS, face=bz.Face.FRONT_AND_BACK)
+            .stencil_test(True, compare=bz.CompareOp.ALWAYS,
+                          pass_op=bz.StencilOp.INCREMENT_CLAMP, face=bz.Face.FRONT)
+            .stencil_test(True, compare=bz.CompareOp.ALWAYS,
+                          pass_op=bz.StencilOp.DECREMENT_CLAMP, face=bz.Face.BACK)
+            .build(target))
+    assert pipe is not None
+
+
+def test_a_triangle_fan_draws_from_one_vertex(ctx, triangle_shaders):
+    """0.25: every triangle in a fan shares the FIRST vertex. Four vertices make
+    two triangles that way and one on a list, so the pixel count is the claim.
+
+    Gated on TRIANGLE_FANS, because Metal has no fan and MoltenVK says so."""
+    if not ctx.supports(bz.Feature.TRIANGLE_FANS):
+        pytest.skip("this driver reports no triangleFans (a portability subset)")
+    vert, frag = triangle_shaders
+    # A square as a fan around its first corner: (0,0), (1,0), (1,1), (0,1).
+    corners = [
+        -0.9, -0.9, 0.0, 1.0, 1.0, 1.0,
+        +0.9, -0.9, 0.0, 1.0, 1.0, 1.0,
+        +0.9, +0.9, 0.0, 1.0, 1.0, 1.0,
+        -0.9, +0.9, 0.0, 1.0, 1.0, 1.0,
+    ]
+    vbuf = ctx.create_buffer(corners, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC,
+                             bz.DataType.FLOAT)
+
+    def render(topology):
+        target = ctx.create_render_target(64, 64)
+        pipe = (ctx.graphics_pipeline()
+                .vertex_shader(vert)
+                .fragment_shader(frag)
+                .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+                .topology(topology)
+                .cull_mode(bz.CullMode.NONE)
+                .build(target))
+        cmd = ctx.create_command_buffer()
+        cmd.begin()
+        with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
+            cmd.bind_pipeline(pipe)
+            cmd.bind_vertex_buffer(vbuf)
+            cmd.draw(4)
+        ctx.submit(cmd)
+        return int(np.count_nonzero(target.color[0].read()[:, :, 0] > 128))
+
+    fan = render(bz.Topology.TRIANGLE_FAN)
+    triangle_list = render(bz.Topology.TRIANGLE_LIST)
+    # The fan closes the square; the list draws one corner triangle and drops the
+    # fourth vertex, so it covers about half as much.
+    assert fan > triangle_list * 1.7, f"fan={fan} list={triangle_list}"
+
+
+def test_a_fan_accepts_primitive_restart(ctx, triangle_shaders):
+    """A restart index ends a fan and the next one picks a new centre, so the
+    guard that refuses restart on a list must not refuse it here."""
+    if not ctx.supports(bz.Feature.TRIANGLE_FANS):
+        pytest.skip("this driver reports no triangleFans (a portability subset)")
+    vert, frag = triangle_shaders
+    target = ctx.create_render_target(16, 16)
+    pipe = (ctx.graphics_pipeline()
+            .vertex_shader(vert)
+            .fragment_shader(frag)
+            .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+            .topology(bz.Topology.TRIANGLE_FAN, restart=True)
+            .build(target))
+    assert pipe is not None

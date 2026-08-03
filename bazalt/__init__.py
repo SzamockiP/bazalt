@@ -3,7 +3,7 @@
 from bazalt import _core
 from bazalt._core import *  # noqa: F401, F403
 
-__version__ = "0.24.0"
+__version__ = "0.25.0"
 
 __all__ = [
     # Core
@@ -16,6 +16,11 @@ __all__ = [
     "Window",
     "Device",
     "list_devices",
+    # Also process-wide, and the one such query that needs no live Window:
+    # choosing where to open one happens first (0.25).
+    "Monitor",
+    "VideoMode",
+    "list_monitors",
     "poll_events",
     # The sleeping half of the same pump, for a program that only redraws on
     # input (0.24).
@@ -40,6 +45,7 @@ __all__ = [
     "DescriptorSet",
     "CommandBuffer",
     "RenderingScope",
+    "RecordScope",
     "Timer",
     "LabelScope",
     "OcclusionQuery",
@@ -76,6 +82,8 @@ __all__ = [
     "Key",
     "MouseButton",
     "CursorMode",
+    "Cursor",
+    "Face",
     # Errors — the type is the recoverability contract
     "BazaltError",
     "InitializationError",

@@ -28,6 +28,25 @@ void bind_targets(py::module_& m)
         .def_property_readonly(
             "depth",
             [](const OffscreenTarget& t) -> py::object { return t.depth() ? py::cast(t.depth()) : py::none(); })
+        // The multisampled attachments, for a custom resolve: bind one to a
+        // sampler2DMS and read the samples with texelFetch. Empty tuple / None
+        // unless samples > 1, and `color` / `depth` above stay the resolve — the
+        // images almost everything wants.
+        .def_property_readonly(
+            "multisampled_color",
+            [](const OffscreenTarget& t)
+            {
+                py::tuple out(t.multisampled_colors().size());
+                for (size_t i = 0; i < t.multisampled_colors().size(); ++i)
+                {
+                    out[i] = py::cast(t.multisampled_colors()[i]);
+                }
+                return out;
+            })
+        .def_property_readonly(
+            "multisampled_depth",
+            [](const OffscreenTarget& t) -> py::object
+            { return t.multisampled_depth() ? py::cast(t.multisampled_depth()) : py::none(); })
         // Render-to-layer / render-to-mip: a lightweight view of one subresource.
         // Pass it straight to cmd.rendering(...). Cube face i == layer i, Vulkan
         // order +X, -X, +Y, -Y, +Z, -Z.
@@ -58,6 +77,13 @@ void bind_targets(py::module_& m)
     // Also constructor-free since 0.23: ctx.create_renderer(window) makes one.
     py::class_<SwapchainRenderer, RenderTarget, std::shared_ptr<SwapchainRenderer>>(m, "SwapchainRenderer")
         .def_property_readonly("present_mode", &SwapchainRenderer::present_mode)
+        // Exclusive fullscreen: a property of the swapchain, so a verb here
+        // rather than a fifth WindowMode (0.25).
+        .def(
+            "set_fullscreen_exclusive",
+            [](SwapchainRenderer& self, bool enable) { unwrap(self.set_fullscreen_exclusive(enable), nullptr); },
+            py::arg("enable") = true)
+        .def_property_readonly("fullscreen_exclusive", &SwapchainRenderer::fullscreen_exclusive)
         // A verb, not a settable property, because the request is a preference:
         // read present_mode back to see what the driver actually gave you.
         .def(

@@ -5,6 +5,167 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.25.0] — 2026-08-04
+
+"The window's input surface finishes". A bazalt program could read keys, mouse
+buttons, a scroll wheel, dropped files, the clipboard and a gamepad. It could
+not read what the user TYPED, could not say what the pointer should look like,
+and could not tell which gamepad button went down this frame. Three holes of the
+same shape: state the OS already delivers and nothing handed over.
+
+`window.text_input()` is the one that matters most, because no library can
+supply it for itself. A character is not a key — the keyboard layout, the shift
+state, AltGr, the dead keys and an IME all sit between the two — so a text field
+in a bazalt program was deaf. `examples/35_imgui_overlay` is the proof: a real
+ImGui panel that tunes a running shader, written entirely on the public API, with
+nothing about ImGui inside bazalt.
+
+The monitor enumeration closes the last backlog entry that touches windowing. A
+fullscreen window can name its display and its video mode.
+
+Then it empties the rest of the additive backlog before the 1.0 freeze: the
+samples behind MSAA can be read, exclusive fullscreen, primitive restart, a
+stride on the indirect draws, a precise occlusion count, per-face stencil,
+`with ctx.record()`, and the short forms of the two verbs that took a pipeline
+they already knew.
+
+Exclusive fullscreen found a bug that had been true since Windows support
+existed: bazalt and volk were compiling two different `VolkDeviceTable`
+structs.
+
+### Added
+- **`window.text_input()`.** The characters typed during the last poll cycle, as
+  text. It expires with the cycle and reads the same twice inside it, exactly
+  like the key edges and the dropped files. Use it for a text field and
+  `was_key_pressed` for a toggle: backspace, Enter and the arrows produce no
+  character.
+- **`window.set_cursor(shape)` and `bz.Cursor`.** The ten standard pointers — an
+  I-beam over a text field, a resize arrow over a splitter, a pointing hand over
+  a link. A different question from `set_cursor_mode`, which says whether the
+  pointer is visible at all, so the two compose. A platform without a given
+  shape draws the arrow instead of failing.
+- **`pad.was_button_pressed(button)`.** The edge, where `pad.button()` is the
+  level — the pair the keyboard has had since 0.16. GLFW has no gamepad
+  callback, so the edge is measured between two readings: read each pad every
+  frame, or a press and a release inside a frame you skipped are both invisible.
+- **`bz.list_monitors()`, `bz.Monitor`, `bz.VideoMode`.** Every display, with its
+  name, position, current mode, physical size, content scale and every video
+  mode it can take. `bz.Window(monitor=...)` opens a fullscreen window on one,
+  and `window.set_mode(mode, monitor=..., video_mode=...)` moves it or changes
+  the display's resolution and refresh rate.
+
+  This is the only process-wide query that needs no live Window, because
+  choosing where to open the first one happens before there is one.
+- **`keep_samples=True` on `ctx.create_render_target`, and
+  `target.multisampled_color` / `.multisampled_depth`.** The multisampled
+  attachment survives the pass and binds to a `sampler2DMS`, so a shader can
+  read the samples one at a time with `texelFetch` — per-sample edge detection,
+  and the shape a TAA resolve wants. The hardware resolve averages the samples
+  and that average is the end of the road.
+
+  It costs the bandwidth of a full multisample buffer, which is why it is off by
+  default: without it the samples never have to leave tile memory on a tiled
+  GPU. The images are empty without it, because handing out an attachment the
+  pass discarded is handing out undefined contents.
+- **`examples/35_imgui_overlay`.** Sliders, a colour picker and a text field
+  that tune a running shader. The backend is about 90 lines of ordinary calls —
+  a pipeline, a dynamic vertex buffer, push constants, a scissor and
+  `draw_indexed` — and nothing in bazalt knows what ImGui is. Needs `pip install
+  imgui`.
+- **`examples/36_msaa_resolve`.** The same picture three ways: the hardware
+  resolve, sample 0 on its own, and how much the samples disagree. The third is
+  a map of every pixel MSAA is working on.
+- **Three keys in `examples/21_window_modes`.** `M` moves a fullscreen window
+  between displays, `R` cycles that display's video modes, and `X` takes the
+  display outright. They are about WHERE the picture goes rather than what is in
+  it, which is why they share the window-modes demo.
+- **`examples/37_occlusion_query`.** A square slides behind a wall and the title
+  bar counts the fragments that survived. Occlusion queries had no example at
+  all before this, and `Feature.PRECISE_OCCLUSION` is what decides whether the
+  number is a count or only "something got through".
+- **`examples/38_topologies`.** One blade of grass, drawn three times from the
+  same vertices: a TRIANGLE_LIST on the left, a TRIANGLE_FAN in the middle, a
+  TRIANGLE_STRIP on the right. The three pictures are identical to the pixel and
+  cost 30, 12 and 12 indices for the same ten triangles. Press W and the
+  wireframe shows what actually differs — the list and the strip cut the blade
+  into the same zigzag, the fan into slices that meet at the root corner.
+- **`examples/40_primitive_restart`.** The opposite question: three blades of the
+  SAME topology in one draw. Press R to drop the restart index and the strip runs
+  on from the tip of one blade into the root of the next — the ribbon between
+  them is the thing restart exists to prevent.
+- **`examples/39_two_sided_stencil`.** The camera flies in and out of a cube and
+  the screen glows while it is inside, decided entirely by the stencil buffer:
+  front faces increment, back faces decrement, and the two cancel from outside.
+  Press F to make both faces increment and the effect breaks in the way that
+  shows why `face=` had to exist.
+- **`renderer.set_fullscreen_exclusive(enable)` and
+  `renderer.fullscreen_exclusive`.** Take the display outright instead of drawing
+  through the compositor: lower latency, and a fullscreen window may change the
+  display mode. A property of the swapchain rather than a fifth `WindowMode`, so
+  put the window in `FULLSCREEN` first. Needs
+  `Feature.EXCLUSIVE_FULLSCREEN`, which is a Windows extension.
+
+  Asking is not getting. The driver may refuse — another application can hold the
+  display — so the call succeeds and `fullscreen_exclusive` reports what you got.
+- **`Feature.PRECISE_OCCLUSION`.** With it, `OcclusionQuery.samples` is a count of
+  samples. Without it the spec allows any non-zero value for "something passed",
+  so the number meant two different things depending on the driver, and now you
+  can ask which one you are being given.
+- **`topology(..., restart=True)`.** The largest index value ends the current
+  strip and starts another, so one draw carries many strips. Opt-in, because it
+  takes that value away from being an index. Needs a strip or a fan.
+- **`Topology.TRIANGLE_FAN` and `Feature.TRIANGLE_FANS`.** Every triangle shares
+  the first vertex — a pie, a circle, a convex polygon. It was simply missing
+  from the enum, with nothing saying why.
+
+  It needs a Feature because Metal has no triangle fan, so MoltenVK reports it
+  absent and the pipeline build says so instead of drawing something else. On
+  every full Vulkan driver it answers True without being asked, like the other
+  portability rows. Where it answers False, the same shape is an indexed
+  TRIANGLE_LIST.
+- **`stride=` on `draw_indirect` and `draw_indexed_indirect`.** Lets the draw
+  arguments be interleaved with your own per-draw data instead of living in a
+  packed array of their own. `dispatch_indirect` has none: it issues one command,
+  so there is nothing to step over.
+- **`face=` on `stencil_test`, and `bz.Face`.** Two calls spell a two-sided test,
+  which is what a shadow volume wants. `enable` is not per face: Vulkan has one
+  stencil-test bit and two op-states, so any call sets the bit.
+- **`with ctx.record() as cmd:`.** The missing half of `cmd.begin()`, which was
+  named like one side of a pair that had no other side. The block brackets the
+  RECORDING and does not submit — who submits stays your decision.
+- **Short `cmd.bind_descriptor_set(set)` and `cmd.push_constants(offset, data)`.**
+  Both arguments the long forms take are already known: a descriptor set records
+  the index it was allocated for, and `bind_pipeline` records the pipeline. The
+  long forms stay for a recording split across functions.
+
+### Changed
+- **`cull_mode(bz.CullMode.NONE)` no longer needs a winding.** `front_face`
+  defaults to `COUNTER_CLOCKWISE`, which is what the builder already started
+  with. Culling nothing makes the winding meaningless, and the call demanded one
+  anyway. Additive: every existing call means the same thing.
+- **`window.set_mode(mode)` with the mode it is already in is no longer a
+  no-op.** It was, and that made `set_mode(FULLSCREEN, monitor=other)` do
+  nothing. Without the new arguments the behaviour is unchanged.
+- **`examples/30_gamepad` uses the edge query.** It kept its own "was it down
+  last frame" set, which is the three lines the feature removes.
+
+### Fixed
+- **bazalt and volk compiled two different `VolkDeviceTable` structs on
+  Windows.** Every Win32-only entry point in that table sits behind
+  `VK_USE_PLATFORM_WIN32_KHR`, and the macro was set for bazalt's own sources but
+  not for volk's, so the two disagreed about where the fields are. Nothing had
+  ever called one of the guarded entry points, which is why it stayed invisible;
+  the first one that did crashed. The macro is now set on the volk target and
+  reaches everything that links it.
+- **A multisampled image was created without `SAMPLED` usage.** No shader could
+  read one, which is what made a custom resolve impossible. The depth/stencil
+  rule that strips `SAMPLED` from a two-aspect view now runs first, so a
+  `DEPTH_STENCIL` attachment is unaffected.
+- **An indirect draw with a stride larger than its argument struct wanted a
+  buffer bigger than the data.** The size check multiplied the stride by the
+  command count, and the last command needs only its own struct — the padding a
+  stride leaves is between commands.
+
 ## [0.24.0] — 2026-08-02
 
 "The notebook, and the second API review". Bazalt runs in a Jupyter cell, on a

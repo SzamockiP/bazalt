@@ -359,6 +359,132 @@ def test_dropped_files_is_per_cycle_state(ctx):
         window = None
 
 
+# ── monitors (0.25) ───────────────────────────────────────────────────────
+
+
+def the_monitors():
+    """Every connected monitor, or a skip. Needs no window, which is the point."""
+    try:
+        return bz.list_monitors()
+    except bz.WindowError:
+        pytest.skip("no display available")
+
+
+def test_a_monitor_describes_itself():
+    """0.25: inert data, like Device. Every question it answers is a field, and
+    the video-mode list is what makes a fullscreen choice possible at all."""
+    monitors = the_monitors()
+    assert monitors, "list_monitors must not answer an empty list"
+    assert sum(1 for m in monitors if m.primary) == 1, "exactly one monitor is primary"
+    assert monitors[0].primary, "the primary monitor comes first"
+
+    for monitor in monitors:
+        assert isinstance(monitor.name, str)
+        assert len(monitor.position) == 2
+        assert len(monitor.content_scale) == 2
+        assert monitor.content_scale[0] > 0.0
+        # Zero is a legitimate answer: some drivers do not report it, and that
+        # is the OS talking rather than a failure.
+        assert len(monitor.physical_size_mm) == 2
+        assert monitor.physical_size_mm[0] >= 0
+        assert monitor.current_mode.width > 0 and monitor.current_mode.height > 0
+        assert monitor.video_modes, "a connected monitor reports at least one video mode"
+        for mode in monitor.video_modes:
+            assert mode.width > 0 and mode.height > 0 and mode.refresh_rate > 0
+
+
+def test_list_monitors_needs_no_window():
+    """The one process-wide query that does not require a live Window, because
+    choosing where to open one happens before any exists. The clipboard and the
+    gamepads refuse here; this must not."""
+    assert the_monitors()
+
+
+def test_a_window_opens_on_a_chosen_monitor(ctx):
+    """monitor= goes through set_mode, so opening on a display and moving to one
+    later cannot drift apart."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    monitors = the_monitors()
+    window = None
+    try:
+        window = bz.Window(160, 120, "bazalt monitor", mode=bz.WindowMode.FULLSCREEN_WINDOWED,
+                           monitor=monitors[-1])
+        assert window.is_open()
+        window.set_mode(bz.WindowMode.WINDOWED)
+        # Back to fullscreen on the primary: the same verb, the other display.
+        window.set_mode(bz.WindowMode.FULLSCREEN_WINDOWED, monitor=monitors[0])
+        window.set_mode(bz.WindowMode.WINDOWED)
+    except bz.WindowError:
+        pytest.skip("no display available")
+    finally:
+        window = None
+
+
+def test_a_windowed_mode_refuses_a_monitor(ctx):
+    """Both extras are about taking over a monitor, so a windowed mode says no
+    rather than quietly doing half of what the call asks."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    monitors = the_monitors()
+    window = a_window()
+    try:
+        with pytest.raises(bz.WindowError, match="set_position"):
+            window.set_mode(bz.WindowMode.WINDOWED, monitor=monitors[0])
+        with pytest.raises(bz.WindowError, match="FULLSCREEN only"):
+            window.set_mode(bz.WindowMode.FULLSCREEN_WINDOWED, video_mode=monitors[0].video_modes[0])
+    finally:
+        window = None
+
+
+def test_text_input_is_per_cycle_state(ctx):
+    """0.25: the character stream expires with the poll cycle, exactly as a drop
+    and a key edge do, because it shares their rotation. Nobody can type here, so
+    what this pins down is the part that is ours: it starts empty, it does not
+    consume, and it is a str."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    try:
+        for _ in range(3):
+            bz.poll_events()
+            first = window.text_input()
+            second = window.text_input()
+            assert first == ""
+            assert first == second
+            assert isinstance(first, str)
+    finally:
+        window = None
+
+
+def test_every_cursor_shape_is_accepted(ctx):
+    """0.25: the ten standard shapes, plus the two edges. A shape a platform has
+    no cursor for falls back to the default arrow rather than failing, and an int
+    that is not a standard cursor at all does the same — the set_icon contract, a
+    request rather than a guarantee."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    # Named one by one rather than looped over __members__: the list IS the
+    # claim, so a shape that quietly disappeared would fail here.
+    shapes = (bz.Cursor.ARROW, bz.Cursor.IBEAM, bz.Cursor.CROSSHAIR,
+              bz.Cursor.POINTING_HAND, bz.Cursor.RESIZE_EW, bz.Cursor.RESIZE_NS,
+              bz.Cursor.RESIZE_NWSE, bz.Cursor.RESIZE_NESW, bz.Cursor.RESIZE_ALL,
+              bz.Cursor.NOT_ALLOWED)
+    assert len(shapes) == len(bz.Cursor.__members__)
+    window = a_window()
+    try:
+        for shape in shapes:
+            window.set_cursor(shape)
+        window.set_cursor(int(bz.Cursor.IBEAM))
+        window.set_cursor(0)
+        # Orthogonal to the mode: hiding the pointer does not undo its shape.
+        window.set_cursor_mode(bz.CursorMode.HIDDEN)
+        window.set_cursor(bz.Cursor.CROSSHAIR)
+        window.set_cursor_mode(bz.CursorMode.NORMAL)
+    finally:
+        window = None
+
+
 def test_set_cursor_position_does_not_fabricate_a_mouse_delta(ctx):
     """Warping the cursor must not read as the user moving it.
 
@@ -518,3 +644,46 @@ def test_wait_events_needs_a_window():
     window GLFW is not initialized, so the call would vanish without a trace."""
     with pytest.raises(bz.WindowError, match="No windows exist"):
         bz.wait_events(timeout=0.0)
+
+
+def test_exclusive_fullscreen_needs_its_feature(ctx):
+    """0.25: a property of the swapchain, not a fifth WindowMode. The session
+    Context does not ask for the Feature, so the refusal names it."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    if ctx.supports(bz.Feature.EXCLUSIVE_FULLSCREEN):
+        pytest.skip("the session Context has EXCLUSIVE_FULLSCREEN, so it cannot refuse")
+    window = a_window()
+    try:
+        renderer = ctx.create_renderer(window)
+        assert renderer.fullscreen_exclusive is False
+        with pytest.raises(bz.UnsupportedError, match="EXCLUSIVE_FULLSCREEN"):
+            renderer.set_fullscreen_exclusive(True)
+        # Turning off what was never on is not an error: it is already true.
+        renderer.set_fullscreen_exclusive(False)
+    finally:
+        window = None
+
+
+def test_exclusive_fullscreen_reports_what_it_got(ctx, extra_context):
+    """Asking is not getting. The driver may refuse — another application can
+    hold the display — so the verb succeeds and the property tells the truth."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    exclusive = extra_context(optional=[bz.Feature.EXCLUSIVE_FULLSCREEN])
+    if not exclusive.supports(bz.Feature.EXCLUSIVE_FULLSCREEN):
+        pytest.skip("VK_EXT_full_screen_exclusive is a Windows extension")
+    window = a_window()
+    try:
+        renderer = exclusive.create_renderer(window)
+        window.set_mode(bz.WindowMode.FULLSCREEN)
+        renderer.set_fullscreen_exclusive(True)
+        # Either answer is correct; what must hold is that it is a bool and that
+        # the swapchain still works, which the ctx fixture's validation referee
+        # checks for the whole recording below.
+        assert isinstance(renderer.fullscreen_exclusive, bool)
+        renderer.set_fullscreen_exclusive(False)
+        assert renderer.fullscreen_exclusive is False
+        window.set_mode(bz.WindowMode.WINDOWED)
+    finally:
+        window = None

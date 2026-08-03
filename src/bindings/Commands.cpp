@@ -215,7 +215,8 @@ void bind_commands(py::module_& m)
                VkDeviceSize offset,
                std::uint32_t count,
                std::shared_ptr<Buffer> count_buffer,
-               VkDeviceSize count_offset)
+               VkDeviceSize count_offset,
+               std::uint32_t stride)
             {
                 require_same_context(self->owner(), buffer->owner(), "draw_indirect");
                 if (count_buffer)
@@ -223,7 +224,8 @@ void bind_commands(py::module_& m)
                     require_same_context(self->owner(), count_buffer->owner(), "draw_indirect");
                 }
                 unwrap(
-                    self->draw_indirect(std::move(buffer), offset, count, std::move(count_buffer), count_offset),
+                    self->draw_indirect(
+                        std::move(buffer), offset, count, std::move(count_buffer), count_offset, stride),
                     nullptr);
                 return self;
             },
@@ -231,7 +233,8 @@ void bind_commands(py::module_& m)
             py::arg("offset") = 0,
             py::arg("count") = 1,
             py::arg("count_buffer") = py::none(),
-            py::arg("count_offset") = 0)
+            py::arg("count_offset") = 0,
+            py::arg("stride") = 0)
         .def(
             "draw_indexed_indirect",
             [](std::shared_ptr<CommandBuffer> self,
@@ -239,7 +242,8 @@ void bind_commands(py::module_& m)
                VkDeviceSize offset,
                std::uint32_t count,
                std::shared_ptr<Buffer> count_buffer,
-               VkDeviceSize count_offset)
+               VkDeviceSize count_offset,
+               std::uint32_t stride)
             {
                 require_same_context(self->owner(), buffer->owner(), "draw_indexed_indirect");
                 if (count_buffer)
@@ -248,7 +252,7 @@ void bind_commands(py::module_& m)
                 }
                 unwrap(
                     self->draw_indexed_indirect(
-                        std::move(buffer), offset, count, std::move(count_buffer), count_offset),
+                        std::move(buffer), offset, count, std::move(count_buffer), count_offset, stride),
                     nullptr);
                 return self;
             },
@@ -256,7 +260,8 @@ void bind_commands(py::module_& m)
             py::arg("offset") = 0,
             py::arg("count") = 1,
             py::arg("count_buffer") = py::none(),
-            py::arg("count_offset") = 0)
+            py::arg("count_offset") = 0,
+            py::arg("stride") = 0)
         .def(
             "dispatch_indirect",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, VkDeviceSize offset)
@@ -409,6 +414,18 @@ void bind_commands(py::module_& m)
             py::arg("pipeline"),
             py::arg("offset"),
             py::arg("data"))
+        // The short form: the bound pipeline is the pipeline (0.25). Distinguished
+        // from the long one by the type of the first argument, which is how
+        // create_image and create_buffer already pick an overload.
+        .def(
+            "push_constants",
+            [](std::shared_ptr<CommandBuffer> self, uint32_t offset, std::string_view data)
+            {
+                unwrap(self->push_constants(offset, static_cast<uint32_t>(data.size()), data.data()), nullptr);
+                return self;
+            },
+            py::arg("offset"),
+            py::arg("data"))
         .def(
             "bind_descriptor_set",
             [](std::shared_ptr<CommandBuffer> self,
@@ -423,7 +440,40 @@ void bind_commands(py::module_& m)
             },
             py::arg("descriptor_set"),
             py::arg("pipeline"),
-            py::arg("set") = 0);
+            py::arg("set") = 0)
+        // The short form (0.25): the set knows which index it was allocated for
+        // and at which bind point, and bind_pipeline already recorded the
+        // pipeline. Registered after the long one, which pybind tries first — a
+        // call with three arguments cannot match this signature, so the two
+        // cannot collide.
+        .def(
+            "bind_descriptor_set",
+            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<DescriptorSet> descriptor_set)
+            {
+                require_same_context(self->owner(), descriptor_set->owner(), "bind_descriptor_set");
+                unwrap(self->bind_descriptor_set(std::move(descriptor_set)), nullptr);
+                return self;
+            },
+            py::arg("descriptor_set"));
+
+    // `with ctx.record() as cmd:` — begin() on the way in, and deliberately no
+    // submit on the way out. The block brackets the RECORDING; who submits it is
+    // still the caller's choice, and a block that guessed between ctx.submit and
+    // renderer.present would be wrong half the time.
+    py::class_<RecordScope>(m, "RecordScope")
+        .def(
+            "__enter__",
+            [](RecordScope& self)
+            {
+                self.cmd->begin();
+                return self.cmd;
+            })
+        .def(
+            "__exit__",
+            [](RecordScope&, py::object, py::object, py::object)
+            {
+                return false; // never swallow exceptions
+            });
 
     py::class_<RenderingScope>(m, "RenderingScope")
         .def(

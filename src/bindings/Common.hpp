@@ -364,7 +364,8 @@ inline std::shared_ptr<OffscreenTarget> make_offscreen_target(
     std::uint32_t layers,
     bool cube,
     std::uint32_t mip_levels,
-    const std::string& name)
+    const std::string& name,
+    bool keep_samples)
 {
     std::vector<Format> colors;
     if (!color.is_none())
@@ -420,7 +421,17 @@ inline std::shared_ptr<OffscreenTarget> make_offscreen_target(
 
     return unwrap(
         OffscreenTarget::create(
-            context, width, height, std::move(colors), depth_format, samples, layers, cube, mip_levels, name),
+            context,
+            width,
+            height,
+            std::move(colors),
+            depth_format,
+            samples,
+            layers,
+            cube,
+            mip_levels,
+            name,
+            keep_samples),
         context.logger().get());
 }
 
@@ -431,7 +442,8 @@ inline std::shared_ptr<OffscreenTarget> make_offscreen_target_from_images(
     const py::object& color,
     const py::object& depth,
     std::uint32_t samples,
-    const std::string& name)
+    const std::string& name,
+    bool keep_samples)
 {
     std::vector<std::shared_ptr<Image>> colors;
     if (!color.is_none())
@@ -482,7 +494,8 @@ inline std::shared_ptr<OffscreenTarget> make_offscreen_target_from_images(
     }
 
     return unwrap(
-        OffscreenTarget::create_from_images(context, std::move(colors), std::move(depth_image), samples, name),
+        OffscreenTarget::create_from_images(
+            context, std::move(colors), std::move(depth_image), samples, name, keep_samples),
         context.logger().get());
 }
 
@@ -1036,6 +1049,20 @@ inline std::uint32_t spec_constant_bytes(const py::object& value)
 // __enter__/__exit__ need to record the begin/end pair. Deliberately a plain
 // struct bound only for its dunder methods; begin_rendering/end_rendering
 // stay public, this is sugar, not a replacement.
+// `with ctx.record() as cmd:` — begin() on the way in, nothing on the way out
+// (0.25, ergonomics #4). It exists because cmd.begin() was named like half of a
+// pair that has no other half: every other pair in the API is symmetric
+// (begin_rendering/end_rendering, begin_label/end_label) and this one means
+// "reset and start recording".
+//
+// __exit__ deliberately does NOT submit. Who submits — ctx.submit or
+// renderer.present — is the caller's decision, and a block that guessed would
+// make the wrong one half the time. The scope brackets the RECORDING.
+struct RecordScope
+{
+    std::shared_ptr<CommandBuffer> cmd;
+};
+
 struct RenderingScope
 {
     std::shared_ptr<CommandBuffer> cmd;

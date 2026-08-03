@@ -184,6 +184,20 @@ class Feature(IntEnum):
     #: full Vulkan driver; MoltenVK answers False. Where it is False, fill the
     #: volume with a compute shader through a storage image instead.
     IMAGE_VIEW_2D_ON_3D = 18
+    #: An occlusion query counts SAMPLES rather than answering "something
+    #: passed". Without it the spec allows any non-zero value, so
+    #: OcclusionQuery.samples means two different things depending on the driver
+    #: — which is what this row exists to say (0.25).
+    PRECISE_OCCLUSION = 19
+    #: Taking the display outright instead of drawing through the compositor
+    #: (SwapchainRenderer.set_fullscreen_exclusive). The first Feature backed by
+    #: an extension rather than a device feature bit, and Win32-only in
+    #: practice, so it answers False elsewhere (0.25).
+    EXCLUSIVE_FULLSCREEN = 20
+    #: Topology.TRIANGLE_FAN. True on every full Vulkan driver; MoltenVK answers
+    #: False, because Metal has no triangle fan at all. Where it is False, emit
+    #: the same shape as an indexed TRIANGLE_LIST (0.25).
+    TRIANGLE_FANS = 21
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -252,14 +266,21 @@ class VertexFormat(IntEnum):
 class Topology(IntEnum):
     """Primitive topology for graphics pipelines. TRIANGLE_LIST is the default.
 
-    The strips extend the previous primitive with each new vertex. There is no
-    restart index: one strip per draw.
+    A strip extends the previous primitive with each new vertex; a fan shares its
+    first vertex with all of them. Both run vertices together until the draw ends,
+    or until a restart index — see topology(..., restart=True) (0.25).
     """
     TRIANGLE_LIST = 0
     POINT_LIST = 1
     LINE_LIST = 2
     TRIANGLE_STRIP = 3
     LINE_STRIP = 4
+    #: Every triangle shares the FIRST vertex: 0,1,2 then 0,2,3 then 0,3,4. A
+    #: pie, a circle, a convex polygon.
+    #:
+    #: The one topology that is not universal — Metal has none, so a portability
+    #: driver may refuse it. Needs Feature.TRIANGLE_FANS (0.25).
+    TRIANGLE_FAN = 5
     #: The input to a tessellation control shader: a run of patch_control_points
     #: vertices with no implied topology. Only valid with tessellation shaders,
     #: and they are only valid with this — the pipeline build checks both ways.
@@ -421,6 +442,16 @@ class CullMode(IntEnum):
 class FrontFace(IntEnum):
     CLOCKWISE = 0
     COUNTER_CLOCKWISE = 1
+
+class Face(IntEnum):
+    """Which side of a triangle a stencil state applies to (0.25).
+
+    Vulkan keeps two op-states and ONE enable bit, so `enable` on stencil_test is
+    not per face: any call sets it, and the last one wins.
+    """
+    FRONT_AND_BACK = 0
+    FRONT = 1
+    BACK = 2
 
 class MemoryUsage(IntEnum):
     STATIC = 0
@@ -638,6 +669,23 @@ class CursorMode(IntEnum):
     NORMAL = 212993
     HIDDEN = 212994
     DISABLED = 212995
+
+class Cursor(IntEnum):
+    """What set_cursor takes: the pointer's shape (0.25).
+
+    A different question from CursorMode, which says whether the pointer is
+    visible at all. The values are GLFW's own, like Key and GamepadButton.
+    """
+    ARROW = 221185
+    IBEAM = 221186
+    CROSSHAIR = 221187
+    POINTING_HAND = 221188
+    RESIZE_EW = 221189
+    RESIZE_NS = 221190
+    RESIZE_NWSE = 221191
+    RESIZE_NESW = 221192
+    RESIZE_ALL = 221193
+    NOT_ALLOWED = 221194
 
 # ── Resources ──────────────────────────────────────────────────────────
 
@@ -908,6 +956,25 @@ class RenderTarget(RenderTargetBase):
     def depth(self) -> Optional[Image]: ...
 
     @property
+    def multisampled_color(self) -> tuple[Image, ...]:
+        """The multisampled attachments themselves, for a custom resolve (0.25).
+
+        `color` above is the single-sample resolve — the image almost everything
+        wants. These are what the pass rendered into: bind one to a `sampler2DMS`
+        and read the samples with `texelFetch(tex, ivec2(gl_FragCoord.xy), i)`,
+        which is what per-sample edge detection and a TAA resolve need. The
+        driver's own resolve has already averaged them away.
+
+        Empty unless the target was created with `keep_samples=True`. Without it
+        the pass discards the samples, so there would be nothing to read.
+        """
+        ...
+    @property
+    def multisampled_depth(self) -> Optional[Image]:
+        """The multisampled depth attachment. See multisampled_color (0.25)."""
+        ...
+
+    @property
     def width(self) -> int: ...
     @property
     def height(self) -> int: ...
@@ -1006,7 +1073,15 @@ class GraphicsPipelineBuilder:
         whatever write says.
         """
         ...
-    def cull_mode(self, mode: CullMode, front_face: FrontFace) -> GraphicsPipelineBuilder: ...
+    def cull_mode(self, mode: CullMode,
+                  front_face: FrontFace = FrontFace.COUNTER_CLOCKWISE) -> GraphicsPipelineBuilder:
+        """Which faces to drop, and which winding counts as front.
+
+        front_face has a default since 0.25, because cull_mode(CullMode.NONE)
+        could not be spelled without naming a winding that means nothing when
+        nothing is culled.
+        """
+        ...
     def polygon_mode(self, mode: PolygonMode) -> GraphicsPipelineBuilder: ...
     def line_width(self, width: float) -> GraphicsPipelineBuilder:
         """Line width in pixels for PolygonMode.LINE or Topology.LINE_LIST.
@@ -1062,7 +1137,8 @@ class GraphicsPipelineBuilder:
     def stencil_test(self, enable: bool, compare: CompareOp = CompareOp.ALWAYS, ref: int = 0,
                      pass_op: StencilOp = StencilOp.KEEP, fail_op: StencilOp = StencilOp.KEEP,
                      depth_fail_op: StencilOp = StencilOp.KEEP, read_mask: int = 0xFF,
-                     write_mask: int = 0xFF) -> GraphicsPipelineBuilder:
+                     write_mask: int = 0xFF,
+                     face: Face = Face.FRONT_AND_BACK) -> GraphicsPipelineBuilder:
         """The stencil test. Needs a target with depth=Format.DEPTH_STENCIL.
 
         An outline is two passes: the first writes the silhouette with
@@ -1094,7 +1170,15 @@ class GraphicsPipelineBuilder:
         because the two stages are separate modules.
         """
         ...
-    def topology(self, topology: Topology) -> GraphicsPipelineBuilder: ...
+    def topology(self, topology: Topology, *, restart: bool = False) -> GraphicsPipelineBuilder:
+        """How vertices become primitives.
+
+        restart=True (0.25) turns the largest index value (0xFFFF or 0xFFFFFFFF,
+        by the index type) into "end this strip and start another", so one draw
+        carries many strips. Opt-in, because it takes that value away from being
+        an index. Needs a strip topology; anything else raises ShaderError.
+        """
+        ...
     def sample_shading(self, enable: bool = True, min_fraction: float = 1.0) -> GraphicsPipelineBuilder:
         """Per-sample fragment shading on an MSAA target: the fragment shader runs
         once per sample instead of once per pixel, cleaning up interior/specular
@@ -1295,7 +1379,7 @@ class CommandBuffer:
 
     def draw_indirect(self, buffer: Buffer, offset: int = 0, count: int = 1,
                       count_buffer: Optional[Buffer] = None,
-                      count_offset: int = 0) -> CommandBuffer:
+                      count_offset: int = 0, stride: int = 0) -> CommandBuffer:
         """Draw with arguments read out of a buffer, so a compute pass decides what
         gets drawn and the CPU never learns the answer (0.19).
 
@@ -1324,7 +1408,7 @@ class CommandBuffer:
         ...
     def draw_indexed_indirect(self, buffer: Buffer, offset: int = 0, count: int = 1,
                               count_buffer: Optional[Buffer] = None,
-                              count_offset: int = 0) -> CommandBuffer:
+                              count_offset: int = 0, stride: int = 0) -> CommandBuffer:
         """draw_indirect through the bound index buffer (0.19).
 
         The struct is VkDrawIndexedIndirectCommand, five words: indexCount,
@@ -1458,9 +1542,27 @@ class CommandBuffer:
     def push_constants(self, pipeline: Pipeline, offset: int, data: bytes) -> CommandBuffer:
         """The Pipeline already knows which stages its range covers."""
         ...
+    def push_constants(self, offset: int, data: bytes) -> CommandBuffer:
+        """The short form: the pipeline that is already bound (0.25).
+
+        Uses the last pipeline bound, whatever its bind point, because push
+        constants belong to a pipeline layout rather than to a bind point.
+        Raises StateError with none bound.
+        """
+        ...
 
     def bind_descriptor_set(self, descriptor_set: DescriptorSet, pipeline: Pipeline,
                             set: int = 0) -> CommandBuffer: ...
+    def bind_descriptor_set(self, descriptor_set: DescriptorSet) -> CommandBuffer:
+        """The short form (0.25): the set knows the index it was allocated for and
+        at which bind point, and bind_pipeline already recorded the pipeline.
+
+        The long form stays for a recording split across functions, where the
+        pipeline was bound somewhere this code cannot see, and for binding a set
+        against a different pipeline with a compatible layout. Raises StateError
+        with no pipeline bound at the set's bind point.
+        """
+        ...
 
     def timer(self) -> Timer:
         """Start a GPU timer and return its handle. Records a timestamp here;
@@ -1563,6 +1665,16 @@ class RenderingScope:
     def __enter__(self) -> CommandBuffer: ...
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
 
+class RecordScope:
+    """Returned by Context.record(); use it in a `with` statement (0.25).
+
+    Entering begins the recording. Leaving does NOT submit: who submits —
+    ctx.submit or renderer.present — stays your decision.
+    """
+
+    def __enter__(self) -> CommandBuffer: ...
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
+
 class Timer:
     """A GPU timer handle from CommandBuffer.timer(). Usable as a context
     manager (`with cmd.timer() as t:`) or stopped by hand (t.stop())."""
@@ -1592,11 +1704,18 @@ class Timer:
 class Window:
     def __init__(self, width: int, height: int, title: str,
                  logger: Optional[Logger] = None,
-                 mode: WindowMode = WindowMode.WINDOWED) -> None:
+                 mode: WindowMode = WindowMode.WINDOWED,
+                 monitor: Optional[Monitor] = None) -> None:
         """width/height/mode describe the window it opens with.
 
         Whatever mode it opens in, that width and height are what WINDOWED
         returns to later.
+
+        monitor= (0.25) picks the display for a fullscreen mode, from
+        bz.list_monitors(). It goes through set_mode, so it obeys the same rule
+        there: a windowed mode refuses it, because a windowed window is placed
+        with set_position. Without it a fullscreen window takes the display it
+        overlaps most.
         """
         ...
     def is_open(self) -> bool: ...
@@ -1619,7 +1738,34 @@ class Window:
         inside one frame and does not consume: two readers both see the drop.
         """
         ...
+    def text_input(self) -> str:
+        """The characters typed during the last poll cycle, as text (0.25).
+
+        Empty on almost every frame. Expires with the cycle, like a drop or a key
+        edge, so it reads the same twice inside one frame and does not consume.
+
+        This is not the key edges seen from another angle. A character arrives
+        after the keyboard layout, the shift state, AltGr, the dead keys and an
+        IME have each had their say, and no amount of key state reconstructs one:
+        `is_key_pressed(Key.A)` says a physical key is down, and this says the
+        user typed "a", "A" or "ä". A text field reads this; a toggle reads
+        was_key_pressed. Backspace, Enter and the arrows produce no character, so
+        a text field handles those through the key edges.
+        """
+        ...
     def set_cursor_mode(self, mode: CursorMode | int) -> None: ...
+    def set_cursor(self, shape: Cursor | int) -> None:
+        """What the pointer draws while it is visible (0.25).
+
+        The ten standard shapes: an I-beam over a text field, a resize arrow over
+        a splitter, a pointing hand over a link. Orthogonal to set_cursor_mode,
+        which decides whether the pointer is visible at all.
+
+        A platform that has no cursor for a shape falls back to the default arrow
+        rather than failing — Wayland lacks several. Same contract as set_icon: a
+        request, not a guarantee.
+        """
+        ...
     def set_cursor_position(self, x: float, y: float) -> None:
         """Move the cursor, without the move reading as the user moving it (0.19).
 
@@ -1644,13 +1790,23 @@ class Window:
         ...
     def get_mouse_state(self) -> MouseState: ...
     def set_title(self, title: str) -> None: ...
-    def set_mode(self, mode: WindowMode) -> None:
+    def set_mode(self, mode: WindowMode, *, monitor: Optional[Monitor] = None,
+                 video_mode: Optional[VideoMode] = None) -> None:
         """Switch between windowed, frameless and the two fullscreen modes.
 
         WINDOWED restores the position and size the window had before it left
         that mode. Fullscreen takes the monitor the window covers most of. The
         swapchain follows on its own, through the same path a resize takes.
         Raises WindowError when no monitor reports a video mode.
+
+        monitor= (0.25) names the display instead, from bz.list_monitors().
+        video_mode= picks the resolution and refresh rate to switch that display
+        to. Both raise WindowError on a mode they cannot mean: monitor= needs a
+        fullscreen mode, and video_mode= needs FULLSCREEN, because
+        FULLSCREEN_WINDOWED is defined by leaving the display's mode alone.
+
+        Passing monitor= while already in that mode is not a no-op — it is how a
+        fullscreen window moves to another display.
         """
         ...
     def set_size(self, width: int, height: int) -> None: ...
@@ -1827,6 +1983,18 @@ class Gamepad:
     def button(self, button: GamepadButton) -> bool:
         """Whether that button is down right now."""
         ...
+    def was_button_pressed(self, button: GamepadButton) -> bool:
+        """True when that button went down since the previous poll cycle (0.25).
+
+        The edge, where button() is the level — the same pair the keyboard has in
+        was_key_pressed beside is_key_pressed. It reads the same twice inside one
+        cycle and does not consume.
+
+        GLFW has no gamepad callback, so an edge is measured between two readings
+        rather than recorded as it happens: read each pad every frame, or a press
+        and a release inside a frame you skipped are both invisible.
+        """
+        ...
 
 def get_gamepad(index: int = 0, *, deadzone: float = 0.0) -> Optional[Gamepad]:
     """The gamepad in slot `index` (0..15), or None when that slot is empty (0.21).
@@ -1862,6 +2030,75 @@ def list_devices() -> list[Device]:
     Creates and destroys a throwaway Vulkan instance (Vulkan has no way to
     enumerate GPUs without one), so it costs a few milliseconds; the Devices it
     returns outlive it.
+    """
+    ...
+
+class VideoMode:
+    """One mode a monitor can be set to (0.25)."""
+
+    @property
+    def width(self) -> int: ...
+    @property
+    def height(self) -> int: ...
+    @property
+    def refresh_rate(self) -> int:
+        """In Hz, as the driver reports it."""
+        ...
+
+class Monitor:
+    """One connected display, as inert data (0.25).
+
+    The Device shape, and for the same reason: choosing between displays means
+    seeing them, and what you see must not be a handle you can outlive. Pass one
+    to bz.Window(monitor=...) or window.set_mode(mode, monitor=...).
+
+    A monitor can be unplugged while you hold this. Using it then raises
+    WindowError naming the display rather than crashing.
+    """
+
+    @property
+    def name(self) -> str:
+        """What the OS calls it. NOT an identity: two identical displays report
+        the same name, which is why choosing takes the Monitor and not its name.
+        """
+        ...
+    @property
+    def primary(self) -> bool: ...
+    @property
+    def position(self) -> tuple[int, int]:
+        """Top-left corner in the virtual desktop, which is what makes "the left
+        one" a question you can answer."""
+        ...
+    @property
+    def current_mode(self) -> VideoMode:
+        """The mode it is in right now, not the largest it can take."""
+        ...
+    @property
+    def physical_size_mm(self) -> tuple[int, int]:
+        """(0, 0) on a driver that does not report it, which is the OS talking."""
+        ...
+    @property
+    def content_scale(self) -> tuple[float, float]:
+        """The DPI scale the desktop uses for this display."""
+        ...
+    @property
+    def video_modes(self) -> list[VideoMode]:
+        """Every mode it can be set to, for window.set_mode(FULLSCREEN,
+        video_mode=...)."""
+        ...
+
+def list_monitors() -> list[Monitor]:
+    """Every connected monitor, primary first (0.25).
+
+        for m in bz.list_monitors():
+            print(m.name, m.current_mode.width, m.current_mode.height)
+
+        window = bz.Window(1280, 720, "app", mode=bz.WindowMode.FULLSCREEN,
+                           monitor=bz.list_monitors()[-1])
+
+    Unlike the clipboard and the gamepads this needs no live Window, because
+    choosing where to open one happens before any exists. Raises WindowError
+    when there is no display at all.
     """
     ...
 
@@ -2151,7 +2388,8 @@ class Context:
                              color: Optional[Format | Sequence[Format]] = Format.RGBA8,
                              depth: Optional[Format] = None, samples: int = 1, *,
                              layers: int = 1, cube: bool = False,
-                             mip_levels: int = 1, name: str = "") -> RenderTarget:
+                             mip_levels: int = 1, name: str = "",
+                             keep_samples: bool = False) -> RenderTarget:
         """An offscreen target that allocates its attachments (0.23; this was
         the RenderTarget constructor).
 
@@ -2171,11 +2409,17 @@ class Context:
         attachment a CUBE view so target.color[0] samples as a cubemap.
         Single-sample only: samples>1 cannot combine with
         layers/cube/mip_levels.
+
+        keep_samples=True stores the multisampled attachment instead of
+        discarding it, so target.multisampled_color can be read back through a
+        sampler2DMS for a custom resolve (0.25). It costs the bandwidth of a full
+        multisample buffer — on a tiled GPU the samples then have to leave tile
+        memory — so it is off by default.
         """
         ...
     def create_render_target(self, *, color: Optional[Image | Sequence[Image]] = None,
                              depth: Optional[Image] = None, samples: int = 1,
-                             name: str = "") -> RenderTarget:
+                             name: str = "", keep_samples: bool = False) -> RenderTarget:
         """A target that renders into images you already own.
 
         What this makes reachable: a graphics ping-pong between two textures,
@@ -2191,8 +2435,9 @@ class Context:
 
         samples>1 works as it does on the other form: the target renders into
         multisampled attachments it allocates and resolves into the images you
-        passed, so those stay single-sample and sampleable. Not available with
-        a mipped or 3D attachment.
+        passed, so those stay single-sample and sampleable, and keep_samples
+        means the same thing it does above. Not available with a mipped or 3D
+        attachment.
         """
         ...
 
@@ -2340,6 +2585,25 @@ class Context:
         buffer; None inherits it."""
         ...
 
+    def record(self, auto_barriers: Optional[bool] = None) -> RecordScope:
+        """`with ctx.record() as cmd:` — create a command buffer and begin it (0.25).
+
+            with ctx.record() as cmd:
+                with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
+                    cmd.bind_pipeline(pipe).draw(3)
+            ctx.submit(cmd)
+
+        cmd.begin() was named like half of a pair that had no other half. This is
+        the other half, and it brackets the RECORDING only — the block does not
+        submit, because who submits is not its business.
+
+        It CREATES a command buffer, so it fits a one-off recording and a frame
+        loop that builds one per frame anyway. A loop that keeps one command
+        buffer and re-records it every frame should keep calling cmd.begin(),
+        which is what re-recording means.
+        """
+        ...
+
     def submit(self, cmd: CommandBuffer, *, wait: bool = True) -> None:
         """Execute a command buffer with no swapchain and no present.
 
@@ -2425,6 +2689,26 @@ class SwapchainRenderer(RenderTargetBase):
         StateError while an image is acquired, because recreation would
         destroy the swapchain that image belongs to.
         """
+        ...
+
+    def set_fullscreen_exclusive(self, enable: bool = True) -> None:
+        """Take the display outright instead of drawing through the compositor
+        (0.25). Recreates the swapchain.
+
+        What it buys is latency and the right to change the display mode; what it
+        costs is that alt-tab becomes a mode switch. A property of the swapchain,
+        not a fifth WindowMode — put the window in FULLSCREEN first.
+
+        Needs Feature.EXCLUSIVE_FULLSCREEN, and raises UnsupportedError without
+        it. Asking is not getting: the driver may refuse, which is normal when
+        another application holds the display, so read fullscreen_exclusive back.
+        Raises StateError while an image is acquired, like set_present_mode.
+        """
+        ...
+    @property
+    def fullscreen_exclusive(self) -> bool:
+        """Whether the display was actually taken (0.25). Not the same question as
+        what was asked for."""
         ...
 
     def acquire(self) -> bool:
