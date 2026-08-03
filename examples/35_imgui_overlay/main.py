@@ -97,6 +97,19 @@ class ImGuiOverlay:
 
         # The atlas is one ordinary texture: glyphs in the alpha channel plus a
         # white block every solid rectangle samples.
+        #
+        # ImGui's default atlas covers U+0020..U+00FF and nothing else, so typing
+        # "ą" (U+0105) or "ł" (U+0142) into the field below draws a "?" — ImGui
+        # has no glyph for them. The character itself arrived intact: it came
+        # through window.text_input(), and the window TITLE shows it correctly
+        # because that path never goes near this atlas. To draw them too, load a
+        # font that has the glyphs:
+        #
+        #     io.fonts.add_font_from_file_ttf(path, 16,
+        #                                     glyph_ranges=io.fonts.get_glyph_ranges_latin())
+        #
+        # This example does not, because it would have to ship or find a TTF, and
+        # the missing glyph teaches where the boundary is.
         width, height, pixels = io.fonts.get_tex_data_as_rgba32()
         atlas = np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, 4)
         self.font = ctx.create_image(atlas, name="imgui atlas")

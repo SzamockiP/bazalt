@@ -3677,11 +3677,18 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
 
   Three things stay unverified and are listed so nobody assumes otherwise:
 
-  * **A typed character has never been round-tripped.** `window.text_input()` is tested for
-    its ROTATION — empty at rest, the same twice inside a cycle, cleared by the next — and
-    nothing can type into a window from a test. Whether an `ą` from a Polish layout, a dead
-    key or an IME arrives intact is the claim the feature makes and the one no test asserts.
-    `examples/35_imgui_overlay` is the referee: type in its title field.
+  * ✅ **A typed character round-trips, confirmed by hand.** `window.text_input()` is tested
+    for its ROTATION — empty at rest, the same twice inside a cycle, cleared by the next —
+    and nothing can type into a window from a test, so the claim the feature actually makes
+    was checked by typing into `examples/35_imgui_overlay`. `ą` (U+0105) and `ł` (U+0142)
+    from a Polish layout arrive intact and appear in the window title.
+
+    **They appear as `?` in the ImGui field, and that is worth writing down because it looks
+    exactly like a bug in this feature.** ImGui's default font atlas covers U+0020..U+00FF;
+    both characters are in Latin Extended-A, above that, so ImGui has no glyph and draws its
+    fallback. The character reached it — the title bar is drawn from the same string and
+    shows it correctly — so the boundary is the atlas, not the character stream. A test that
+    only looked at the widget would have condemned the wrong component.
   * **Exclusive fullscreen has never actually succeeded here.** Every acquire on the
     development machine returned `VK_ERROR_INITIALIZATION_FAILED`, which is a legitimate
     answer — an overlay layer was loaded — and it means the SUCCESS path is untested. What
