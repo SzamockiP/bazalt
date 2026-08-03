@@ -46,6 +46,47 @@ struct MouseState
     float scroll_dy = 0.0f;
 };
 
+// One video mode a monitor can be set to. Width, height and refresh rate: the
+// three a caller chooses between. GLFWvidmode also carries the per-channel bit
+// depths, which no fullscreen decision has ever needed, so they stay out until
+// something asks.
+struct VideoMode
+{
+    int width = 0;
+    int height = 0;
+    int refresh_rate = 0;
+};
+
+// One monitor, as inert data — the Device shape, and for the same reason:
+// choosing between monitors means seeing them, and what a caller sees must not
+// be a live handle it can outlive.
+//
+// The GLFWmonitor* is kept, unlike Device's VkPhysicalDevice, because the two
+// dangle differently. A VkPhysicalDevice dies with the instance list_devices
+// destroys a moment later, so keeping it would be a guaranteed dangle. A
+// GLFWmonitor* dies only when somebody unplugs that monitor, and every use
+// re-scans the live list first — so the pointer is a key, never a dereference.
+struct Monitor
+{
+    std::string name;
+    // Position in the virtual desktop, which is what makes "the left one" a
+    // question a caller can answer.
+    int x = 0;
+    int y = 0;
+    // The mode the monitor is in right now, not the largest it can take.
+    VideoMode current_mode;
+    // Millimetres, as the OS reports them. Some drivers report zero, and that is
+    // the OS talking rather than an error.
+    int physical_width_mm = 0;
+    int physical_height_mm = 0;
+    float scale_x = 1.0f;
+    float scale_y = 1.0f;
+    bool primary = false;
+    std::vector<VideoMode> video_modes;
+
+    GLFWmonitor* handle = nullptr;
+};
+
 // How the window presents itself. One enum and one verb rather than a
 // set_fullscreen plus a set_decorated plus the rules for combining them: the
 // four states are exclusive, and a bool pair would spell two of them twice.
@@ -84,7 +125,8 @@ public:
         int height,
         const std::string& title,
         std::shared_ptr<Logger> logger = nullptr,
-        WindowMode mode = WindowMode::WINDOWED)
+        WindowMode mode = WindowMode::WINDOWED,
+        const Monitor* monitor = nullptr)
     {
         // Must be installed before glfwInit — otherwise the most common failure a
         // new user hits (no display, no drivers) reports "Failed to create window"
@@ -94,6 +136,8 @@ public:
 
         if (window_count_.fetch_add(1) == 0)
         {
+            // glfwInit is idempotent, so this is a no-op when list_monitors()
+            // already brought GLFW up to answer a question about displays.
             if (!glfwInit())
             {
                 window_count_.fetch_sub(1);
@@ -141,9 +185,10 @@ public:
         // The requested width/height/position become what WINDOWED returns to,
         // whatever mode the window opens in. Then the mode goes on through
         // set_mode: one implementation, so opening fullscreen and switching to
-        // fullscreen cannot drift apart.
+        // fullscreen cannot drift apart — and monitor= inherits every rule
+        // set_mode has about which modes it means anything for.
         window->save_windowed_geometry_();
-        if (auto applied = window->set_mode(mode); !applied)
+        if (auto applied = window->set_mode(mode, monitor); !applied)
         {
             return std::unexpected(applied.error());
         }
@@ -158,6 +203,53 @@ public:
             terminate_glfw_();
         }
     };
+
+    // Bring GLFW up without owning a window.
+    //
+    // Every other process-wide query — the clipboard, the gamepads — refuses
+    // when no Window is alive, and monitor enumeration cannot: choosing which
+    // display to open on happens BEFORE the first window exists. So it
+    // initializes GLFW itself, the way list_devices() builds its own instance
+    // rather than borrowing a Context's.
+    //
+    // Nothing shuts it down again if no window is ever created. glfwTerminate is
+    // process-wide cleanup the OS does at exit anyway, and the alternative is a
+    // second reference count beside window_count_ for a case nobody has.
+    static std::expected<void, Error> ensure_glfw_ready()
+    {
+        glfwSetErrorCallback(glfw_error_callback);
+        if (!glfwInit())
+        {
+            return std::unexpected(err_window(describe_glfw_failure(
+                "Bazalt cannot start the window system. Usually there is no "
+                "display attached, or the display drivers are missing")));
+        }
+        return {};
+    }
+
+    // The live GLFWmonitor* behind a Monitor value, or a refusal naming it.
+    //
+    // A Monitor is a copy the caller may have kept for minutes, and a monitor
+    // can be unplugged in that time. So the pointer is treated as a key looked
+    // up in the current list, never as something to dereference on trust: the
+    // failure is a message about that display, not a crash inside GLFW.
+    static std::expected<GLFWmonitor*, Error> live_monitor(const Monitor& monitor)
+    {
+        int count = 0;
+        GLFWmonitor** monitors = glfwGetMonitors(&count);
+        for (int i = 0; i < count; ++i)
+        {
+            if (monitors[i] == monitor.handle)
+            {
+                return monitors[i];
+            }
+        }
+        return std::unexpected(err_window(
+            std::format(
+                "the monitor '{}' is no longer connected. Call bz.list_monitors() again to see "
+                "what is.",
+                monitor.name)));
+    }
 
     Window(const Window&) = delete;
     Window& operator=(const Window&) = delete;
@@ -320,11 +412,48 @@ public:
     // the framebuffer, framebuffer_resize_callback records it, and present()
     // consumes the flag and recreates — the same path a dragged window edge
     // takes.
-    std::expected<void, Error> set_mode(WindowMode mode)
+    std::expected<void, Error> set_mode(
+        WindowMode mode,
+        const Monitor* monitor_choice = nullptr,
+        const VideoMode* video_mode_choice = nullptr)
     {
-        if (mode == mode_)
+        // A repeat of the same mode is a no-op only when nothing else changed.
+        // Moving a fullscreen window to another monitor asks for the same mode
+        // and has real work to do.
+        if (mode == mode_ && !monitor_choice && !video_mode_choice)
         {
             return {};
+        }
+        // Both extras are about taking over a monitor, so neither means anything
+        // to a windowed mode. Refused rather than ignored: a call that quietly
+        // does half of what it says is worse than one that says no.
+        const bool fullscreen = mode == WindowMode::FULLSCREEN || mode == WindowMode::FULLSCREEN_WINDOWED;
+        if (monitor_choice && !fullscreen)
+        {
+            return std::unexpected(err_window(
+                "monitor= applies to FULLSCREEN and FULLSCREEN_WINDOWED only. A windowed "
+                "window is moved with set_position(x, y)."));
+        }
+        // FULLSCREEN_WINDOWED is defined by NOT changing the video mode — that is
+        // what keeps alt-tab and a second display behaving normally — so a video
+        // mode there would be a request the mode cannot honour.
+        if (video_mode_choice && mode != WindowMode::FULLSCREEN)
+        {
+            return std::unexpected(err_window(
+                "video_mode= applies to FULLSCREEN only. FULLSCREEN_WINDOWED deliberately "
+                "keeps the monitor's current mode, and a windowed window is resized with "
+                "set_size(width, height)."));
+        }
+
+        GLFWmonitor* chosen = nullptr;
+        if (monitor_choice)
+        {
+            auto live = live_monitor(*monitor_choice);
+            if (!live)
+            {
+                return std::unexpected(live.error());
+            }
+            chosen = *live;
         }
 
         GLFWwindow* win = window_.get();
@@ -344,19 +473,29 @@ public:
         }
         else
         {
-            GLFWmonitor* monitor = current_monitor_();
+            // Without monitor= the window takes the monitor it overlaps most,
+            // which is what it has always done and what a single-display machine
+            // needs to know nothing about.
+            GLFWmonitor* monitor = chosen ? chosen : current_monitor_();
             const GLFWvidmode* video_mode = monitor ? glfwGetVideoMode(monitor) : nullptr;
             if (!monitor || !video_mode)
             {
                 return std::unexpected(
                     err_window(describe_glfw_failure("Cannot go fullscreen: no monitor reported a video mode")));
             }
+            // A chosen video mode replaces the monitor's current one. Not checked
+            // against the monitor's list: GLFW picks the closest match it has, so
+            // a mode from another monitor lands on something sane instead of
+            // failing, and refusing it would mean re-enumerating to say what the
+            // driver is about to work out anyway.
+            const VideoMode wanted = video_mode_choice
+                                         ? *video_mode_choice
+                                         : VideoMode{video_mode->width, video_mode->height, video_mode->refreshRate};
 
             if (mode == WindowMode::FULLSCREEN)
             {
                 glfwSetWindowAttrib(win, GLFW_DECORATED, GLFW_TRUE);
-                glfwSetWindowMonitor(
-                    win, monitor, 0, 0, video_mode->width, video_mode->height, video_mode->refreshRate);
+                glfwSetWindowMonitor(win, monitor, 0, 0, wanted.width, wanted.height, wanted.refresh_rate);
             }
             else
             {
@@ -885,6 +1024,64 @@ inline std::expected<void, Error> wait_events(std::optional<double> timeout)
     // completed cycles, so a per-cycle query reports what this call delivered.
     Window::poll_generation_.fetch_add(1, std::memory_order_relaxed);
     return {};
+}
+
+// Every monitor the OS reports, as inert data.
+//
+// A free function for the reason poll_events() is one: a monitor belongs to the
+// process, and glfwGetMonitors takes no window. Unlike the clipboard and the
+// gamepads it does NOT need a live Window, because its whole use is choosing
+// where to open one — see ensure_glfw_ready.
+//
+// The primary monitor comes first, which is GLFW's own order and the answer a
+// caller who does not care wants.
+inline std::expected<std::vector<Monitor>, Error> list_monitors()
+{
+    if (auto ready = Window::ensure_glfw_ready(); !ready)
+    {
+        return std::unexpected(ready.error());
+    }
+
+    int count = 0;
+    GLFWmonitor** monitors = glfwGetMonitors(&count);
+    // An error rather than an empty list: with nothing to choose between there is
+    // nothing this call can be used for, and every caller would have to write the
+    // same check. GLFW reports no error of its own here, so there is none to add.
+    if (!monitors || count == 0)
+    {
+        return std::unexpected(err_window("No monitor is connected"));
+    }
+    GLFWmonitor* primary = glfwGetPrimaryMonitor();
+
+    std::vector<Monitor> out;
+    out.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i)
+    {
+        Monitor monitor;
+        monitor.handle = monitors[i];
+        monitor.primary = monitors[i] == primary;
+        if (const char* name = glfwGetMonitorName(monitors[i]))
+        {
+            monitor.name = name;
+        }
+        glfwGetMonitorPos(monitors[i], &monitor.x, &monitor.y);
+        glfwGetMonitorPhysicalSize(monitors[i], &monitor.physical_width_mm, &monitor.physical_height_mm);
+        glfwGetMonitorContentScale(monitors[i], &monitor.scale_x, &monitor.scale_y);
+        if (const GLFWvidmode* current = glfwGetVideoMode(monitors[i]))
+        {
+            monitor.current_mode = {current->width, current->height, current->refreshRate};
+        }
+
+        int mode_count = 0;
+        const GLFWvidmode* modes = glfwGetVideoModes(monitors[i], &mode_count);
+        monitor.video_modes.reserve(static_cast<std::size_t>(mode_count));
+        for (int m = 0; m < mode_count; ++m)
+        {
+            monitor.video_modes.push_back({modes[m].width, modes[m].height, modes[m].refreshRate});
+        }
+        out.push_back(std::move(monitor));
+    }
+    return out;
 }
 
 // The system clipboard. Free functions, not Window methods, for the same reason

@@ -359,6 +359,80 @@ def test_dropped_files_is_per_cycle_state(ctx):
         window = None
 
 
+# ── monitors (0.25) ───────────────────────────────────────────────────────
+
+
+def the_monitors():
+    """Every connected monitor, or a skip. Needs no window, which is the point."""
+    try:
+        return bz.list_monitors()
+    except bz.WindowError:
+        pytest.skip("no display available")
+
+
+def test_a_monitor_describes_itself():
+    """0.25: inert data, like Device. Every question it answers is a field, and
+    the video-mode list is what makes a fullscreen choice possible at all."""
+    monitors = the_monitors()
+    assert monitors, "list_monitors must not answer an empty list"
+    assert sum(1 for m in monitors if m.primary) == 1, "exactly one monitor is primary"
+    assert monitors[0].primary, "the primary monitor comes first"
+
+    for monitor in monitors:
+        assert isinstance(monitor.name, str)
+        assert len(monitor.position) == 2
+        assert len(monitor.content_scale) == 2
+        assert monitor.content_scale[0] > 0.0
+        assert monitor.current_mode.width > 0 and monitor.current_mode.height > 0
+        assert monitor.video_modes, "a connected monitor reports at least one video mode"
+        for mode in monitor.video_modes:
+            assert mode.width > 0 and mode.height > 0 and mode.refresh_rate > 0
+
+
+def test_list_monitors_needs_no_window():
+    """The one process-wide query that does not require a live Window, because
+    choosing where to open one happens before any exists. The clipboard and the
+    gamepads refuse here; this must not."""
+    assert the_monitors()
+
+
+def test_a_window_opens_on_a_chosen_monitor(ctx):
+    """monitor= goes through set_mode, so opening on a display and moving to one
+    later cannot drift apart."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    monitors = the_monitors()
+    window = None
+    try:
+        window = bz.Window(160, 120, "bazalt monitor", mode=bz.WindowMode.FULLSCREEN_WINDOWED,
+                           monitor=monitors[-1])
+        assert window.is_open()
+        window.set_mode(bz.WindowMode.WINDOWED)
+        # Back to fullscreen on the primary: the same verb, the other display.
+        window.set_mode(bz.WindowMode.FULLSCREEN_WINDOWED, monitor=monitors[0])
+        window.set_mode(bz.WindowMode.WINDOWED)
+    except bz.WindowError:
+        pytest.skip("no display available")
+    finally:
+        window = None
+
+
+def test_a_windowed_mode_refuses_a_monitor(ctx):
+    """Both extras are about taking over a monitor, so a windowed mode says no
+    rather than quietly doing half of what the call asks."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    monitors = the_monitors()
+    window = a_window()
+    try:
+        with pytest.raises(bz.WindowError, match="set_position"):
+            window.set_mode(bz.WindowMode.WINDOWED, monitor=monitors[0])
+        with pytest.raises(bz.WindowError, match="FULLSCREEN only"):
+            window.set_mode(bz.WindowMode.FULLSCREEN_WINDOWED, video_mode=monitors[0].video_modes[0])
+    finally:
+        window = None
+
+
 def test_text_input_is_per_cycle_state(ctx):
     """0.25: the character stream expires with the poll cycle, exactly as a drop
     and a key edge do, because it shares their rotation. Nobody can type here, so

@@ -1628,11 +1628,18 @@ class Timer:
 class Window:
     def __init__(self, width: int, height: int, title: str,
                  logger: Optional[Logger] = None,
-                 mode: WindowMode = WindowMode.WINDOWED) -> None:
+                 mode: WindowMode = WindowMode.WINDOWED,
+                 monitor: Optional[Monitor] = None) -> None:
         """width/height/mode describe the window it opens with.
 
         Whatever mode it opens in, that width and height are what WINDOWED
         returns to later.
+
+        monitor= (0.25) picks the display for a fullscreen mode, from
+        bz.list_monitors(). It goes through set_mode, so it obeys the same rule
+        there: a windowed mode refuses it, because a windowed window is placed
+        with set_position. Without it a fullscreen window takes the display it
+        overlaps most.
         """
         ...
     def is_open(self) -> bool: ...
@@ -1707,13 +1714,23 @@ class Window:
         ...
     def get_mouse_state(self) -> MouseState: ...
     def set_title(self, title: str) -> None: ...
-    def set_mode(self, mode: WindowMode) -> None:
+    def set_mode(self, mode: WindowMode, *, monitor: Optional[Monitor] = None,
+                 video_mode: Optional[VideoMode] = None) -> None:
         """Switch between windowed, frameless and the two fullscreen modes.
 
         WINDOWED restores the position and size the window had before it left
         that mode. Fullscreen takes the monitor the window covers most of. The
         swapchain follows on its own, through the same path a resize takes.
         Raises WindowError when no monitor reports a video mode.
+
+        monitor= (0.25) names the display instead, from bz.list_monitors().
+        video_mode= picks the resolution and refresh rate to switch that display
+        to. Both raise WindowError on a mode they cannot mean: monitor= needs a
+        fullscreen mode, and video_mode= needs FULLSCREEN, because
+        FULLSCREEN_WINDOWED is defined by leaving the display's mode alone.
+
+        Passing monitor= while already in that mode is not a no-op — it is how a
+        fullscreen window moves to another display.
         """
         ...
     def set_size(self, width: int, height: int) -> None: ...
@@ -1937,6 +1954,75 @@ def list_devices() -> list[Device]:
     Creates and destroys a throwaway Vulkan instance (Vulkan has no way to
     enumerate GPUs without one), so it costs a few milliseconds; the Devices it
     returns outlive it.
+    """
+    ...
+
+class VideoMode:
+    """One mode a monitor can be set to (0.25)."""
+
+    @property
+    def width(self) -> int: ...
+    @property
+    def height(self) -> int: ...
+    @property
+    def refresh_rate(self) -> int:
+        """In Hz, as the driver reports it."""
+        ...
+
+class Monitor:
+    """One connected display, as inert data (0.25).
+
+    The Device shape, and for the same reason: choosing between displays means
+    seeing them, and what you see must not be a handle you can outlive. Pass one
+    to bz.Window(monitor=...) or window.set_mode(mode, monitor=...).
+
+    A monitor can be unplugged while you hold this. Using it then raises
+    WindowError naming the display rather than crashing.
+    """
+
+    @property
+    def name(self) -> str:
+        """What the OS calls it. NOT an identity: two identical displays report
+        the same name, which is why choosing takes the Monitor and not its name.
+        """
+        ...
+    @property
+    def primary(self) -> bool: ...
+    @property
+    def position(self) -> tuple[int, int]:
+        """Top-left corner in the virtual desktop, which is what makes "the left
+        one" a question you can answer."""
+        ...
+    @property
+    def current_mode(self) -> VideoMode:
+        """The mode it is in right now, not the largest it can take."""
+        ...
+    @property
+    def physical_size_mm(self) -> tuple[int, int]:
+        """(0, 0) on a driver that does not report it, which is the OS talking."""
+        ...
+    @property
+    def content_scale(self) -> tuple[float, float]:
+        """The DPI scale the desktop uses for this display."""
+        ...
+    @property
+    def video_modes(self) -> list[VideoMode]:
+        """Every mode it can be set to, for window.set_mode(FULLSCREEN,
+        video_mode=...)."""
+        ...
+
+def list_monitors() -> list[Monitor]:
+    """Every connected monitor, primary first (0.25).
+
+        for m in bz.list_monitors():
+            print(m.name, m.current_mode.width, m.current_mode.height)
+
+        window = bz.Window(1280, 720, "app", mode=bz.WindowMode.FULLSCREEN,
+                           monitor=bz.list_monitors()[-1])
+
+    Unlike the clipboard and the gamepads this needs no live Window, because
+    choosing where to open one happens before any exists. Raises WindowError
+    when there is no display at all.
     """
     ...
 

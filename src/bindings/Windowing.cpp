@@ -22,20 +22,70 @@ void bind_windowing(py::module_& m)
         .def_readonly("scroll_dx", &MouseState::scroll_dx)
         .def_readonly("scroll_dy", &MouseState::scroll_dy);
 
+    // Inert data, like Device: what list_monitors() reports so a caller can
+    // choose where to open. No methods — every question it answers is a field.
+    py::class_<VideoMode>(m, "VideoMode")
+        .def_readonly("width", &VideoMode::width)
+        .def_readonly("height", &VideoMode::height)
+        .def_readonly("refresh_rate", &VideoMode::refresh_rate)
+        .def(
+            "__repr__",
+            [](const VideoMode& v)
+            { return std::format("<bazalt.VideoMode {}x{} @{}Hz>", v.width, v.height, v.refresh_rate); });
+
+    py::class_<Monitor>(m, "Monitor")
+        .def_readonly("name", &Monitor::name)
+        .def_readonly("primary", &Monitor::primary)
+        .def_property_readonly("position", [](const Monitor& mon) { return py::make_tuple(mon.x, mon.y); })
+        .def_readonly("current_mode", &Monitor::current_mode)
+        .def_property_readonly(
+            "physical_size_mm",
+            [](const Monitor& mon) { return py::make_tuple(mon.physical_width_mm, mon.physical_height_mm); })
+        .def_property_readonly(
+            "content_scale", [](const Monitor& mon) { return py::make_tuple(mon.scale_x, mon.scale_y); })
+        .def_readonly("video_modes", &Monitor::video_modes)
+        .def(
+            "__repr__",
+            [](const Monitor& mon)
+            {
+                return std::format(
+                    "<bazalt.Monitor '{}' {}x{}{}>",
+                    mon.name,
+                    mon.current_mode.width,
+                    mon.current_mode.height,
+                    mon.primary ? " primary" : "");
+            });
+
+    m.def(
+        "list_monitors",
+        []() { return unwrap(list_monitors(), nullptr); },
+        "Every connected monitor, primary first (0.25).\n\n"
+        "Unlike the clipboard and the gamepads this needs no live Window, because\n"
+        "choosing where to open one happens first. Pass a result to\n"
+        "bz.Window(monitor=...) or window.set_mode(mode, monitor=...).");
+
     py::class_<Window>(m, "Window")
         .def(
             py::init(
-                [](int width, int height, const std::string& title, std::shared_ptr<Logger> logger, WindowMode mode)
+                [](int width,
+                   int height,
+                   const std::string& title,
+                   std::shared_ptr<Logger> logger,
+                   WindowMode mode,
+                   std::optional<Monitor> monitor)
                 {
                     // Window used to have no way to reach a Logger at all, so GLFW's own
                     // diagnostics went nowhere.
-                    return unwrap(Window::create(width, height, title, logger, mode), logger.get());
+                    return unwrap(
+                        Window::create(width, height, title, logger, mode, monitor ? &*monitor : nullptr),
+                        logger.get());
                 }),
             py::arg("width"),
             py::arg("height"),
             py::arg("title"),
             py::arg("logger") = py::none(),
-            py::arg("mode") = WindowMode::WINDOWED)
+            py::arg("mode") = WindowMode::WINDOWED,
+            py::arg("monitor") = py::none())
         .def("is_open", &Window::is_open)
         .def("is_key_pressed", &Window::is_key_pressed, py::arg("key"))
         .def("is_mouse_button_pressed", &Window::is_mouse_button_pressed, py::arg("button"))
@@ -50,8 +100,15 @@ void bind_windowing(py::module_& m)
             // nullptr logger: GLFW's own error callback has already logged the
             // reason through the Window's Logger, so passing it here would say
             // the same thing twice.
-            [](Window& self, WindowMode mode) { unwrap(self.set_mode(mode), nullptr); },
-            py::arg("mode"))
+            [](Window& self, WindowMode mode, std::optional<Monitor> monitor, std::optional<VideoMode> video_mode)
+            {
+                unwrap(
+                    self.set_mode(mode, monitor ? &*monitor : nullptr, video_mode ? &*video_mode : nullptr), nullptr);
+            },
+            py::arg("mode"),
+            py::kw_only(),
+            py::arg("monitor") = py::none(),
+            py::arg("video_mode") = py::none())
         .def("set_size", &Window::set_size, py::arg("width"), py::arg("height"))
         .def("set_position", &Window::set_position, py::arg("x"), py::arg("y"))
         .def("set_cursor_position", &Window::set_cursor_position, py::arg("x"), py::arg("y"))

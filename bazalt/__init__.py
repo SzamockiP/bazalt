@@ -16,6 +16,11 @@ __all__ = [
     "Window",
     "Device",
     "list_devices",
+    # Also process-wide, and the one such query that needs no live Window:
+    # choosing where to open one happens first (0.25).
+    "Monitor",
+    "VideoMode",
+    "list_monitors",
     "poll_events",
     # The sleeping half of the same pump, for a program that only redraws on
     # input (0.24).
