@@ -54,16 +54,29 @@ These settle most arguments.
    unrelated debt because the debt is old. This one collects work that is all the same
    subject. If a future release wants the same exemption, the test is that question: does
    the work share a subject, or only a mood?
-   **0.25 is not an exception either, and it says what it bought separately.** The
-   feature is **the window's input surface finishes**: the characters, the pointer
-   shapes and the gamepad edges are three holes of one shape — state the GLFW
-   callbacks already receive and nothing handed to the caller — and the monitor
-   enumeration is the last backlog entry that touches `Window.hpp`. Sampleable MSAA
-   shares no subject with any of that. It is here because it was bought separately,
-   which is the 0.24 precedent used as 0.24 asked it to be used: name the feature,
-   then name the rest rather than inventing a subject wide enough to cover both.
-   Rule 4 is why it was the one bought — it makes a picture, and nothing else left on
-   the additive list does.
+   **0.25 IS an exception, it is the third one, and the reason is a decision rather
+   than a discovery.** The release has a feature — **the window's input surface
+   finishes**: the characters, the pointer shapes, the gamepad edges and the monitor
+   enumeration are one subject, and after them no open backlog entry touches
+   `Window.hpp`. Then it empties the rest of the additive list: sampleable MSAA,
+   primitive restart, `stride=`, precise occlusion, per-face stencil, exclusive
+   fullscreen, `ctx.record()` and the short descriptor verbs. Those share no subject
+   with the input surface or with each other.
+
+   The plan proposed the feature alone and argued the rest was a mood release. **The
+   owner overruled it, and the argument is on the record because it is better than
+   the rule as written:** most releases since 0.20 have been shaped this way, none of
+   these items is a new idea that needed designing, and 0.25 is the last additive
+   release before the freeze — so "wait for a release that shares your subject" means
+   "wait past 1.0" for entries that have been priced and ready for three releases.
+   Rule 5 exists so a session can execute a plan without filling its context, and
+   that test was met: the whole release is one session.
+
+   **What the rule keeps.** The release is still NAMED for its feature, and each
+   entry that rode along says so in its own decision rather than being folded into an
+   invented subject — the 0.24 precedent, used the way 0.24 asked. The test for the
+   next release quoting this one is not "0.25 did it": it is whether the list being
+   emptied was priced and waiting, or refilled by somebody who wanted a big diff.
 
    **0.24 is not an exception, and it is written down because it nearly was.** The plan
    called it "the seams" and argued that a cross-recording barrier, `close()`, and a
@@ -428,6 +441,32 @@ entry. The release is a label, not the organizing axis.
 
 - **Every device-level call goes through the per-Context table** (`ctx.vk()`, 0.15). 131
   call sites moved. Recorded lambdas read the table from `FrameContext::vk`.
+
+- **The volk device table had two layouts, and nothing said so** (0.25). `VolkDeviceTable`
+  declares every Win32-only entry point behind `#if defined(VK_USE_PLATFORM_WIN32_KHR)`.
+  The macro was defined `PRIVATE` on the `_core` target and NOT on the `volk` target, so
+  `volk.c` compiled a struct with fewer members than the one every bazalt file saw. That is
+  a one-definition-rule violation: the two translation units disagreed about the offset of
+  every field after the guarded ones, and `volkLoadDeviceTable` filled a shorter struct
+  than the caller read.
+
+  It had been true since Windows support existed and hurt nothing, because no bazalt code
+  had ever named one of the guarded members. Exclusive fullscreen is the first, and it
+  found the bug the only way a layout mismatch can be found — by crashing. **Fixed by
+  defining the macro `PUBLIC` on the volk target instead**, so it reaches volk's own
+  compilation AND everything that links it, and the two cannot drift apart again. The same
+  line covers `VK_USE_PLATFORM_METAL_EXT` on macOS.
+
+  **The general form is the 0.15 lesson from the other side.** That entry says the compiler
+  cannot catch a missed call site, because the globals still exist as symbols; this one says
+  the compiler cannot catch a mismatched struct either, because both spellings compile.
+  What catches these is a call that has to go through the thing — which is the argument for
+  writing the feature rather than only the column it needed.
+
+  A null entry point is now checked before it is called, in the one place that has a single
+  pointer rather than a whole table. A driver can legitimately leave one null when an
+  extension is available but was not enabled at device creation, and the difference between
+  a crash and a logged warning is one `if`.
 
 - **`volkLoadInstanceOnly`, not `volkLoadInstance`** (0.15). This is the verification of the
   pass, not a detail. The compiler cannot catch a missed call site, because the globals
@@ -2375,13 +2414,23 @@ Ordered by how often the friction shows up, not by effort.
    `samplers=` became `textures=`. `set_image` stays — it names its argument (an Image),
    not the descriptor type, and `test_stubs.py` asserts `set_texture` is dead. Two of the
    three were the same name problem; the third was a different question.
-3. **`bind_descriptor_set` and `push_constants` take a pipeline that is already known.**
+3. ✅ **`bind_descriptor_set` and `push_constants` take a pipeline that is already known.**
+   DONE in 0.25 as short overloads beside the long ones, which stay for a recording split
+   across functions and for binding a set against a different compatible pipeline. The entry
+   was right that both arguments are derivable and wrong about where from: a `DescriptorSet`
+   did NOT record its set index or its bind point, so it had to start. Push constants use the
+   LAST pipeline bound whatever its bind point, because a push-constant range belongs to a
+   layout rather than to a bind point.
    `cmd.bind_descriptor_set(scene_set, scene_pipe, set=0)` passes three arguments of which two
    are derivable: `bound_graphics_pipeline_` and `bound_compute_pipeline_` are already kept as
    record-time state (`src/CommandBuffer.hpp:539`, added by 0.19's reflection work), and a
    `DescriptorSet` already knows the layout and set index it was allocated from. Add the short
    overload, keep the long one for a recording split across functions. **~150 lines.**
-4. **`cmd.begin()` has no `cmd.end()`.** Every other pair in the API is symmetric —
+4. ✅ **`cmd.begin()` has no `cmd.end()`.** DONE in 0.25 as `with ctx.record() as cmd:`,
+   with `begin()` kept. **`__exit__` deliberately does not submit**, which the entry did not
+   say and is the only decision in it: who submits — `ctx.submit` or `renderer.present` — is
+   the caller's, and a block that guessed would be wrong half the time. The scope brackets
+   the recording, which is exactly what `begin()` starts. Every other pair in the API is symmetric —
    `begin_rendering`/`end_rendering`, `begin_label`/`end_label` — and this one means "reset and
    start recording" while being named like half of a pair. Add `with ctx.record() as cmd:`;
    `begin()` stays. **~120 lines**, and the pattern is already written twice — `Timer` and
@@ -2495,23 +2544,26 @@ used to claim.
   two costs that do not exist (no declarator, no new descriptor type) and missed the two
   that do (the attachment store-op and the layout the pass retires to). See the decision
   above, and `examples/36_msaa_resolve`.
-- **`stride=` on the indirect verbs** (was UNASKED). One argument, and it is what lets draw
-  arguments be interleaved with per-draw data instead of living in their own packed array.
-  **~120 lines.** Two verbs, not three — `dispatch_indirect` has no stride — plus
-  `check_indirect_`, which validates against the packed size today
-  (`src/CommandBuffer.hpp:1799`).
-- **A precise occlusion count** (was UNASKED). A `Feature` row plus the `PRECISE` flag when it
-  is on. The code comment's worry — that `samples` would mean two things depending on the
-  driver — is exactly what `Feature` answers, and 0.22 added three rows this way. **~100
-  lines**; a plain-boolean `Feature` row needs no pNext column, which is what 0.19 confirmed
-  by adding four of them.
-- **Per-face stencil state** (was UNASKED). A `face=` kwarg; `src/Pipeline.hpp` writes one
-  struct into both `.front` and `.back` today (`:2095`, through `to_vk_state()` at `:377`).
-  **~170 lines.**
-- **Primitive restart** (was UNASKED). `topology(TRIANGLE_STRIP, restart=True)`, opt-in so the
-  change in what the largest index value means belongs to the caller who asked for it.
-  `src/Pipeline.hpp:1812` hardcodes `VK_FALSE` (the trace above says `:1644`, which is where it
-  sat when the audit read it). **~70 lines**, the cheapest entry in the file.
+- ✅ **`stride=` on the indirect verbs** (was UNASKED) — DONE in 0.25. Two verbs, not three:
+  `dispatch_indirect` issues one command, so there is nothing for a stride to step over, and
+  the code says so where the argument is missing. What the estimate did not see is that
+  `check_indirect_` had to stop multiplying — the LAST command needs only its own struct, not
+  a whole stride, so a buffer sized exactly for the data was being refused. A stride below
+  the struct size, or not a multiple of 4, is refused with the reason.
+- ✅ **A precise occlusion count** (was UNASKED) — DONE in 0.25 as `Feature.PRECISE_OCCLUSION`
+  plus `VK_QUERY_CONTROL_PRECISE_BIT` where it is on. The code comment's worry — that
+  `samples` would mean two things depending on the driver — is exactly what a `Feature`
+  answers: the caller can now ask which of the two they are being given. Read once per
+  recording rather than per query, because the feature set is fixed for the Context's life.
+- ✅ **Per-face stencil state** (was UNASKED) — DONE in 0.25 as `face=` plus `bz.Face`, the
+  upgrade path the 0.17 entry named. Two calls spell a two-sided test, which is the
+  shadow-volume shape. **`enable` is deliberately NOT per face**: Vulkan has one
+  `stencilTestEnable` and two op-states, so any call sets the bit and the last one wins.
+  Pretending otherwise would invent a state the hardware does not have.
+- ✅ **Primitive restart** (was UNASKED) — DONE in 0.25, in the shape the entry gave, and it
+  was the cheapest entry in the file. A kwarg on `topology()` rather than a verb of its own,
+  because it means nothing without a strip. Refused on a list topology with the reason,
+  rather than left to VUID-VkPipelineInputAssemblyStateCreateInfo-topology-06252.
 - ✅ **`monitor=` and video-mode enumeration for fullscreen** (was UNASKED) — DONE in 0.25.
   **~300 lines, and the estimate was the interesting part and it was right:** this reads
   like a kwarg and is not one. Choosing needs the monitors and their modes *visible* from
@@ -2522,22 +2574,32 @@ used to claim.
   a fifth `WindowMode` — it is a property of the swapchain. **~250 lines**, including the
   acquire/release pair the extension requires and a Windows-only path in the tests.
 
-  **0.25 planned it, looked at it, and cut it — the estimate is wrong and here is the
-  shape.** `FeatureInfo` has no column for a capability that needs an EXTENSION rather than
-  a feature bit; the table's own comment has been asking for that fourth column since 0.21,
-  and it drags `DeviceFeatures` (which must then carry the device's extension list) and
-  `feature_available` along with it. On top of that: `VK_KHR_get_surface_capabilities2` is
-  an INSTANCE extension the extension requires, so `create_instance_` has to know about a
-  device capability; the Win32 half needs an `HMONITOR` from the native window handle, which
-  means `<windows.h>` reaching a header that has stayed clear of it; and the acquire/release
-  pair has to survive every swapchain recreation. Call it ~450, not ~250.
+  ✅ DONE in 0.25 as `renderer.set_fullscreen_exclusive(enable)` plus the read-back
+  `renderer.fullscreen_exclusive`. **The estimate of ~250 was wrong and the shape is worth
+  recording**, because every part of the overrun was next to the feature rather than in it —
+  the 0.19 corollary, for the fourth time.
 
-  **What settled it is rule 4, not the number.** An exclusive swapchain makes no picture —
-  it lowers latency and lets a fullscreen window change the display mode — and it is the
-  only item on the additive list that CI can never exercise and no test can assert. It goes
-  behind anything that draws. The fourth column is the useful half and is worth doing on the
-  day a second extension-gated capability asks for it, because one customer does not justify
-  a column.
+  `FeatureInfo` had no column for a capability spelled as an EXTENSION rather than a feature
+  bit. The table's own comment had been asking for that fourth column since 0.21, and it
+  drags `DeviceFeatures` (which now carries the device's extension list) and
+  `feature_available` (no longer `constexpr`, because it compares strings) along with it.
+  `VK_KHR_get_surface_capabilities2` is an INSTANCE extension that the device extension
+  requires, so `create_instance_` has to know about a device capability before any device
+  exists. The Win32 half needs an `HMONITOR`, which is a new field on `SurfaceProvider`
+  (`void*`, so the header stays free of `<windows.h>`) filled from `glfwGetWin32Window`.
+  And the acquire has to follow EVERY swapchain creation, not only the first: the mode
+  belongs to the swapchain, so a resize or a present-mode change would lose it.
+
+  **Asking is not getting, and the API says so.** `set_fullscreen_exclusive(True)` succeeds
+  and `fullscreen_exclusive` reports what the driver actually gave, because a refusal is a
+  normal outcome — another application can hold the display, and the machine this was
+  written on refuses with `VK_ERROR_INITIALIZATION_FAILED` while an overlay layer is loaded.
+  A warning names the VkResult rather than leaving a silent nothing.
+  `APPLICATION_CONTROLLED` rather than `ALLOWED`: the caller said WHEN, so a driver-decided
+  mode would make the verb a suggestion.
+
+  **It found a real bug, and that is the best thing about it.** See "The volk device table
+  had two layouts" below.
 - **Compressed texture formats** (was a STALE rejection). BC and ASTC rows in `Format` plus an
   upload path that does not decode. Container parsing (KTX2) stays out of scope, which is what
   the original rejection got right. **~500 lines, the most expensive additive entry.** Not

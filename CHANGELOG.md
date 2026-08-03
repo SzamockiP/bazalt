@@ -23,8 +23,15 @@ nothing about ImGui inside bazalt.
 The monitor enumeration closes the last backlog entry that touches windowing. A
 fullscreen window can name its display and its video mode.
 
-One thing rode along that shares no subject with any of that, and it is here
-because it makes a picture: the samples behind MSAA can be read.
+Then it empties the rest of the additive backlog before the 1.0 freeze: the
+samples behind MSAA can be read, exclusive fullscreen, primitive restart, a
+stride on the indirect draws, a precise occlusion count, per-face stencil,
+`with ctx.record()`, and the short forms of the two verbs that took a pipeline
+they already knew.
+
+Exclusive fullscreen found a bug that had been true since Windows support
+existed: bazalt and volk were compiling two different `VolkDeviceTable`
+structs.
 
 ### Added
 - **`window.text_input()`.** The characters typed during the last poll cycle, as
@@ -68,6 +75,36 @@ because it makes a picture: the samples behind MSAA can be read.
 - **`examples/36_msaa_resolve`.** The same picture three ways: the hardware
   resolve, sample 0 on its own, and how much the samples disagree. The third is
   a map of every pixel MSAA is working on.
+- **`renderer.set_fullscreen_exclusive(enable)` and
+  `renderer.fullscreen_exclusive`.** Take the display outright instead of drawing
+  through the compositor: lower latency, and a fullscreen window may change the
+  display mode. A property of the swapchain rather than a fifth `WindowMode`, so
+  put the window in `FULLSCREEN` first. Needs
+  `Feature.EXCLUSIVE_FULLSCREEN`, which is a Windows extension.
+
+  Asking is not getting. The driver may refuse — another application can hold the
+  display — so the call succeeds and `fullscreen_exclusive` reports what you got.
+- **`Feature.PRECISE_OCCLUSION`.** With it, `OcclusionQuery.samples` is a count of
+  samples. Without it the spec allows any non-zero value for "something passed",
+  so the number meant two different things depending on the driver, and now you
+  can ask which one you are being given.
+- **`topology(..., restart=True)`.** The largest index value ends the current
+  strip and starts another, so one draw carries many strips. Opt-in, because it
+  takes that value away from being an index. Needs a strip topology.
+- **`stride=` on `draw_indirect` and `draw_indexed_indirect`.** Lets the draw
+  arguments be interleaved with your own per-draw data instead of living in a
+  packed array of their own. `dispatch_indirect` has none: it issues one command,
+  so there is nothing to step over.
+- **`face=` on `stencil_test`, and `bz.Face`.** Two calls spell a two-sided test,
+  which is what a shadow volume wants. `enable` is not per face: Vulkan has one
+  stencil-test bit and two op-states, so any call sets the bit.
+- **`with ctx.record() as cmd:`.** The missing half of `cmd.begin()`, which was
+  named like one side of a pair that had no other side. The block brackets the
+  RECORDING and does not submit — who submits stays your decision.
+- **Short `cmd.bind_descriptor_set(set)` and `cmd.push_constants(offset, data)`.**
+  Both arguments the long forms take are already known: a descriptor set records
+  the index it was allocated for, and `bind_pipeline` records the pipeline. The
+  long forms stay for a recording split across functions.
 
 ### Changed
 - **`cull_mode(bz.CullMode.NONE)` no longer needs a winding.** `front_face`
@@ -81,10 +118,21 @@ because it makes a picture: the samples behind MSAA can be read.
   last frame" set, which is the three lines the feature removes.
 
 ### Fixed
+- **bazalt and volk compiled two different `VolkDeviceTable` structs on
+  Windows.** Every Win32-only entry point in that table sits behind
+  `VK_USE_PLATFORM_WIN32_KHR`, and the macro was set for bazalt's own sources but
+  not for volk's, so the two disagreed about where the fields are. Nothing had
+  ever called one of the guarded entry points, which is why it stayed invisible;
+  the first one that did crashed. The macro is now set on the volk target and
+  reaches everything that links it.
 - **A multisampled image was created without `SAMPLED` usage.** No shader could
   read one, which is what made a custom resolve impossible. The depth/stencil
   rule that strips `SAMPLED` from a two-aspect view now runs first, so a
   `DEPTH_STENCIL` attachment is unaffected.
+- **An indirect draw with a stride larger than its argument struct wanted a
+  buffer bigger than the data.** The size check multiplied the stride by the
+  command count, and the last command needs only its own struct — the padding a
+  stride leaves is between commands.
 
 ## [0.24.0] — 2026-08-02
 
