@@ -73,11 +73,12 @@ while window.is_open():
             f"R({pad.axis(bz.GamepadAxis.RIGHT_X):+.2f}, {pad.axis(bz.GamepadAxis.RIGHT_Y):+.2f})")
 
     # One recording per frame: the clear colour is baked into it, and the clear
-    # colour is the whole picture here.
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(renderer, clear_color=color):
-        pass
+    # colour is the whole picture here. `with ctx.record()` is cmd.begin() with
+    # the closing half it never had — it suits a loop like this one, which builds
+    # a command buffer per frame anyway.
+    with ctx.record() as cmd:
+        with cmd.rendering(renderer, clear_color=color):
+            pass
 
     ctx.begin_frame()
     if renderer.acquire():

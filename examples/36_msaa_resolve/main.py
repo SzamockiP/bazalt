@@ -108,21 +108,24 @@ while window.is_open():
     angle = (time.perf_counter() - start) * 0.4
     window.set_title(f"Bazalt Demo - Custom MSAA resolve | {MODES[mode]}")
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    # Pass one: the star, multisampled, resolved AND kept.
-    with cmd.rendering(scene_target, clear_color=[0.02, 0.02, 0.04, 1.0]):
-        cmd.bind_pipeline(star)
-        cmd.push_constants(star, 0, struct.pack("2f", angle, scene_target.width / scene_target.height))
-        cmd.bind_vertex_buffer(star_buffer)
-        cmd.draw(POINTS * 3)
-    # Pass two: look at it three ways. No barrier here — the target contract
-    # leaves both images readable, and the tracker knows it.
-    with cmd.rendering(renderer):
-        cmd.bind_pipeline(resolve)
-        cmd.bind_descriptor_set(dset, resolve)
-        cmd.push_constants(resolve, 0, struct.pack("2i", mode, SAMPLES))
-        cmd.draw(3)
+    # The short forms of push_constants and bind_descriptor_set: the pipeline is
+    # bound two lines up, and the set knows which index it was allocated for, so
+    # naming either again is a chance to disagree with the truth rather than
+    # information.
+    with ctx.record() as cmd:
+        # Pass one: the star, multisampled, resolved AND kept.
+        with cmd.rendering(scene_target, clear_color=[0.02, 0.02, 0.04, 1.0]):
+            cmd.bind_pipeline(star)
+            cmd.push_constants(0, struct.pack("2f", angle, scene_target.width / scene_target.height))
+            cmd.bind_vertex_buffer(star_buffer)
+            cmd.draw(POINTS * 3)
+        # Pass two: look at it three ways. No barrier here — the target contract
+        # leaves both images readable, and the tracker knows it.
+        with cmd.rendering(renderer):
+            cmd.bind_pipeline(resolve)
+            cmd.bind_descriptor_set(dset)
+            cmd.push_constants(0, struct.pack("2i", mode, SAMPLES))
+            cmd.draw(3)
 
     ctx.begin_frame()
     if renderer.acquire():

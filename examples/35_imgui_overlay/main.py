@@ -208,8 +208,8 @@ class ImGuiOverlay:
         push = struct.pack("4f", 2.0 / width, 2.0 / height, -1.0, -1.0)
 
         cmd.bind_pipeline(self.pipeline)
-        cmd.bind_descriptor_set(self.dset, self.pipeline)
-        cmd.push_constants(self.pipeline, 0, push)
+        cmd.bind_descriptor_set(self.dset)
+        cmd.push_constants(0, push)
         cmd.bind_vertex_buffer(self.vbuf)
         cmd.bind_index_buffer(self.ibuf)
         for elem_count, index_offset, clip in draws:
@@ -306,13 +306,12 @@ while window.is_open():
 
     scene_push = struct.pack("4f4f", *tint, 1.0, elapsed, scale, speed, warp)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(renderer, clear_color=[0.05, 0.05, 0.07, 1.0]):
-        cmd.bind_pipeline(scene)
-        cmd.push_constants(scene, 0, scene_push)
-        cmd.draw(3)
-        overlay.draw(cmd)
+    with ctx.record() as cmd:
+        with cmd.rendering(renderer, clear_color=[0.05, 0.05, 0.07, 1.0]):
+            cmd.bind_pipeline(scene)
+            cmd.push_constants(0, scene_push)
+            cmd.draw(3)
+            overlay.draw(cmd)
 
     ctx.begin_frame()
     if renderer.acquire():

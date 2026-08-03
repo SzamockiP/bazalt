@@ -2585,6 +2585,11 @@ class Context:
         cmd.begin() was named like half of a pair that had no other half. This is
         the other half, and it brackets the RECORDING only — the block does not
         submit, because who submits is not its business.
+
+        It CREATES a command buffer, so it fits a one-off recording and a frame
+        loop that builds one per frame anyway. A loop that keeps one command
+        buffer and re-records it every frame should keep calling cmd.begin(),
+        which is what re-recording means.
         """
         ...
 
