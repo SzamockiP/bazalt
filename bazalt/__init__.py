@@ -76,6 +76,7 @@ __all__ = [
     "Key",
     "MouseButton",
     "CursorMode",
+    "Cursor",
     # Errors — the type is the recoverability contract
     "BazaltError",
     "InitializationError",

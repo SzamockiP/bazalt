@@ -359,6 +359,47 @@ def test_dropped_files_is_per_cycle_state(ctx):
         window = None
 
 
+def test_text_input_is_per_cycle_state(ctx):
+    """0.25: the character stream expires with the poll cycle, exactly as a drop
+    and a key edge do, because it shares their rotation. Nobody can type here, so
+    what this pins down is the part that is ours: it starts empty, it does not
+    consume, and it is a str."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    try:
+        for _ in range(3):
+            bz.poll_events()
+            first = window.text_input()
+            second = window.text_input()
+            assert first == ""
+            assert first == second
+            assert isinstance(first, str)
+    finally:
+        window = None
+
+
+def test_every_cursor_shape_is_accepted(ctx):
+    """0.25: the ten standard shapes, plus the two edges. A shape a platform has
+    no cursor for falls back to the default arrow rather than failing, and an int
+    that is not a standard cursor at all does the same — the set_icon contract, a
+    request rather than a guarantee."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window = a_window()
+    try:
+        for shape in bz.Cursor.__members__.values():
+            window.set_cursor(shape)
+        window.set_cursor(int(bz.Cursor.IBEAM))
+        window.set_cursor(0)
+        # Orthogonal to the mode: hiding the pointer does not undo its shape.
+        window.set_cursor_mode(bz.CursorMode.HIDDEN)
+        window.set_cursor(bz.Cursor.CROSSHAIR)
+        window.set_cursor_mode(bz.CursorMode.NORMAL)
+    finally:
+        window = None
+
+
 def test_set_cursor_position_does_not_fabricate_a_mouse_delta(ctx):
     """Warping the cursor must not read as the user moving it.
 

@@ -212,6 +212,20 @@ void bind_enums(py::module_& m)
         .value("HIDDEN", CursorMode::HIDDEN)
         .value("DISABLED", CursorMode::DISABLED);
 
+    // What the pointer draws, which set_cursor takes. CursorMode answers whether
+    // it is visible at all, so the two compose instead of overlapping.
+    py::enum_<Cursor>(m, "Cursor")
+        .value("ARROW", Cursor::ARROW)
+        .value("IBEAM", Cursor::IBEAM)
+        .value("CROSSHAIR", Cursor::CROSSHAIR)
+        .value("POINTING_HAND", Cursor::POINTING_HAND)
+        .value("RESIZE_EW", Cursor::RESIZE_EW)
+        .value("RESIZE_NS", Cursor::RESIZE_NS)
+        .value("RESIZE_NWSE", Cursor::RESIZE_NWSE)
+        .value("RESIZE_NESW", Cursor::RESIZE_NESW)
+        .value("RESIZE_ALL", Cursor::RESIZE_ALL)
+        .value("NOT_ALLOWED", Cursor::NOT_ALLOWED);
+
     py::enum_<BufferType>(m, "BufferType")
         .value("VERTEX", BufferType::VERTEX)
         .value("INDEX", BufferType::INDEX)

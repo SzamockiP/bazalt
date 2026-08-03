@@ -639,6 +639,23 @@ class CursorMode(IntEnum):
     HIDDEN = 212994
     DISABLED = 212995
 
+class Cursor(IntEnum):
+    """What set_cursor takes: the pointer's shape (0.25).
+
+    A different question from CursorMode, which says whether the pointer is
+    visible at all. The values are GLFW's own, like Key and GamepadButton.
+    """
+    ARROW = 221185
+    IBEAM = 221186
+    CROSSHAIR = 221187
+    POINTING_HAND = 221188
+    RESIZE_EW = 221189
+    RESIZE_NS = 221190
+    RESIZE_NWSE = 221191
+    RESIZE_NESW = 221192
+    RESIZE_ALL = 221193
+    NOT_ALLOWED = 221194
+
 # ── Resources ──────────────────────────────────────────────────────────
 
 class Buffer:
@@ -1619,7 +1636,34 @@ class Window:
         inside one frame and does not consume: two readers both see the drop.
         """
         ...
+    def text_input(self) -> str:
+        """The characters typed during the last poll cycle, as text (0.25).
+
+        Empty on almost every frame. Expires with the cycle, like a drop or a key
+        edge, so it reads the same twice inside one frame and does not consume.
+
+        This is not the key edges seen from another angle. A character arrives
+        after the keyboard layout, the shift state, AltGr, the dead keys and an
+        IME have each had their say, and no amount of key state reconstructs one:
+        `is_key_pressed(Key.A)` says a physical key is down, and this says the
+        user typed "a", "A" or "ä". A text field reads this; a toggle reads
+        was_key_pressed. Backspace, Enter and the arrows produce no character, so
+        a text field handles those through the key edges.
+        """
+        ...
     def set_cursor_mode(self, mode: CursorMode | int) -> None: ...
+    def set_cursor(self, shape: Cursor | int) -> None:
+        """What the pointer draws while it is visible (0.25).
+
+        The ten standard shapes: an I-beam over a text field, a resize arrow over
+        a splitter, a pointing hand over a link. Orthogonal to set_cursor_mode,
+        which decides whether the pointer is visible at all.
+
+        A platform that has no cursor for a shape falls back to the default arrow
+        rather than failing — Wayland lacks several. Same contract as set_icon: a
+        request, not a guarantee.
+        """
+        ...
     def set_cursor_position(self, x: float, y: float) -> None:
         """Move the cursor, without the move reading as the user moving it (0.19).
 
@@ -1826,6 +1870,18 @@ class Gamepad:
         ...
     def button(self, button: GamepadButton) -> bool:
         """Whether that button is down right now."""
+        ...
+    def was_button_pressed(self, button: GamepadButton) -> bool:
+        """True when that button went down since the previous poll cycle (0.25).
+
+        The edge, where button() is the level — the same pair the keyboard has in
+        was_key_pressed beside is_key_pressed. It reads the same twice inside one
+        cycle and does not consume.
+
+        GLFW has no gamepad callback, so an edge is measured between two readings
+        rather than recorded as it happens: read each pad every frame, or a press
+        and a release inside a frame you skipped are both invisible.
+        """
         ...
 
 def get_gamepad(index: int = 0, *, deadzone: float = 0.0) -> Optional[Gamepad]:

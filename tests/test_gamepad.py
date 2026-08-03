@@ -72,6 +72,43 @@ def test_a_connected_pad_reads_every_control():
         del window
 
 
+def test_an_untouched_pad_reports_no_edge():
+    """0.25: was_button_pressed is the edge where button() is the level, and it
+    must not invent one. Nobody can press a button from here, so what this pins
+    down is the same half the keyboard's edge test does — several poll cycles
+    with no input produce no edge, and a button held when the first read happened
+    is not an edge either (the history starts level rather than at zero)."""
+    window = a_window()
+    try:
+        for _ in range(3):
+            bz.poll_events()
+            pad = bz.get_gamepad(0)
+            if pad is None:
+                pytest.skip("no gamepad connected")
+            for button in bz.GamepadButton.__members__.values():
+                assert pad.was_button_pressed(button) is False
+    finally:
+        del window
+
+
+def test_a_pad_edge_reads_the_same_twice_in_one_cycle():
+    """The rotation is reader-driven and does not consume, exactly as the window's
+    is: two reads inside one poll cycle answer identically, so two parts of a
+    program can both act on the same press."""
+    window = a_window()
+    try:
+        bz.poll_events()
+        first = bz.get_gamepad(0)
+        second = bz.get_gamepad(0)
+        if first is None:
+            pytest.skip("no gamepad connected")
+        for button in bz.GamepadButton.__members__.values():
+            assert first.was_button_pressed(button) == second.was_button_pressed(button)
+            assert first.button(button) == second.button(button)
+    finally:
+        del window
+
+
 def test_the_enums_cover_the_whole_layout():
     """GLFW maps every pad it knows onto 15 buttons and 6 axes, and bazalt renames
     those rather than translating them — so a missing entry would be a control no

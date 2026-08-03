@@ -114,7 +114,7 @@ public:
         {
             if (window_count_.fetch_sub(1) == 1)
             {
-                glfwTerminate();
+                terminate_glfw_();
             }
             return std::unexpected(err_window(describe_glfw_failure("Bazalt cannot create the window")));
         }
@@ -130,6 +130,7 @@ public:
         glfwSetMouseButtonCallback(window->window_.get(), mouse_button_callback);
         glfwSetFramebufferSizeCallback(window->window_.get(), framebuffer_resize_callback);
         glfwSetDropCallback(window->window_.get(), drop_callback);
+        glfwSetCharCallback(window->window_.get(), char_callback);
 
         // Start level with the world: a window created mid-loop must not rotate
         // an empty pending_ into current_ on its first query.
@@ -154,7 +155,7 @@ public:
     {
         if (window_count_.fetch_sub(1) == 1)
         {
-            glfwTerminate();
+            terminate_glfw_();
         }
     };
 
@@ -201,9 +202,44 @@ public:
         return current_.dropped;
     }
 
+    // The characters typed during the last poll cycle, as UTF-8. Empty on almost
+    // every frame.
+    //
+    // This is NOT the key edges seen from another angle, and the difference is
+    // the whole reason the entry point exists. glfwSetCharCallback reports a
+    // Unicode codepoint after the keyboard layout, the shift state, AltGr, the
+    // dead keys and the IME have each had their say; is_key_pressed reports a
+    // physical key. Nothing reconstructs the first from the second, which is why
+    // every text field in every toolkit reads this stream instead.
+    //
+    // Same lifetime as the key edges: it belongs to one poll cycle, it reads the
+    // same twice inside that cycle, and it does not consume.
+    const std::string& text_input() const
+    {
+        rotate_();
+        return current_.text;
+    }
+
     void set_cursor_mode(int mode)
     {
         glfwSetInputMode(window_.get(), GLFW_CURSOR, mode);
+    }
+
+    // The pointer's shape, from the ten standard ones GLFW draws. Orthogonal to
+    // set_cursor_mode, which decides whether the pointer is visible at all.
+    //
+    // The shape takes an int for the reason every other input query does: a
+    // pybind enum converts through its value, so bz.Cursor.IBEAM and a bare GLFW
+    // constant both arrive here.
+    //
+    // A platform may not have a given shape — Wayland lacks several — and
+    // glfwCreateStandardCursor then returns null, which glfwSetCursor reads as
+    // "the default arrow". That is the set_icon contract: a request, not a
+    // guarantee, and a missing shape is not worth an error channel that every
+    // caller would then have to handle for a cosmetic detail.
+    void set_cursor(int shape)
+    {
+        glfwSetCursor(window_.get(), standard_cursor_(shape));
     }
 
     // Move the cursor, and make sure the move does not read as the user moving it.
@@ -590,6 +626,11 @@ private:
         // scroll notch, so it shares the one rotation mechanism rather than
         // inventing a second lifetime to remember.
         std::vector<std::string> dropped;
+        // Characters typed during this cycle, already UTF-8. Encoded in the
+        // callback rather than kept as codepoints, because every reader of this
+        // wants text: a vector<unsigned int> would make the binding layer do the
+        // encoding and make C++ callers do it themselves.
+        std::string text;
     };
 
     // The callbacks append to pending_; a reader whose generation is stale
@@ -687,6 +728,76 @@ private:
         if (win)
         {
             win->framebuffer_resized_ = true;
+        }
+    };
+
+    // A GLFWcursor belongs to the process rather than to a window — the same fact
+    // that makes poll_events() and the clipboard free functions — so the ten
+    // standard shapes are created once, on first use, and shared by every window.
+    //
+    // GLFW defines the ten constants contiguously from GLFW_ARROW_CURSOR, which is
+    // what lets an array stand in for a map. A shape outside that range is not a
+    // standard cursor, and null is what glfwSetCursor takes for "the default".
+    static GLFWcursor* standard_cursor_(int shape)
+    {
+        const int index = shape - GLFW_ARROW_CURSOR;
+        if (index < 0 || index >= static_cast<int>(cursors_.size()))
+        {
+            return nullptr;
+        }
+        if (!cursors_[index])
+        {
+            cursors_[index] = glfwCreateStandardCursor(shape);
+        }
+        return cursors_[index];
+    }
+
+    // glfwTerminate destroys every remaining cursor, so the cache holds dangling
+    // pointers the moment the last window closes. Cleared beside the call rather
+    // than in a destructor of its own, because the cache has no owner: it belongs
+    // to the same process-wide lifetime glfwInit and glfwTerminate bracket.
+    static void terminate_glfw_()
+    {
+        cursors_.fill(nullptr);
+        glfwTerminate();
+    }
+
+    static inline std::array<GLFWcursor*, 10> cursors_{};
+
+    // GLFW hands out one codepoint; the rest of the library speaks UTF-8, so the
+    // conversion happens here, once, at the only place a codepoint exists.
+    static void append_utf8(std::string& out, unsigned int codepoint)
+    {
+        if (codepoint < 0x80)
+        {
+            out.push_back(static_cast<char>(codepoint));
+        }
+        else if (codepoint < 0x800)
+        {
+            out.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+            out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+        }
+        else if (codepoint < 0x10000)
+        {
+            out.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+        }
+        else
+        {
+            out.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+            out.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+        }
+    }
+
+    static void char_callback(GLFWwindow* window, unsigned int codepoint)
+    {
+        Window* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
+        if (win)
+        {
+            append_utf8(win->pending_.text, codepoint);
         }
     };
 
@@ -1002,6 +1113,28 @@ enum class CursorMode
     DISABLED = GLFW_CURSOR_DISABLED
 };
 
+// What the pointer looks like, which is a different question from CursorMode:
+// that one says whether the pointer is visible or captured, this one says what
+// it draws while it is visible. Two questions, two verbs, and no rules for
+// combining them.
+//
+// The values ARE the GLFW ints, by the rule Key and GamepadButton already
+// follow: the two cannot drift, and a bare GLFW constant stays valid.
+enum class Cursor
+{
+    ARROW = GLFW_ARROW_CURSOR,
+    // A text caret. What a text field shows, so it arrives with text_input().
+    IBEAM = GLFW_IBEAM_CURSOR,
+    CROSSHAIR = GLFW_CROSSHAIR_CURSOR,
+    POINTING_HAND = GLFW_POINTING_HAND_CURSOR,
+    RESIZE_EW = GLFW_RESIZE_EW_CURSOR,
+    RESIZE_NS = GLFW_RESIZE_NS_CURSOR,
+    RESIZE_NWSE = GLFW_RESIZE_NWSE_CURSOR,
+    RESIZE_NESW = GLFW_RESIZE_NESW_CURSOR,
+    RESIZE_ALL = GLFW_RESIZE_ALL_CURSOR,
+    NOT_ALLOWED = GLFW_NOT_ALLOWED_CURSOR
+};
+
 // One reading of one pad. A snapshot by value, not a live handle: the state is
 // what the last poll_events() left behind, and holding it means a value that
 // cannot change halfway through the frame that is reading it.
@@ -1025,6 +1158,21 @@ struct Gamepad
         const auto i = static_cast<std::size_t>(b);
         return i < buttons.size() && buttons[i] != 0;
     }
+
+    // Went down since the last poll cycle — the edge, where button() is the
+    // level. Same pair as was_key_pressed beside is_key_pressed, and the same
+    // reason: without it every caller keeps its own "was it down last frame"
+    // array.
+    bool was_button_pressed(GamepadButton b) const
+    {
+        const auto i = static_cast<std::size_t>(b);
+        return i < buttons.size() && buttons[i] != 0 && previous[i] == 0;
+    }
+
+    // The state this pad was in one poll cycle ago. Carried in the snapshot
+    // rather than looked up by the query, so a Gamepad stays a value that
+    // answers every question about one moment out of its own fields.
+    std::array<unsigned char, 15> previous{};
 };
 
 // A stick that reads 0.03 when nobody is touching it is what real hardware does,
@@ -1057,6 +1205,27 @@ static_assert(apply_deadzone(0.25f, 0.25f) == 0.0f);
 static_assert(apply_deadzone(0.5f, 0.0f) == 0.5f);
 static_assert(apply_deadzone(0.625f, 0.25f) == 0.5f);
 
+// What each pad's buttons read when this cycle started, so an edge has something
+// to compare against.
+//
+// Process-wide, because the pad is: 0.16 refused a registry of live *windows* to
+// hang a global on, and this needs no such thing — the pads are a fixed set of
+// slots, and the per-cycle counter it rotates on has existed since 0.16. Not
+// synchronized, like the per-window PollState it mirrors, because GLFW's input
+// belongs to the main thread.
+struct GamepadHistory
+{
+    std::array<unsigned char, 15> previous{};
+    std::array<unsigned char, 15> current{};
+    // 0 is a real generation, so "never read" needs its own flag rather than a
+    // sentinel: without it the first read of the very first cycle would roll a
+    // zeroed `current` into `previous` and report every held button as an edge.
+    bool seen = false;
+    std::uint64_t generation = 0;
+};
+
+inline std::array<GamepadHistory, GLFW_JOYSTICK_LAST + 1> gamepad_history_{};
+
 // Read one gamepad, or nothing when that slot is empty.
 //
 // A free function for the reason poll_events() is one: a pad belongs to the
@@ -1064,11 +1233,15 @@ static_assert(apply_deadzone(0.625f, 0.25f) == 0.5f);
 // window. The state itself is refreshed by poll_events(), so this is a read of
 // what the last pump saw.
 //
-// Level state only — which buttons are down now. The edge queries
-// (was_key_pressed and friends) rotate on a per-window generation counter, and a
-// pad has no window to hang that on; 0.16 rejected a process-wide registry of
-// live windows for exactly this, and an edge here would need the global that
-// decision refused.
+// The edges rotate the same way the window's do: the first read in a new poll
+// cycle rolls what it read last time into `previous`, and every later read in
+// that cycle answers identically. Reader-driven, so it does not consume — the
+// 0.16 rule, and the reason was_button_pressed twice in one frame is not a trap.
+//
+// What that costs, and it is the honest half: GLFW has no gamepad callback, so a
+// press and a release inside a cycle nobody read are both invisible. A key edge
+// cannot be missed that way, because the key callback records it whether or not
+// anybody asks. Reading each pad every frame is what closes the gap.
 // The index and the deadzone are checked in the binding layer and raise
 // ValueError there: both are values outside a fixed range in the signature, which
 // is the half of the 0.20 rule that does not belong to the BazaltError hierarchy.
@@ -1089,6 +1262,13 @@ inline std::expected<std::optional<Gamepad>, Error> get_gamepad(int index, float
     // there is no gamepad here as far as this API is concerned.
     if (!glfwGetGamepadState(index, &state))
     {
+        // An empty slot forgets its history, so a pad that is unplugged and
+        // plugged back in starts level instead of reporting whatever it held
+        // before as an edge.
+        if (index >= 0 && index < static_cast<int>(gamepad_history_.size()))
+        {
+            gamepad_history_[static_cast<std::size_t>(index)] = GamepadHistory{};
+        }
         return std::nullopt;
     }
 
@@ -1139,6 +1319,22 @@ inline std::expected<std::optional<Gamepad>, Error> get_gamepad(int index, float
     {
         float& value = pad.axes[static_cast<std::size_t>(stick)];
         value = apply_deadzone(value, deadzone);
+    }
+
+    // The buttons, not the axes: an axis edge is a threshold the caller picks,
+    // and bazalt has no business picking it.
+    if (index >= 0 && index < static_cast<int>(gamepad_history_.size()))
+    {
+        GamepadHistory& history = gamepad_history_[static_cast<std::size_t>(index)];
+        const std::uint64_t generation = Window::poll_generation_.load(std::memory_order_relaxed);
+        if (!history.seen || history.generation != generation)
+        {
+            history.previous = history.seen ? history.current : pad.buttons;
+            history.current = pad.buttons;
+            history.generation = generation;
+            history.seen = true;
+        }
+        pad.previous = history.previous;
     }
     return pad;
 }

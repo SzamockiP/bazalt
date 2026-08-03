@@ -42,6 +42,7 @@ void bind_windowing(py::module_& m)
         .def("was_key_pressed", &Window::was_key_pressed, py::arg("key"))
         .def("was_mouse_button_pressed", &Window::was_mouse_button_pressed, py::arg("button"))
         .def("set_cursor_mode", &Window::set_cursor_mode, py::arg("mode"))
+        .def("set_cursor", &Window::set_cursor, py::arg("shape"))
         .def("get_mouse_state", &Window::get_mouse_state)
         .def("set_title", &Window::set_title, py::arg("title"))
         .def(
@@ -59,6 +60,12 @@ void bind_windowing(py::module_& m)
             // Copied into a Python list rather than returned by reference: the
             // vector is rotated out from under the caller on the next poll cycle.
             [](const Window& self) { return py::cast(self.dropped_files()); })
+        .def(
+            "text_input",
+            // Copied for the same reason dropped_files is, and decoded as UTF-8
+            // rather than handed over as bytes: the C++ side already encoded it,
+            // and a str is what a text field appends.
+            [](const Window& self) { return py::str(self.text_input()); })
         .def(
             "set_icon",
             [](Window& self, py::object icon)
@@ -240,6 +247,7 @@ void bind_windowing(py::module_& m)
         .def_readonly("name", &Gamepad::name)
         .def("axis", &Gamepad::axis, py::arg("axis"))
         .def("button", &Gamepad::button, py::arg("button"))
+        .def("was_button_pressed", &Gamepad::was_button_pressed, py::arg("button"))
         .def("__repr__", [](const Gamepad& g) { return std::format("<bazalt.Gamepad {} '{}'>", g.index, g.name); });
 
     // Free function, not a Window method, for the reason poll_events() is one:
@@ -267,9 +275,13 @@ void bind_windowing(py::module_& m)
         py::kw_only(),
         py::arg("deadzone") = 0.0f,
         "The gamepad in slot `index`, or None when that slot is empty.\n\n"
-        "Level state only: which buttons are down and where the sticks are, as of\n"
-        "the last poll_events(). Needs at least one live Window, because GLFW is\n"
-        "initialized with the first one.");
+        "What the pad reads as of the last poll_events(): which buttons are down,\n"
+        "where the sticks are, and which buttons went down since the previous poll\n"
+        "cycle (pad.was_button_pressed). Needs at least one live Window, because\n"
+        "GLFW is initialized with the first one.\n\n"
+        "GLFW gives no gamepad callback, so an edge is measured between two reads.\n"
+        "Read each pad every frame, or a press and a release inside a frame you\n"
+        "skipped are both invisible.");
 
     // ── Key Constants ──
     m.attr("KEY_SPACE") = GLFW_KEY_SPACE;
