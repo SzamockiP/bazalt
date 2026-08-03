@@ -1171,8 +1171,13 @@ public:
         return std::forward<Self>(self);
     }
 
+    // front_face defaults to the value the builder already starts with, so
+    // cull_mode(CullMode::NONE) is spellable. Culling nothing makes the winding
+    // meaningless, and requiring an argument that means nothing is how a caller
+    // ends up picking one at random and being wrong later — the 0.24 rule that a
+    // default belongs on every call that asks for the value.
     template <typename Self>
-    Self&& cull_mode(this Self&& self, CullMode mode, FrontFace frontFace)
+    Self&& cull_mode(this Self&& self, CullMode mode, FrontFace frontFace = FrontFace::COUNTER_CLOCKWISE)
     {
         self.cull_mode_ = mode;
         self.front_face_ = frontFace;

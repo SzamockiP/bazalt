@@ -1042,7 +1042,15 @@ class GraphicsPipelineBuilder:
         whatever write says.
         """
         ...
-    def cull_mode(self, mode: CullMode, front_face: FrontFace) -> GraphicsPipelineBuilder: ...
+    def cull_mode(self, mode: CullMode,
+                  front_face: FrontFace = FrontFace.COUNTER_CLOCKWISE) -> GraphicsPipelineBuilder:
+        """Which faces to drop, and which winding counts as front.
+
+        front_face has a default since 0.25, because cull_mode(CullMode.NONE)
+        could not be spelled without naming a winding that means nothing when
+        nothing is culled.
+        """
+        ...
     def polygon_mode(self, mode: PolygonMode) -> GraphicsPipelineBuilder: ...
     def line_width(self, width: float) -> GraphicsPipelineBuilder:
         """Line width in pixels for PolygonMode.LINE or Topology.LINE_LIST.

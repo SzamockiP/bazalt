@@ -5,9 +5,11 @@ the process, not to a window, so there is no such thing as one window's gamepad.
 It answers None when nothing is plugged into that slot, which is why this example
 still runs with no hardware at all.
 
-The reading is level state — where the sticks are and which buttons are down as
-of the last `poll_events()`. There are no edge queries (`was_button_pressed`):
-those rotate on a per-window counter, and a pad has no window to hang one on.
+The reading carries both the level and the edge: where the sticks are and which
+buttons are down as of the last `poll_events()`, plus which of them went down
+since the poll before that (`pad.was_button_pressed`, 0.25). The edge is measured
+between two readings rather than recorded as it happens, because GLFW has no
+gamepad callback — so read the pad every frame.
 
 Nothing here compiles a shader. The whole picture is the clear colour, which is
 the smallest thing that can show a live analogue value.
@@ -16,7 +18,7 @@ the smallest thing that can show a live analogue value.
   * right stick  -> blue
   * triggers     -> overall brightness, 0..1 each (bazalt normalizes them; GLFW
                     reports a trigger as -1 released)
-  * any button   -> printed once while it is held
+  * any button   -> printed once, on the frame it goes down
 """
 
 import time
@@ -33,7 +35,6 @@ ctx = bz.Context(logger)
 renderer = ctx.create_renderer(window)
 
 print("plug in a gamepad and move the sticks. ESC or close the window to quit.")
-held = set()
 announced = False
 
 while window.is_open():
@@ -60,10 +61,11 @@ while window.is_open():
                                        pad.axis(bz.GamepadAxis.RIGHT_TRIGGER))
         color = [red * brightness, green * brightness, blue * brightness, 1.0]
 
-        down = {b for b in bz.GamepadButton.__members__.values() if pad.button(b)}
-        for button in sorted(down - held, key=lambda b: b.name):
-            print(f"  {button.name} down")
-        held = down
+        # The edge, not the level, so the caller keeps no "was it down last
+        # frame" set of its own — which is what these three lines used to be.
+        for button in bz.GamepadButton.__members__.values():
+            if pad.was_button_pressed(button):
+                print(f"  {button.name} down")
 
         window.set_title(
             f"Bazalt Demo - Gamepad | {pad.name} | "

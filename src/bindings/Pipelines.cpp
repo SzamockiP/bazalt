@@ -60,7 +60,7 @@ void bind_pipelines(py::module_& m)
             [](GraphicsPipelineBuilder& self, CullMode mode, FrontFace front_face) -> GraphicsPipelineBuilder&
             { return self.cull_mode(mode, front_face); },
             py::arg("mode"),
-            py::arg("front_face"))
+            py::arg("front_face") = FrontFace::COUNTER_CLOCKWISE)
         .def(
             "polygon_mode",
             [](GraphicsPipelineBuilder& self, PolygonMode mode) -> GraphicsPipelineBuilder&
