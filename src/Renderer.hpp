@@ -485,11 +485,19 @@ public:
         }
         // Released before the swapchain goes, not after: the mode belongs to the
         // swapchain that holds it, and releasing a destroyed one is nothing.
+        //
+        // Guarded by the platform macro rather than by a runtime check, because
+        // VolkDeviceTable does not even DECLARE these members off Win32 — the
+        // whole extension lives behind VK_USE_PLATFORM_WIN32_KHR in the Vulkan
+        // headers. The runtime check stays inside it: the member can exist and
+        // still be null.
+#ifdef VK_USE_PLATFORM_WIN32_KHR
         if (!enable && exclusive_active_ && context_->vk().vkReleaseFullScreenExclusiveModeEXT)
         {
             context_->vk().vkReleaseFullScreenExclusiveModeEXT(context_->device(), swapchain_);
             exclusive_active_ = false;
         }
+#endif
         fullscreen_exclusive_ = enable;
         recreate_swapchain();
         return {};
@@ -1104,7 +1112,14 @@ private:
         // driver-decided mode would make set_fullscreen_exclusive(True) a
         // suggestion.
         //
-        // The Win32 struct is not optional beside it
+        // The whole extension is Win32-only in the Vulkan headers, structs
+        // included, so everything about it is compiled out elsewhere. Nothing is
+        // lost: Feature::EXCLUSIVE_FULLSCREEN keys on a device extension no other
+        // platform reports, so set_fullscreen_exclusive already refuses there.
+        const void* swapchain_next = nullptr;
+        exclusive_active_ = false;
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+        // The Win32 struct is not optional beside the first
         // (VUID-VkSwapchainCreateInfoKHR-pNext-02679): a Win32 surface must name
         // the monitor, which is what the SurfaceProvider hands out.
         VkSurfaceFullScreenExclusiveInfoEXT exclusive_info{
@@ -1115,8 +1130,6 @@ private:
             .sType = VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT,
             .pNext = nullptr,
             .hmonitor = nullptr};
-        const void* swapchain_next = nullptr;
-        exclusive_active_ = false;
         if (fullscreen_exclusive_)
         {
             // The surface has to be able to name its display. A renderer built on
@@ -1142,6 +1155,7 @@ private:
                 exclusive_active_ = true;
             }
         }
+#endif
 
         VkSwapchainCreateInfoKHR createInfo{
             .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
@@ -1197,6 +1211,7 @@ private:
         // belongs to the swapchain rather than to the surface. Failure is not
         // fatal — another application may hold the display — so it is logged and
         // the composited swapchain keeps working.
+#ifdef VK_USE_PLATFORM_WIN32_KHR
         // The entry point can be null even when the extension is available: volk
         // loads a device function only if the extension was enabled at device
         // creation, and a null call is a crash with no diagnostic — the 0.15
@@ -1234,6 +1249,7 @@ private:
                 }
             }
         }
+#endif
 
         // Retrieve swapchain images
         uint32_t actual_image_count;

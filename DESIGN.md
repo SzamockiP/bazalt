@@ -2648,6 +2648,22 @@ used to claim.
 
   **It found a real bug, and that is the best thing about it.** See "The volk device table
   had two layouts" below.
+
+  **And it broke the build on two platforms, which is the other half of the same lesson.**
+  `VK_EXT_full_screen_exclusive` is Win32-only in the Vulkan headers — not just its entry
+  points but its STRUCTS — so `VkSurfaceFullScreenExclusiveInfoEXT` and `HMONITOR` do not
+  exist off Windows, and a header that names them unconditionally fails to compile on Linux
+  and macOS. The Windows build says nothing, because there it is all there.
+
+  The guard is `#ifdef VK_USE_PLATFORM_WIN32_KHR` around the code, not a runtime check:
+  there is nothing to check at run time when the type does not exist. The runtime null check
+  stays INSIDE it, because a member can exist and still be null. Nothing is lost elsewhere —
+  `Feature::EXCLUSIVE_FULLSCREEN` keys on a device extension no other platform reports, so
+  `set_fullscreen_exclusive` already refuses there with a message rather than by absence.
+
+  **The general form: a capability the Vulkan headers gate by platform gates the CODE by
+  platform too**, and the only thing that catches it is a build on that platform — which in
+  this project means the wheel jobs, so it is a push away rather than a test away.
 - **Compressed texture formats** (was a STALE rejection). BC and ASTC rows in `Format` plus an
   upload path that does not decode. Container parsing (KTX2) stays out of scope, which is what
   the original rejection got right. **~500 lines, the most expensive additive entry.** Not
