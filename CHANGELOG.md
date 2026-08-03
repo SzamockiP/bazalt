@@ -5,7 +5,7 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
-## [0.25.0] — 2026-08-03
+## [0.25.0] — 2026-08-04
 
 "The window's input surface finishes". A bazalt program could read keys, mouse
 buttons, a scroll wheel, dropped files, the clipboard and a gamepad. It could

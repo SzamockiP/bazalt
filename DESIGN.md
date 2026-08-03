@@ -3661,13 +3661,34 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   "zero object pixels adjacent to background" for a closed outline, "pixel-identical with
   culling on and off" for the culled view, "the same count as the CPU computes" for the
   culling itself. Add the measurement, not another look.
-- **A connected gamepad is unverified** (0.21). No test can plug one in, and the
-  machine the release was built on had none, so `examples/30_gamepad` was checked by
-  substituting a fake reading and measuring the frame it produced — the colour
-  follows the sticks, in the direction they moved. What that does NOT cover is
-  whether GLFW's mapping reports a real pad the way the enums claim: the axis
-  ordering, the trigger range, and whether a stick at rest reads near zero. Run the
-  example with a pad before trusting any of it.
+- **What 0.25 could not verify, and how the examples were checked instead.** The release
+  confirmed the 0.19 entry above three times over: every new example ran clean on the first
+  try and three were wrong anyway. The quads in `37_occlusion_query` were being CULLED (a
+  screen-space quad winds clockwise under Vulkan's downward Y) and the query answered 0
+  forever; the fan in `38_topologies` drew a legal tangle because it had been given geometry
+  built for a strip; and the exclusive-fullscreen code compiled only on Windows. None of
+  those is visible from "it started and did not crash".
+
+  What caught them was the same recipe: turn the claim into a number. `samples=14580`
+  visible against `0` hidden, `14174` filled pixels identical across three topologies,
+  `3` runs of grass across a row with restart against `5` without, `0` orange pixels outside
+  the volume against a full screen inside. Every one of those would have failed loudly on a
+  wrong picture; none of them needed a person to look.
+
+  Three things stay unverified and are listed so nobody assumes otherwise:
+
+  * **A typed character has never been round-tripped.** `window.text_input()` is tested for
+    its ROTATION — empty at rest, the same twice inside a cycle, cleared by the next — and
+    nothing can type into a window from a test. Whether an `ą` from a Polish layout, a dead
+    key or an IME arrives intact is the claim the feature makes and the one no test asserts.
+    `examples/35_imgui_overlay` is the referee: type in its title field.
+  * **Exclusive fullscreen has never actually succeeded here.** Every acquire on the
+    development machine returned `VK_ERROR_INITIALIZATION_FAILED`, which is a legitimate
+    answer — an overlay layer was loaded — and it means the SUCCESS path is untested. What
+    is verified is that the extension is enabled, the pNext is accepted, the acquire is
+    attempted and a refusal is reported rather than swallowed.
+  * **Nothing can see the pointer.** `set_cursor` is tested for accepting all ten shapes and
+    the two edge cases; that the I-beam actually appears over a text field is `35`'s job.
 
 - ✅ **The headless fallback** (no windowing extensions) still has no coverage. COVERED in
   0.24 by `BAZALT_FORCE_HEADLESS=1`, and it found a bug on the first run: the device enabled
