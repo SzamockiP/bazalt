@@ -75,6 +75,10 @@ structs.
 - **`examples/36_msaa_resolve`.** The same picture three ways: the hardware
   resolve, sample 0 on its own, and how much the samples disagree. The third is
   a map of every pixel MSAA is working on.
+- **Three keys in `examples/21_window_modes`.** `M` moves a fullscreen window
+  between displays, `R` cycles that display's video modes, and `X` takes the
+  display outright. They are about WHERE the picture goes rather than what is in
+  it, which is why they share the window-modes demo.
 - **`renderer.set_fullscreen_exclusive(enable)` and
   `renderer.fullscreen_exclusive`.** Take the display outright instead of drawing
   through the compositor: lower latency, and a fullscreen window may change the

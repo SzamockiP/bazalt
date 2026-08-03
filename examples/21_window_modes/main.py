@@ -1,6 +1,9 @@
-"""Window modes and per-frame input — the 0.16 release feature.
+"""Window modes and per-frame input — the 0.16 release feature, plus 0.25's displays.
 
     F11        cycle windowed -> frameless -> fullscreen -> borderless fullscreen
+    M          cycle which monitor a fullscreen mode takes    (0.25)
+    R          cycle that monitor's video mode                (0.25, FULLSCREEN only)
+    X          exclusive fullscreen on/off                    (0.25)
     L          wireframe on/off        (polygon_mode, needs Feature.WIREFRAME)
     V          vsync on/off            (renderer.set_present_mode)
     T          always on top
@@ -8,6 +11,14 @@
     scroll     zoom
     mouse      look
     ESC        quit
+
+The three 0.25 keys are about WHERE the picture goes rather than what is in it.
+`bz.list_monitors()` reports every display as inert data, so `M` names one and
+`R` picks a resolution and refresh rate off it. `X` asks for the display outright:
+`WindowMode.FULLSCREEN` takes the monitor but still draws through the desktop
+compositor, and exclusive fullscreen takes the scanout as well — lower latency,
+and alt-tab becomes a mode switch. Asking is not getting, so the title bar
+reports what the driver actually gave.
 
 Three things this demo is built out of, and each one is new in 0.16.
 
@@ -43,7 +54,15 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 # WIREFRAME is optional=, not features=: a machine without fillModeNonSolid
 # still runs the demo, only without the L key. Asking for it in features= would
 # refuse to start over a debug view.
-ctx = bz.Context(logger, optional=[bz.Feature.WIREFRAME])
+# EXCLUSIVE_FULLSCREEN joins it for the same reason: the X key is a nicety, and a
+# machine without VK_EXT_full_screen_exclusive (which means anything but Windows)
+# still runs everything else.
+ctx = bz.Context(logger, optional=[bz.Feature.WIREFRAME, bz.Feature.EXCLUSIVE_FULLSCREEN])
+
+# The displays, before the window exists — which is the one thing list_monitors()
+# needs no live Window for, because choosing where to open one happens first.
+monitors = bz.list_monitors()
+monitor_index = next((i for i, m in enumerate(monitors) if m.primary), 0)
 
 window = bz.Window(900, 600, "Bazalt - Window Modes", logger=logger)
 renderer = ctx.create_renderer(window, present_mode=bz.PresentMode.FIFO)
@@ -128,6 +147,7 @@ dset.set_buffer(0, ubuf)
 MODES = [bz.WindowMode.WINDOWED, bz.WindowMode.FRAMELESS,
          bz.WindowMode.FULLSCREEN, bz.WindowMode.FULLSCREEN_WINDOWED]
 MODE_NAMES = ["windowed", "frameless", "fullscreen", "borderless fullscreen"]
+FULLSCREEN_MODES = (bz.WindowMode.FULLSCREEN, bz.WindowMode.FULLSCREEN_WINDOWED)
 OPACITIES = [1.0, 0.85, 0.65]
 
 BAR_HEIGHT = 46
@@ -168,6 +188,8 @@ def bar_bytes():
 
 
 mode_index = 0
+video_mode_index = None  # None means "whatever the monitor is set to now"
+exclusive = False
 opacity_index = 0
 glow = 1.0
 use_wireframe = False
@@ -185,6 +207,29 @@ start = time.time()
 print(__doc__)
 if wireframe is None:
     print("This GPU has no fillModeNonSolid, so the L key does nothing.")
+if not ctx.supports(bz.Feature.EXCLUSIVE_FULLSCREEN):
+    print("VK_EXT_full_screen_exclusive is a Windows extension, so the X key does nothing.")
+for i, m in enumerate(monitors):
+    marker = "*" if i == monitor_index else " "
+    print(f" {marker} monitor {i}: {m.name} at {m.position}, "
+          f"{m.current_mode.width}x{m.current_mode.height} @{m.current_mode.refresh_rate}Hz, "
+          f"{len(m.video_modes)} modes")
+
+
+def apply_mode():
+    """One place that turns the four bits of state into a set_mode call, so the
+    F11, M and R keys cannot each grow their own version of the rules.
+
+    monitor= and video_mode= are refused on a mode that cannot mean them, so the
+    call passes them only where they apply — a fullscreen mode for the display,
+    and FULLSCREEN alone for the video mode, because FULLSCREEN_WINDOWED is
+    defined by leaving the display's mode alone."""
+    mode = MODES[mode_index]
+    monitor = monitors[monitor_index] if mode in FULLSCREEN_MODES else None
+    video_mode = None
+    if mode is bz.WindowMode.FULLSCREEN and video_mode_index is not None:
+        video_mode = monitors[monitor_index].video_modes[video_mode_index]
+    window.set_mode(mode, monitor=monitor, video_mode=video_mode)
 
 while window.is_open():
     bz.poll_events()
@@ -196,8 +241,36 @@ while window.is_open():
     # the key stays down.
     if window.was_key_pressed(bz.Key.F11):
         mode_index = (mode_index + 1) % len(MODES)
-        window.set_mode(MODES[mode_index])
+        apply_mode()
         print(f"mode: {MODE_NAMES[mode_index]}")
+
+    # Moving a fullscreen window to another display asks for the SAME mode, which
+    # is why set_mode stopped being a no-op when the mode repeats.
+    if window.was_key_pressed(bz.Key.M) and len(monitors) > 1:
+        monitor_index = (monitor_index + 1) % len(monitors)
+        video_mode_index = None
+        apply_mode()
+        print(f"monitor: {monitors[monitor_index].name} at {monitors[monitor_index].position}")
+
+    if window.was_key_pressed(bz.Key.R):
+        modes = monitors[monitor_index].video_modes
+        video_mode_index = 0 if video_mode_index is None else (video_mode_index + 1) % len(modes)
+        chosen = modes[video_mode_index]
+        apply_mode()
+        print(f"video mode: {chosen.width}x{chosen.height} @{chosen.refresh_rate}Hz"
+              + ("" if MODES[mode_index] is bz.WindowMode.FULLSCREEN
+                 else "  (takes effect in FULLSCREEN)"))
+
+    if window.was_key_pressed(bz.Key.X) and ctx.supports(bz.Feature.EXCLUSIVE_FULLSCREEN):
+        exclusive = not exclusive
+        renderer.set_fullscreen_exclusive(exclusive)
+        # Asking is not getting: the driver refuses when the window does not own
+        # the display, and an overlay or a screen recorder is usually why.
+        if exclusive and not renderer.fullscreen_exclusive:
+            print("exclusive fullscreen refused — go FULLSCREEN with F11 first, and check "
+                  "that nothing else holds the display")
+        else:
+            print(f"exclusive fullscreen: {renderer.fullscreen_exclusive}")
 
     if window.was_key_pressed(bz.Key.L) and wireframe is not None:
         use_wireframe = not use_wireframe
@@ -256,7 +329,9 @@ while window.is_open():
     if time.time() - fps_timer >= 1.0:
         scale_x, _ = window.content_scale
         window.set_title(
-            f"Bazalt - {MODE_NAMES[mode_index]} | {renderer.present_mode} | "
+            f"Bazalt - {MODE_NAMES[mode_index]}"
+            + (" exclusive" if renderer.fullscreen_exclusive else "")
+            + f" | {monitors[monitor_index].name} | {renderer.present_mode} | "
             f"{renderer.width}x{renderer.height} @ {scale_x:g}x | {frames} FPS")
         frames = 0
         fps_timer = time.time()
