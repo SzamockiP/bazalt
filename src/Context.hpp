@@ -1514,7 +1514,8 @@ private:
              {Feature::COMPARISON_SAMPLER,
               Feature::SAMPLER_MIP_LOD_BIAS,
               Feature::MULTISAMPLE_ARRAYS,
-              Feature::IMAGE_VIEW_2D_ON_3D})
+              Feature::IMAGE_VIEW_2D_ON_3D,
+              Feature::TRIANGLE_FANS})
         {
             if (feature_available(available, portability))
             {

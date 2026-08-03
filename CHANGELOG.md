@@ -86,7 +86,9 @@ structs.
 - **`examples/38_primitive_restart`.** Three blades of grass, each a triangle
   strip, in ONE indexed draw. Press R to drop the restart index and watch the
   strip run on from the tip of one blade into the root of the next — the ribbon
-  between them is the thing restart exists to prevent.
+  between them is the thing restart exists to prevent. Press F for three flower
+  heads instead: the fan's own shape, where the wireframe shows every edge
+  running back to one centre.
 - **`examples/39_two_sided_stencil`.** The camera flies in and out of a cube and
   the screen glows while it is inside, decided entirely by the stencil buffer:
   front faces increment, back faces decrement, and the two cancel from outside.
@@ -107,7 +109,16 @@ structs.
   can ask which one you are being given.
 - **`topology(..., restart=True)`.** The largest index value ends the current
   strip and starts another, so one draw carries many strips. Opt-in, because it
-  takes that value away from being an index. Needs a strip topology.
+  takes that value away from being an index. Needs a strip or a fan.
+- **`Topology.TRIANGLE_FAN` and `Feature.TRIANGLE_FANS`.** Every triangle shares
+  the first vertex — a pie, a circle, a convex polygon. It was simply missing
+  from the enum, with nothing saying why.
+
+  It needs a Feature because Metal has no triangle fan, so MoltenVK reports it
+  absent and the pipeline build says so instead of drawing something else. On
+  every full Vulkan driver it answers True without being asked, like the other
+  portability rows. Where it answers False, the same shape is an indexed
+  TRIANGLE_LIST.
 - **`stride=` on `draw_indirect` and `draw_indexed_indirect`.** Lets the draw
   arguments be interleaved with your own per-draw data instead of living in a
   packed array of their own. `dispatch_indirect` has none: it issues one command,

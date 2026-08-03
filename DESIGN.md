@@ -2575,6 +2575,27 @@ used to claim.
   was the cheapest entry in the file. A kwarg on `topology()` rather than a verb of its own,
   because it means nothing without a strip. Refused on a list topology with the reason,
   rather than left to VUID-VkPipelineInputAssemblyStateCreateInfo-topology-06252.
+
+  **And it found a hole nobody had filed: there was no `TRIANGLE_FAN`** (0.25). `Topology`
+  listed a list and a strip for triangles, a list and a strip for lines, points and patches
+  — and no fan, with nothing anywhere saying why. A reader could only conclude it was an
+  oversight, which it was. The owner spotted it while looking at the restart example.
+
+  It is in now, with `Feature::TRIANGLE_FANS` over the portability bit, because **the reason
+  a fan is awkward is real and is not a reason to omit it**: Metal has no triangle fan at
+  all, so MoltenVK reports `triangleFans` false and a pipeline using one must be refused
+  rather than silently drawn as something else. That is the fifth portability row and it
+  behaves like the other four — enabled implicitly where present, so `ctx.supports()` answers
+  True on every full Vulkan driver without anybody asking. The refusal names the shape that
+  works everywhere: the same geometry as an indexed `TRIANGLE_LIST`.
+
+  Two things the addition changed beside itself. The restart guard now accepts a fan — a
+  restart index ends a fan and the next one takes a new centre, which the Vulkan rule allows
+  and the first version of the guard did not. And `examples/38_primitive_restart` grew a
+  second GEOMETRY rather than a second pipeline: drawing blade vertices with a fan topology
+  is legal, produces a mess, and teaches nothing. **A demo of a topology has to use the shape
+  that topology is for** — so the strip mode draws blades and the fan mode draws flower
+  heads, and the wireframe shows the difference in one look.
 - ✅ **`monitor=` and video-mode enumeration for fullscreen** (was UNASKED) — DONE in 0.25.
   **~300 lines, and the estimate was the interesting part and it was right:** this reads
   like a kwarg and is not one. Choosing needs the monitors and their modes *visible* from

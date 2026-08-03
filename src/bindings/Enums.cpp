@@ -44,6 +44,7 @@ void bind_enums(py::module_& m)
         .value("SAMPLER_MIP_LOD_BIAS", Feature::SAMPLER_MIP_LOD_BIAS)
         .value("MULTISAMPLE_ARRAYS", Feature::MULTISAMPLE_ARRAYS)
         .value("IMAGE_VIEW_2D_ON_3D", Feature::IMAGE_VIEW_2D_ON_3D)
+        .value("TRIANGLE_FANS", Feature::TRIANGLE_FANS)
         // The first row backed by an extension rather than a feature bit.
         .value("EXCLUSIVE_FULLSCREEN", Feature::EXCLUSIVE_FULLSCREEN);
 
@@ -274,6 +275,7 @@ void bind_enums(py::module_& m)
         .value("LINE_LIST", Topology::LINE_LIST)
         .value("TRIANGLE_STRIP", Topology::TRIANGLE_STRIP)
         .value("LINE_STRIP", Topology::LINE_STRIP)
+        .value("TRIANGLE_FAN", Topology::TRIANGLE_FAN)
         .value("PATCH_LIST", Topology::PATCH_LIST);
 
     // The vocabulary of cmd.barrier() in manual mode (auto_barriers=False).

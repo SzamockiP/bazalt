@@ -194,6 +194,10 @@ class Feature(IntEnum):
     #: an extension rather than a device feature bit, and Win32-only in
     #: practice, so it answers False elsewhere (0.25).
     EXCLUSIVE_FULLSCREEN = 20
+    #: Topology.TRIANGLE_FAN. True on every full Vulkan driver; MoltenVK answers
+    #: False, because Metal has no triangle fan at all. Where it is False, emit
+    #: the same shape as an indexed TRIANGLE_LIST (0.25).
+    TRIANGLE_FANS = 21
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -262,14 +266,21 @@ class VertexFormat(IntEnum):
 class Topology(IntEnum):
     """Primitive topology for graphics pipelines. TRIANGLE_LIST is the default.
 
-    The strips extend the previous primitive with each new vertex. There is no
-    restart index: one strip per draw.
+    A strip extends the previous primitive with each new vertex; a fan shares its
+    first vertex with all of them. Both run vertices together until the draw ends,
+    or until a restart index — see topology(..., restart=True) (0.25).
     """
     TRIANGLE_LIST = 0
     POINT_LIST = 1
     LINE_LIST = 2
     TRIANGLE_STRIP = 3
     LINE_STRIP = 4
+    #: Every triangle shares the FIRST vertex: 0,1,2 then 0,2,3 then 0,3,4. A
+    #: pie, a circle, a convex polygon.
+    #:
+    #: The one topology that is not universal — Metal has none, so a portability
+    #: driver may refuse it. Needs Feature.TRIANGLE_FANS (0.25).
+    TRIANGLE_FAN = 5
     #: The input to a tessellation control shader: a run of patch_control_points
     #: vertices with no implied topology. Only valid with tessellation shaders,
     #: and they are only valid with this — the pipeline build checks both ways.

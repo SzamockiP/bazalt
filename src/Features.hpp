@@ -64,6 +64,7 @@ enum class Feature
     SAMPLER_MIP_LOD_BIAS, // samplerMipLodBias — create_sampler(mip_lod_bias=)
     MULTISAMPLE_ARRAYS,   // multisampleArrayImage — samples > 1 together with layers > 1
     IMAGE_VIEW_2D_ON_3D,  // imageView2DOn3DImage — target.layer(z) on a 3D image
+    TRIANGLE_FANS,        // triangleFans — Topology::TRIANGLE_FAN
     // The first capability that is an EXTENSION rather than a feature bit
     // (0.25). VK_EXT_full_screen_exclusive is Win32-only in practice, so this
     // answers False everywhere else — which is what the row is for.
@@ -200,6 +201,9 @@ inline constexpr auto kFeatureTable = std::to_array<FeatureInfo>({
     {.feature = Feature::IMAGE_VIEW_2D_ON_3D,
      .name = "IMAGE_VIEW_2D_ON_3D",
      .portability = &VkPhysicalDevicePortabilitySubsetFeaturesKHR::imageView2DOn3DImage},
+    {.feature = Feature::TRIANGLE_FANS,
+     .name = "TRIANGLE_FANS",
+     .portability = &VkPhysicalDevicePortabilitySubsetFeaturesKHR::triangleFans},
     // The first row whose Vulkan spelling is an extension rather than a bit.
     {.feature = Feature::EXCLUSIVE_FULLSCREEN,
      .name = "EXCLUSIVE_FULLSCREEN",

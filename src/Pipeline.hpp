@@ -118,6 +118,14 @@ enum class Topology
     // changes what an index buffer's largest value means.
     TRIANGLE_STRIP,
     LINE_STRIP,
+    // Every triangle shares the FIRST vertex: 0,1,2 then 0,2,3 then 0,3,4. A
+    // circle, a pie slice, a convex polygon.
+    //
+    // The one topology that is not universal. Metal has no fan at all, so a
+    // portability driver may refuse it, and Feature::TRIANGLE_FANS is how you
+    // ask. Where it answers False the same shape is an indexed TRIANGLE_LIST,
+    // which is what a portable renderer should emit anyway.
+    TRIANGLE_FAN,
     // The input to a tessellation control shader: a run of patch_control_points
     // vertices with no implied topology at all. What the patch becomes is decided
     // by the tessellation evaluation shader's own `layout(triangles)` and the
@@ -364,6 +372,8 @@ inline constexpr VkPrimitiveTopology to_vk(Topology topology)
             return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
         case Topology::LINE_STRIP:
             return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+        case Topology::TRIANGLE_FAN:
+            return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
         case Topology::PATCH_LIST:
             return VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
     }
@@ -1631,12 +1641,26 @@ public:
         }
         // VUID-VkPipelineInputAssemblyStateCreateInfo-topology-06252: a restart
         // index only means anything to a topology that runs primitives together.
-        if (primitive_restart_ && topology_ != Topology::TRIANGLE_STRIP && topology_ != Topology::LINE_STRIP)
+        // A fan counts — it ends at the sentinel and the next fan picks a new
+        // centre — which is why the list here is not just the two strips.
+        if (primitive_restart_ && topology_ != Topology::TRIANGLE_STRIP && topology_ != Topology::LINE_STRIP &&
+            topology_ != Topology::TRIANGLE_FAN)
         {
             return std::unexpected(err_shader(
-                "topology(..., restart=True) needs a strip topology. A restart index ends the "
-                "current strip, and a list has no strip to end — use Topology.TRIANGLE_STRIP or "
-                "Topology.LINE_STRIP"));
+                "topology(..., restart=True) needs a strip or a fan. A restart index ends the "
+                "primitive being run together, and a list has none to end — use "
+                "Topology.TRIANGLE_STRIP, Topology.LINE_STRIP or Topology.TRIANGLE_FAN"));
+        }
+        // Metal has no triangle fan, so a portability driver may say no. Same
+        // shape as every other portability gate: ask by capability, and name the
+        // shape that works everywhere.
+        if (topology_ == Topology::TRIANGLE_FAN && !context_.supports(Feature::TRIANGLE_FANS))
+        {
+            return std::unexpected(err_unsupported(
+                "Topology.TRIANGLE_FAN needs the TRIANGLE_FANS feature, which this driver does not "
+                "offer — Metal has no fan, so MoltenVK reports it missing. Ask "
+                "ctx.supports(bz.Feature.TRIANGLE_FANS), and emit the same shape as an indexed "
+                "Topology.TRIANGLE_LIST where it answers False."));
         }
         if (topology_ == Topology::PATCH_LIST && !tess_control_shader_)
         {
