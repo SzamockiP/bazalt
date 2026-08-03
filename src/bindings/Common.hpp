@@ -364,7 +364,8 @@ inline std::shared_ptr<OffscreenTarget> make_offscreen_target(
     std::uint32_t layers,
     bool cube,
     std::uint32_t mip_levels,
-    const std::string& name)
+    const std::string& name,
+    bool keep_samples)
 {
     std::vector<Format> colors;
     if (!color.is_none())
@@ -420,7 +421,17 @@ inline std::shared_ptr<OffscreenTarget> make_offscreen_target(
 
     return unwrap(
         OffscreenTarget::create(
-            context, width, height, std::move(colors), depth_format, samples, layers, cube, mip_levels, name),
+            context,
+            width,
+            height,
+            std::move(colors),
+            depth_format,
+            samples,
+            layers,
+            cube,
+            mip_levels,
+            name,
+            keep_samples),
         context.logger().get());
 }
 
@@ -431,7 +442,8 @@ inline std::shared_ptr<OffscreenTarget> make_offscreen_target_from_images(
     const py::object& color,
     const py::object& depth,
     std::uint32_t samples,
-    const std::string& name)
+    const std::string& name,
+    bool keep_samples)
 {
     std::vector<std::shared_ptr<Image>> colors;
     if (!color.is_none())
@@ -482,7 +494,8 @@ inline std::shared_ptr<OffscreenTarget> make_offscreen_target_from_images(
     }
 
     return unwrap(
-        OffscreenTarget::create_from_images(context, std::move(colors), std::move(depth_image), samples, name),
+        OffscreenTarget::create_from_images(
+            context, std::move(colors), std::move(depth_image), samples, name, keep_samples),
         context.logger().get());
 }
 

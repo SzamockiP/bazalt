@@ -311,7 +311,8 @@ public:
                                                                                     : (*clear_colors)[0]);
                     // MSAA: render into the multisampled view, resolve (averaging
                     // the samples) into the single-sample target. The multisampled
-                    // image is transient — only the resolve is kept (DONT_CARE).
+                    // image is discarded afterwards unless the target asked to keep
+                    // it — see the store-op below.
                     const bool resolve = rt->color_resolve_view(i) != VK_NULL_HANDLE;
                     colorAttachments.push_back(
                         {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -323,7 +324,16 @@ public:
                          .resolveImageLayout = resolve ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
                                                        : VK_IMAGE_LAYOUT_UNDEFINED,
                          .loadOp = preserve ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR,
-                         .storeOp = resolve ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE,
+                         // DONT_CARE on the multisampled attachment is what makes
+                         // MSAA cheap: on a tiler the samples never leave tile
+                         // memory, and the resolve is the only thing written out.
+                         // A custom resolve needs them written out, so the target
+                         // says so once (keep_samples=True) and pays for it there.
+                         // Deriving this from "did anyone bind the multisampled
+                         // image" is not available — that happens in another
+                         // recording, or in another frame.
+                         .storeOp = (resolve && !rt->keep_samples()) ? VK_ATTACHMENT_STORE_OP_DONT_CARE
+                                                                     : VK_ATTACHMENT_STORE_OP_STORE,
                          .clearValue = {.color = {{cc[0], cc[1], cc[2], cc[3]}}}});
                 }
 
@@ -416,8 +426,7 @@ public:
                 for (uint32_t i = 0; i < target->color_count(); ++i)
                 {
                     // With MSAA it is the resolve image that must reach the final
-                    // layout (present / sampleable); the multisampled image is
-                    // transient and discarded.
+                    // layout, because that is the one that gets presented.
                     VkImage final_image = target->color_resolve_image(i) != VK_NULL_HANDLE
                                               ? target->color_resolve_image(i)
                                               : target->color_image(i);
@@ -449,6 +458,31 @@ public:
                         nullptr,
                         1,
                         &barrier);
+
+                    // A kept multisampled image retires too, since 0.25, because it
+                    // is then readable: target.multisampled_color[i] goes into a
+                    // sampler2DMS for a custom resolve. It goes to
+                    // SHADER_READ_ONLY_OPTIMAL rather than to final_layout(), and
+                    // that difference is the point — a swapchain's final layout is
+                    // PRESENT_SRC_KHR, and a multisampled image is never the thing
+                    // that gets presented.
+                    if (target->keep_samples() && target->color_resolve_image(i) != VK_NULL_HANDLE)
+                    {
+                        barrier.image = target->color_image(i);
+                        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                        frame.vk->vkCmdPipelineBarrier(
+                            cmd,
+                            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                            0,
+                            0,
+                            nullptr,
+                            0,
+                            nullptr,
+                            1,
+                            &barrier);
+                    }
                 }
 
                 // Depth retires to its own final layout when it will be consumed
@@ -493,6 +527,28 @@ public:
                         nullptr,
                         1,
                         &depthBarrier);
+
+                    // The multisampled depth follows the multisampled colour, for
+                    // the reason the colour comment gives. Symmetric on purpose:
+                    // "the colour samples are readable and the depth samples are
+                    // not" would be a second rule to remember, and it would show up
+                    // as a validation error rather than as a message.
+                    if (target->keep_samples() && target->depth_resolve_image() != VK_NULL_HANDLE)
+                    {
+                        depthBarrier.image = target->depth_image();
+                        depthBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                        frame.vk->vkCmdPipelineBarrier(
+                            cmd,
+                            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                            0,
+                            0,
+                            nullptr,
+                            0,
+                            nullptr,
+                            1,
+                            &depthBarrier);
+                    }
                 }
 
                 // Runs at execute() time, inside a real submit â€” so the target learns

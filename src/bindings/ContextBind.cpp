@@ -719,11 +719,12 @@ void bind_context(py::module_& m)
                std::uint32_t layers,
                bool cube,
                std::uint32_t mip_levels,
-               const std::string& name)
+               const std::string& name,
+               bool keep_samples)
             {
                 require_open(self, "create_render_target");
                 return make_offscreen_target(
-                    self, width, height, color, depth, samples, layers, cube, mip_levels, name);
+                    self, width, height, color, depth, samples, layers, cube, mip_levels, name, keep_samples);
             },
             py::arg("width"),
             py::arg("height"),
@@ -734,19 +735,26 @@ void bind_context(py::module_& m)
             py::arg("layers") = 1,
             py::arg("cube") = false,
             py::arg("mip_levels") = 1,
-            py::arg("name") = "")
+            py::arg("name") = "",
+            py::arg("keep_samples") = false)
         .def(
             "create_render_target",
-            [](Context& self, py::object color, py::object depth, std::uint32_t samples, const std::string& name)
+            [](Context& self,
+               py::object color,
+               py::object depth,
+               std::uint32_t samples,
+               const std::string& name,
+               bool keep_samples)
             {
                 require_open(self, "create_render_target");
-                return make_offscreen_target_from_images(self, color, depth, samples, name);
+                return make_offscreen_target_from_images(self, color, depth, samples, name, keep_samples);
             },
             py::kw_only(),
             py::arg("color") = py::none(),
             py::arg("depth") = py::none(),
             py::arg("samples") = 1,
-            py::arg("name") = "")
+            py::arg("name") = "",
+            py::arg("keep_samples") = false)
         .def(
             "create_renderer",
             [](std::shared_ptr<Context> self,

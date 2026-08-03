@@ -586,26 +586,38 @@ public:
 
     // The usage an image of this format and sample count actually gets.
     //
-    // Two narrowings on top of "everything the device supports". A multisampled
-    // attachment is only rendered into and resolved out, so it keeps just the
-    // attachment usage: STORAGE on a multisample image needs a feature we do not
-    // enable, and SAMPLED/TRANSFER are dead weight (you sample the resolve).
+    // Two narrowings on top of "everything the device supports", and the order
+    // between them matters: the depth/stencil rule is a hard Vulkan limit, so it
+    // runs first and the multisample rule cannot hand SAMPLED back.
     //
-    // A combined depth/stencil image drops SAMPLED and STORAGE for a harder
-    // reason: its view carries both aspects, and Vulkan forbids sampling
-    // through such a view. Keeping the usage would make every DEPTH_STENCIL
-    // view illegal at creation, which is a validation error at the target's
-    // constructor rather than at the sample that was never going to work.
+    // A combined depth/stencil image drops SAMPLED and STORAGE because its view
+    // carries both aspects, and Vulkan forbids sampling through such a view.
+    // Keeping the usage would make every DEPTH_STENCIL view illegal at creation,
+    // which is a validation error at the target's constructor rather than at the
+    // sample that was never going to work.
+    //
+    // A multisampled image keeps the attachment usage and SAMPLED. SAMPLED is
+    // there so a shader can read the individual samples through sampler2DMS and
+    // texelFetch — a custom resolve, which is what per-sample edge detection and
+    // a TAA resolve are. Until 0.25 it was stripped, and the ceiling entry that
+    // said so called the multisampled image transient: it is an ordinary
+    // device-local image, so nothing but the usage bit stood in the way.
+    //
+    // STORAGE stays off: imageStore into a multisampled image needs
+    // shaderStorageImageMultisample, which this library does not negotiate.
+    // TRANSFER stays off because copying a multisampled image is illegal, which
+    // is the same reason read() refuses one.
     static VkImageUsageFlags usage_for_image(Context& context, Format format, VkSampleCountFlagBits samples)
     {
         VkImageUsageFlags usage = usage_for(context, format);
-        if (samples != VK_SAMPLE_COUNT_1_BIT)
-        {
-            return usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
-        }
         if (has_stencil(context.vk_format(format)))
         {
             usage &= ~static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+        }
+        if (samples != VK_SAMPLE_COUNT_1_BIT)
+        {
+            usage &= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                     VK_IMAGE_USAGE_SAMPLED_BIT;
         }
         return usage;
     }

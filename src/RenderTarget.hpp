@@ -153,6 +153,23 @@ public:
         return VK_NULL_HANDLE;
     }
 
+    // Whether the multisampled attachment survives the pass that renders it.
+    //
+    // False is the default and the cheap answer: the samples are resolved and
+    // then discarded (STORE_OP_DONT_CARE), so on a tiled GPU they never leave
+    // tile memory. True stores them, which costs the bandwidth of a full
+    // multisample buffer and is the price of reading them back through a
+    // sampler2DMS — a custom resolve.
+    //
+    // It is a property of the target rather than of the pass because the target
+    // owns the image, and because the recording that renders it cannot see the
+    // one that reads it: those are different command buffers, often different
+    // frames.
+    virtual bool keep_samples() const
+    {
+        return false;
+    }
+
     // ── Subresource selection (render-to-layer / render-to-mip) ────────────────
     // Which array layer(s) and mip of each attachment a pass actually writes.
     // The default is the whole-image, base-subresource case every target used
@@ -275,7 +292,8 @@ public:
         std::uint32_t layers = 1,
         bool cube = false,
         std::uint32_t mip_levels = 1,
-        const std::string& name = "")
+        const std::string& name = "",
+        bool keep_samples = false)
     {
         if (colors.empty() && !depth)
         {
@@ -358,11 +376,20 @@ public:
         }
         const bool msaa = *vk_samples != VK_SAMPLE_COUNT_1_BIT;
 
+        // keep_samples without MSAA has nothing to keep. Silently false rather than
+        // an error: it is a hint about a multisampled attachment that does not
+        // exist, so there is no wrong result to warn about.
+        if (keep_samples && !msaa)
+        {
+            keep_samples = false;
+        }
+
         auto target = std::shared_ptr<OffscreenTarget>(new OffscreenTarget(context.shared_from_this()));
         target->extent_ = {width, height};
         target->samples_ = *vk_samples;
         target->layers_ = layers;
         target->mip_levels_ = mip_levels;
+        target->keep_samples_ = keep_samples;
 
         // colors_/depth_ are always the single-sample, sampleable attachments —
         // what target.color/target.depth expose and what final_layout() applies to.
@@ -461,7 +488,8 @@ public:
         std::vector<std::shared_ptr<Image>> colors,
         std::shared_ptr<Image> depth,
         std::uint32_t samples = 1,
-        const std::string& name = "")
+        const std::string& name = "",
+        bool keep_samples = false)
     {
         if (colors.empty() && !depth)
         {
@@ -567,6 +595,7 @@ public:
         target->mip_levels_ = first->mip_levels();
         target->colors_ = std::move(colors);
         target->depth_ = std::move(depth);
+        target->keep_samples_ = keep_samples && msaa;
 
         // The borrowed images are the resolve targets; the multisampled
         // attachments beside them are allocated here and owned by the target,
@@ -729,7 +758,8 @@ public:
         return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
 
-    // The attachments as Images, for Python and for readback.
+    // The attachments as Images, for Python and for readback. With MSAA these are
+    // the single-sample resolve images — the ones a shader normally reads.
     const std::vector<std::shared_ptr<Image>>& colors() const
     {
         return colors_;
@@ -737,6 +767,30 @@ public:
     const std::shared_ptr<Image>& depth() const
     {
         return depth_;
+    }
+
+    // The multisampled attachments themselves, for a custom resolve: bind one to a
+    // sampler2DMS and read the samples with texelFetch, which is what per-sample
+    // edge detection and a TAA resolve need — the driver's own resolve has already
+    // averaged them away.
+    //
+    // Empty unless the target was created with keep_samples=True, even though the
+    // images exist either way. Without it the pass discards them (DONT_CARE), so
+    // handing them out would hand out undefined contents: an empty list fails at
+    // the line that reads it, and a subtly wrong picture fails nowhere at all.
+    const std::vector<std::shared_ptr<Image>>& multisampled_colors() const
+    {
+        static const std::vector<std::shared_ptr<Image>> none;
+        return keep_samples_ ? msaa_colors_ : none;
+    }
+    const std::shared_ptr<Image>& multisampled_depth() const
+    {
+        static const std::shared_ptr<Image> none;
+        return keep_samples_ ? msaa_depth_ : none;
+    }
+    bool keep_samples() const override
+    {
+        return keep_samples_;
     }
 
     // Copies colour attachment 0 back to host memory; kept as the ergonomic
@@ -793,6 +847,45 @@ public:
             depth_->mark_subresource_contents(
                 depth_final_layout(), depth_sr.base_layer, depth_sr.layer_count, depth_sr.base_mip, depth_sr.mip_count);
         }
+        if (!keep_samples_)
+        {
+            return;
+        }
+        // The multisampled attachments end SHADER_READ_ONLY_OPTIMAL, which is what
+        // end_rendering retires them to and not what final_layout() says: a
+        // swapchain's final layout is PRESENT_SRC_KHR, and no multisampled image is
+        // ever presented. The tracker reads these, so a mark that disagreed with
+        // the barrier would hand the next use a stale oldLayout.
+        for (auto& image : msaa_colors_)
+        {
+            image->mark_subresource_contents(
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                color_sr.base_layer,
+                color_sr.layer_count,
+                color_sr.base_mip,
+                color_sr.mip_count);
+        }
+        // Only when the pass actually retired it — the swapchain's scratch depth
+        // keeps its attachment layout, and end_rendering skips the whole depth
+        // block there.
+        if (msaa_depth_ && depth_ && depth_final_layout() != attachment_depth_layout_())
+        {
+            msaa_depth_->mark_subresource_contents(
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                depth_sr.base_layer,
+                depth_sr.layer_count,
+                depth_sr.base_mip,
+                depth_sr.mip_count);
+        }
+    }
+
+    // The layout a depth attachment is in *during* a pass. end_rendering compares
+    // against exactly this to decide whether the depth retires at all, so the two
+    // read the same source instead of spelling the rule twice.
+    VkImageLayout attachment_depth_layout_() const
+    {
+        return depth_ && has_stencil(depth_->vk_format()) ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                                                          : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     }
 
     ~OffscreenTarget()
@@ -1037,6 +1130,7 @@ private:
     // samples_ > 1; colors_/depth_ then serve as their resolve targets.
     std::vector<std::shared_ptr<Image>> msaa_colors_;
     std::shared_ptr<Image> msaa_depth_;
+    bool keep_samples_ = false;
     VkSampleCountFlagBits samples_ = VK_SAMPLE_COUNT_1_BIT;
 
     // Layer / mip counts every attachment shares. layers_ == 6 for a cube.

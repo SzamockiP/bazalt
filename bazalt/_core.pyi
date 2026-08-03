@@ -925,6 +925,25 @@ class RenderTarget(RenderTargetBase):
     def depth(self) -> Optional[Image]: ...
 
     @property
+    def multisampled_color(self) -> tuple[Image, ...]:
+        """The multisampled attachments themselves, for a custom resolve (0.25).
+
+        `color` above is the single-sample resolve — the image almost everything
+        wants. These are what the pass rendered into: bind one to a `sampler2DMS`
+        and read the samples with `texelFetch(tex, ivec2(gl_FragCoord.xy), i)`,
+        which is what per-sample edge detection and a TAA resolve need. The
+        driver's own resolve has already averaged them away.
+
+        Empty unless the target was created with `keep_samples=True`. Without it
+        the pass discards the samples, so there would be nothing to read.
+        """
+        ...
+    @property
+    def multisampled_depth(self) -> Optional[Image]:
+        """The multisampled depth attachment. See multisampled_color (0.25)."""
+        ...
+
+    @property
     def width(self) -> int: ...
     @property
     def height(self) -> int: ...
@@ -2207,7 +2226,8 @@ class Context:
                              color: Optional[Format | Sequence[Format]] = Format.RGBA8,
                              depth: Optional[Format] = None, samples: int = 1, *,
                              layers: int = 1, cube: bool = False,
-                             mip_levels: int = 1, name: str = "") -> RenderTarget:
+                             mip_levels: int = 1, name: str = "",
+                             keep_samples: bool = False) -> RenderTarget:
         """An offscreen target that allocates its attachments (0.23; this was
         the RenderTarget constructor).
 
@@ -2227,11 +2247,17 @@ class Context:
         attachment a CUBE view so target.color[0] samples as a cubemap.
         Single-sample only: samples>1 cannot combine with
         layers/cube/mip_levels.
+
+        keep_samples=True stores the multisampled attachment instead of
+        discarding it, so target.multisampled_color can be read back through a
+        sampler2DMS for a custom resolve (0.25). It costs the bandwidth of a full
+        multisample buffer — on a tiled GPU the samples then have to leave tile
+        memory — so it is off by default.
         """
         ...
     def create_render_target(self, *, color: Optional[Image | Sequence[Image]] = None,
                              depth: Optional[Image] = None, samples: int = 1,
-                             name: str = "") -> RenderTarget:
+                             name: str = "", keep_samples: bool = False) -> RenderTarget:
         """A target that renders into images you already own.
 
         What this makes reachable: a graphics ping-pong between two textures,
@@ -2247,8 +2273,9 @@ class Context:
 
         samples>1 works as it does on the other form: the target renders into
         multisampled attachments it allocates and resolves into the images you
-        passed, so those stay single-sample and sampleable. Not available with
-        a mipped or 3D attachment.
+        passed, so those stay single-sample and sampleable, and keep_samples
+        means the same thing it does above. Not available with a mipped or 3D
+        attachment.
         """
         ...
 
