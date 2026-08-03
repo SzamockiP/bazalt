@@ -383,6 +383,10 @@ def test_a_monitor_describes_itself():
         assert len(monitor.position) == 2
         assert len(monitor.content_scale) == 2
         assert monitor.content_scale[0] > 0.0
+        # Zero is a legitimate answer: some drivers do not report it, and that
+        # is the OS talking rather than a failure.
+        assert len(monitor.physical_size_mm) == 2
+        assert monitor.physical_size_mm[0] >= 0
         assert monitor.current_mode.width > 0 and monitor.current_mode.height > 0
         assert monitor.video_modes, "a connected monitor reports at least one video mode"
         for mode in monitor.video_modes:
@@ -460,9 +464,16 @@ def test_every_cursor_shape_is_accepted(ctx):
     request rather than a guarantee."""
     if ctx.headless:
         pytest.skip("no swapchain support (headless Context)")
+    # Named one by one rather than looped over __members__: the list IS the
+    # claim, so a shape that quietly disappeared would fail here.
+    shapes = (bz.Cursor.ARROW, bz.Cursor.IBEAM, bz.Cursor.CROSSHAIR,
+              bz.Cursor.POINTING_HAND, bz.Cursor.RESIZE_EW, bz.Cursor.RESIZE_NS,
+              bz.Cursor.RESIZE_NWSE, bz.Cursor.RESIZE_NESW, bz.Cursor.RESIZE_ALL,
+              bz.Cursor.NOT_ALLOWED)
+    assert len(shapes) == len(bz.Cursor.__members__)
     window = a_window()
     try:
-        for shape in bz.Cursor.__members__.values():
+        for shape in shapes:
             window.set_cursor(shape)
         window.set_cursor(int(bz.Cursor.IBEAM))
         window.set_cursor(0)

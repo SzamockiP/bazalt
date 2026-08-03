@@ -3,7 +3,7 @@
 from bazalt import _core
 from bazalt._core import *  # noqa: F401, F403
 
-__version__ = "0.24.0"
+__version__ = "0.25.0"
 
 __all__ = [
     # Core

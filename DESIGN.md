@@ -54,6 +54,17 @@ These settle most arguments.
    unrelated debt because the debt is old. This one collects work that is all the same
    subject. If a future release wants the same exemption, the test is that question: does
    the work share a subject, or only a mood?
+   **0.25 is not an exception either, and it says what it bought separately.** The
+   feature is **the window's input surface finishes**: the characters, the pointer
+   shapes and the gamepad edges are three holes of one shape — state the GLFW
+   callbacks already receive and nothing handed to the caller — and the monitor
+   enumeration is the last backlog entry that touches `Window.hpp`. Sampleable MSAA
+   shares no subject with any of that. It is here because it was bought separately,
+   which is the 0.24 precedent used as 0.24 asked it to be used: name the feature,
+   then name the rest rather than inventing a subject wide enough to cover both.
+   Rule 4 is why it was the one bought — it makes a picture, and nothing else left on
+   the additive list does.
+
    **0.24 is not an exception, and it is written down because it nearly was.** The plan
    called it "the seams" and argued that a cross-recording barrier, `close()`, and a
    sentinel split share the subject "boundaries bazalt left implicit". That reading is
@@ -228,6 +239,60 @@ entry. The release is a label, not the organizing axis.
   pad has no window to hang one on, and a process-wide edge would need exactly the
   global registry of live windows that 0.16 rejected.
 
+  **That last paragraph was half right, and 0.25 shipped the edge anyway.** The
+  reasoning it gives is about WINDOWS: a per-window counter needs a registry of live
+  windows to drive it, and 0.16 refused to keep one. A pad needs no such registry,
+  because the pads are a fixed set of sixteen slots — an array, not a list somebody
+  has to maintain — and the counter it rotates on has been process-wide since 0.16.
+  So `pad.was_button_pressed(...)` is a per-pad previous-state snapshot beside that
+  array, rotated the first time each pad is read in a new cycle. The general form,
+  and it is why the entry stays: **a limitation inherited from a neighbouring
+  decision has to be re-derived, not re-read.** Third time this file has recorded
+  that (after per-subresource layouts in 0.18 and MSAA into borrowed images in 0.21).
+
+  **What the edge costs here that a key edge does not.** GLFW records a key press in
+  a callback, so no cycle can lose one. It has no gamepad callback, so a pad edge is
+  measured between two READINGS: a press and a release inside a cycle nobody read are
+  both invisible. Documented rather than fixed, because fixing it means polling every
+  pad from `poll_events()` whether or not the program owns a gamepad.
+
+- **A character is not a key, and that is the whole reason `text_input()` exists**
+  (0.25). `window.text_input()` returns what the user TYPED during the last poll
+  cycle, as text. `is_key_pressed(Key.A)` reports a physical key, and between the two
+  sit the keyboard layout, the shift state, AltGr, the dead keys and an IME — so no
+  amount of key state reconstructs a character, which is why every text field in
+  every toolkit reads a character stream instead. It rides the 0.16 rotation with the
+  key edges and the dropped files, because it is the same kind of thing: a change
+  that expires with the cycle.
+
+  It returns `str`, not codepoints, and the conversion happens in the CALLBACK. GLFW
+  hands out one Unicode codepoint per event and the rest of the library speaks UTF-8,
+  so encoding at the only place a codepoint exists means neither the binding layer
+  nor a C++ caller has to.
+
+  **This is the one thing an overlay library cannot supply for itself**, which is
+  what made it the release's feature rather than a nicety: `ImGuiIO::AddInputCharacter`
+  has to be fed from exactly this callback, and until 0.25 a text field in a bazalt
+  program was deaf.
+
+- **The pointer's shape is a second question, not a fourth `CursorMode`** (0.25).
+  `set_cursor_mode` answers "is the pointer visible, hidden or captured" and
+  `set_cursor(shape)` answers "what does it draw" — two questions, two verbs, and no
+  rules for combining them. Folding the ten shapes into `CursorMode` would have made
+  a thirteen-value enum of which three values are exclusive with each other and ten
+  are exclusive with each other, which is the `set_fullscreen` plus `set_decorated`
+  mistake `WindowMode` was designed against.
+
+  `Cursor`'s values ARE the GLFW ints, following `Key` and `GamepadButton`. The ten
+  cursors are created once and shared by every window, because a `GLFWcursor` belongs
+  to the process — the `poll_events()` line again — and the cache is cleared beside
+  `glfwTerminate`, which destroys every remaining cursor and would otherwise leave the
+  cache holding dangling pointers the moment the last window closes.
+
+  A platform without a given shape gets the default arrow rather than an error. That
+  is the `set_icon` contract — a request, not a guarantee — and the alternative is an
+  error channel every caller must handle for a cosmetic detail.
+
 - **`Device` is dead data** (0.14). `bz.list_devices()` builds a bare VkInstance,
   enumerates, destroys it and returns `list[Device]`. `Context(device=)` then matches on
   `deviceUUID` inside its own instance. `Device` holds neither `VkPhysicalDevice` nor
@@ -237,6 +302,44 @@ entry. The release is a label, not the organizing axis.
   goes through `vkGetInstanceProcAddr`, not `volkLoadInstance`, because the second one would
   point the instance-level globals of a live Context at an instance that disappears a moment
   later.
+
+- **A `Monitor` is the `Device` shape, and it keeps its handle** (0.25).
+  `bz.list_monitors()` reports every display as inert data — name, position in the
+  virtual desktop, current mode, physical size, content scale and every video mode —
+  and `Window(monitor=)` / `set_mode(mode, monitor=, video_mode=)` take one. The
+  backlog entry called this a kwarg and it is not: choosing needs the displays
+  VISIBLE from Python, which is a new public type, and that is where the cost is.
+
+  It departs from `Device` in exactly one place, and the reason is what makes the
+  departure safe. A `Device` deliberately holds no `VkPhysicalDevice`, because that
+  handle dies with the instance `list_devices` destroys a moment later — keeping it
+  would be a guaranteed dangle. A `GLFWmonitor*` dies only when somebody unplugs that
+  display, and every use re-scans `glfwGetMonitors` for the pointer before touching
+  it. So the pointer is a KEY looked up in the live list, never something
+  dereferenced on trust, and an unplugged display raises `WindowError` naming itself.
+
+  **Matching by name was the alternative and it does not work.** The machine this was
+  written on reports two monitors, both called "Generic PnP Monitor". A name is not
+  an identity, which is the same lesson as "no string keys on an API whose primitive
+  is a handle" (0.9) seen from the other end.
+
+  **It is the only process-wide query that does NOT need a live Window.** The
+  clipboard and the gamepads refuse without one, because GLFW comes up with the first
+  Window and goes down with the last. Monitor enumeration cannot follow that rule and
+  still be useful: choosing where to open the first window happens before there is
+  one. So it initializes GLFW itself, the way `list_devices()` builds its own
+  instance rather than borrowing a Context's, and nothing shuts it down again if no
+  window is ever created — `glfwTerminate` is process-wide cleanup the OS does at
+  exit anyway, and a second reference count beside `window_count_` would be machinery
+  for a case nobody has.
+
+  Both extras are refused on a mode that cannot mean them: `monitor=` needs a
+  fullscreen mode (a windowed window is placed with `set_position`), and
+  `video_mode=` needs `FULLSCREEN`, because `FULLSCREEN_WINDOWED` is DEFINED by
+  leaving the display's mode alone. Refused rather than ignored — a call that quietly
+  does half of what it says is the thing this file keeps finding a year later. And
+  `set_mode` stopped being a no-op when the mode repeats: moving a fullscreen window
+  to another display asks for the same mode and has real work to do.
 
 ### The binding layer, and why it is eight files
 
@@ -626,6 +729,49 @@ entry. The release is a label, not the organizing axis.
   and one where the caller does. Second time a ceiling's recorded reason turned out
   to be worth re-deriving rather than re-reading, after per-subresource layouts in
   0.18. The lesson section already says so; this is the confirmation.
+
+- **The samples are readable, and `keep_samples=` is what they cost** (0.25).
+  `target.multisampled_color[i]` binds to a `sampler2DMS` for a custom resolve — the
+  driver's resolve averages the samples and that average is the end of the road, so
+  per-sample edge detection and a TAA history reject need them before it happens.
+
+  **Three things stood in the way and only the first was the one the ceiling entry
+  predicted.** `usage_for_image` stripped `SAMPLED` from every multisampled image;
+  the entry called the image transient, and it is an ordinary device-local image, so
+  the bit was the whole obstacle. The depth/stencil narrowing now runs FIRST in that
+  function, because it is a hard Vulkan limit and the multisample rule must not hand
+  `SAMPLED` back to a two-aspect view.
+
+  **The second is the store-op, and it is the real cost.** A resolving pass used
+  `STORE_OP_DONT_CARE` on the multisampled attachment, which is what makes MSAA cheap:
+  on a tiled GPU — MoltenVK on Apple Silicon, which bazalt supports — the samples
+  never leave tile memory. Storing them is the price of reading them, so the TARGET
+  asks for it once and pays there. It cannot be derived: the recording that renders
+  cannot see the recording that reads, because those are different command buffers
+  and usually different frames.
+
+  **The third is the layout, and it is not `final_layout()`.** `end_rendering`
+  retired only the resolve image, so the multisampled one stayed in
+  `COLOR_ATTACHMENT_OPTIMAL`. A kept attachment now retires to
+  `SHADER_READ_ONLY_OPTIMAL` — deliberately not the target's final layout, because a
+  swapchain's is `PRESENT_SRC_KHR` and no multisampled image is ever presented.
+  `mark_rendered` records the same layout, so the barrier and the tracker cannot
+  disagree; that is the 0.13 rule about the view and the barrier reading one source,
+  applied to a third reader.
+
+  **`multisampled_color` is empty without `keep_samples`, even though the images
+  exist.** Handing out an attachment the pass discarded is handing out undefined
+  contents. An empty tuple fails at the line that reads it; a subtly wrong picture
+  fails nowhere, which is the failure this API is allowed to prevent cheaply.
+
+  **The estimate said ~300 lines and named a `texture2DMS` declarator and "the
+  tracker seeing a descriptor type it has not seen". Both were wrong**, and in the
+  useful direction: `VkDescriptorSetLayoutBinding` records nothing about sample
+  count, so a `sampler2DMS` binds through the same `COMBINED_IMAGE_SAMPLER` as a
+  `sampler2D` and the layout says nothing about which is which — the shader's
+  declaration decides. What the estimate missed instead was the store-op and the
+  layout, which is the 0.19 corollary again: the invasive part sits next to the
+  feature rather than in it.
 
 - **The pipeline infers sample count and formats from its target** (0.12). No parallel knobs
   on the builder. The target is the single source, so the two cannot disagree.
@@ -1700,6 +1846,11 @@ permanent ceiling.
    sweep did by hand. Target: before 1.0, because "the examples are the documentation" is
    only true while they run.
 
+   **Estimate: ~300 lines** for the import harness — a test that walks `examples/`, imports
+   each module under `BAZALT_FORCE_HEADLESS`, and fails on a raise. The cost is not the
+   harness. It is that every example needs its frame loop behind a guard the harness can
+   stop at, which is 34 small edits and a convention the next example has to follow.
+
 ### Ceilings accepted on purpose
 
 **Audited in 0.22.** The section used to open with "these are not debt to pay, they are
@@ -1913,18 +2064,27 @@ its price stops belonging here and becomes backlog.
   stutters the other for a moment. It is correct, it only stutters. **Price of lifting it:**
   narrowing the wait to one swapchain means tracking which submits touched which swapchain,
   which is per-window state the Renderer does not keep today. **Paid by:** anyone with two
-  windows on one Context, at every resize.
+  windows on one Context, at every resize. **Estimate: ~350 lines**, most of it the new
+  per-window submit bookkeeping rather than the resize path itself.
 - **A cross-Context transfer goes through host memory and blocks the source queue** (0.15).
   **Price:** `external_memory` — `VK_KHR_external_memory_win32` and `_fd` are two spellings
   of one idea plus a platform split in the build, and the entry in `Proposed features` files
   the same work under raw-handle interop. So the honest statement is not "no portable
   alternative" but "one escape hatch buys this and three other integrations, and nobody has
   asked for any of them yet". **Paid by:** multi-GPU setups, once, at setup time.
+  **Estimate: ~600-900 lines**, the largest single item left anywhere in this file — two
+  platform spellings, a split in the build, and both sides of the handle. It is also the item
+  with four other customers waiting on it (see raw-handle interop), so it is the one whose
+  cost is worth paying least often and covering most.
 - **A preserved second pass re-transitions the attachment** (0.16). Pass 1 retires the image
   to `final_layout()` and pass 2 brings it back, so N passes cost N round trips instead of
   staying in `COLOR_ATTACHMENT_OPTIMAL`. **Price:** a recording-wide look-ahead — the same
   machinery a depth store-op wants — against the current design where each pass is decided in
   isolation. **Paid by:** any multi-pass recording on one target, per frame.
+  **Estimate: ~500 lines, and the spread is design risk rather than typing.** Every other
+  entry here adds machinery beside what exists; this one changes an invariant — that a pass
+  decides its own transitions with no knowledge of the next — which is the assumption the
+  RenderTarget contract is written on.
 - **A `DEPTH_STENCIL` attachment cannot be sampled or read back** (0.17). Its view carries
   both aspects, and Vulkan forbids sampling through such a view — that half is HARD. The
   conclusion is not: **price** is a second, depth-only view beside the attachment one, plus
@@ -1932,18 +2092,28 @@ its price stops belonging here and becomes backlog.
   cubemap keeps a parallel `2D_ARRAY` storage view beside its `CUBE` sampling view
   (`src/Image.hpp:738`) — so this is a known pattern applied twice, not new machinery.
   **Paid by:** anyone wanting a stencil-carrying shadow map, who today needs two targets.
+  **Estimate: ~300 lines**, and the number is low precisely because the cubemap already
+  answered the hard question — which view a given verb hands out.
 - **A pipeline cache lives and dies with its Context** (0.17). **Price:** an on-disk format is
   only worth writing against a frozen API, so this one is genuinely waiting on 1.0 rather
-  than on effort. **Paid by:** startup time, every run.
+  than on effort. **Paid by:** startup time, every run. **Estimate: ~300 lines**, including
+  the header validation a cache blob needs before it is trusted — vendor and device UUID,
+  driver version — because a stale blob from another GPU is the failure mode this feature
+  has.
 - **A cross-Context transfer of a mipped image is O(layers x mips) readbacks** (0.18).
   **Price:** a single readback of every level needs a staging layout the host side does not
   describe today. **Paid by:** setup time on a mipped cross-GPU transfer.
+  **Estimate: ~250 lines.**
 - **The record-time descriptor walk is per descriptor, not per binding** (0.21). A draw asks
   the tracker about every bound descriptor, so a 500-texture array is 500 hash lookups — at
   RECORD time only, since replay costs nothing, and a sampled image the tracker never saw
   stops at `tracker_.tracks()`. **Price:** skipping the walk above some declared count means
   requiring a manual barrier there, which is a worse API. **Paid by:** nobody measured yet,
-  which is the entry's real status.
+  which is the entry's real status. **Estimate: zero lines of feature code**, and it is the
+  only entry in this file where that is the answer. The work is a benchmark: record a draw
+  against a large descriptor array, and see whether the walk shows up at all. Until that
+  number exists there is nothing to design, and an optimization written before it would be
+  guessing at both the problem and the fix.
 - ✅ **The tracker orders uses within ONE recording** (0.19, and true since 0.6) — CLOSED in
   0.24, and **the price this entry named was wrong in both directions.** It is worth keeping
   for that, because the error is the reusable part.
@@ -2044,6 +2214,17 @@ layer, the stub, tests, an example and the docs.
   (`VkDevice`, `VkImage`, `VkBuffer`, `VkCommandBuffer`) for C++ ImGui with no copy, CUDA
   interop, a video decoder and OpenXR. Rule 2, and it fits several libraries at once. YAGNI
   until a concrete integration asks for it.
+
+  **A fourth customer, and it changes the shape** (0.25). A vendor upscaler — DLSS through
+  NGX or Streamline, XeSS — is the same request as the other three plus one thing none of
+  them needs: the SDK computes which instance and device extensions it requires
+  (`NVSDK_NGX_VULKAN_GetFeature*ExtensionRequirements`) and the answer must reach
+  `create_instance_` and `create_device_` *before* either runs. So the entry is not only
+  "hand out the handles after the fact". Half of it already exists —
+  `Context(raw_extensions=)` is exactly the hook, and it was written as an escape hatch for
+  this class of caller. What is missing is the handles themselves. The upscaler is rejected
+  as a bazalt feature for reasons of its own (see `Rejected, and why`); it is listed here
+  because it is the customer that says what the interop entry has to cover.
 - **ImGui integration** — a companion package or an example on the public primitives, not
   core. See the rejection below for why.
 
@@ -2085,6 +2266,24 @@ entries are breaking, and only those three are bounded by the 1.0 freeze.** Ever
 is additive and can land before or after it. The COST entries in `Priced, not forbidden`
 above are also work, and are listed there rather than here because their price is the
 interesting part.
+
+**Every open entry carries a line estimate (0.25).** They are measured rather than guessed,
+against what comparable features actually cost: the gamepad wrapper 519, 3D textures 618, the
+blend escape hatch 530, the `Key`/`MouseButton` enums 491, `ctx.close()` 352, render-to-slice
+229, and `BlendMode.MULTIPLY` plus the integer vertex formats 118 for the pair. An estimate
+covers C++, the binding layer, the stub and the tests — **not** the example and not the docs,
+for a reason the same measurement gives: 0.23's features sum to 2647 lines and the release
+diff is 4090, so **about 1400 lines of every release are examples, changelog and docs before
+any feature is written.** Against release diffs of 2806 (0.21), 4090 (0.23) and 4017 (0.24),
+that leaves roughly 1800-2600 lines of feature code per minor. Anyone planning a release
+should subtract the 1400 first; the number is remarkably stable and it is the thing that
+makes a backlog look shorter than it is.
+
+The estimates below total roughly 2500 lines for the additive features and 450 for the
+ergonomics entries, plus 2300-2600 for the COST entries above and about 700 for the two open
+1.0 items (the example harness, debt #6, and splitting the enum row). So the open backlog is
+on the order of **three to four releases**, and the spread on the COST half is design risk
+rather than typing.
 
 ### Breaking, and therefore before the freeze
 
@@ -2181,11 +2380,12 @@ Ordered by how often the friction shows up, not by effort.
    are derivable: `bound_graphics_pipeline_` and `bound_compute_pipeline_` are already kept as
    record-time state (`src/CommandBuffer.hpp:539`, added by 0.19's reflection work), and a
    `DescriptorSet` already knows the layout and set index it was allocated from. Add the short
-   overload, keep the long one for a recording split across functions.
+   overload, keep the long one for a recording split across functions. **~150 lines.**
 4. **`cmd.begin()` has no `cmd.end()`.** Every other pair in the API is symmetric —
    `begin_rendering`/`end_rendering`, `begin_label`/`end_label` — and this one means "reset and
    start recording" while being named like half of a pair. Add `with ctx.record() as cmd:`;
-   `begin()` stays.
+   `begin()` stays. **~120 lines**, and the pattern is already written twice — `Timer` and
+   `OcclusionQuery` are both usable as context managers.
 5. ✅ **The keyboard is bare ints while the gamepad is an enum.** DONE in 0.23, in the
    backward-compatible shape this entry predicted. See the decision beside the gamepad's. `bz.KEY_W: int`,
    `set_cursor_mode(mode: int)` and `is_mouse_button_pressed(button: int)` sit next to
@@ -2199,6 +2399,11 @@ Ordered by how often the friction shows up, not by effort.
    merge is real and deliberate (`src/Pipeline.hpp:591`) but appears nowhere in the stub, so a
    user cannot know it is allowed. Accept a sequence, and document the merge either way — the
    documentation half is worth more than the sugar.
+
+   **The documentation half shipped in 0.24**, so what is left is the sequence. **~180
+   lines**, and the cost is spread rather than deep: every declarator on both builders takes
+   the stage, so accepting `ShaderStage | Sequence[ShaderStage]` is one small change repeated
+   across all of them plus the stub for each.
 7. ✅ **`set` has no default on the graphics builder and defaults to 0 on the compute one.**
    Same declarator, two contracts. DONE in 0.24: the graphics declarators default to 0
    as well. The entry was written from the audit; what settled it was
@@ -2254,9 +2459,19 @@ Ordered by rule 4 — what makes pictures goes first.
    it, because the watcher runs on its own thread and its result is applied from
    `begin_frame()`. A program that only ever waits for input sees the reload at the next
    click, so pass a timeout there.
-5. **`window.text_input()`.** Dropped files and the clipboard both shipped in 0.19, but there
-   is no character callback, so typing a filename inside an application is impossible. Same
-   per-cycle rotation as the key edges.
+5. ✅ **`window.text_input()`.** DONE in 0.25, and it became the release's feature. Dropped
+   files and the clipboard both shipped in 0.19, but there was no character callback, so
+   typing a filename inside an application was impossible. Same per-cycle rotation as the
+   key edges. **~180 lines**, and the estimate was right — the decision the estimate did
+   not see is that it returns `str` and encodes in the callback. See the decision above.
+
+   **It is not a small sibling of the key edges, and 0.25 is where that became clear.**
+   `glfwSetCharCallback` reports Unicode *codepoints*; `is_key_pressed(Key.A)` reports a
+   physical key. The layout, shift, AltGr, dead keys and an IME all live between the two, so
+   no amount of key state reconstructs the character — which is why every text field in every
+   toolkit reads the character stream instead. This is also **the one thing an ImGui backend
+   cannot supply for itself**: `ImGuiIO::AddInputCharacter` has to be fed from exactly this
+   callback, so the entry below depends on this one.
 6. ❌ **Y-flip through a negative-height viewport.** REJECTED in 0.24 — see
    "Rejected, and why". The entry named the catch correctly (it flips the winding) and drew
    the wrong conclusion from it: a Context-level opt-in does not contain that cost, it gives
@@ -2269,38 +2484,102 @@ Ordered by rule 4 — what makes pictures goes first.
 These arrived with their reasoning already written; see the traces above for what each one
 used to claim.
 
-- **Gamepad edge queries** (was STALE). `pad.was_button_pressed(...)` needs the per-cycle
-  rotation the windows use, and the process-wide counter it wanted has existed since 0.16
-  (`src/Window.hpp:80`). What is left is a per-pad previous-state snapshot.
-- **A sampleable multisampled image** (was UNASKED). Keep `SAMPLED` for `samples > 1` and add
-  a `texture2DMS` declarator, which unlocks a custom resolve — per-sample edge detection, and
-  the shape a TAA resolve wants.
+- ✅ **Gamepad edge queries** (was STALE) — DONE in 0.25, and the entry read the shape
+  correctly: a per-pad previous-state snapshot beside a counter that already existed.
+  **~150 lines** was close. What neither the entry nor the estimate saw is that the LIMIT
+  it inherited from 0.21 was reasoning about windows rather than about pads, and that GLFW
+  having no gamepad callback makes this edge weaker than a key edge. Both are in the
+  decision above.
+- ✅ **A sampleable multisampled image** (was UNASKED) — DONE in 0.25 as
+  `keep_samples=True` plus `target.multisampled_color`. The estimate of ~300 lines named
+  two costs that do not exist (no declarator, no new descriptor type) and missed the two
+  that do (the attachment store-op and the layout the pass retires to). See the decision
+  above, and `examples/36_msaa_resolve`.
 - **`stride=` on the indirect verbs** (was UNASKED). One argument, and it is what lets draw
   arguments be interleaved with per-draw data instead of living in their own packed array.
+  **~120 lines.** Two verbs, not three — `dispatch_indirect` has no stride — plus
+  `check_indirect_`, which validates against the packed size today
+  (`src/CommandBuffer.hpp:1799`).
 - **A precise occlusion count** (was UNASKED). A `Feature` row plus the `PRECISE` flag when it
   is on. The code comment's worry — that `samples` would mean two things depending on the
-  driver — is exactly what `Feature` answers, and 0.22 added three rows this way.
+  driver — is exactly what `Feature` answers, and 0.22 added three rows this way. **~100
+  lines**; a plain-boolean `Feature` row needs no pNext column, which is what 0.19 confirmed
+  by adding four of them.
 - **Per-face stencil state** (was UNASKED). A `face=` kwarg; `src/Pipeline.hpp` writes one
-  struct into both `.front` and `.back` today.
+  struct into both `.front` and `.back` today (`:2095`, through `to_vk_state()` at `:377`).
+  **~170 lines.**
 - **Primitive restart** (was UNASKED). `topology(TRIANGLE_STRIP, restart=True)`, opt-in so the
   change in what the largest index value means belongs to the caller who asked for it.
-  `src/Pipeline.hpp:1644` hardcodes `VK_FALSE`.
-- **`monitor=` and video-mode enumeration for fullscreen** (was UNASKED). The monitor
-  enumeration and video-mode read already exist (`src/Window.hpp:526`); what is missing is
-  letting the caller choose.
+  `src/Pipeline.hpp:1812` hardcodes `VK_FALSE` (the trace above says `:1644`, which is where it
+  sat when the audit read it). **~70 lines**, the cheapest entry in the file.
+- ✅ **`monitor=` and video-mode enumeration for fullscreen** (was UNASKED) — DONE in 0.25.
+  **~300 lines, and the estimate was the interesting part and it was right:** this reads
+  like a kwarg and is not one. Choosing needs the monitors and their modes *visible* from
+  Python, which is a new public type of inert data — the `Device` shape, which cost more
+  than the kwarg it enables. See the decision above for the one place it departs from
+  `Device`.
 - **Exclusive fullscreen** (was UNASKED). A `Feature` over `VK_EXT_full_screen_exclusive`, not
-  a fifth `WindowMode` — it is a property of the swapchain.
+  a fifth `WindowMode` — it is a property of the swapchain. **~250 lines**, including the
+  acquire/release pair the extension requires and a Windows-only path in the tests.
+
+  **0.25 planned it, looked at it, and cut it — the estimate is wrong and here is the
+  shape.** `FeatureInfo` has no column for a capability that needs an EXTENSION rather than
+  a feature bit; the table's own comment has been asking for that fourth column since 0.21,
+  and it drags `DeviceFeatures` (which must then carry the device's extension list) and
+  `feature_available` along with it. On top of that: `VK_KHR_get_surface_capabilities2` is
+  an INSTANCE extension the extension requires, so `create_instance_` has to know about a
+  device capability; the Win32 half needs an `HMONITOR` from the native window handle, which
+  means `<windows.h>` reaching a header that has stayed clear of it; and the acquire/release
+  pair has to survive every swapchain recreation. Call it ~450, not ~250.
+
+  **What settled it is rule 4, not the number.** An exclusive swapchain makes no picture —
+  it lowers latency and lets a fullscreen window change the display mode — and it is the
+  only item on the additive list that CI can never exercise and no test can assert. It goes
+  behind anything that draws. The fourth column is the useful half and is worth doing on the
+  day a second extension-gated capability asks for it, because one customer does not justify
+  a column.
 - **Compressed texture formats** (was a STALE rejection). BC and ASTC rows in `Format` plus an
   upload path that does not decode. Container parsing (KTX2) stays out of scope, which is what
-  the original rejection got right.
-- **A text or ImGui overlay example** (was a SCOPE rejection whose promise nobody kept). Not
-  core — an example or a companion package, exactly as the rejection says, but written.
+  the original rejection got right. **~500 lines, the most expensive additive entry.** Not
+  because of the `Format` rows: `UploadManager` decodes through `stbi` to RGBA8 on every path
+  it has (`src/UploadManager.hpp:475`), so "do not decode" is a new path rather than a branch,
+  and every size computation that assumes one byte per texel — mips, regions, `image.update`
+  — becomes block arithmetic. Worth it at four to eight times the VRAM of an uncompressed
+  asset.
+- ✅ **An ImGui overlay example** (was a SCOPE rejection whose promise nobody kept) — DONE
+  in 0.25 as `examples/35_imgui_overlay`, on the public primitives exactly as the rejection
+  said. **~350 lines** was close, and the prediction that `window.text_input()` was its only
+  missing prerequisite was WRONG by one: `set_cursor` is the other, because ImGui asks for
+  an I-beam over a text field and had no way to be answered.
+
+  **The example paid for itself the way an example is supposed to.** It found that
+  `cull_mode(CullMode.NONE)` could not be spelled — `front_face` had no default, so culling
+  nothing still demanded a winding that means nothing. Fixed in the same release, and it is
+  the 0.24 rule that a default belongs on every call that asks for the value.
+
+  **The entry used to say "a text or ImGui overlay example", and 0.25 split it.** Text
+  rendering stays rejected and stays rejected for the reason already written — the rasterizer
+  is freetype's or PIL's, and the atlas-and-quads layer is glue over an API that already has
+  every primitive. Nothing about that changed. ImGui is the half worth building, and a check
+  of what it needs found the gap is one call: `ImDrawData` is vertices, indices, a scissor and
+  an atlas id, and `DynamicBuffer.update`, `graphics_pipeline`, `push_constants`,
+  `draw_indexed`, `set_scissor`, `create_image` and a sampler already cover all of it. Mouse
+  position, buttons, `scroll_dx/dy`, key edges and the clipboard shipped in 0.19 and 0.21. The
+  character stream did not, so an `InputText` field in a bazalt program is deaf today. **Two
+  entries that looked independent are one feature and its prerequisite**, which is the kind of
+  thing a backlog hides until somebody prices it.
 
 ### Small, and looked at
 
 Defects small enough that each is a line, plus one thing the review raised that turned out to
 be fine — recorded so it does not get re-raised.
 
+- ✅ **`cull_mode(CullMode.NONE)` could not be spelled** — FIXED in 0.25. `front_face` had
+  no default, so a pipeline that culls nothing still had to name a winding that means
+  nothing when nothing is culled. It defaults to `COUNTER_CLOCKWISE`, which is the value the
+  builder already started with. Found by writing `examples/35_imgui_overlay`, because ImGui
+  does not wind its triangles consistently — the fifth defect an example has found that no
+  test looked for.
 - ✅ `bazalt/_core.pyi` — the `begin_frame` docstring names `DynamicBuffer`, which is not a
   public symbol. It should say "a DYNAMIC buffer". Internal vocabulary leaking into the file
   users read. FIXED in 0.24. (In this file `DynamicBuffer` is correct: this is the
@@ -2433,6 +2712,41 @@ UNASKED wearing a costume.
   rejected, without saying so, is compressed textures altogether, at a cost of four to eight
   times the VRAM for every real asset. The container half stays out of scope; the format
   rows and an upload path that does not decode are in the backlog.
+- **Temporal upscaling and frame generation — DLSS, XeSS, FSR** (0.25). Rejected as a bazalt
+  feature, and the interesting part is that the scope test does not settle it. Question one
+  says yes, loudly: an upscaler wants `VkInstance`, `VkPhysicalDevice`, `VkDevice`,
+  `VkCommandBuffer` and each input image with its view, format and subresource, and it wants
+  the extension list decided before the device exists. Question two also says yes for a
+  Python caller — nothing in the ecosystem hands you DLSS from Python. Both answers point in,
+  and it still stays out, on the two rules the scope test does not cover.
+
+  **Rule 4 is what decides it.** Bazalt ranks what makes pictures first, and an upscaler
+  makes no picture. It makes an existing picture cheaper, and the user of a prototyping
+  library is bounded by their own edit-run loop rather than by fill rate. That is the
+  opposite end of the ordering from "put a number on the screen", which is still unbuilt.
+
+  **Rule 3 rejects the vendor half separately.** DLSS is NVIDIA RTX only, so it is under the
+  90% line by construction — and a `Feature` row is not the answer here, because `Feature`
+  negotiates a capability the driver already has, not a closed-source blob
+  (`nvngx_dlss`) that a wheel would have to carry under a separate licence, per platform.
+  XeSS has the same shape.
+
+  **FSR is the path that stays open, and it is open outside bazalt.** FSR 2 and 3 are open
+  source and are ordinary compute passes, so they run on any GPU and need no blob, no new
+  extension and no handle: they are the ImGui argument again — glue over the public API,
+  written beside the library. Rule 3 does not block them; only rule 4 does, which is a
+  statement about bazalt's ordering rather than about the technique.
+
+  **What bazalt already gives anyone who tries.** Motion vectors are a second colour
+  attachment, and `RenderTarget` has taken several since it existed. Rendering small and
+  presenting large is an `OffscreenTarget` plus a draw, today. The one piece of sampler state
+  every temporal upscaler forces, a negative LOD bias, shipped as `create_sampler(mip_lod_bias=)`
+  for unrelated reasons. Jitter is a projection matrix, which bazalt deliberately does not
+  own — the same line the `Context(y_up=True)` rejection above draws.
+
+  **The one piece that could not live outside.** Frame *generation* interposes on present and
+  on frame pacing, and `SwapchainRenderer` owns both. If this ever comes back, the question
+  to answer is "a hook on present", not "DLSS" — and it should be filed as that.
 - **Dual-source blending, blend constants, unnormalized sampler coordinates.** Real Vulkan
   state, but nothing on the proposal list needs them. They stay unlisted until something
   asks. **0.22:** something asks, and it is smaller than any of these three — `MULTIPLY` and
@@ -2623,6 +2937,13 @@ ceiling to raise, so there is nothing for the five verdicts to grade.
   passed to `create_image` is an untested code path; a `Key` member is a read-only integer
   that `test_stubs.py` already proves exists — the same argument the constants lost on.
   Split the row before treating it as the 1.0 test plan.
+
+  **Estimate: ~400 lines**, and the split is most of the value rather than a preliminary. The
+  members that name a code path — `Format`, `BlendFactor`, `BlendOp`, `Access`, `AddressMode`
+  — get a test that passes them to the verb they belong to, which is a parametrized test per
+  enum rather than a test per member. The members that are read-only integers get counted
+  separately and left alone, exactly as the 127 key constants were in 0.23. Doing this
+  without the split first is how a percentage turns into busywork.
 - ✅ Add the `KEY_*` and `MOUSE_*` constants to `__all__` in `bazalt/__init__.py` — DONE, and
   it had been done for several releases while this line still asked for it. Found by the 0.20
   audit. A checklist nothing tests is a checklist that drifts.

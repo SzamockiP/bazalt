@@ -305,10 +305,13 @@ GPU as a calculator.
   `with bz.Context() as ctx:` releases the device's worker threads when the block ends,
   instead of when the garbage collector notices.
 - **The window, and what arrives through it.** Keys, the mouse and the scroll wheel, plus
-  files dropped on the window, the clipboard through `bz.get_clipboard()` and
-  `bz.set_clipboard()`, an icon through `window.set_icon()` and the cursor through
-  `window.set_cursor_position()`. `bz.poll_events()` pumps a program that animates;
-  `bz.wait_events()` sleeps until something happens, for one that does not.
+  the characters the user typed through `window.text_input()`, files dropped on the window,
+  the clipboard through `bz.get_clipboard()` and `bz.set_clipboard()`, an icon through
+  `window.set_icon()`, and the pointer through `window.set_cursor()` and
+  `window.set_cursor_position()`. A gamepad reports both the level and the edge.
+  `bz.list_monitors()` says which displays exist, so a fullscreen window can name one.
+  `bz.poll_events()` pumps a program that animates; `bz.wait_events()` sleeps until
+  something happens, for one that does not.
 - **Tools for a picture that looks wrong.** The validation layers report through a Python
   logger. `Context(shader_printf=True)` sends `debugPrintfEXT()` from a shader to that
   logger. `Context(gpu_timing=True)` and `cmd.timer()` measure a frame or one slice of a
@@ -341,12 +344,12 @@ Every directory in `examples/` runs on its own.
 | Shadows and deferred | [09_shadow_map](examples/09_shadow_map), [17_cascade_shadows](examples/17_cascade_shadows), [10_gbuffer_mrt](examples/10_gbuffer_mrt) |
 | Cubemaps and layers | [14_skybox](examples/14_skybox), [16_env_capture](examples/16_env_capture) (six faces), [18_multiview](examples/18_multiview) |
 | 3D textures | [31_volume_raymarch](examples/31_volume_raymarch) (a raymarched cloud), [32_lut_grading](examples/32_lut_grading) (colour grading through a LUT baked by render-to-slice) |
-| Image quality | [15_msaa](examples/15_msaa), [23_outline](examples/23_outline) (stencil) |
+| Image quality | [15_msaa](examples/15_msaa), [36_msaa_resolve](examples/36_msaa_resolve) (reading the samples one at a time), [23_outline](examples/23_outline) (stencil) |
 | Pipeline stages | [25_tessellation](examples/25_tessellation) (displacement and adaptive detail), [26_geometry_normals](examples/26_geometry_normals) (triangles become lines) |
 | GPU-driven work | [28_gpu_culling](examples/28_gpu_culling) (indirect draw, two windows), [29_bindless](examples/29_bindless) (one draw, many textures) |
 | Data in and out | [24_video_texture](examples/24_video_texture) (per-frame updates), [22_instancing](examples/22_instancing) (20000 instances) |
 | Windows and devices | [19_multi_window](examples/19_multi_window), [20_multi_context](examples/20_multi_context) (two GPUs), [21_window_modes](examples/21_window_modes), [08_pyqt_integration](examples/08_pyqt_integration) |
-| Tools | [12_hot_reload](examples/12_hot_reload), [27_drop_and_icon](examples/27_drop_and_icon) (drag a picture onto the window), [30_gamepad](examples/30_gamepad) |
+| Tools | [12_hot_reload](examples/12_hot_reload), [27_drop_and_icon](examples/27_drop_and_icon) (drag a picture onto the window), [30_gamepad](examples/30_gamepad), [35_imgui_overlay](examples/35_imgui_overlay) (an ImGui panel that tunes a running shader) |
 | Notebooks | [33_notebook](examples/33_notebook) (headless rendering, a slider, GPU compute — needs Jupyter) |
 | Showcase | [34_showcase](examples/34_showcase) (San Miguel with GPU culling, bindless materials, a day-night cycle, PCF shadows, MSAA and an HDR post chain) |
 
