@@ -2550,6 +2550,17 @@ used to claim.
   `check_indirect_` had to stop multiplying — the LAST command needs only its own struct, not
   a whole stride, so a buffer sized exactly for the data was being refused. A stride below
   the struct size, or not a multiple of 4, is refused with the reason.
+
+  **It is the one 0.25 feature with no example, and the reason is worth recording rather
+  than fixing badly.** `examples/28_gpu_culling` looked like its home and is not: it draws
+  ONE command whose instanceCount an atomic accumulates, so there is no second command for a
+  stride to step over. `examples/34_showcase` does multi-draw, and already solves the
+  per-draw-data problem the other way — `firstInstance` carries the material slot, which
+  costs no stride at all. So a demo would have to invent a use, and an example that invents
+  its own reason teaches the argument rather than the technique. The test
+  (`test_indirect_stride_steps_over_per_draw_data`) renders the same two stripes the packed
+  multi-draw produces, which is the honest check; the example waits for a program that
+  actually wants interleaved arguments.
 - ✅ **A precise occlusion count** (was UNASKED) — DONE in 0.25 as `Feature.PRECISE_OCCLUSION`
   plus `VK_QUERY_CONTROL_PRECISE_BIT` where it is on. The code comment's worry — that
   `samples` would mean two things depending on the driver — is exactly what a `Feature`

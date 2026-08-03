@@ -79,6 +79,19 @@ structs.
   between displays, `R` cycles that display's video modes, and `X` takes the
   display outright. They are about WHERE the picture goes rather than what is in
   it, which is why they share the window-modes demo.
+- **`examples/37_occlusion_query`.** A square slides behind a wall and the title
+  bar counts the fragments that survived. Occlusion queries had no example at
+  all before this, and `Feature.PRECISE_OCCLUSION` is what decides whether the
+  number is a count or only "something got through".
+- **`examples/38_primitive_restart`.** Three blades of grass, each a triangle
+  strip, in ONE indexed draw. Press R to drop the restart index and watch the
+  strip run on from the tip of one blade into the root of the next — the ribbon
+  between them is the thing restart exists to prevent.
+- **`examples/39_two_sided_stencil`.** The camera flies in and out of a cube and
+  the screen glows while it is inside, decided entirely by the stencil buffer:
+  front faces increment, back faces decrement, and the two cancel from outside.
+  Press F to make both faces increment and the effect breaks in the way that
+  shows why `face=` had to exist.
 - **`renderer.set_fullscreen_exclusive(enable)` and
   `renderer.fullscreen_exclusive`.** Take the display outright instead of drawing
   through the compositor: lower latency, and a fullscreen window may change the
