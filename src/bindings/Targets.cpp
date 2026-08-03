@@ -77,6 +77,13 @@ void bind_targets(py::module_& m)
     // Also constructor-free since 0.23: ctx.create_renderer(window) makes one.
     py::class_<SwapchainRenderer, RenderTarget, std::shared_ptr<SwapchainRenderer>>(m, "SwapchainRenderer")
         .def_property_readonly("present_mode", &SwapchainRenderer::present_mode)
+        // Exclusive fullscreen: a property of the swapchain, so a verb here
+        // rather than a fifth WindowMode (0.25).
+        .def(
+            "set_fullscreen_exclusive",
+            [](SwapchainRenderer& self, bool enable) { unwrap(self.set_fullscreen_exclusive(enable), nullptr); },
+            py::arg("enable") = true)
+        .def_property_readonly("fullscreen_exclusive", &SwapchainRenderer::fullscreen_exclusive)
         // A verb, not a settable property, because the request is a preference:
         // read present_mode back to see what the driver actually gave you.
         .def(

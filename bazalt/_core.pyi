@@ -184,6 +184,16 @@ class Feature(IntEnum):
     #: full Vulkan driver; MoltenVK answers False. Where it is False, fill the
     #: volume with a compute shader through a storage image instead.
     IMAGE_VIEW_2D_ON_3D = 18
+    #: An occlusion query counts SAMPLES rather than answering "something
+    #: passed". Without it the spec allows any non-zero value, so
+    #: OcclusionQuery.samples means two different things depending on the driver
+    #: — which is what this row exists to say (0.25).
+    PRECISE_OCCLUSION = 19
+    #: Taking the display outright instead of drawing through the compositor
+    #: (SwapchainRenderer.set_fullscreen_exclusive). The first Feature backed by
+    #: an extension rather than a device feature bit, and Win32-only in
+    #: practice, so it answers False elsewhere (0.25).
+    EXCLUSIVE_FULLSCREEN = 20
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -421,6 +431,16 @@ class CullMode(IntEnum):
 class FrontFace(IntEnum):
     CLOCKWISE = 0
     COUNTER_CLOCKWISE = 1
+
+class Face(IntEnum):
+    """Which side of a triangle a stencil state applies to (0.25).
+
+    Vulkan keeps two op-states and ONE enable bit, so `enable` on stencil_test is
+    not per face: any call sets it, and the last one wins.
+    """
+    FRONT_AND_BACK = 0
+    FRONT = 1
+    BACK = 2
 
 class MemoryUsage(IntEnum):
     STATIC = 0
@@ -1106,7 +1126,8 @@ class GraphicsPipelineBuilder:
     def stencil_test(self, enable: bool, compare: CompareOp = CompareOp.ALWAYS, ref: int = 0,
                      pass_op: StencilOp = StencilOp.KEEP, fail_op: StencilOp = StencilOp.KEEP,
                      depth_fail_op: StencilOp = StencilOp.KEEP, read_mask: int = 0xFF,
-                     write_mask: int = 0xFF) -> GraphicsPipelineBuilder:
+                     write_mask: int = 0xFF,
+                     face: Face = Face.FRONT_AND_BACK) -> GraphicsPipelineBuilder:
         """The stencil test. Needs a target with depth=Format.DEPTH_STENCIL.
 
         An outline is two passes: the first writes the silhouette with
@@ -1138,7 +1159,15 @@ class GraphicsPipelineBuilder:
         because the two stages are separate modules.
         """
         ...
-    def topology(self, topology: Topology) -> GraphicsPipelineBuilder: ...
+    def topology(self, topology: Topology, *, restart: bool = False) -> GraphicsPipelineBuilder:
+        """How vertices become primitives.
+
+        restart=True (0.25) turns the largest index value (0xFFFF or 0xFFFFFFFF,
+        by the index type) into "end this strip and start another", so one draw
+        carries many strips. Opt-in, because it takes that value away from being
+        an index. Needs a strip topology; anything else raises ShaderError.
+        """
+        ...
     def sample_shading(self, enable: bool = True, min_fraction: float = 1.0) -> GraphicsPipelineBuilder:
         """Per-sample fragment shading on an MSAA target: the fragment shader runs
         once per sample instead of once per pixel, cleaning up interior/specular
@@ -1339,7 +1368,7 @@ class CommandBuffer:
 
     def draw_indirect(self, buffer: Buffer, offset: int = 0, count: int = 1,
                       count_buffer: Optional[Buffer] = None,
-                      count_offset: int = 0) -> CommandBuffer:
+                      count_offset: int = 0, stride: int = 0) -> CommandBuffer:
         """Draw with arguments read out of a buffer, so a compute pass decides what
         gets drawn and the CPU never learns the answer (0.19).
 
@@ -1368,7 +1397,7 @@ class CommandBuffer:
         ...
     def draw_indexed_indirect(self, buffer: Buffer, offset: int = 0, count: int = 1,
                               count_buffer: Optional[Buffer] = None,
-                              count_offset: int = 0) -> CommandBuffer:
+                              count_offset: int = 0, stride: int = 0) -> CommandBuffer:
         """draw_indirect through the bound index buffer (0.19).
 
         The struct is VkDrawIndexedIndirectCommand, five words: indexCount,
@@ -1502,9 +1531,27 @@ class CommandBuffer:
     def push_constants(self, pipeline: Pipeline, offset: int, data: bytes) -> CommandBuffer:
         """The Pipeline already knows which stages its range covers."""
         ...
+    def push_constants(self, offset: int, data: bytes) -> CommandBuffer:
+        """The short form: the pipeline that is already bound (0.25).
+
+        Uses the last pipeline bound, whatever its bind point, because push
+        constants belong to a pipeline layout rather than to a bind point.
+        Raises StateError with none bound.
+        """
+        ...
 
     def bind_descriptor_set(self, descriptor_set: DescriptorSet, pipeline: Pipeline,
                             set: int = 0) -> CommandBuffer: ...
+    def bind_descriptor_set(self, descriptor_set: DescriptorSet) -> CommandBuffer:
+        """The short form (0.25): the set knows the index it was allocated for and
+        at which bind point, and bind_pipeline already recorded the pipeline.
+
+        The long form stays for a recording split across functions, where the
+        pipeline was bound somewhere this code cannot see, and for binding a set
+        against a different pipeline with a compatible layout. Raises StateError
+        with no pipeline bound at the set's bind point.
+        """
+        ...
 
     def timer(self) -> Timer:
         """Start a GPU timer and return its handle. Records a timestamp here;
@@ -1603,6 +1650,16 @@ class OcclusionQuery:
 
 class RenderingScope:
     """Returned by CommandBuffer.rendering(); use it in a `with` statement."""
+
+    def __enter__(self) -> CommandBuffer: ...
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
+
+class RecordScope:
+    """Returned by Context.record(); use it in a `with` statement (0.25).
+
+    Entering begins the recording. Leaving does NOT submit: who submits —
+    ctx.submit or renderer.present — stays your decision.
+    """
 
     def __enter__(self) -> CommandBuffer: ...
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
@@ -2517,6 +2574,20 @@ class Context:
         buffer; None inherits it."""
         ...
 
+    def record(self, auto_barriers: Optional[bool] = None) -> RecordScope:
+        """`with ctx.record() as cmd:` — create a command buffer and begin it (0.25).
+
+            with ctx.record() as cmd:
+                with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
+                    cmd.bind_pipeline(pipe).draw(3)
+            ctx.submit(cmd)
+
+        cmd.begin() was named like half of a pair that had no other half. This is
+        the other half, and it brackets the RECORDING only — the block does not
+        submit, because who submits is not its business.
+        """
+        ...
+
     def submit(self, cmd: CommandBuffer, *, wait: bool = True) -> None:
         """Execute a command buffer with no swapchain and no present.
 
@@ -2602,6 +2673,26 @@ class SwapchainRenderer(RenderTargetBase):
         StateError while an image is acquired, because recreation would
         destroy the swapchain that image belongs to.
         """
+        ...
+
+    def set_fullscreen_exclusive(self, enable: bool = True) -> None:
+        """Take the display outright instead of drawing through the compositor
+        (0.25). Recreates the swapchain.
+
+        What it buys is latency and the right to change the display mode; what it
+        costs is that alt-tab becomes a mode switch. A property of the swapchain,
+        not a fifth WindowMode — put the window in FULLSCREEN first.
+
+        Needs Feature.EXCLUSIVE_FULLSCREEN, and raises UnsupportedError without
+        it. Asking is not getting: the driver may refuse, which is normal when
+        another application holds the display, so read fullscreen_exclusive back.
+        Raises StateError while an image is acquired, like set_present_mode.
+        """
+        ...
+    @property
+    def fullscreen_exclusive(self) -> bool:
+        """Whether the display was actually taken (0.25). Not the same question as
+        what was asked for."""
         ...
 
     def acquire(self) -> bool:

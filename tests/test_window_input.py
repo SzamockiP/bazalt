@@ -644,3 +644,46 @@ def test_wait_events_needs_a_window():
     window GLFW is not initialized, so the call would vanish without a trace."""
     with pytest.raises(bz.WindowError, match="No windows exist"):
         bz.wait_events(timeout=0.0)
+
+
+def test_exclusive_fullscreen_needs_its_feature(ctx):
+    """0.25: a property of the swapchain, not a fifth WindowMode. The session
+    Context does not ask for the Feature, so the refusal names it."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    if ctx.supports(bz.Feature.EXCLUSIVE_FULLSCREEN):
+        pytest.skip("the session Context has EXCLUSIVE_FULLSCREEN, so it cannot refuse")
+    window = a_window()
+    try:
+        renderer = ctx.create_renderer(window)
+        assert renderer.fullscreen_exclusive is False
+        with pytest.raises(bz.UnsupportedError, match="EXCLUSIVE_FULLSCREEN"):
+            renderer.set_fullscreen_exclusive(True)
+        # Turning off what was never on is not an error: it is already true.
+        renderer.set_fullscreen_exclusive(False)
+    finally:
+        window = None
+
+
+def test_exclusive_fullscreen_reports_what_it_got(ctx, extra_context):
+    """Asking is not getting. The driver may refuse — another application can
+    hold the display — so the verb succeeds and the property tells the truth."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    exclusive = extra_context(optional=[bz.Feature.EXCLUSIVE_FULLSCREEN])
+    if not exclusive.supports(bz.Feature.EXCLUSIVE_FULLSCREEN):
+        pytest.skip("VK_EXT_full_screen_exclusive is a Windows extension")
+    window = a_window()
+    try:
+        renderer = exclusive.create_renderer(window)
+        window.set_mode(bz.WindowMode.FULLSCREEN)
+        renderer.set_fullscreen_exclusive(True)
+        # Either answer is correct; what must hold is that it is a bool and that
+        # the swapchain still works, which the ctx fixture's validation referee
+        # checks for the whole recording below.
+        assert isinstance(renderer.fullscreen_exclusive, bool)
+        renderer.set_fullscreen_exclusive(False)
+        assert renderer.fullscreen_exclusive is False
+        window.set_mode(bz.WindowMode.WINDOWED)
+    finally:
+        window = None

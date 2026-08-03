@@ -1197,6 +1197,21 @@ private:
             inst_builder.enable_extension(extension.c_str());
         }
 
+        // VK_EXT_full_screen_exclusive is a DEVICE extension that requires an
+        // INSTANCE one, so asking for the Feature has to reach this far back —
+        // the device does not exist yet, and by the time it does the instance is
+        // fixed. Checked against system_info rather than enabled outright,
+        // because enable_extension refuses to build when the extension is absent
+        // and a missing one here must degrade to "the Feature answers False".
+        const bool wants_exclusive_fullscreen =
+            std::ranges::find(config.required, Feature::EXCLUSIVE_FULLSCREEN) != config.required.end() ||
+            std::ranges::find(config.optional, Feature::EXCLUSIVE_FULLSCREEN) != config.optional.end();
+        if (wants_exclusive_fullscreen &&
+            system_info->is_extension_available(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME))
+        {
+            inst_builder.enable_extension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+        }
+
         // A test knob in the same family as BAZALT_FORCE_VULKAN_1_2, and not
         // public API: it asks for the headless instance on a machine that has a
         // display, so the fallback below is reachable where anyone can run it.
@@ -1339,6 +1354,18 @@ private:
         return {};
     }
 
+    // A Feature whose Vulkan spelling is an extension turns that extension on
+    // rather than a bit in a feature struct (0.25). Same position in
+    // configure_features_ as every other enable_*, and for the same reason: the
+    // DeviceBuilder takes the PhysicalDevice by value.
+    static void enable_extension_for(Context& ctx, Feature feature)
+    {
+        if (const char* extension = feature_info(feature).extension)
+        {
+            ctx.vkb_physical_device_.enable_extension_if_present(extension);
+        }
+    }
+
     // EVERY enable_* call in here must happen BEFORE the DeviceBuilder exists
     // (i.e. before create_device_): its constructor takes the PhysicalDevice
     // *by value*, so anything enabled afterwards is written to a copy and
@@ -1438,6 +1465,7 @@ private:
                         "device.supports() answers True.",
                         feature_name(feature))));
             }
+            enable_extension_for(ctx, feature);
             enable_feature(enabled_features, feature);
             ctx.enabled_features_.insert(feature);
         }
@@ -1445,6 +1473,7 @@ private:
         {
             if (feature_available(available, feature))
             {
+                enable_extension_for(ctx, feature);
                 enable_feature(enabled_features, feature);
                 ctx.enabled_features_.insert(feature);
             }

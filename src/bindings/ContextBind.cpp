@@ -877,6 +877,17 @@ void bind_context(py::module_& m)
                 return py::cast(unwrap(CommandBuffer::create(self, auto_barriers), self.logger().get()));
             },
             py::arg("auto_barriers") = py::none())
+        // `with ctx.record() as cmd:` — the missing half of cmd.begin(). Creates
+        // the command buffer and begins it; the block ends the RECORDING, not the
+        // frame, so the caller still chooses ctx.submit or renderer.present.
+        .def(
+            "record",
+            [](Context& self, std::optional<bool> auto_barriers)
+            {
+                require_open(self, "record");
+                return RecordScope{unwrap(CommandBuffer::create(self, auto_barriers), self.logger().get())};
+            },
+            py::arg("auto_barriers") = py::none())
         // The headless counterpart of renderer.present(): no swapchain, no present.
         .def(
             "submit",

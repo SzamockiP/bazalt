@@ -2,6 +2,12 @@
 #include <volk.h>
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#ifdef _WIN32
+// For glfwGetWin32Window, which exclusive fullscreen needs to find the HMONITOR.
+// volk.h above already pulled in <windows.h> through VK_USE_PLATFORM_WIN32_KHR.
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#endif
 #include <array>
 #include <string>
 #include <stdexcept>
@@ -629,6 +635,15 @@ public:
             glfwGetFramebufferSize(raw, &w, &h);
             return {w, h};
         };
+
+        // Which display the window is on right now, for exclusive fullscreen
+        // (0.25). Read per call rather than captured, because dragging a window
+        // to the other display changes the answer, and the swapchain asks again
+        // every time it is recreated.
+#ifdef _WIN32
+        sp.get_win32_monitor = [raw]() -> void*
+        { return MonitorFromWindow(glfwGetWin32Window(raw), MONITOR_DEFAULTTONEAREST); };
+#endif
 
         // Pointer to this Window's resize flag — consumed (read + reset) each check
         bool* resized_flag = &framebuffer_resized_;

@@ -475,3 +475,28 @@ def test_gpu_time_is_none_only_while_it_is_early(ctx):
     renderer = ctx.create_renderer(window)
     value = renderer.gpu_time_ms
     assert value is None or isinstance(value, float)
+
+
+def test_a_precise_occlusion_query_counts_samples(ctx, extra_context):
+    """0.25: with PRECISE_OCCLUSION the count is a COUNT. Without it the spec
+    allows any non-zero value for "something passed", so `samples` would mean two
+    things depending on the driver — which is what a Feature row exists to say.
+
+    A fullscreen triangle over an 8x8 target covers 64 pixels, so a precise query
+    must report at least that. The session Context does not ask for the feature,
+    so this needs one of its own."""
+    precise = extra_context(optional=[bz.Feature.PRECISE_OCCLUSION])
+    if not precise.supports(bz.Feature.PRECISE_OCCLUSION):
+        pytest.skip("GPU reports no occlusionQueryPrecise")
+
+    target = precise.create_render_target(8, 8)
+    pipeline = solid_pipeline(precise, target)
+
+    cmd = precise.create_command_buffer()
+    cmd.begin()
+    with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
+        with cmd.occlusion_query() as q:
+            cmd.bind_pipeline(pipeline).draw(3)
+    precise.submit(cmd)
+
+    assert q.samples >= 64, "a precise query counts every covered sample"

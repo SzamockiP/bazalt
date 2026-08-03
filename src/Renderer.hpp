@@ -451,6 +451,57 @@ public:
         return {};
     }
 
+    // Take the display outright instead of drawing through the compositor
+    // (0.25). What it buys is latency and the right to change the display mode;
+    // what it costs is that alt-tab becomes a mode switch.
+    //
+    // A property of the SWAPCHAIN, not a fifth WindowMode: the window is already
+    // fullscreen or this does nothing, and the enum stayed out of it for that
+    // reason since 0.16. Needs Feature.EXCLUSIVE_FULLSCREEN, which is Win32-only
+    // in practice.
+    //
+    // Refused between acquire() and present() for the reason set_present_mode is:
+    // it recreates the swapchain, and an acquired image would be freed under the
+    // frame that holds it.
+    std::expected<void, Error> set_fullscreen_exclusive(bool enable)
+    {
+        if (enable && !context_->supports(Feature::EXCLUSIVE_FULLSCREEN))
+        {
+            return std::unexpected(err_unsupported(
+                "exclusive fullscreen needs Feature.EXCLUSIVE_FULLSCREEN, which this driver does "
+                "not offer (VK_EXT_full_screen_exclusive is a Windows extension). Ask "
+                "ctx.supports(bz.Feature.EXCLUSIVE_FULLSCREEN), and use "
+                "window.set_mode(bz.WindowMode.FULLSCREEN) where it answers False."));
+        }
+        if (image_acquired_)
+        {
+            return std::unexpected(err_state(
+                "set_fullscreen_exclusive() recreates the swapchain, so it cannot run between "
+                "acquire() and present(). Call it before ctx.begin_frame(), or after present()."));
+        }
+        if (enable == fullscreen_exclusive_)
+        {
+            return {};
+        }
+        // Released before the swapchain goes, not after: the mode belongs to the
+        // swapchain that holds it, and releasing a destroyed one is nothing.
+        if (!enable && exclusive_active_ && context_->vk().vkReleaseFullScreenExclusiveModeEXT)
+        {
+            context_->vk().vkReleaseFullScreenExclusiveModeEXT(context_->device(), swapchain_);
+            exclusive_active_ = false;
+        }
+        fullscreen_exclusive_ = enable;
+        recreate_swapchain();
+        return {};
+    }
+
+    // Whether the display was actually taken. Not the same question as what was
+    // asked for: a driver may refuse, and that is a normal outcome.
+    bool fullscreen_exclusive() const
+    {
+        return exclusive_active_;
+    }
+
     // ── GPU timing ────────────────────────────────────────────────────────────
     //
     // The GPU duration of the frame submitted `frames_in_flight` frames ago (a
@@ -866,6 +917,11 @@ private:
 
     std::shared_ptr<Context> context_;
     SurfaceProvider surface_provider_;
+    // What the caller asked for, and what the swapchain actually got. The two
+    // differ when the driver refuses, which is a normal outcome rather than an
+    // error: another application can hold the display.
+    bool fullscreen_exclusive_ = false;
+    bool exclusive_active_ = false;
 
     // The frame serial this window last acquired at, and whether that acquire
     // produced an image still waiting to be presented. Together they are the
@@ -1042,9 +1098,54 @@ private:
             image_usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         }
 
+        // Exclusive fullscreen, when the Context negotiated it and the caller
+        // asked. APPLICATION_CONTROLLED rather than ALLOWED: the caller said when
+        // to take the display, so the acquire below is theirs to time, and a
+        // driver-decided mode would make set_fullscreen_exclusive(True) a
+        // suggestion.
+        //
+        // The Win32 struct is not optional beside it
+        // (VUID-VkSwapchainCreateInfoKHR-pNext-02679): a Win32 surface must name
+        // the monitor, which is what the SurfaceProvider hands out.
+        VkSurfaceFullScreenExclusiveInfoEXT exclusive_info{
+            .sType = VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT,
+            .pNext = nullptr,
+            .fullScreenExclusive = VK_FULL_SCREEN_EXCLUSIVE_APPLICATION_CONTROLLED_EXT};
+        VkSurfaceFullScreenExclusiveWin32InfoEXT exclusive_win32{
+            .sType = VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT,
+            .pNext = nullptr,
+            .hmonitor = nullptr};
+        const void* swapchain_next = nullptr;
+        exclusive_active_ = false;
+        if (fullscreen_exclusive_)
+        {
+            // The surface has to be able to name its display. A renderer built on
+            // a raw HWND has no Window behind it to ask, which is the one case
+            // where the Feature is present and the mode still cannot be taken.
+            void* monitor = surface_provider_.get_win32_monitor ? surface_provider_.get_win32_monitor() : nullptr;
+            if (!monitor)
+            {
+                if (auto l = context_->logger())
+                {
+                    l->log(
+                        Severity::Warning,
+                        Source::Device,
+                        "Exclusive fullscreen was asked for, but this surface cannot name the display "
+                        "it is on, so the swapchain stays composited.");
+                }
+            }
+            else
+            {
+                exclusive_win32.hmonitor = static_cast<HMONITOR>(monitor);
+                exclusive_info.pNext = &exclusive_win32;
+                swapchain_next = &exclusive_info;
+                exclusive_active_ = true;
+            }
+        }
+
         VkSwapchainCreateInfoKHR createInfo{
             .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-            .pNext = nullptr,
+            .pNext = swapchain_next,
             .flags = 0,
             .surface = surface_,
             .minImageCount = image_count,
@@ -1090,6 +1191,49 @@ private:
         swapchain_ = new_swapchain;
         swapchain_format_ = surface_format.format;
         swapchain_extent_ = extent;
+
+        // The acquire has to follow every swapchain creation, not only the first:
+        // a resize or a present-mode change builds a new swapchain, and the mode
+        // belongs to the swapchain rather than to the surface. Failure is not
+        // fatal — another application may hold the display — so it is logged and
+        // the composited swapchain keeps working.
+        // The entry point can be null even when the extension is available: volk
+        // loads a device function only if the extension was enabled at device
+        // creation, and a null call is a crash with no diagnostic — the 0.15
+        // lesson about device-level globals, in a place that has one pointer
+        // rather than a whole table.
+        if (exclusive_active_ && !context_->vk().vkAcquireFullScreenExclusiveModeEXT)
+        {
+            exclusive_active_ = false;
+            if (auto l = context_->logger())
+            {
+                l->log(
+                    Severity::Warning,
+                    Source::Device,
+                    "VK_EXT_full_screen_exclusive is present but its entry points were not loaded, so "
+                    "the swapchain stays composited.");
+            }
+        }
+        if (exclusive_active_)
+        {
+            const VkResult acquired =
+                context_->vk().vkAcquireFullScreenExclusiveModeEXT(context_->device(), swapchain_);
+            if (acquired != VK_SUCCESS)
+            {
+                exclusive_active_ = false;
+                if (auto l = context_->logger())
+                {
+                    l->log(
+                        Severity::Warning,
+                        Source::Device,
+                        std::format(
+                            "Exclusive fullscreen was refused ({}), so the swapchain stays composited. "
+                            "The window must already be fullscreen on that display, and no other "
+                            "application may hold it.",
+                            vk_result_name(acquired)));
+                }
+            }
+        }
 
         // Retrieve swapchain images
         uint32_t actual_image_count;

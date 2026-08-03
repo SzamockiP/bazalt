@@ -132,8 +132,12 @@ void bind_pipelines(py::module_& m)
                StencilOp fail_op,
                StencilOp depth_fail_op,
                std::uint32_t read_mask,
-               std::uint32_t write_mask) -> GraphicsPipelineBuilder&
-            { return self.stencil_test(enable, compare, ref, pass_op, fail_op, depth_fail_op, read_mask, write_mask); },
+               std::uint32_t write_mask,
+               Face face) -> GraphicsPipelineBuilder&
+            {
+                return self.stencil_test(
+                    enable, compare, ref, pass_op, fail_op, depth_fail_op, read_mask, write_mask, face);
+            },
             py::arg("enable"),
             py::arg("compare") = CompareOp::ALWAYS,
             py::arg("ref") = 0,
@@ -141,7 +145,8 @@ void bind_pipelines(py::module_& m)
             py::arg("fail_op") = StencilOp::KEEP,
             py::arg("depth_fail_op") = StencilOp::KEEP,
             py::arg("read_mask") = 0xFFu,
-            py::arg("write_mask") = 0xFFu)
+            py::arg("write_mask") = 0xFFu,
+            py::arg("face") = Face::FRONT_AND_BACK)
         .def(
             "depth_clamp",
             [](GraphicsPipelineBuilder& self, bool enable) -> GraphicsPipelineBuilder&
@@ -164,9 +169,11 @@ void bind_pipelines(py::module_& m)
             py::arg("stage"))
         .def(
             "topology",
-            [](GraphicsPipelineBuilder& self, Topology topology) -> GraphicsPipelineBuilder&
-            { return self.topology(topology); },
-            py::arg("topology"))
+            [](GraphicsPipelineBuilder& self, Topology topology, bool restart) -> GraphicsPipelineBuilder&
+            { return self.topology(topology, restart); },
+            py::arg("topology"),
+            py::kw_only(),
+            py::arg("restart") = false)
         .def(
             "sample_shading",
             [](GraphicsPipelineBuilder& self, bool enable, float min_fraction) -> GraphicsPipelineBuilder&

@@ -45,6 +45,7 @@ __all__ = [
     "DescriptorSet",
     "CommandBuffer",
     "RenderingScope",
+    "RecordScope",
     "Timer",
     "LabelScope",
     "OcclusionQuery",
@@ -82,6 +83,7 @@ __all__ = [
     "MouseButton",
     "CursorMode",
     "Cursor",
+    "Face",
     # Errors — the type is the recoverability contract
     "BazaltError",
     "InitializationError",

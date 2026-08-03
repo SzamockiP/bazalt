@@ -105,6 +105,7 @@ public:
         bound_compute_sets_.clear();
         bound_graphics_pipeline_.reset();
         bound_compute_pipeline_.reset();
+        bound_last_pipeline_.reset();
         tracked_writes_ = false;
         in_rendering_ = false;
         rendering_insert_pos_ = 0;
@@ -608,10 +609,12 @@ public:
             if (pipeline->bind_point() == VK_PIPELINE_BIND_POINT_COMPUTE)
             {
                 bound_compute_pipeline_ = pipeline;
+                bound_last_pipeline_ = pipeline;
             }
             else
             {
                 bound_graphics_pipeline_ = pipeline;
+                bound_last_pipeline_ = pipeline;
             }
         }
         commands_.push_back([pipeline](VkCommandBuffer cmd, const FrameContext& frame)
@@ -719,10 +722,18 @@ public:
         VkDeviceSize offset = 0,
         std::uint32_t count = 1,
         std::shared_ptr<Buffer> count_buffer = nullptr,
-        VkDeviceSize count_offset = 0)
+        VkDeviceSize count_offset = 0,
+        std::uint32_t stride = 0)
     {
         // 16 bytes: vertexCount, instanceCount, firstVertex, firstInstance.
-        if (auto e = check_indirect_(buffer, offset, count, sizeof(VkDrawIndirectCommand), "draw_indirect"); !e)
+        // stride=0 means "packed", which is the array a compute shader usually
+        // writes. A larger stride lets the arguments be INTERLEAVED with per-draw
+        // data — a material index, a bounding sphere — so one buffer carries both
+        // instead of two buffers that have to stay index-aligned with each other.
+        const VkDeviceSize draw_stride = stride ? stride : sizeof(VkDrawIndirectCommand);
+        if (auto e =
+                check_indirect_(buffer, offset, count, draw_stride, sizeof(VkDrawIndirectCommand), "draw_indirect");
+            !e)
         {
             return std::unexpected(e.error());
         }
@@ -737,8 +748,12 @@ public:
         }
         track_draw_();
         commands_.push_back(
-            [buffer = std::move(buffer), offset, count, count_buffer = std::move(count_buffer), count_offset](
-                VkCommandBuffer cmd, const FrameContext& frame)
+            [buffer = std::move(buffer),
+             offset,
+             count,
+             count_buffer = std::move(count_buffer),
+             count_offset,
+             draw_stride](VkCommandBuffer cmd, const FrameContext& frame)
             {
                 if (count_buffer)
                 {
@@ -749,10 +764,10 @@ public:
                         count_buffer->get(),
                         count_offset,
                         count,
-                        sizeof(VkDrawIndirectCommand));
+                        static_cast<std::uint32_t>(draw_stride));
                     return;
                 }
-                frame.vk->vkCmdDrawIndirect(cmd, buffer->get(), offset, count, sizeof(VkDrawIndirectCommand));
+                frame.vk->vkCmdDrawIndirect(cmd, buffer->get(), offset, count, static_cast<std::uint32_t>(draw_stride));
             });
         return {};
     }
@@ -762,12 +777,14 @@ public:
         VkDeviceSize offset = 0,
         std::uint32_t count = 1,
         std::shared_ptr<Buffer> count_buffer = nullptr,
-        VkDeviceSize count_offset = 0)
+        VkDeviceSize count_offset = 0,
+        std::uint32_t stride = 0)
     {
         // 20 bytes, and note vertexOffset is SIGNED: indexCount, instanceCount,
         // firstIndex, vertexOffset (int32), firstInstance.
-        if (auto e =
-                check_indirect_(buffer, offset, count, sizeof(VkDrawIndexedIndirectCommand), "draw_indexed_indirect");
+        const VkDeviceSize draw_stride = stride ? stride : sizeof(VkDrawIndexedIndirectCommand);
+        if (auto e = check_indirect_(
+                buffer, offset, count, draw_stride, sizeof(VkDrawIndexedIndirectCommand), "draw_indexed_indirect");
             !e)
         {
             return std::unexpected(e.error());
@@ -783,8 +800,12 @@ public:
         }
         track_draw_();
         commands_.push_back(
-            [buffer = std::move(buffer), offset, count, count_buffer = std::move(count_buffer), count_offset](
-                VkCommandBuffer cmd, const FrameContext& frame)
+            [buffer = std::move(buffer),
+             offset,
+             count,
+             count_buffer = std::move(count_buffer),
+             count_offset,
+             draw_stride](VkCommandBuffer cmd, const FrameContext& frame)
             {
                 if (count_buffer)
                 {
@@ -795,11 +816,11 @@ public:
                         count_buffer->get(),
                         count_offset,
                         count,
-                        sizeof(VkDrawIndexedIndirectCommand));
+                        static_cast<std::uint32_t>(draw_stride));
                     return;
                 }
                 frame.vk->vkCmdDrawIndexedIndirect(
-                    cmd, buffer->get(), offset, count, sizeof(VkDrawIndexedIndirectCommand));
+                    cmd, buffer->get(), offset, count, static_cast<std::uint32_t>(draw_stride));
             });
         return {};
     }
@@ -810,7 +831,16 @@ public:
     // is not either — one rule for both.
     std::expected<void, Error> dispatch_indirect(std::shared_ptr<Buffer> buffer, VkDeviceSize offset = 0)
     {
-        if (auto e = check_indirect_(buffer, offset, 1, sizeof(VkDispatchIndirectCommand), "dispatch_indirect"); !e)
+        // No stride argument here, and not an omission: dispatch_indirect issues
+        // exactly one command, so there is nothing for a stride to step over.
+        if (auto e = check_indirect_(
+                buffer,
+                offset,
+                1,
+                sizeof(VkDispatchIndirectCommand),
+                sizeof(VkDispatchIndirectCommand),
+                "dispatch_indirect");
+            !e)
         {
             return std::unexpected(e.error());
         }
@@ -1459,12 +1489,16 @@ public:
             {
                 if (occlusion_pool_ != VK_NULL_HANDLE)
                 {
-                    // Not PRECISE: the precise flag needs the occlusionQueryPrecise
-                    // feature, and without it the spec allows any non-zero value for
-                    // "something passed". Asking for a count bazalt cannot promise on
-                    // every device would make `samples` mean two different things
-                    // depending on the driver.
-                    frame.vk->vkCmdBeginQuery(cmd, occlusion_pool_, static_cast<std::uint32_t>(index), 0);
+                    // PRECISE exactly where the device promises it (0.25). Without
+                    // occlusionQueryPrecise the spec allows any non-zero value for
+                    // "something passed", so the flag is the difference between
+                    // `query.samples` being a COUNT and being a yes/no wearing an
+                    // integer. That is what a Feature row is for: the capability is
+                    // negotiated, and ctx.supports(Feature.PRECISE_OCCLUSION) says
+                    // which of the two answers this GPU is giving.
+                    const VkQueryControlFlags flags = precise_occlusion_ ? VK_QUERY_CONTROL_PRECISE_BIT
+                                                                         : static_cast<VkQueryControlFlags>(0);
+                    frame.vk->vkCmdBeginQuery(cmd, occlusion_pool_, static_cast<std::uint32_t>(index), flags);
                 }
             });
         return index;
@@ -1512,6 +1546,23 @@ public:
         return {QueryStatus::Ok, samples};
     }
 
+    // The short form, for the pipeline that is already bound (0.25). Uses the
+    // LAST pipeline bound whatever its bind point, because push constants belong
+    // to a pipeline layout rather than to a bind point, and a recording that
+    // pushes for a pipeline it has not bound is already confused.
+    std::expected<void, Error> push_constants(uint32_t offset, uint32_t size, const void* data)
+    {
+        if (!bound_last_pipeline_)
+        {
+            return std::unexpected(err_state(
+                "push_constants(offset, data) needs a pipeline bound first, because that is where "
+                "it reads the layout and the stage mask from. Call cmd.bind_pipeline(pipeline) "
+                "before it, or name the pipeline: push_constants(pipeline, offset, data)."));
+        }
+        push_constants(bound_last_pipeline_, offset, size, data);
+        return {};
+    }
+
     // No stage argument: the Pipeline already knows which stages its push constant
     // range covers, so passing a mismatched one was a validation error for no gain.
     CommandBuffer& push_constants(std::shared_ptr<Pipeline> pipeline, uint32_t offset, uint32_t size, const void* data)
@@ -1524,6 +1575,33 @@ public:
                     cmd, pipeline->layout(), pipeline->push_constant_stages(), offset, size, buffer.data());
             });
         return *this;
+    }
+
+    // The short form: bind the set where it was allocated to go, on the pipeline
+    // that is already bound (0.25, ergonomics #3). Both arguments the long form
+    // takes are known — the set records its index and bind point, and
+    // bind_pipeline records the pipeline — so repeating them is a chance to
+    // disagree with the truth, not information.
+    //
+    // The long form stays for a recording split across functions, where the
+    // pipeline was bound somewhere this code cannot see, and for binding a set
+    // against a DIFFERENT pipeline with a compatible layout.
+    std::expected<void, Error> bind_descriptor_set(std::shared_ptr<DescriptorSet> descSet)
+    {
+        const bool compute = descSet->bind_point() == VK_PIPELINE_BIND_POINT_COMPUTE;
+        std::shared_ptr<Pipeline> pipeline = compute ? bound_compute_pipeline_ : bound_graphics_pipeline_;
+        if (!pipeline)
+        {
+            return std::unexpected(err_state(
+                std::format(
+                    "bind_descriptor_set(set) needs a {} pipeline bound first, because that is where "
+                    "it reads the layout from. Call cmd.bind_pipeline(pipeline) before it, or name "
+                    "the pipeline: bind_descriptor_set(set, pipeline, set=N).",
+                    compute ? "compute" : "graphics")));
+        }
+        const std::uint32_t set_index = descSet->set_index();
+        bind_descriptor_set(std::move(descSet), std::move(pipeline), set_index);
+        return {};
     }
 
     CommandBuffer& bind_descriptor_set(
@@ -1857,8 +1935,24 @@ private:
         VkDeviceSize offset,
         std::uint32_t count,
         VkDeviceSize stride,
+        VkDeviceSize argument_size,
         const char* what)
     {
+        // A stride smaller than the struct would make consecutive commands
+        // overlap, and one that is not a multiple of 4 puts the next command's
+        // 32-bit words on an unaligned address
+        // (VUID-vkCmdDrawIndirect-drawCount-00476).
+        if (stride < argument_size || stride % 4 != 0)
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: stride must be at least {} bytes (the size of one argument struct) and a "
+                    "multiple of 4, got {}. stride= exists to leave room for per-draw data BETWEEN "
+                    "the argument structs, so it can only be larger.",
+                    what,
+                    argument_size,
+                    stride)));
+        }
         if (!buffer)
         {
             return std::unexpected(err_resource(std::format("{}: buffer is null", what)));
@@ -1889,17 +1983,20 @@ private:
                     "instanceCount of the argument struct — that is the GPU-side way to say it.",
                     what)));
         }
-        // stride is always a sizeof() of an argument struct, so the product cannot
-        // overflow 64 bits. Adding the offset to it can, hence fits_within.
-        const VkDeviceSize needed = static_cast<VkDeviceSize>(count) * stride;
+        // The last command needs only its own struct, not a whole stride: the
+        // padding stride= leaves is BETWEEN commands, so a buffer sized exactly
+        // for the data is legal and must not be refused. With the default packed
+        // stride the two are the same number.
+        const VkDeviceSize needed = static_cast<VkDeviceSize>(count - 1) * stride + argument_size;
         if (!fits_within(offset, needed, buffer->size()))
         {
             return std::unexpected(err_resource(
                 std::format(
-                    "{}: {} argument struct(s) of {} bytes at offset {} need {} bytes, but the "
-                    "buffer is {}",
+                    "{}: {} argument struct(s) of {} bytes at a stride of {} from offset {} need {} "
+                    "bytes, but the buffer is {}",
                     what,
                     count,
+                    argument_size,
                     stride,
                     offset,
                     needed,
@@ -2162,6 +2259,9 @@ private:
     // Cleared in begin() with the sets, because both describe one recording.
     std::shared_ptr<Pipeline> bound_graphics_pipeline_;
     std::shared_ptr<Pipeline> bound_compute_pipeline_;
+    // Whichever of the two was bound last. Push constants belong to a layout, not
+    // to a bind point, so "the pipeline that is already known" is this one.
+    std::shared_ptr<Pipeline> bound_last_pipeline_;
 
     // ── GPU timers (query pool survives begin(); results read after submit) ──
     VkQueryPool timer_pool_ = VK_NULL_HANDLE;
@@ -2175,6 +2275,10 @@ private:
     // ── Occlusion queries (same lifetime rules as the timer pool above) ──
     VkQueryPool occlusion_pool_ = VK_NULL_HANDLE;
     std::uint32_t occlusion_capacity_ = 0;
+    // Read once per recording rather than per query: the feature set is fixed for
+    // the Context's whole life, so asking again per draw would be the same answer
+    // through a hash lookup.
+    bool precise_occlusion_ = context_->supports(Feature::PRECISE_OCCLUSION);
     std::size_t occlusion_count_ = 0;
 
     // Depth of the label nesting declared this recording, so end_label() can

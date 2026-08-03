@@ -549,3 +549,56 @@ def test_line_mode_draws_edges_and_leaves_the_interior(extra_context):
     painted = lambda px: int(np.count_nonzero(px[:, :, :3].any(axis=2)))
     assert 0 < painted(lined) < painted(filled) // 2, \
         f"line {painted(lined)} px vs fill {painted(filled)} px"
+
+
+# ── primitive restart and per-face stencil (0.25) ────────────────────────
+
+
+def test_primitive_restart_builds_on_a_strip(ctx, triangle_shaders):
+    """Opt-in, because it takes the largest index value away from being an index.
+    The pipeline is the whole feature — there is no draw-time knob."""
+    vert, frag = triangle_shaders
+    target = ctx.create_render_target(16, 16)
+    pipe = (ctx.graphics_pipeline()
+            .vertex_shader(vert)
+            .fragment_shader(frag)
+            .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+            .topology(bz.Topology.TRIANGLE_STRIP, restart=True)
+            .build(target))
+    assert pipe is not None
+
+
+def test_primitive_restart_needs_a_strip(ctx, triangle_shaders):
+    """A restart index ends the current strip, and a list has no strip to end.
+    Refused with the reason rather than left to VUID-...-topology-06252."""
+    vert, frag = triangle_shaders
+    target = ctx.create_render_target(16, 16)
+    with pytest.raises(bz.ShaderError, match="strip topology"):
+        (ctx.graphics_pipeline()
+         .vertex_shader(vert)
+         .fragment_shader(frag)
+         .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+         .topology(bz.Topology.TRIANGLE_LIST, restart=True)
+         .build(target))
+
+
+def test_stencil_state_can_differ_per_face(ctx, triangle_shaders):
+    """Two calls spell a two-sided test — the shadow-volume shape, where one side
+    increments and the other decrements. `enable` is not per face, because Vulkan
+    has one stencilTestEnable and two op-states."""
+    vert, frag = triangle_shaders
+    target = ctx.create_render_target(16, 16, depth=bz.Format.DEPTH_STENCIL)
+    pipe = (ctx.graphics_pipeline()
+            .vertex_shader(vert)
+            .fragment_shader(frag)
+            .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+            .cull_mode(bz.CullMode.NONE)
+            # FRONT_AND_BACK first, so the two-sided calls below are visibly an
+            # override of one state rather than two halves of nothing.
+            .stencil_test(True, compare=bz.CompareOp.ALWAYS, face=bz.Face.FRONT_AND_BACK)
+            .stencil_test(True, compare=bz.CompareOp.ALWAYS,
+                          pass_op=bz.StencilOp.INCREMENT_CLAMP, face=bz.Face.FRONT)
+            .stencil_test(True, compare=bz.CompareOp.ALWAYS,
+                          pass_op=bz.StencilOp.DECREMENT_CLAMP, face=bz.Face.BACK)
+            .build(target))
+    assert pipe is not None

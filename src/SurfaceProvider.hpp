@@ -19,4 +19,12 @@ struct SurfaceProvider
 
     // Returns true if the window was resized since last check, and resets the flag
     std::function<bool()> consume_resize_flag;
+
+    // The HMONITOR the window currently sits on, as an opaque pointer, or null
+    // where the platform has no such thing (0.25). Exclusive fullscreen is the
+    // only caller: VK_EXT_full_screen_exclusive requires it in the swapchain's
+    // pNext on Win32, and a swapchain has no other reason to know about
+    // monitors. void* keeps <windows.h> out of this header, which every
+    // platform includes.
+    std::function<void*()> get_win32_monitor;
 };

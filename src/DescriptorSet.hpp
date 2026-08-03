@@ -58,14 +58,30 @@ public:
         VkDescriptorPool block,
         std::vector<VkDescriptorSet> sets,
         Pipeline::BindingTypeMap bindingTypes,
-        bool isFrameSet)
+        bool isFrameSet,
+        std::uint32_t setIndex = 0,
+        VkPipelineBindPoint bindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS)
         : context_(context),
           pool_(std::move(pool)),
           block_(block),
           sets_(std::move(sets)),
           binding_types_(std::move(bindingTypes)),
-          is_frame_set_(isFrameSet)
+          is_frame_set_(isFrameSet),
+          set_index_(setIndex),
+          bind_point_(bindPoint)
     {
+    }
+
+    // Which set index this was allocated for, and at which bind point. Recorded
+    // since 0.25 so cmd.bind_descriptor_set(set) can work them out instead of
+    // making the caller repeat what the allocation already decided.
+    std::uint32_t set_index() const
+    {
+        return set_index_;
+    }
+    VkPipelineBindPoint bind_point() const
+    {
+        return bind_point_;
     }
 
     // Frees the sets back to the pool, deferred (an in-flight frame may still
@@ -359,6 +375,8 @@ private:
     std::vector<VkDescriptorSet> sets_;
     Pipeline::BindingTypeMap binding_types_;
     bool is_frame_set_;
+    std::uint32_t set_index_ = 0;
+    VkPipelineBindPoint bind_point_ = VK_PIPELINE_BIND_POINT_GRAPHICS;
     // Hold shared_ptrs to prevent resources from being freed
     std::vector<BoundImage> bound_images_;
     std::vector<BoundBuffer> buffers_;
@@ -520,7 +538,14 @@ private:
         }
 
         return std::make_shared<DescriptorSet>(
-            context_, shared_from_this(), from, std::move(sets), pipeline->binding_types(setIndex), frame_set);
+            context_,
+            shared_from_this(),
+            from,
+            std::move(sets),
+            pipeline->binding_types(setIndex),
+            frame_set,
+            setIndex,
+            pipeline->bind_point());
     }
 
     VkResult try_allocate_(

@@ -6,12 +6,16 @@ identically. Pinned by rendering the same scene both ways and comparing
 pixels exactly.
 """
 
+import pathlib
+import struct
+
 import numpy as np
 import pytest
 
 import bazalt as bz
 
 CLEAR = [0.1, 0.2, 0.3, 1.0]
+SHADER_DIR = pathlib.Path(__file__).parent / "shaders"
 
 
 def test_every_recording_method_returns_the_same_object(ctx, triangle_shaders, triangle_buffers):
@@ -126,3 +130,74 @@ def test_rendering_scope_closes_on_exception(ctx, triangle_shaders, triangle_buf
         c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
     ctx.submit(cmd)
     assert target.color[0].read() is not None
+
+
+# ── ctx.record() and the short verbs (0.25) ──────────────────────────────
+
+
+def test_record_scope_records_the_same_frame_as_begin(ctx, triangle_shaders, triangle_buffers):
+    """`with ctx.record() as cmd:` is cmd.begin() with the missing half of the
+    pair. It brackets the RECORDING and deliberately does not submit: who submits
+    — ctx.submit or renderer.present — stays the caller's decision."""
+    vert, frag = triangle_shaders
+    vbuf, ibuf = triangle_buffers
+
+    def draw(cmd, target, pipe):
+        with cmd.rendering(target, clear_color=CLEAR):
+            cmd.bind_pipeline(pipe)
+            cmd.bind_vertex_buffer(vbuf)
+            cmd.bind_index_buffer(ibuf)
+            cmd.draw_indexed(3)
+
+    def pipeline(target):
+        return (ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
+                .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+                .build(target))
+
+    manual_target = ctx.create_render_target(32, 32)
+    manual = ctx.create_command_buffer()
+    manual.begin()
+    draw(manual, manual_target, pipeline(manual_target))
+    ctx.submit(manual)
+
+    scoped_target = ctx.create_render_target(32, 32)
+    with ctx.record() as cmd:
+        draw(cmd, scoped_target, pipeline(scoped_target))
+    ctx.submit(cmd)
+
+    assert np.array_equal(manual_target.color[0].read(), scoped_target.color[0].read())
+
+
+def test_the_short_verbs_bind_what_the_long_ones_do(ctx, triangle_shaders):
+    """bind_descriptor_set(set) and push_constants(offset, data) read the set's
+    own index and the bound pipeline, so they must produce the same picture as
+    naming both."""
+    vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+    frag = ctx.compile_shader(str(SHADER_DIR / "push.frag"), bz.ShaderStage.FRAGMENT)
+
+    def render(short):
+        target = ctx.create_render_target(16, 16)
+        pipe = (ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
+                .push_constant(16, bz.ShaderStage.FRAGMENT).build(target))
+        colour = struct.pack("4f", 0.25, 0.5, 0.75, 1.0)
+        with ctx.record() as cmd:
+            with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
+                cmd.bind_pipeline(pipe)
+                if short:
+                    cmd.push_constants(0, colour)
+                else:
+                    cmd.push_constants(pipe, 0, colour)
+                cmd.draw(3)
+        ctx.submit(cmd)
+        return target.color[0].read()
+
+    assert np.array_equal(render(short=True), render(short=False))
+
+
+def test_the_short_verbs_need_a_bound_pipeline(ctx):
+    """They read the layout off the pipeline that is bound, so with none bound
+    there is nothing to read — StateError naming the fix, not a crash."""
+    cmd = ctx.create_command_buffer()
+    cmd.begin()
+    with pytest.raises(bz.StateError, match="bind_pipeline"):
+        cmd.push_constants(0, b"\x00" * 16)

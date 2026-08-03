@@ -97,15 +97,25 @@ enum class FrontFace
     COUNTER_CLOCKWISE
 };
 
+// Which side of a triangle a stencil state applies to. Vulkan keeps two
+// VkStencilOpStates and one enable bit, and this names the pair rather than
+// splitting stencil_test into two verbs of eight parameters each.
+enum class Face
+{
+    FRONT_AND_BACK,
+    FRONT,
+    BACK
+};
+
 enum class Topology
 {
     TRIANGLE_LIST,
     POINT_LIST,
     LINE_LIST,
     // Strips: each new vertex extends the primitive instead of starting one, so
-    // a quad is 4 vertices instead of 6. primitiveRestartEnable stays FALSE —
-    // one strip per draw. A restart index is a separate decision, and it would
-    // change what an index buffer's largest value means.
+    // a quad is 4 vertices instead of 6. One strip per draw unless the caller
+    // asks for restart (topology(..., restart=true)), which is opt-in because it
+    // changes what an index buffer's largest value means.
     TRIANGLE_STRIP,
     LINE_STRIP,
     // The input to a tessellation control shader: a run of patch_control_points
@@ -1145,9 +1155,15 @@ public:
     // Needs a target whose depth attachment has a stencil aspect
     // (`depth=bz.Format.DEPTH_STENCIL`).
     //
-    // Front and back faces get the same state. Separate states are a rare case
-    // and would double eight parameters on one verb, which is worse than the
-    // ceiling; the upgrade path is a face= kwarg, and it is additive.
+    // Both faces share the state unless face= says otherwise (0.25, the upgrade
+    // path the 0.17 entry named). Two calls spell a two-sided test — one per
+    // face — which is what a shadow-volume pass wants: the same test increments
+    // on one side and decrements on the other.
+    //
+    // `enable` is NOT per face. Vulkan has one stencilTestEnable for the
+    // pipeline and two op-states, so any call sets the bit, and the last
+    // `enable` wins. Pretending otherwise would invent a state the hardware does
+    // not have.
     template <typename Self>
     Self&& stencil_test(
         this Self&& self,
@@ -1158,16 +1174,29 @@ public:
         StencilOp fail_op = StencilOp::KEEP,
         StencilOp depth_fail_op = StencilOp::KEEP,
         std::uint32_t read_mask = 0xFF,
-        std::uint32_t write_mask = 0xFF)
+        std::uint32_t write_mask = 0xFF,
+        Face face = Face::FRONT_AND_BACK)
     {
         self.stencil_.enable = enable;
-        self.stencil_.compare = compare;
-        self.stencil_.reference = ref;
-        self.stencil_.pass_op = pass_op;
-        self.stencil_.fail_op = fail_op;
-        self.stencil_.depth_fail_op = depth_fail_op;
-        self.stencil_.read_mask = read_mask;
-        self.stencil_.write_mask = write_mask;
+        for (StencilState* side : {&self.stencil_, &self.stencil_back_})
+        {
+            const bool is_front = side == &self.stencil_;
+            if (face == Face::FRONT && !is_front)
+            {
+                continue;
+            }
+            if (face == Face::BACK && is_front)
+            {
+                continue;
+            }
+            side->compare = compare;
+            side->reference = ref;
+            side->pass_op = pass_op;
+            side->fail_op = fail_op;
+            side->depth_fail_op = depth_fail_op;
+            side->read_mask = read_mask;
+            side->write_mask = write_mask;
+        }
         return std::forward<Self>(self);
     }
 
@@ -1301,10 +1330,19 @@ public:
         return std::forward<Self>(self);
     }
 
+    // restart= turns the largest representable index (0xFFFF or 0xFFFFFFFF, by
+    // the index type) into "end this strip and start another", so one draw can
+    // carry many strips. Opt-in rather than always on, because it takes that
+    // value away from being an index: a mesh that happens to use it is silently
+    // cut in two, and the caller who asked for restart is the one who knows.
+    //
+    // A kwarg on topology() rather than a verb of its own — it is meaningless
+    // without a strip topology, and Vulkan rejects it on a list.
     template <typename Self>
-    Self&& topology(this Self&& self, Topology topology)
+    Self&& topology(this Self&& self, Topology topology, bool restart = false)
     {
         self.topology_ = topology;
+        self.primitive_restart_ = restart;
         return std::forward<Self>(self);
     }
 
@@ -1591,6 +1629,15 @@ public:
                 "a tessellation pipeline must draw patches. Add "
                 "topology(bz.Topology.PATCH_LIST) and patch_control_points(n)"));
         }
+        // VUID-VkPipelineInputAssemblyStateCreateInfo-topology-06252: a restart
+        // index only means anything to a topology that runs primitives together.
+        if (primitive_restart_ && topology_ != Topology::TRIANGLE_STRIP && topology_ != Topology::LINE_STRIP)
+        {
+            return std::unexpected(err_shader(
+                "topology(..., restart=True) needs a strip topology. A restart index ends the "
+                "current strip, and a list has no strip to end — use Topology.TRIANGLE_STRIP or "
+                "Topology.LINE_STRIP"));
+        }
         if (topology_ == Topology::PATCH_LIST && !tess_control_shader_)
         {
             return std::unexpected(err_shader(
@@ -1656,6 +1703,7 @@ public:
             .depth_write = depth_write_,
             .depth_compare = depth_compare_,
             .stencil = stencil_,
+            .stencil_back = stencil_back_,
             .cull_mode = cull_mode_,
             .front_face = front_face_,
             .polygon_mode = polygon_mode_,
@@ -1667,6 +1715,7 @@ public:
             .blend_overrides = blend_overrides_,
             .alpha_to_coverage = alpha_to_coverage_,
             .topology = topology_,
+            .primitive_restart = primitive_restart_,
             .patch_control_points = patch_control_points_,
             .color_formats = std::move(colorFormats),
             .depth_format = depthFormat,
@@ -1756,6 +1805,7 @@ private:
         bool depth_write = true;
         CompareOp depth_compare = CompareOp::LESS_OR_EQUAL;
         StencilState stencil;
+        StencilState stencil_back;
         CullMode cull_mode = CullMode::BACK;
         FrontFace front_face = FrontFace::COUNTER_CLOCKWISE;
         PolygonMode polygon_mode = PolygonMode::FILL;
@@ -1767,6 +1817,7 @@ private:
         std::map<std::uint32_t, BlendOverride> blend_overrides;
         bool alpha_to_coverage = false;
         Topology topology = Topology::TRIANGLE_LIST;
+        bool primitive_restart = false;
         std::uint32_t patch_control_points = 0;
         std::vector<VkFormat> color_formats;
         VkFormat depth_format = VK_FORMAT_UNDEFINED;
@@ -1814,7 +1865,7 @@ private:
             .pNext = nullptr,
             .flags = 0,
             .topology = to_vk(s.topology),
-            .primitiveRestartEnable = VK_FALSE};
+            .primitiveRestartEnable = s.primitive_restart ? VK_TRUE : VK_FALSE};
 
         // Only read when the pipeline has tessellation stages, so it costs a
         // struct on the stack and nothing else. patchControlPoints is the INPUT
@@ -2098,7 +2149,7 @@ private:
             .stencilTestEnable = s.stencil.enable ? VK_TRUE : VK_FALSE,
             // Front and back carry the same state — see stencil_test().
             .front = s.stencil.to_vk_state(),
-            .back = s.stencil.to_vk_state(),
+            .back = s.stencil_back.to_vk_state(),
             .minDepthBounds = 0.0f,
             .maxDepthBounds = 1.0f};
     }
@@ -2116,6 +2167,9 @@ private:
     bool depth_write_ = true;
     CompareOp depth_compare_ = CompareOp::LESS_OR_EQUAL;
     StencilState stencil_;
+    // The back face's op-state. Kept beside the front one rather than inside it,
+    // because the enable bit they share belongs to neither.
+    StencilState stencil_back_;
     CullMode cull_mode_ = CullMode::BACK;
     FrontFace front_face_ = FrontFace::COUNTER_CLOCKWISE;
     PolygonMode polygon_mode_ = PolygonMode::FILL;
@@ -2127,6 +2181,7 @@ private:
     std::map<std::uint32_t, BlendOverride> blend_overrides_;
     bool alpha_to_coverage_ = false;
     Topology topology_ = Topology::TRIANGLE_LIST;
+    bool primitive_restart_ = false;
     std::uint32_t patch_control_points_ = 0;
     bool sample_shading_ = false;
     float min_sample_shading_ = 1.0f;
