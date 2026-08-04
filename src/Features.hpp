@@ -130,8 +130,16 @@ struct DeviceFeatures
 // portability_subset must come from the caller: a pNext struct for an extension
 // the device does not have is not a question the driver has to answer, and
 // asking anyway is how you read a garbage struct as "every restriction applies".
+// `enumerate_extensions` is a parameter for the same reason `get_features2` is,
+// and 0.25 missed it: the extension list arrived that release reading the volk
+// GLOBAL, which is null until a Context calls volkLoadInstanceOnly. list_devices
+// runs before any Context exists and deliberately does not bind volk to its
+// throwaway instance, so `bz.list_devices()` as a program's first bazalt call
+// dereferenced null. Under pytest it never did — the session Context is built
+// first — which is why a suite of 650 tests missed a crash on line one.
 inline DeviceFeatures query_device_features(
     PFN_vkGetPhysicalDeviceFeatures2 get_features2,
+    PFN_vkEnumerateDeviceExtensionProperties enumerate_extensions,
     VkPhysicalDevice physical_device,
     bool portability_subset = false,
     std::uint32_t api_version = VK_API_VERSION_1_2)
@@ -143,12 +151,11 @@ inline DeviceFeatures query_device_features(
     // legal to chain is partly an extension question, so the list has to exist
     // first. Nothing else about the order matters.
     std::uint32_t extension_count = 0;
-    if (vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &extension_count, nullptr) == VK_SUCCESS &&
-        extension_count > 0)
+    if (enumerate_extensions != nullptr &&
+        enumerate_extensions(physical_device, nullptr, &extension_count, nullptr) == VK_SUCCESS && extension_count > 0)
     {
         std::vector<VkExtensionProperties> properties(extension_count);
-        if (vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &extension_count, properties.data()) ==
-            VK_SUCCESS)
+        if (enumerate_extensions(physical_device, nullptr, &extension_count, properties.data()) == VK_SUCCESS)
         {
             features.extensions.reserve(properties.size());
             for (const auto& property : properties)

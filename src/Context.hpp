@@ -1393,6 +1393,7 @@ private:
             ctx.vkb_physical_device_.is_extension_present(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
         const DeviceFeatures available = query_device_features(
             vkGetPhysicalDeviceFeatures2,
+            vkEnumerateDeviceExtensionProperties,
             ctx.vkb_physical_device_.physical_device,
             ctx.portability_subset_,
             (std::min)(target_api, ctx.vkb_physical_device_.properties.apiVersion));

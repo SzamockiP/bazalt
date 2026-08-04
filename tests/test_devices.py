@@ -7,6 +7,9 @@ hold a VkPhysicalDevice), so these tests also pin that it survives independently
 of any Context.
 """
 
+import subprocess
+import sys
+
 import pytest
 
 import bazalt as bz
@@ -84,3 +87,28 @@ def test_explicit_device_is_honoured(ctx):
             assert chosen[0].supports(feature), (
                 f"the Context enabled {feature!r} on a device that reports it missing"
             )
+
+
+def test_list_devices_works_as_the_first_call(tmp_path):
+    """In a subprocess, because the bug only exists when nothing ran first.
+
+    query_device_features reads the device extension list, and until 0.26 it
+    read it through volk's instance-level global — which is null until a
+    Context calls volkLoadInstanceOnly. Every test in this file passes either
+    way, because the session Context is already up by the time they run. A
+    PROGRAM that opens with bz.list_devices(), which is what the function is
+    for, segfaulted on its first line.
+    """
+    script = tmp_path / "first_call.py"
+    script.write_text(
+        "import bazalt as bz\n"
+        "devices = bz.list_devices()\n"
+        "print(len(devices))\n"
+        # Touch the part that needed the extension list, so a crash-free but
+        # empty answer does not pass either.
+        "for d in devices:\n"
+        "    d.supports(bz.Feature.EXCLUSIVE_FULLSCREEN)\n",
+        encoding="utf-8")
+
+    done = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, f"exit {done.returncode}\nstdout: {done.stdout}\nstderr: {done.stderr}"

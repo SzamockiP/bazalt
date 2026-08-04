@@ -75,6 +75,16 @@ when 1.2 has it as an extension.
   that is too large fails before any host memory is reserved for it.
 
 ### Fixed
+- **`bz.list_devices()` crashed when it was a program's first bazalt call.** It
+  is the one function meant to run before any Context exists, and since 0.25 it
+  read the device extension list through volk's instance-level global — which is
+  null until a Context calls `volkLoadInstanceOnly`. The entry point is a
+  parameter now, like the feature query beside it has always been.
+
+  The suite never saw it: a test file gets a session Context first, so the
+  global is loaded by the time any test asks. Only a fresh process starting with
+  `list_devices()` reproduces it, and the regression test is a subprocess for
+  exactly that reason.
 - **A DYNAMIC buffer got no device-address usage flag** while a STATIC one did,
   so `buffer.address` on it was a validation error rather than an address. Found
   by the test that asks a DYNAMIC buffer for one. The flag now rides in

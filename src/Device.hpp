@@ -225,7 +225,8 @@ inline std::expected<std::vector<Device>, Error> list_devices()
                 [](const VkExtensionProperties& extension)
                 { return std::string_view(extension.extensionName) == VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME; });
         }
-        device.features = query_device_features(get_features2, handle, portability_subset);
+        device.features = query_device_features(
+            get_features2, enumerate_device_extensions, handle, portability_subset, props2.properties.apiVersion);
         devices.push_back(std::move(device));
     }
 
