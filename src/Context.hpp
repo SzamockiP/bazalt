@@ -1005,13 +1005,20 @@ public:
     // A compute shader doing a subgroupAdd reduction has to size its workgroup
     // against this number, and there was no way to ask. Vulkan 1.1 core, so no
     // negotiation and no Feature: the property either has a value or it does not.
+    //
+    // Reads the cache since 0.26 rather than querying per call. The RANGE a
+    // driver may be pinned to lives on limits() instead of here, so each number
+    // still has one spelling.
     std::uint32_t subgroup_size() const
     {
-        VkPhysicalDeviceSubgroupProperties subgroup{
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES, .pNext = nullptr};
-        VkPhysicalDeviceProperties2 props{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &subgroup};
-        vkGetPhysicalDeviceProperties2(vkb_physical_device_.physical_device, &props);
-        return subgroup.subgroupSize;
+        return limits_.subgroup_size;
+    }
+
+    // The numbers this device holds a caller to (0.26). Queried once at
+    // creation, because a property does not change under a live device.
+    const DeviceLimits& limits() const
+    {
+        return limits_;
     }
 
     // ── Debug object names ────────────────────────────────────────────────────
@@ -1385,7 +1392,16 @@ private:
         ctx.portability_subset_ =
             ctx.vkb_physical_device_.is_extension_present(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
         const DeviceFeatures available = query_device_features(
-            vkGetPhysicalDeviceFeatures2, ctx.vkb_physical_device_.physical_device, ctx.portability_subset_);
+            vkGetPhysicalDeviceFeatures2,
+            ctx.vkb_physical_device_.physical_device,
+            ctx.portability_subset_,
+            (std::min)(target_api, ctx.vkb_physical_device_.properties.apiVersion));
+
+        // Here rather than in a lazy accessor: this is the only place holding
+        // the available features, and which property structs may be chained
+        // follows from them.
+        ctx.limits_ =
+            query_device_limits(vkGetPhysicalDeviceProperties2, ctx.vkb_physical_device_.physical_device, available);
 
         // Dynamic rendering: core in 1.3, an extension on 1.2. Same capability,
         // two spellings — resolve it here so nothing else has to care.
@@ -1587,6 +1603,13 @@ private:
             .shaderDemoteToHelperInvocation = VK_TRUE,
             .shaderTerminateInvocation = VK_TRUE,
             .dynamicRendering = VK_TRUE};
+        // maintenance4 has two homes and the spec forbids sending both: a chain
+        // holding VkPhysicalDeviceVulkan13Features must not also hold
+        // VkPhysicalDeviceMaintenance4Features. So the bit is copied into the
+        // roll-up on the 1.3 path and the standalone struct rides the 1.2 one
+        // (0.26).
+        features13.maintenance4 = ctx.negotiated_features_.maintenance4.maintenance4;
+        VkPhysicalDeviceMaintenance4Features maintenance4 = ctx.negotiated_features_.maintenance4;
         VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_khr{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR,
             .pNext = nullptr,
@@ -1617,6 +1640,10 @@ private:
         if (ctx.dynamic_rendering_khr_)
         {
             dev_builder.add_pNext(&dynamic_rendering_khr);
+            if (maintenance4.maintenance4 == VK_TRUE)
+            {
+                dev_builder.add_pNext(&maintenance4);
+            }
         }
         else
         {
@@ -1661,6 +1688,14 @@ private:
         // The negotiated version, not a hardcoded one: telling VMA 1.3 on the
         // 1.2+KHR path would let it call entry points the device never promised.
         allocatorInfo.vulkanApiVersion = ctx.negotiated_api_version_;
+        // Buffers that will be asked for their address must be allocated from
+        // memory that carries VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT, and only
+        // the allocator can do that — per-buffer usage flags are too late. So
+        // the whole allocator opts in whenever the feature is on (0.26).
+        if (ctx.enabled_features_.contains(Feature::BUFFER_ADDRESS))
+        {
+            allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+        }
 
         if (auto e = check(vmaCreateAllocator(&allocatorInfo, &ctx.allocator_), "create VMA allocator"))
         {
@@ -1861,6 +1896,9 @@ private:
     // configure_features_ fills it and create_device_ hands it over, so the set
     // Python asks about and the structs the device was built with cannot drift.
     DeviceFeatures negotiated_features_;
+    // Filled beside the feature query and never touched again: a device's
+    // limits are fixed for its lifetime (0.26).
+    DeviceLimits limits_;
     bool headless_ = false;
     std::atomic<bool> closed_ = false;
     bool swapchain_supported_ = false;

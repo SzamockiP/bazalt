@@ -198,6 +198,21 @@ class Feature(IntEnum):
     #: False, because Metal has no triangle fan at all. Where it is False, emit
     #: the same shape as an indexed TRIANGLE_LIST (0.25).
     TRIANGLE_FANS = 21
+    #: `buffer.address`, and with it a shader that reads a buffer through a
+    #: `buffer_reference` pointer instead of a descriptor (0.26). What it buys is
+    #: reach: a descriptor sees at most `ctx.limits.max_storage_buffer` (4 GiB on
+    #: the desktop drivers that report the most) and an address has no such cap.
+    BUFFER_ADDRESS = 22
+    #: 64-bit integers in a shader (`uint64_t`, `GL_ARB_gpu_shader_int64`).
+    #: Separate from BUFFER_ADDRESS: passing an address around needs neither, but
+    #: doing arithmetic on one does (0.26).
+    SHADER_INT64 = 23
+    #: `layout(local_size_x_id = 0)` — a workgroup size the pipeline picks with
+    #: `.constant()` rather than one baked into the shader text (0.26). The Vulkan
+    #: capability is maintenance4, core in 1.3 and an extension on 1.2. Without it
+    #: the shader still compiles and the driver may still run it, but it is
+    #: undefined behaviour that the validation layers report.
+    WORKGROUP_SIZE = 24
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -733,6 +748,37 @@ class Buffer:
 
     def wait(self) -> None:
         """Block until this buffer's upload has finished."""
+        ...
+
+    @property
+    def address(self) -> int:
+        """Where this buffer lives on the device — needs Feature.BUFFER_ADDRESS.
+
+        Push it as a push constant and the shader reads the memory through a
+        pointer instead of a descriptor::
+
+            #extension GL_EXT_buffer_reference : require
+            layout(buffer_reference, std430) readonly buffer Words { uint v[]; };
+            layout(push_constant, std430) uniform PC { Words words; };
+
+        The point is reach. A descriptor may only see
+        `ctx.limits.max_storage_buffer` of a buffer, which is 4 GiB on the
+        desktop drivers that report the most; an address is not a descriptor and
+        has no such limit, so the ceiling becomes what the device can allocate.
+
+        Two consequences, both the price of leaving the descriptor behind:
+
+        - **Nothing tracks a buffer reached this way.** Automatic barriers work
+          off what a recording binds, and this binds nothing, so a dispatch that
+          writes through an address and a later pass that reads it need
+          `cmd.barrier(buf, ...)` by hand.
+        - **Reading this BLOCKS** on the buffer's own upload, once, for the same
+          reason: nothing downstream can see the dependency, so the wait happens
+          at the one call you must make to use the memory at all.
+
+        A DYNAMIC buffer has one copy per frame in flight, so its address is the
+        current frame's and has to be read again each frame.
+        """
         ...
 
 class ShaderModule:
@@ -2102,6 +2148,71 @@ def list_monitors() -> list[Monitor]:
     """
     ...
 
+class Limits:
+    """The numbers this GPU holds a caller to, from `ctx.limits`.
+
+    A limit is not a Feature: every device has a value for all of these, so the
+    question is never "may I" but "how much". Which numbers are here is a
+    judgement — VkPhysicalDeviceLimits has about a hundred members and these are
+    the ones that change what code does.
+
+    All sizes are in bytes.
+    """
+    @property
+    def max_storage_buffer(self) -> int:
+        """The most one DESCRIPTOR may see of a storage buffer.
+
+        Typically 4 GiB - 1 on desktop drivers. A buffer may be larger than this
+        — see max_buffer — but a binding cannot reach past it, which is what
+        Feature.BUFFER_ADDRESS exists to get around."""
+        ...
+    @property
+    def max_uniform_buffer(self) -> int:
+        """The same for a uniform buffer, and much smaller: 64 KiB is common."""
+        ...
+    @property
+    def max_buffer(self) -> int:
+        """The most one buffer may hold. Usually far above max_storage_buffer,
+        which is why the descriptor is the binding limit and not this."""
+        ...
+    @property
+    def max_allocation(self) -> int:
+        """The most one memory allocation may be. A buffer needs one of these to
+        back it, so the smaller of this and max_buffer is the real ceiling."""
+        ...
+    @property
+    def max_push_constants(self) -> int:
+        """The most a pipeline may declare with `.push_constant(size)`. The
+        Vulkan floor is 128 bytes and plenty of devices offer exactly that."""
+        ...
+    @property
+    def max_workgroup_size(self) -> tuple[int, int, int]:
+        """The largest `local_size` per axis."""
+        ...
+    @property
+    def max_workgroup_invocations(self) -> int:
+        """The most threads in one workgroup: the PRODUCT of the local sizes,
+        which is a tighter bound than the per-axis one above."""
+        ...
+    @property
+    def max_workgroup_memory(self) -> int:
+        """How much `shared` a compute shader may declare."""
+        ...
+    @property
+    def max_dispatch(self) -> tuple[int, int, int]:
+        """The largest group count per axis of one `cmd.dispatch()`."""
+        ...
+    @property
+    def min_subgroup_size(self) -> int:
+        """The narrowest subgroup this device runs. Equal to max_subgroup_size
+        on a driver with one fixed width, which is most of them; the width
+        itself is `ctx.subgroup_size`."""
+        ...
+    @property
+    def max_subgroup_size(self) -> int:
+        """The widest subgroup this device runs."""
+        ...
+
 class Context:
     """The GPU device, and the factory for everything that lives on it.
 
@@ -2188,6 +2299,11 @@ class Context:
     def auto_barriers(self) -> bool: ...
     @property
     def shader_printf(self) -> bool: ...
+    @property
+    def limits(self) -> Limits:
+        """What this GPU allows, in numbers. Queried once when the Context is
+        created, because a device's limits do not change under it."""
+        ...
     @property
     def subgroup_size(self) -> int:
         """The width this GPU runs shader subgroups at, or 0 where the driver

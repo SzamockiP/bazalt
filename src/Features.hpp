@@ -68,7 +68,23 @@ enum class Feature
     // The first capability that is an EXTENSION rather than a feature bit
     // (0.25). VK_EXT_full_screen_exclusive is Win32-only in practice, so this
     // answers False everywhere else — which is what the row is for.
-    EXCLUSIVE_FULLSCREEN
+    EXCLUSIVE_FULLSCREEN,
+    // A shader reading a buffer through its ADDRESS instead of a descriptor
+    // (0.26). The reason this exists is a limit rather than a convenience:
+    // maxStorageBufferRange caps what one descriptor may see at 4 GiB on the
+    // desktop drivers that report the most, and an address is not a descriptor,
+    // so it has no such cap. Core in Vulkan 1.2, so it needs no extension path.
+    BUFFER_ADDRESS, // VkPhysicalDeviceVulkan12Features::bufferDeviceAddress
+    // 64-bit integers in a shader (0.26). Its own row rather than a silent part
+    // of BUFFER_ADDRESS: address arithmetic in GLSL (uint64_t casts,
+    // `buffer_reference` maths) needs it, plain indexing does not.
+    SHADER_INT64, // shaderInt64
+    // A workgroup size the pipeline decides rather than the shader text (0.26):
+    // `layout(local_size_x_id = 0)` plus .constant(). The capability is
+    // maintenance4, because that is what makes the OpExecutionMode LocalSizeId
+    // glslang emits legal. Core in 1.3, VK_KHR_maintenance4 on the 1.2 path —
+    // the first row that needs both spellings, hence the sixth column below.
+    WORKGROUP_SIZE
 };
 
 // The feature structs bazalt reads, as one value with no pNext links between the
@@ -87,6 +103,14 @@ struct DeviceFeatures
     VkPhysicalDevicePortabilitySubsetFeaturesKHR portability{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR};
     bool portability_subset = false;
+
+    // Promoted into Vulkan 1.3 and available on 1.2 as VK_KHR_maintenance4, so
+    // unlike the three above it is legal to ask for on two different grounds.
+    // The flag records whether either held: a struct chained onto a device that
+    // has neither is a question the driver never agreed to answer (0.26).
+    VkPhysicalDeviceMaintenance4Features maintenance4{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES};
+    bool maintenance4_queryable = false;
 
     // Which device extensions this GPU offers, for the rows whose capability is
     // an extension rather than a feature bit (0.25). A vector of names rather
@@ -109,22 +133,15 @@ struct DeviceFeatures
 inline DeviceFeatures query_device_features(
     PFN_vkGetPhysicalDeviceFeatures2 get_features2,
     VkPhysicalDevice physical_device,
-    bool portability_subset = false)
+    bool portability_subset = false,
+    std::uint32_t api_version = VK_API_VERSION_1_2)
 {
     DeviceFeatures features;
     features.portability_subset = portability_subset;
-    features.v11.pNext = &features.v12;
-    if (portability_subset)
-    {
-        features.v12.pNext = &features.portability;
-    }
-    VkPhysicalDeviceFeatures2 features2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &features.v11};
-    get_features2(physical_device, &features2);
-    features.core = features2.features;
-    features.v11.pNext = nullptr;
-    features.v12.pNext = nullptr;
-    features.portability.pNext = nullptr;
 
+    // Before the feature query since 0.26, not after: which pNext structs are
+    // legal to chain is partly an extension question, so the list has to exist
+    // first. Nothing else about the order matters.
     std::uint32_t extension_count = 0;
     if (vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &extension_count, nullptr) == VK_SUCCESS &&
         extension_count > 0)
@@ -140,7 +157,125 @@ inline DeviceFeatures query_device_features(
             }
         }
     }
+
+    features.maintenance4_queryable =
+        api_version >= VK_API_VERSION_1_3 ||
+        std::ranges::find(features.extensions, std::string_view(VK_KHR_MAINTENANCE_4_EXTENSION_NAME)) !=
+            features.extensions.end();
+
+    features.v11.pNext = &features.v12;
+    void** tail = &features.v12.pNext;
+    if (portability_subset)
+    {
+        *tail = &features.portability;
+        tail = &features.portability.pNext;
+    }
+    if (features.maintenance4_queryable)
+    {
+        *tail = &features.maintenance4;
+    }
+    VkPhysicalDeviceFeatures2 features2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &features.v11};
+    get_features2(physical_device, &features2);
+    features.core = features2.features;
+    features.v11.pNext = nullptr;
+    features.v12.pNext = nullptr;
+    features.portability.pNext = nullptr;
+    features.maintenance4.pNext = nullptr;
     return features;
+}
+
+// The numbers a caller has to respect, as opposed to the capabilities above
+// (0.26). A limit is not a Feature and must not become one: every device has a
+// value for all of these, so the question is never "may I" but "how much".
+//
+// Which numbers are here is a judgement, not a dump. VkPhysicalDeviceLimits has
+// about a hundred members and almost none of them ever change a decision; these
+// are the ones that do — how big a buffer may get, and how work is spread over
+// it. A field earns its place by being the reason some code takes a different
+// path.
+struct DeviceLimits
+{
+    // The most one DESCRIPTOR may see. Commonly 4 GiB - 1 on desktop drivers,
+    // and the reason Feature::BUFFER_ADDRESS exists: an address is not a
+    // descriptor, so a buffer read through one is not held to this.
+    VkDeviceSize max_storage_buffer = 0;
+    VkDeviceSize max_uniform_buffer = 0;
+    // The most one VkBuffer may hold, and the most one allocation may be. Both
+    // are usually far larger than the descriptor range above, which is what
+    // makes that the binding limit rather than these.
+    VkDeviceSize max_buffer = 0;
+    VkDeviceSize max_allocation = 0;
+    std::uint32_t max_push_constants = 0;
+
+    // Compute: the shape of one workgroup, and how many of them one dispatch
+    // may launch.
+    std::array<std::uint32_t, 3> max_workgroup_size{};
+    std::uint32_t max_workgroup_invocations = 0;
+    std::uint32_t max_workgroup_memory = 0;
+    std::array<std::uint32_t, 3> max_dispatch{};
+
+    // The subgroup width, and the range it may be pinned to on a driver that
+    // allows more than one. min == max on a device that has no range.
+    std::uint32_t subgroup_size = 0;
+    std::uint32_t min_subgroup_size = 0;
+    std::uint32_t max_subgroup_size = 0;
+};
+
+// Same shape and the same reasoning as query_device_features: one query, so two
+// callers cannot ask a different question. Takes the features because which
+// property structs are legal to chain follows from the same extension list.
+inline DeviceLimits query_device_limits(
+    PFN_vkGetPhysicalDeviceProperties2 get_properties2,
+    VkPhysicalDevice physical_device,
+    const DeviceFeatures& features)
+{
+    const bool subgroup_control =
+        std::ranges::find(features.extensions, std::string_view(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME)) !=
+        features.extensions.end();
+
+    VkPhysicalDeviceSubgroupProperties subgroup{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+    VkPhysicalDeviceVulkan11Properties v11{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES};
+    VkPhysicalDeviceMaintenance4Properties maintenance4{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_PROPERTIES};
+    VkPhysicalDeviceSubgroupSizeControlProperties size_control{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES};
+
+    subgroup.pNext = &v11;
+    void** tail = &v11.pNext;
+    if (features.maintenance4_queryable)
+    {
+        *tail = &maintenance4;
+        tail = &maintenance4.pNext;
+    }
+    if (subgroup_control)
+    {
+        *tail = &size_control;
+    }
+
+    VkPhysicalDeviceProperties2 props{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &subgroup};
+    get_properties2(physical_device, &props);
+
+    DeviceLimits limits;
+    limits.max_storage_buffer = props.properties.limits.maxStorageBufferRange;
+    limits.max_uniform_buffer = props.properties.limits.maxUniformBufferRange;
+    limits.max_allocation = v11.maxMemoryAllocationSize;
+    // maxBufferSize is maintenance4's own contribution. Without it the largest
+    // buffer anyone can prove is the largest allocation that can back one.
+    limits.max_buffer = features.maintenance4_queryable ? maintenance4.maxBufferSize : v11.maxMemoryAllocationSize;
+    limits.max_push_constants = props.properties.limits.maxPushConstantsSize;
+
+    const auto& core = props.properties.limits;
+    limits.max_workgroup_size = {
+        core.maxComputeWorkGroupSize[0], core.maxComputeWorkGroupSize[1], core.maxComputeWorkGroupSize[2]};
+    limits.max_workgroup_invocations = core.maxComputeWorkGroupInvocations;
+    limits.max_workgroup_memory = core.maxComputeSharedMemorySize;
+    limits.max_dispatch = {
+        core.maxComputeWorkGroupCount[0], core.maxComputeWorkGroupCount[1], core.maxComputeWorkGroupCount[2]};
+
+    limits.subgroup_size = subgroup.subgroupSize;
+    limits.min_subgroup_size = subgroup_control ? size_control.minSubgroupSize : subgroup.subgroupSize;
+    limits.max_subgroup_size = subgroup_control ? size_control.maxSubgroupSize : subgroup.subgroupSize;
+    return limits;
 }
 
 // A Feature is one boolean in one of the three structs above, so the table is a
@@ -164,6 +299,7 @@ struct FeatureInfo
     VkBool32 VkPhysicalDeviceVulkan11Features::* v11 = nullptr;
     VkBool32 VkPhysicalDeviceVulkan12Features::* v12 = nullptr;
     VkBool32 VkPhysicalDevicePortabilitySubsetFeaturesKHR::* portability = nullptr;
+    VkBool32 VkPhysicalDeviceMaintenance4Features::* maintenance4 = nullptr;
     const char* extension = nullptr;
 };
 
@@ -208,6 +344,21 @@ inline constexpr auto kFeatureTable = std::to_array<FeatureInfo>({
     {.feature = Feature::EXCLUSIVE_FULLSCREEN,
      .name = "EXCLUSIVE_FULLSCREEN",
      .extension = "VK_EXT_full_screen_exclusive"},
+    {.feature = Feature::BUFFER_ADDRESS,
+     .name = "BUFFER_ADDRESS",
+     .v12 = &VkPhysicalDeviceVulkan12Features::bufferDeviceAddress},
+    {Feature::SHADER_INT64, "SHADER_INT64", &VkPhysicalDeviceFeatures::shaderInt64},
+    // The first row in its own struct, which is also the first capability with
+    // both a core and an extension spelling of the same bit.
+    // Both columns on purpose: the bit says whether the device has it, the
+    // extension is how a 1.2 device is asked for it. On 1.3 the bit lives in
+    // VkPhysicalDeviceVulkan13Features and the extension may not be advertised
+    // at all, which enable_extension_if_present already treats as "nothing to
+    // do" — so one row covers both drivers with no version test at the call site.
+    {.feature = Feature::WORKGROUP_SIZE,
+     .name = "WORKGROUP_SIZE",
+     .maintenance4 = &VkPhysicalDeviceMaintenance4Features::maintenance4,
+     .extension = VK_KHR_MAINTENANCE_4_EXTENSION_NAME},
 });
 
 inline constexpr const FeatureInfo& feature_info(Feature feature)
@@ -248,6 +399,14 @@ inline bool feature_available(const DeviceFeatures& available, Feature feature)
         // never claimed to be a subset answers yes without being asked.
         return !available.portability_subset || available.portability.*(info.portability) == VK_TRUE;
     }
+    if (info.maintenance4)
+    {
+        // Unasked is not the same as absent here, the opposite way round from a
+        // portability row: nothing was chained because the device offered
+        // neither spelling, so the struct holds its zero-initialised default and
+        // reading it would be reading nothing.
+        return available.maintenance4_queryable && available.maintenance4.*(info.maintenance4) == VK_TRUE;
+    }
     if (info.extension)
     {
         return std::ranges::find(available.extensions, std::string_view(info.extension)) != available.extensions.end();
@@ -273,6 +432,13 @@ inline constexpr void enable_feature(DeviceFeatures& features, Feature feature)
     else if (info.portability)
     {
         features.portability.*(info.portability) = VK_TRUE;
+    }
+    else if (info.maintenance4)
+    {
+        features.maintenance4.*(info.maintenance4) = VK_TRUE;
+        // create_device_ reads this to decide whether to chain the struct at
+        // all, so the bit and the permission to send it travel together.
+        features.maintenance4_queryable = true;
     }
 }
 

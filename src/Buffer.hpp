@@ -63,7 +63,13 @@ inline constexpr const char* buffer_type_name(BufferType type)
 // The transfer bits ride along on both, so cmd.copy_buffer / cmd.fill_buffer work
 // on either (0.18). Refusing them on host-visible memory would make "which
 // buffers can the GPU copy into" a second rule to remember, for nothing.
-inline constexpr VkBufferUsageFlags buffer_usage_for(BufferType type)
+// `device_address` rides here rather than at the call sites (0.26) for the same
+// reason the two usages were merged above: the bit has to be on EVERY buffer a
+// Context with Feature::BUFFER_ADDRESS makes, and a call site is a place for
+// the two kinds of buffer to disagree. They already had, once — the static path
+// got the flag and the dynamic one did not, which a DYNAMIC buffer only reports
+// at the vkGetBufferDeviceAddress that needs it.
+inline constexpr VkBufferUsageFlags buffer_usage_for(BufferType type, bool device_address = false)
 {
     // TRANSFER_SRC so read() can copy the contents back out.
     VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
@@ -97,6 +103,14 @@ inline constexpr VkBufferUsageFlags buffer_usage_for(BufferType type)
         case BufferType::UNIFORM:
             usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
             break;
+    }
+    // The allocator opted in for the whole Context (see
+    // create_allocator_and_pool_), so this is the buffer's half of the same
+    // decision: no per-buffer kwarg, because its wrong setting would only
+    // surface much later, at the call that wants the address.
+    if (device_address)
+    {
+        usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
     return usage;
 }
@@ -138,6 +152,42 @@ public:
     // without a check is a driver crash or a validation message from Vulkan
     // rather than from bazalt; the binding layer compares owners at record time.
     virtual const Context* owner() const = 0;
+
+    // Where this buffer lives on the device (0.26). Push it as a push constant
+    // and a shader reaches the memory through a `buffer_reference` pointer
+    // instead of a descriptor — which is the point, because a descriptor may
+    // only see limits().max_storage_buffer of it and an address has no such
+    // ceiling.
+    //
+    // Not virtual: get() already answers "which VkBuffer is current", so a
+    // DYNAMIC buffer's address follows its per-frame copy for free. That also
+    // means a DYNAMIC address is only good for the frame it was read in.
+    //
+    // BLOCKS on a pending upload, which is why it is not const. An address is
+    // not a binding, so nothing downstream can see that a submit reads this
+    // buffer — the record-time tracking that makes every other path wait for
+    // the staging copy has nothing to key on. This is the one place the caller
+    // must pass through to use the memory at all, so the wait goes here. It
+    // costs a timeline query once and nothing on every read after that.
+    std::expected<VkDeviceAddress, Error> address()
+    {
+        wait();
+        const Context* context = owner();
+        if (context == nullptr)
+        {
+            return std::unexpected(err_state("this buffer has no Context"));
+        }
+        if (!context->supports(Feature::BUFFER_ADDRESS))
+        {
+            return std::unexpected(err_unsupported(
+                "buffer.address needs Feature.BUFFER_ADDRESS, which this Context did not enable. "
+                "Pass it in Context(features=[bz.Feature.BUFFER_ADDRESS]) — the flag has to be set "
+                "when the buffer is created, so enabling it later would not help this buffer."));
+        }
+        VkBufferDeviceAddressInfo info{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .pNext = nullptr, .buffer = get()};
+        return context->vk().vkGetBufferDeviceAddress(context->device(), &info);
+    }
 
     // ── The buffer IS its own upload future (0.18.0) ──────────────────────────
     //
@@ -314,15 +364,11 @@ public:
         size_t data_size,
         BufferType type)
     {
-        const VkBufferUsageFlags usage = buffer_usage_for(type);
+        const VkBufferUsageFlags usage = buffer_usage_for(type, context.supports(Feature::BUFFER_ADDRESS));
 
-        auto staging_pair = create_staging_buffer(context, data_size, Staging::Upload, data);
-        if (!staging_pair)
-        {
-            return std::unexpected(staging_pair.error());
-        }
-        auto [stagingBuffer, stagingAllocation] = *staging_pair;
-
+        // The device buffer comes first since 0.26: it is the allocation that
+        // can fail on size, and failing before any host memory is reserved for
+        // it is the difference between an error and a machine that swaps.
         VkBufferCreateInfo bufferInfo{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
             .pNext = nullptr,
@@ -343,42 +389,109 @@ public:
                 "create device local buffer",
                 ErrorCode::Resource))
         {
-            vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
             return std::unexpected(*e);
         }
 
-        // Asynchronous since 0.18.0. The staging fill above already happened on
-        // this thread (the bytes come from Python, so they cannot be copied
-        // anywhere else), which leaves the queue drain as the only cost of
-        // the old blocking path — and 30 meshes meant 30 full queue drains at
-        // startup. The copy is submitted here, so every failure below is still
-        // raised at the create_buffer call; only the wait is gone.
-        auto serial = deferred_submit(
-            context,
-            [&](VkCommandBuffer cmd)
-            {
-                VkBufferCopy copyRegion{.srcOffset = 0, .dstOffset = 0, .size = data_size};
-                context.vk().vkCmdCopyBuffer(cmd, stagingBuffer, buffer, 1, &copyRegion);
-            });
-
+        auto serial = fill_from_host(context, buffer, data, data_size);
         if (!serial)
         {
-            vmaDestroyBuffer(context.allocator(), stagingBuffer, stagingAllocation);
             vmaDestroyBuffer(context.allocator(), buffer, allocation);
             return std::unexpected(serial.error());
         }
-        // The GPU reads the staging buffer after this returns, so it retires on
-        // the serial rather than here.
-        context.defer_destroy([allocator = context.allocator(), stagingBuffer, stagingAllocation]
-                              { vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation); });
 
         auto result = std::make_shared<StaticBuffer>(context.shared_from_this(), buffer, allocation, data_size);
         result->set_upload_serial(*serial);
-        context.note_upload_serial(*serial);
+        if (*serial != 0)
+        {
+            context.note_upload_serial(*serial);
+        }
         return result;
     }
 
 private:
+    // How much host memory one upload may hold at a time. A staging buffer the
+    // size of the upload is what capped a buffer at whatever the machine could
+    // spare twice over, and it is the reason this is a loop rather than one
+    // memcpy: filling VRAM should cost VRAM, not VRAM plus as much RAM.
+    //
+    // 64 MiB is large enough that the per-piece submit is noise next to the
+    // copy, and small enough to be nothing on any machine that runs Vulkan.
+    static constexpr VkDeviceSize kStagingChunk = 64ull << 20;
+
+    // Copies `data` into `buffer` through bounded staging, and returns the
+    // serial of the LAST piece — 0 when there was nothing to copy.
+    //
+    // Only the last piece stays in flight. Every earlier one is waited for and
+    // destroyed on the spot, because handing them to defer_destroy would keep
+    // them all alive until the Context next drains, which is the whole thing
+    // this loop is avoiding. So a buffer under one chunk behaves exactly as it
+    // did before 0.26 (one staging buffer, one submit, no wait) and a larger
+    // one trades that asynchrony for a fixed memory ceiling.
+    static std::expected<std::uint64_t, Error> fill_from_host(
+        Context& context,
+        VkBuffer buffer,
+        const void* data,
+        VkDeviceSize data_size)
+    {
+        if (data == nullptr || data_size == 0)
+        {
+            return 0; // A sized buffer with no contents yet.
+        }
+
+        std::uint64_t serial = 0;
+        for (VkDeviceSize offset = 0; offset < data_size; offset += kStagingChunk)
+        {
+            const VkDeviceSize span = (std::min)(kStagingChunk, data_size - offset);
+            const bool last = offset + span >= data_size;
+
+            auto staging_pair =
+                create_staging_buffer(context, span, Staging::Upload, static_cast<const std::byte*>(data) + offset);
+            if (!staging_pair)
+            {
+                return std::unexpected(staging_pair.error());
+            }
+            auto [staging, staging_allocation] = *staging_pair;
+
+            // Asynchronous since 0.18.0. The staging fill above already happened
+            // on this thread (the bytes come from Python, so they cannot be
+            // copied anywhere else), which leaves the queue drain as the only
+            // cost of the old blocking path — and 30 meshes meant 30 full queue
+            // drains at startup. The copy is submitted here, so every failure is
+            // still raised at the create_buffer call; only the wait is gone.
+            auto piece = deferred_submit(
+                context,
+                [&](VkCommandBuffer cmd)
+                {
+                    VkBufferCopy region{.srcOffset = 0, .dstOffset = offset, .size = span};
+                    context.vk().vkCmdCopyBuffer(cmd, staging, buffer, 1, &region);
+                });
+            if (!piece)
+            {
+                vmaDestroyBuffer(context.allocator(), staging, staging_allocation);
+                return std::unexpected(piece.error());
+            }
+            serial = *piece;
+
+            if (last)
+            {
+                // The GPU reads this one after we return, so it retires on the
+                // serial rather than here.
+                context.defer_destroy([allocator = context.allocator(), staging, staging_allocation]
+                                      { vmaDestroyBuffer(allocator, staging, staging_allocation); });
+            }
+            else if (auto r = context.wait_for_serial(serial); !r)
+            {
+                vmaDestroyBuffer(context.allocator(), staging, staging_allocation);
+                return std::unexpected(r.error());
+            }
+            else
+            {
+                vmaDestroyBuffer(context.allocator(), staging, staging_allocation);
+            }
+        }
+        return serial;
+    }
+
     std::shared_ptr<Context> context_;
     VkBuffer buffer_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
@@ -502,7 +615,7 @@ public:
         size_t data_size,
         BufferType type)
     {
-        const VkBufferUsageFlags usage = buffer_usage_for(type);
+        const VkBufferUsageFlags usage = buffer_usage_for(type, context.supports(Feature::BUFFER_ADDRESS));
 
         VmaAllocationCreateInfo allocInfo{};
         allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;

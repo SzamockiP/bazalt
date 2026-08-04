@@ -22,6 +22,37 @@ void bind_context(py::module_& m)
                     static_cast<double>(self.budget) / mb);
             });
 
+    // Read-only like MemoryStats above, and for a stronger reason: these are
+    // the driver's numbers, so a settable one would be a lie with a setter.
+    py::class_<DeviceLimits>(m, "Limits")
+        .def_readonly("max_storage_buffer", &DeviceLimits::max_storage_buffer)
+        .def_readonly("max_uniform_buffer", &DeviceLimits::max_uniform_buffer)
+        .def_readonly("max_buffer", &DeviceLimits::max_buffer)
+        .def_readonly("max_allocation", &DeviceLimits::max_allocation)
+        .def_readonly("max_push_constants", &DeviceLimits::max_push_constants)
+        .def_readonly("max_workgroup_size", &DeviceLimits::max_workgroup_size)
+        .def_readonly("max_workgroup_invocations", &DeviceLimits::max_workgroup_invocations)
+        .def_readonly("max_workgroup_memory", &DeviceLimits::max_workgroup_memory)
+        .def_readonly("max_dispatch", &DeviceLimits::max_dispatch)
+        .def_readonly("min_subgroup_size", &DeviceLimits::min_subgroup_size)
+        .def_readonly("max_subgroup_size", &DeviceLimits::max_subgroup_size)
+        .def(
+            "__repr__",
+            [](const DeviceLimits& self)
+            {
+                constexpr double mb = 1024.0 * 1024.0;
+                return std::format(
+                    "Limits(max_storage_buffer={:.0f} MB, max_buffer={:.0f} MB, "
+                    "max_workgroup_size={}x{}x{}, subgroup={}..{})",
+                    static_cast<double>(self.max_storage_buffer) / mb,
+                    static_cast<double>(self.max_buffer) / mb,
+                    self.max_workgroup_size[0],
+                    self.max_workgroup_size[1],
+                    self.max_workgroup_size[2],
+                    self.min_subgroup_size,
+                    self.max_subgroup_size);
+            });
+
     py::class_<Context, std::shared_ptr<Context>>(m, "Context")
         .def(
             py::init(
@@ -131,6 +162,9 @@ void bind_context(py::module_& m)
                 return false;
             })
         .def_property_readonly("subgroup_size", &Context::subgroup_size)
+        // By reference: the object lives in the Context and never changes, so a
+        // copy per read would be a copy of a constant.
+        .def_property_readonly("limits", &Context::limits, py::return_value_policy::reference_internal)
         .def_property_readonly("frames_in_flight", &Context::frames_in_flight)
         // The frame verb of a windowed loop: opens one logical frame for every
         // window on this Context. Advances the ring slot that CommandBuffer,
