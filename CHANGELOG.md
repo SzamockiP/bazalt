@@ -75,6 +75,13 @@ when 1.2 has it as an extension.
   that is too large fails before any host memory is reserved for it.
 
 ### Fixed
+- **Closing the last window reported "The GLFW library is not initialized".** A
+  destructor body runs before its members are destroyed, so `~Window` terminated
+  GLFW and left its own window handle to be destroyed afterwards — a call into a
+  library that had just been shut down. GLFW answers that with an error instead
+  of a crash, which is why it went unnoticed: nothing broke, and at interpreter
+  shutdown no logger is listening any more. It shows up when a window dies while
+  the program is still running, which is what closing one usually means.
 - **`bz.list_devices()` crashed when it was a program's first bazalt call.** It
   is the one function meant to run before any Context exists, and since 0.25 it
   read the device extension list through volk's instance-level global — which is

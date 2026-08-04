@@ -204,6 +204,14 @@ public:
 
     ~Window()
     {
+        // The handle goes first, explicitly. A destructor body runs BEFORE the
+        // members are destroyed, so leaving this to the unique_ptr put
+        // glfwDestroyWindow after the glfwTerminate below — and on the last
+        // window that is a call into a library that no longer exists. GLFW
+        // reports it rather than crashing ("The GLFW library is not
+        // initialized"), which is why it survived until somebody read the log
+        // after closing a window (0.26).
+        window_.reset();
         if (window_count_.fetch_sub(1) == 1)
         {
             terminate_glfw_();

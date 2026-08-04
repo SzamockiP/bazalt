@@ -8,6 +8,8 @@ Context: begin_frame owning the ring.
 
 import pathlib
 
+import gc
+
 import pytest
 
 import bazalt as bz
@@ -221,3 +223,31 @@ def test_present_without_an_acquired_image_is_an_error(ctx):
     finally:
         renderer = None
         window = None
+
+
+def test_closing_the_last_window_reports_nothing(extra_context):
+    """The teardown order inside ~Window, which only a live logger can see.
+
+    A destructor body runs before its members are destroyed, so terminating
+    GLFW in the body left the window handle to be destroyed afterwards — a call
+    into a library that had just been shut down. GLFW answers that with an
+    error rather than a crash, so it stayed invisible until somebody read the
+    log after closing a window.
+
+    The window has to die while Python is still up to catch it: at interpreter
+    shutdown nothing is listening any more.
+    """
+    messages = []
+    logger = bz.Logger(min_severity=bz.Severity.INFO)
+    logger.on_message(messages.append)
+
+    window = bz.Window(64, 64, "teardown", logger=logger)
+    context = extra_context()
+    renderer = context.create_renderer(window)
+
+    del renderer
+    del window
+    gc.collect()
+
+    errors = [m.text for m in messages if m.severity >= bz.Severity.ERROR]
+    assert not errors, "closing the last window complained:\n" + "\n".join(errors)
