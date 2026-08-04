@@ -5,6 +5,81 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.26.0] — 2026-08-05
+
+"How much data one shader can reach". A bazalt program could allocate a buffer
+of any size the driver would take, and then only ever read the first
+`maxStorageBufferRange` bytes of it — 4 GiB on the desktop drivers that report
+the most, and far less on some. The limit belongs to the DESCRIPTOR, not to the
+memory: the same devices happily make a buffer of a terabyte. Nothing in bazalt
+said so, and nothing offered the other way of reaching one.
+
+`Feature.BUFFER_ADDRESS` and `buffer.address` are that other way. The shader
+takes a pointer in a push constant and reads through it, with no descriptor
+anywhere, so the ceiling stops being the binding and becomes what the device can
+allocate. A `uint` index still reaches 16 GiB of a `uint` buffer, which is to say
+the shader code does not change.
+
+Two things had to come with it. `ctx.limits` reports the numbers this was all
+about — until now the only way to learn a device's limit was to exceed it and
+read the driver's complaint. And a STATIC upload is now staged in 64 MiB pieces
+instead of one buffer the size of the whole thing, because filling GPU memory
+should cost GPU memory rather than that much again in RAM.
+
+`Feature.WORKGROUP_SIZE` closes a ceiling standing since 0.17: a workgroup size
+chosen by the pipeline rather than written into the shader text. It works out to
+one feature bit — maintenance4 — which the 0.17 entry read as "needs Vulkan 1.3"
+when 1.2 has it as an extension.
+
+### Added
+- **`Feature.BUFFER_ADDRESS` and `buffer.address`.** The device address of a
+  buffer, to push as a push constant and read in the shader through
+  `GL_EXT_buffer_reference`. `examples/41_buffer_address` reads a 4.5 GiB buffer
+  this way — half a gigabyte past what any descriptor on that GPU could bind.
+
+  Two consequences, both the price of leaving the descriptor behind, and both
+  documented on the property. Automatic barriers work off what a recording
+  binds, and this binds nothing, so a hazard on a buffer reached by address is
+  `cmd.barrier()` by hand. And reading `.address` BLOCKS once on that buffer's
+  own upload, for the same reason: it is the only call the caller must pass
+  through, so the wait that nothing else can see goes there.
+
+  Every buffer of a Context with the feature carries the usage flag, rather than
+  a per-buffer kwarg — the wrong setting of that kwarg would only surface much
+  later, at the call that wants the address.
+- **`ctx.limits`.** What this GPU allows, in numbers: how much of a buffer one
+  descriptor reaches, how large a buffer and an allocation may be, the shape and
+  cost of a workgroup, how many groups one dispatch may launch, the push
+  constant budget, and the subgroup range.
+
+  Not a dump of `VkPhysicalDeviceLimits`, which has about a hundred members. A
+  number is here because some code takes a different path on it.
+- **`Feature.WORKGROUP_SIZE`.** `layout(local_size_x_id = 0)` plus
+  `.constant(0, n)` — one compute shader specialized to several workgroup sizes,
+  which is how you tune one against `limits.max_workgroup_invocations` without
+  editing the shader. Without the feature the SPIR-V glslang emits for that
+  layout is undefined behaviour that the validation layers report, which is what
+  the 0.17 ceiling entry was really about.
+- **`Feature.SHADER_INT64`.** `uint64_t` in a shader. Its own row rather than a
+  silent part of BUFFER_ADDRESS: passing an address needs neither, and doing
+  arithmetic on one needs this.
+
+### Changed
+- **A STATIC buffer uploads through bounded staging.** 64 MiB at a time, waiting
+  for each piece before refilling, instead of one host buffer as large as the
+  upload. A buffer under 64 MiB behaves exactly as before — one staging buffer,
+  one submit, no wait. A larger one trades that asynchrony for a memory ceiling,
+  which is the trade that makes a multi-gigabyte buffer possible at all on a
+  machine with ordinary RAM.
+- **The device buffer is allocated before its staging buffer**, so a request
+  that is too large fails before any host memory is reserved for it.
+
+### Fixed
+- **A DYNAMIC buffer got no device-address usage flag** while a STATIC one did,
+  so `buffer.address` on it was a validation error rather than an address. Found
+  by the test that asks a DYNAMIC buffer for one. The flag now rides in
+  `buffer_usage_for`, the single place both kinds of buffer compute their usage.
+
 ## [0.25.0] — 2026-08-04
 
 "The window's input surface finishes". A bazalt program could read keys, mouse

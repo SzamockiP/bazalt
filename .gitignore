@@ -3,6 +3,7 @@ venv/
 out/
 build/
 examples/assets/San_Miguel/
+examples/assets/Sponza/
 
 # CI: the Vulkan SDK installer, cached between runs (see .github/workflows/build.yml)
 .vulkan-sdk/
@@ -27,3 +28,6 @@ _skbuild/
 
 # ImGui writes its window layout beside the example that ran (0.25).
 imgui.ini
+
+# Local scratch workspace, never tracked.
+external/
