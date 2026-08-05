@@ -204,6 +204,14 @@ public:
 
     ~Window()
     {
+        // The handle goes first, explicitly. A destructor body runs BEFORE the
+        // members are destroyed, so leaving this to the unique_ptr put
+        // glfwDestroyWindow after the glfwTerminate below — and on the last
+        // window that is a call into a library that no longer exists. GLFW
+        // reports it rather than crashing ("The GLFW library is not
+        // initialized"), which is why it survived until somebody read the log
+        // after closing a window (0.26).
+        window_.reset();
         if (window_count_.fetch_sub(1) == 1)
         {
             terminate_glfw_();
@@ -839,10 +847,15 @@ private:
             win->first_mouse_ = false;
         }
 
-        // dy is positive upwards: a camera wants "how far did the look move",
-        // not the screen's downward-positive y.
+        // Both deltas point the way Vulkan's y does: +x right, +y DOWN. dy used
+        // to be flipped here, on the argument that a camera wants "how far did
+        // the look move" — but that made the mouse the one thing in bazalt whose
+        // y disagreed with the clip space, the framebuffer rows and the cursor
+        // position beside it. A first-person camera subtracts it, which is one
+        // sign in the caller against a convention that had to be remembered
+        // everywhere else (0.26).
         win->pending_.dx += fx - win->pos_x_;
-        win->pending_.dy += win->pos_y_ - fy;
+        win->pending_.dy += fy - win->pos_y_;
 
         win->pos_x_ = fx;
         win->pos_y_ = fy;

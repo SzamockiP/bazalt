@@ -224,14 +224,14 @@ void bind_windowing(py::module_& m)
         .def_property_readonly("api_version", [](const Device& d) { return api_version_string(d.api_version); })
         // Megabytes rather than bytes: the number is read by a human choosing a
         // card, and "8188" beats "8584495104".
-        .def_property_readonly(
-            "memory_mb", [](const Device& d) { return static_cast<std::uint64_t>(d.memory_bytes / (1024 * 1024)); })
+        .def_property_readonly("limits", [](const Device& d) { return d.limits; })
         .def("supports", &Device::supports, py::arg("feature"))
         .def(
             "__repr__",
             [](const Device& d)
             {
-                return std::format("<bazalt.Device '{}' ({}, {} MB)>", d.name, d.type, d.memory_bytes / (1024 * 1024));
+                return std::format(
+                    "<bazalt.Device '{}' ({}, {} MB)>", d.name, d.type, d.limits.device_memory / (1024 * 1024));
             });
 
     // Free function, not a Window method: GLFW's event queue is process-wide.

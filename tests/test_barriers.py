@@ -11,6 +11,7 @@ up a second Context with validation="sync" of its own.
 """
 
 import os
+import struct
 
 import numpy as np
 import pytest
@@ -374,3 +375,65 @@ def test_cross_recording_hazard_is_barriered_automatically(ctx):
     """A read-only recording is ordered against a write it cannot see. The
     first-use floor is what covers it, and before 0.24 this reported a hazard."""
     assert run_cross_recording_case(auto=True) == []
+
+
+def test_a_transfer_write_can_be_named_by_hand(extra_context):
+    """cmd.fill_buffer writes; until 0.26 no Access could say so.
+
+    The automatic tracker always knew — it puts a TRANSFER_WRITE floor under a
+    buffer's first reader. What it cannot see is a buffer reached by ADDRESS,
+    and that is exactly where the manual verb is the only tool: zero a counter
+    with fill_buffer, read it from a dispatch through a pointer, and the hazard
+    had no spelling at all.
+
+    Sync validation is the referee here, not the values: it is the mode that
+    reports a missing barrier.
+    """
+    context = extra_context(validation="sync", optional=[bz.Feature.BUFFER_ADDRESS])
+    if not context.supports(bz.Feature.BUFFER_ADDRESS):
+        pytest.skip("this GPU has no bufferDeviceAddress")
+
+    source = """
+    #version 450
+    #extension GL_EXT_buffer_reference : require
+    layout(local_size_x = 1) in;
+    layout(buffer_reference, std430) buffer Counter { uint v[]; };
+    layout(push_constant, std430) uniform PC { Counter counter; };
+    void main() { counter.v[1] = counter.v[0] + 7u; }
+    """
+    pipeline = (context.compute_pipeline()
+                .shader(context.compile_shader(source=source, stage=bz.ShaderStage.COMPUTE))
+                .push_constant(8)
+                .build())
+
+    buf = context.create_buffer(
+        np.full(4, 99, dtype=np.uint32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+
+    cmd = context.create_command_buffer()
+    cmd.begin()
+    cmd.fill_buffer(buf, 5, size=4)
+    cmd.barrier(buf, bz.Access.TRANSFER_WRITE, bz.Access.SHADER_READ)
+    (cmd.bind_pipeline(pipeline)
+        .push_constants(pipeline, 0, struct.pack("<Q", buf.address))
+        .dispatch(1))
+    context.submit(cmd)
+
+    got = buf.read(np.uint32)
+    assert (int(got[0]), int(got[1])) == (5, 12)
+
+
+def test_transfer_read_is_spelled_too(extra_context):
+    """The other half: a shader writes, a copy reads."""
+    context = extra_context()
+    src = context.create_buffer(
+        np.arange(8, dtype=np.uint32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    dst = context.create_buffer(
+        np.zeros(8, dtype=np.uint32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+
+    cmd = context.create_command_buffer()
+    cmd.begin()
+    cmd.barrier(src, bz.Access.SHADER_WRITE, bz.Access.TRANSFER_READ)
+    cmd.copy_buffer(src, dst)
+    context.submit(cmd)
+
+    assert np.array_equal(dst.read(np.uint32), np.arange(8, dtype=np.uint32))

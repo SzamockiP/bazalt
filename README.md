@@ -295,6 +295,12 @@ GPU as a calculator.
   and adaptive detail, and geometry for a primitive that becomes a different one. A dispatch
   or a draw can also read its own arguments from a buffer the GPU filled, so the count never
   travels back to the CPU.
+- **Data larger than a binding.** A descriptor sees at most
+  `ctx.limits.max_storage_buffer` of a buffer, which is 4 GB on most desktop drivers.
+  `buffer.address` goes around it: the shader reads a pointer from a push constant, so the
+  size the device can allocate becomes the only limit. `ctx.limits` reports the numbers
+  behind decisions like this one, and a large upload is staged in pieces, so it costs GPU
+  memory and not that much RAM as well.
 - **One rule for what blocks.** Every write is asynchronous and every read blocks. A handle
   is its own future, so normal code waits nowhere. `buf.read()` blocks, because it has
   nothing to give you until the bytes arrive.
@@ -340,7 +346,7 @@ Every directory in `examples/` runs on its own.
 | Subject | Examples |
 | --- | --- |
 | Basics | [01_empty_window](examples/01_empty_window), [02_triangle](examples/02_triangle), [03_textured_quad](examples/03_textured_quad), [04_colored_cube](examples/04_colored_cube), [05_textured_cube](examples/05_textured_cube), [06_multiple_cubes](examples/06_multiple_cubes), [07_model_loading](examples/07_model_loading) |
-| Compute | [11_particles](examples/11_particles) (compute writes the vertices), [13_compute_postprocess](examples/13_compute_postprocess) |
+| Compute | [11_particles](examples/11_particles) (compute writes the vertices), [13_compute_postprocess](examples/13_compute_postprocess), [41_buffer_address](examples/41_buffer_address) (a buffer larger than a descriptor can bind) |
 | Shadows and deferred | [09_shadow_map](examples/09_shadow_map), [17_cascade_shadows](examples/17_cascade_shadows), [10_gbuffer_mrt](examples/10_gbuffer_mrt) |
 | Cubemaps and layers | [14_skybox](examples/14_skybox), [16_env_capture](examples/16_env_capture) (six faces), [18_multiview](examples/18_multiview) |
 | 3D textures | [31_volume_raymarch](examples/31_volume_raymarch) (a raymarched cloud), [32_lut_grading](examples/32_lut_grading) (colour grading through a LUT baked by render-to-slice) |

@@ -76,6 +76,13 @@ void bind_resources(py::module_& m)
         // waits CPU-side — which leaves these for loading screens and for
         // timing a setup phase.
         .def_property_readonly("ready", &Buffer::ready)
+        .def_property_readonly(
+            "address",
+            [](Buffer& buffer)
+            {
+                require_open(buffer.owner(), "Buffer.address");
+                return unwrap(buffer.address(), nullptr);
+            })
         .def(
             "wait",
             [](Buffer& self)

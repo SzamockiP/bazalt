@@ -295,7 +295,7 @@ while window.is_open():
     # held to look, so the cursor stays usable everywhere else.
     if window.is_mouse_button_pressed(bz.MouseButton.LEFT):
         camera_yaw += mouse.dx * 0.005
-        camera_pitch = max(-1.4, min(1.4, camera_pitch + mouse.dy * 0.005))
+        camera_pitch = max(-1.4, min(1.4, camera_pitch - mouse.dy * 0.005))
 
     # One notch of the wheel is 1.0, whatever the platform.
     if mouse.scroll_dy:

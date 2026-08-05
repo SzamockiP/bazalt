@@ -131,7 +131,7 @@ class Camera:
     def update(self, window, dt):
         mouse = window.get_mouse_state()
         self.yaw += mouse.dx * self.sensitivity
-        self.pitch = clamp(self.pitch + mouse.dy * self.sensitivity,
+        self.pitch = clamp(self.pitch - mouse.dy * self.sensitivity,
                            -math.pi / 2 + 0.01, math.pi / 2 - 0.01)
         self.front = glm.normalize(glm.vec3(
             math.cos(self.yaw) * math.cos(self.pitch),

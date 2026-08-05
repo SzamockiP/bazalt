@@ -15,7 +15,7 @@ class Camera:
 
     def update_mouse(self, dx, dy):
         self.yaw += dx * self.sensitivity
-        self.pitch = max(-math.pi/2 + 0.01, min(math.pi/2 - 0.01, self.pitch + dy * self.sensitivity))
+        self.pitch = max(-math.pi/2 + 0.01, min(math.pi/2 - 0.01, self.pitch - dy * self.sensitivity))
         
         front = glm.vec3(
             math.cos(self.yaw) * math.cos(self.pitch),

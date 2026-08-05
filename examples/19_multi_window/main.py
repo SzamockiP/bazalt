@@ -41,7 +41,7 @@ logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 ctx = bz.Context(logger)
 for d in bz.list_devices():
     mark = "*" if d.name == ctx.device_name else " "
-    print(f" {mark} {d.name} ({d.type}, {d.memory_mb} MB, Vulkan {d.api_version})")
+    print(f" {mark} {d.name} ({d.type}, {d.limits.device_memory // 2**20} MB, Vulkan {d.api_version})")
 
 window_a = bz.Window(800, 600, "Bazalt - Window A (MAILBOX)", logger=logger)
 window_b = bz.Window(800, 600, "Bazalt - Window B (FIFO_RELAXED)", logger=logger)

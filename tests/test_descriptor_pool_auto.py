@@ -114,3 +114,65 @@ def test_auto_pool_fits_a_bindless_array(extra_context):
     pixels = np.zeros((4, 4, 4), dtype=np.uint8)
     pixels[..., 3] = 255
     dset.set_image(0, ctx.create_image(pixels), index=79)
+
+
+SMALL_SHADER = """
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, std430) buffer Out { uint v[]; };
+void main() { v[0] = 1u; }
+"""
+
+
+def test_a_request_larger_than_a_block_warns_about_nothing(extra_context):
+    """The self-sizing pool must not print its way to working.
+
+    Growth was REACTIVE: `allocate_` took the newest block, and only when
+    vkAllocateDescriptorSets answered VK_ERROR_OUT_OF_POOL_MEMORY did a block
+    sized for the request get built and the call retried. The result was right
+    and the doomed first attempt is what the validation layers reported, so the
+    documented default printed a warning on every bindless program.
+
+    It asks the block's declared capacity first now. This test is the referee:
+    one request for more descriptors than any default block holds, and silence.
+    """
+    messages = []
+    context = extra_context(optional=[bz.Feature.BINDLESS])
+    if not context.supports(bz.Feature.BINDLESS):
+        pytest.skip("this GPU has no descriptor indexing")
+
+    # 84 textures in one set: past the 64-per-type a default block declares.
+    source = """
+    #version 450
+    #extension GL_EXT_nonuniform_qualifier : require
+    layout(local_size_x = 1) in;
+    layout(set = 0, binding = 0) uniform sampler2D textures[84];
+    layout(set = 0, binding = 1, std430) buffer Out { vec4 v[]; };
+    void main() { v[0] = texture(textures[nonuniformEXT(gl_GlobalInvocationID.x)], vec2(0.5)); }
+    """
+    pipeline = (context.compute_pipeline()
+                .shader(context.compile_shader(source=source, stage=bz.ShaderStage.COMPUTE))
+                .texture(0, count=84)
+                .storage_buffer(1)
+                .build())
+
+    pool = context.create_descriptor_pool()
+    # A small set first, so the pool holds a block declared at the default 64
+    # per type. A fresh pool has no block at all and grows straight into a
+    # block sized for the request, which is the case that never warned.
+    small = (context.compute_pipeline()
+             .shader(context.compile_shader(source=SMALL_SHADER, stage=bz.ShaderStage.COMPUTE))
+             .storage_buffer(0)
+             .build())
+    pool.allocate_set(small)
+
+    context.logger.on_message(messages.append)
+    pool.allocate_set(pipeline)
+
+    # The layers report from their own thread, so the queue has to be drained
+    # before asking what arrived.
+    context.logger.flush()
+
+    complaints = [m.text for m in messages
+                  if "OUT_OF_POOL" in m.text or "only has a total of" in m.text]
+    assert not complaints, "the pool reported its way to working:\n" + "\n".join(complaints)

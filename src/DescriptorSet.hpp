@@ -426,7 +426,12 @@ public:
             return std::unexpected(block.error());
         }
         auto pool = std::shared_ptr<DescriptorPool>(new DescriptorPool(context.shared_from_this(), false));
-        pool->blocks_.push_back(*block);
+        Block record{.pool = *block, .capacity = {}, .max_sets = maxSets};
+        for (const auto& size : poolSizes)
+        {
+            record.capacity[size.type] = size.descriptorCount;
+        }
+        pool->blocks_.push_back(record);
         return pool;
     }
 
@@ -450,9 +455,9 @@ public:
             context_->defer_destroy(
                 [vk = &context_->vk(), device = context_->device(), blocks = std::move(blocks_)]
                 {
-                    for (VkDescriptorPool block : blocks)
+                    for (const auto& block : blocks)
                     {
-                        vk->vkDestroyDescriptorPool(device, block, nullptr);
+                        vk->vkDestroyDescriptorPool(device, block.pool, nullptr);
                     }
                 });
         }
@@ -512,9 +517,15 @@ private:
         std::vector<VkDescriptorSet> sets(count);
         VkResult result = VK_ERROR_OUT_OF_POOL_MEMORY; // "no block yet" allocates one
         VkDescriptorPool from = VK_NULL_HANDLE;
-        if (!blocks_.empty())
+        // Ask before trying, since 0.26. A self-sizing pool used to discover a
+        // request it could not fit by making it and reading the error, so the
+        // documented default printed a validation warning on its way to working
+        // — which is the one thing a pool that sizes itself must not do. The
+        // check is against what the block was declared to hold, so a request
+        // larger than any block skips straight to growth.
+        if (!blocks_.empty() && !(grows_ && exceeds_(blocks_.back(), needed_(*pipeline, setIndex, count), count)))
         {
-            from = blocks_.back();
+            from = blocks_.back().pool;
             result = try_allocate_(from, layouts, sets);
         }
         // Growth, auto mode only: a full block is the expected state of a pool
@@ -571,11 +582,7 @@ private:
         constexpr uint32_t kDefaultSets = 64;
         constexpr uint32_t kDefaultDescriptors = 64;
 
-        std::unordered_map<VkDescriptorType, uint32_t> needed;
-        for (const auto& [binding, info] : pipeline.binding_types(setIndex))
-        {
-            needed[info.type] += info.count * set_count;
-        }
+        const auto needed = needed_(pipeline, setIndex, set_count);
         std::vector<VkDescriptorPoolSize> sizes;
         for (VkDescriptorType type :
              {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -587,12 +594,18 @@ private:
             const uint32_t requested = it == needed.end() ? 0 : it->second;
             sizes.push_back({.type = type, .descriptorCount = (std::ranges::max)(kDefaultDescriptors, requested)});
         }
-        auto block = create_block_(*context_, (std::ranges::max)(kDefaultSets, set_count), sizes);
+        const uint32_t max_sets = (std::ranges::max)(kDefaultSets, set_count);
+        auto block = create_block_(*context_, max_sets, sizes);
         if (!block)
         {
             return std::unexpected(block.error());
         }
-        blocks_.push_back(*block);
+        Block record{.pool = *block, .capacity = {}, .max_sets = max_sets};
+        for (const auto& size : sizes)
+        {
+            record.capacity[size.type] = size.descriptorCount;
+        }
+        blocks_.push_back(record);
         return *block;
     }
 
@@ -646,8 +659,57 @@ private:
     // never grows; auto mode appends. Sets free back into the block that
     // allocated them (DescriptorSet::block_), so a block is never emptied by a
     // free aimed at a sibling.
-    std::vector<VkDescriptorPool> blocks_;
+    // What each block was DECLARED to hold, beside the handle. Declared rather
+    // than remaining, on purpose: it needs no per-allocation bookkeeping, and
+    // being wrong low simply falls through to the retry that already exists
+    // (0.26).
+    struct Block
+    {
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        std::unordered_map<VkDescriptorType, uint32_t> capacity;
+        uint32_t max_sets = 0;
+    };
+    std::vector<Block> blocks_;
     bool grows_ = false;
+
+    // What one request needs, per descriptor type. Factored out of grow_for_ so
+    // the question "does this fit" and the answer "then size a block like this"
+    // cannot drift apart.
+    static std::unordered_map<VkDescriptorType, uint32_t> needed_(
+        const Pipeline& pipeline,
+        uint32_t setIndex,
+        uint32_t set_count)
+    {
+        std::unordered_map<VkDescriptorType, uint32_t> needed;
+        for (const auto& [binding, info] : pipeline.binding_types(setIndex))
+        {
+            needed[info.type] += info.count * set_count;
+        }
+        return needed;
+    }
+
+    // Whether the newest block could not possibly satisfy this request, so the
+    // allocation attempt would be a guaranteed VK_ERROR_OUT_OF_POOL_MEMORY —
+    // which the validation layers report before the retry quietly fixes it.
+    static bool exceeds_(
+        const Block& block,
+        const std::unordered_map<VkDescriptorType, uint32_t>& needed,
+        uint32_t set_count)
+    {
+        if (set_count > block.max_sets)
+        {
+            return true;
+        }
+        for (const auto& [type, count] : needed)
+        {
+            const auto it = block.capacity.find(type);
+            if (it == block.capacity.end() || it->second < count)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 // Out of line only for symmetry with its history; the free names block_, the

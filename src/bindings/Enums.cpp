@@ -46,7 +46,10 @@ void bind_enums(py::module_& m)
         .value("IMAGE_VIEW_2D_ON_3D", Feature::IMAGE_VIEW_2D_ON_3D)
         .value("TRIANGLE_FANS", Feature::TRIANGLE_FANS)
         // The first row backed by an extension rather than a feature bit.
-        .value("EXCLUSIVE_FULLSCREEN", Feature::EXCLUSIVE_FULLSCREEN);
+        .value("EXCLUSIVE_FULLSCREEN", Feature::EXCLUSIVE_FULLSCREEN)
+        .value("BUFFER_ADDRESS", Feature::BUFFER_ADDRESS)
+        .value("SHADER_INT64", Feature::SHADER_INT64)
+        .value("WORKGROUP_SIZE", Feature::WORKGROUP_SIZE);
 
     // The gamepad layout GLFW maps every known pad onto, renamed rather than
     // translated: the values ARE the GLFW ones, so the two cannot drift.
@@ -285,7 +288,9 @@ void bind_enums(py::module_& m)
         .value("VERTEX_READ", Access::VERTEX_READ)
         .value("INDEX_READ", Access::INDEX_READ)
         .value("UNIFORM_READ", Access::UNIFORM_READ)
-        .value("INDIRECT_READ", Access::INDIRECT_READ);
+        .value("INDIRECT_READ", Access::INDIRECT_READ)
+        .value("TRANSFER_WRITE", Access::TRANSFER_WRITE)
+        .value("TRANSFER_READ", Access::TRANSFER_READ);
 
     // Pixel formats — the name VertexFormat freed in 0.4.
     py::enum_<Format>(m, "Format")

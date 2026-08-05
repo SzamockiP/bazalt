@@ -297,7 +297,7 @@ while culled_window.is_open() and observer_window.is_open():
         # suppresses every frame's delta.
         mouse = observer_window.get_mouse_state()
         obs_yaw += mouse.dx * 0.15
-        obs_pitch = max(min(obs_pitch + mouse.dy * 0.15, 89.0), -89.0)
+        obs_pitch = max(min(obs_pitch - mouse.dy * 0.15, 89.0), -89.0)
     elif looking:
         observer_window.set_cursor_mode(bz.CursorMode.NORMAL)
         looking = False

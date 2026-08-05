@@ -1232,6 +1232,91 @@ entry. The release is a label, not the organizing axis.
   report it as a missing file. The same trap `compile_shader(source=)` hit in 0.16, and
   the third time this codebase has had to order overloads by Python type.
 
+### Reaching memory a descriptor cannot bind (0.26)
+
+**The limit is on the binding, not on the buffer, and that took measuring to see.** The
+complaint that started this was "I cannot load a model bigger than 2 GB". The obvious reading
+is that something caps allocation, and the obvious fix is a virtual buffer backed by several
+physical allocations — Vulkan spells that sparse binding, and it is a large feature. The
+numbers said otherwise. On the driver in front of us `maxMemoryAllocationSize` is
+`0xffffffffffffffff` and `maxBufferSize` is a terabyte, so one allocation of any size anyone
+would ask for is already legal. What is 4 GiB - 1 is `maxStorageBufferRange`: how much of a
+buffer a DESCRIPTOR may see.
+
+So sparse binding solves a limit this hardware does not have, and the limit it does have is
+not about allocation at all. `VK_KHR_buffer_device_address` is: the shader takes a pointer
+instead of a descriptor, and a pointer has no range. It is also core in Vulkan 1.2, so it
+costs one feature bit against a baseline bazalt already requires, where sparse residency
+would have been a new device feature, a second binding path and a memory manager.
+
+Sparse binding stays rejected on those grounds rather than forever: a device that reports a
+small `maxMemoryAllocationSize` — AMD has historically reported 4 GiB — is the customer that
+would reopen it. `ctx.limits.max_allocation` is what makes such a device visible instead of
+guessed at, which is the more useful half of the answer.
+
+**A limit is not a Feature, and the two must not blur.** Every device has a value for
+`maxStorageBufferRange`; none of them lacks the capability. A `Feature` answers "may I", a
+limit answers "how much", and the moment a limit is spelled as a capability the question
+"what do I do when it is False" has no sensible answer. Hence a separate object rather than
+more rows in the feature table.
+
+Which numbers `Limits` carries is a judgement and is meant to stay one.
+`VkPhysicalDeviceLimits` has about a hundred members; a field earns its place by being the
+reason some code takes a different path. Eleven qualified in 0.26. The failure mode to avoid
+is not "we forgot one" — that is an additive fix — but a wrapper that mirrors the whole
+struct and thereby stops being a decision about what matters.
+
+**`buffer.address` blocks, and it is the only place that can.** Everything else in bazalt
+learns what a submit touches from what the recording binds, which is what makes a STATIC
+buffer's asynchronous upload safe: the submit waits for the staging copy because it can see
+the buffer. An address defeats exactly that. The submit sees a push constant.
+
+The fix is not more tracking, which the ceiling above explains is impossible. It is that
+reading the address is the one call a caller cannot avoid — the memory is unreachable without
+it — so the wait for that buffer's own upload goes there. It costs a timeline query on first
+read and nothing after, and it turns "the first frame reads garbage on a fast machine" into
+"the first read is a little slower". A property that blocks deserves a docstring saying so,
+and it has one; see also `What blocks and what does not`.
+
+**Staging in pieces is what makes the size usable.** A STATIC upload used to allocate one
+host buffer as large as the upload, which means a 6 GiB buffer wanted 6 GiB of RAM on top of
+6 GiB of VRAM — a second ceiling, hit at exactly the sizes the address feature exists to
+allow. It is now a loop over 64 MiB pieces, waiting for each before refilling. 64 MiB because
+the per-piece submit is noise against the copy at that size and nothing on any machine that
+runs Vulkan.
+
+The loop reduces to the old path for anything under one piece — one staging buffer, one
+submit, no wait — so the 0.18 asynchrony is intact where it was worth having, and only a
+buffer big enough to threaten the machine pays for the ceiling with a blocking upload. The
+subtlety is that the earlier pieces must be destroyed on the spot instead of handed to
+`defer_destroy`: deferred handles retire when the Context next drains, so deferring them
+would keep every piece alive at once and reinstate the exact problem the loop removes.
+
+**A limit and a live number are different questions, and so are their homes.**
+`Limits` is what the device permits and never changes; `memory_stats()` is what
+is used right now. Putting the heap CAPACITY in the first and the heap USAGE in
+the second is why `device.limits.device_memory` exists and why `memory_mb` no
+longer sits beside it: a caller asking "will this fit" needs both numbers, and
+before 0.26 one came from a Device and the other from a Context, so the pair
+could only be assembled by matching a GPU by name. One type reachable from both
+sides settles it.
+
+The same audit found `memory_stats()` summing every heap. It reported 18.9 GiB
+free on an 8 GiB card, because a laptop's GPU may spill into system memory. That
+number is not wrong about Vulkan and is useless for the only question it is
+asked, which is the shape of mistake worth naming: a sum over things the caller
+does not distinguish is not a summary, it is an average of two answers.
+
+**What `cmd.barrier()` can say has to cover what the tracker cannot see.** The
+manual vocabulary had no word for a transfer write, and that was survivable
+while every unseen reader was exotic. `buffer.address` ended it: the tracker
+works from what a recording binds, an address binds nothing, and `fill_buffer`
+is the documented way to reset a counter an atomic increments. So the one verb
+for zeroing and the one mechanism for reaching a big buffer could not be used in
+the same frame. The rule this leaves: every hazard the automatic path knows how
+to insert must also be spellable by hand, because the escape hatch is only an
+escape if it covers the same ground.
+
 ### Shader stages, and the mask they broke
 
 - **Geometry is not redundant with tessellation, and mesh shaders do not settle it**
@@ -1907,6 +1992,24 @@ went through every entry against the code and split them by what actually holds 
 - **UNASKED** — possible, in scope, cheap, and the only reason is that nobody hit it. This
   is the honest name for "we don't do that". Also moved to the backlog.
 
+**New in 0.26:**
+
+- **HARD. A buffer reached by its address is invisible to the tracker.** `auto_barriers`
+  computes hazards from what a recording BINDS — descriptor sets, vertex buffers, index
+  buffers — and a `buffer_reference` pointer arrives as eight bytes inside a push constant.
+  There is nothing to key on, and no amount of SPIR-V reflection changes that: reflection can
+  see that the shader dereferences a pointer, never which buffer the pointer holds, because
+  the answer is chosen at record time by the caller. So a dispatch that writes through an
+  address and a later pass that reads it need `cmd.barrier()` by hand.
+
+  This is debt #3's shape and NOT debt #3's cause, which is why it is a ceiling and that is a
+  debt. Debt #3 is missing work — reflection would fix it. This one is what the feature IS:
+  the caller asked for memory the binding model does not describe. Upgrade path: none, and
+  the escape hatch is the same one rule 3 has always required.
+
+  The one hazard bazalt does close is the buffer's own upload, at `buffer.address` — see the
+  decision below for why that single point is enough.
+
 Rule 7 is the test: no way out means HARD or SCOPE; a way out with no named price means
 UNASKED. What follows are the HARD and SCOPE entries, plus the traces of what left.
 
@@ -1963,10 +2066,16 @@ UNASKED. What follows are the HARD and SCOPE entries, plus the traces of what le
   buffer means, which is a decision, not a flag", and that is right about a global switch and
   wrong about the fix: restart is per-pipeline state, so an opt-in kwarg makes the meaning
   change the caller's own. `src/Pipeline.hpp:1644` hardcodes `VK_FALSE`.*
-- **HARD. A specialized compute workgroup size needs Vulkan 1.3** (0.17).
-  `layout(local_size_x_id = 0)` compiles to `OpExecutionMode LocalSizeId`, which requires
-  `maintenance4`, and the baseline is 1.2. Specialize the numbers the shader reads instead.
-  Upgrade path: none needed — it becomes available by itself as the baseline moves.
+- ✅ **A specialized compute workgroup size needs Vulkan 1.3** (0.17) — CLOSED in 0.26, and
+  the entry was wrong in a way worth keeping. `LocalSizeId` does require `maintenance4`, and
+  `maintenance4` is core in 1.3 — but it is also `VK_KHR_maintenance4` on 1.2, which the
+  entry never checked. "Needs version N" and "is core in version N" are different claims, and
+  writing the second as the first cost three releases of a capability that was available all
+  along. `Feature::WORKGROUP_SIZE` is the row; it is the first with both a bit and an
+  extension spelling of the same capability, which is what the sixth table column is for.
+
+  The upgrade path the entry named — "it becomes available by itself as the baseline moves" —
+  is the tell. A ceiling whose fix is waiting is a ceiling nobody re-examined.
 - ✅ **`copy_image` copies mip 0 only** (0.17) — CLOSED in 0.18. The case came up:
   `image.update(mip=)` makes per-level content ordinary, and a copy that leaves the other
   levels stale is a copy of the top level rather than of the image.
@@ -2527,6 +2636,45 @@ Ordered by rule 4 — what makes pictures goes first.
    `FrontFace` and `CullMode` two meanings. And the line it wanted to remove belongs to GLM
    rather than to Vulkan, which nobody had checked. The escape hatch already exists
    (`cmd.set_viewport(0, h, w, -h)`), so what shipped is the explanation.
+7. **Sub-resource sampling: `set_image(..., layer=, mip=)`.** A descriptor takes a whole
+   Image, so nothing can bind ONE mip or ONE layer as a texture. The render side has spelled
+   exactly this since 0.13 (`target.layer(i, mip=)`) and the sampling side never grew the
+   twin, which leaves a pass unable to read level N of a chain it is writing level N-1 of —
+   a bloom pyramid and a prefiltered environment map are both that shape, and the workaround
+   is one Image per level. Same two words, keyword-only for the reason entry 4 of the
+   breaking list gives.
+
+   **The expensive half already exists**, which is why this is cheaper than it looks: `Image`
+   has tracked layout per `(layer, mip)` since 0.18, so a narrowed storage write can mark
+   only what it touched instead of claiming the whole image. What is missing is a view cache
+   keyed by `(layer, mip)` on `Image`, the two kwargs on `set_image` / `set_storage_image`,
+   and the stub. **~300 lines.** A narrowed view is always `VIEW_TYPE_2D`: naming one face of
+   a cubemap asks for that face as a texture, not for a `samplerCube` of it. `layer=` on a 3D
+   image is refused — a volume has depth, not layers.
+8. **`load_image(srgb=False)` and `create_image(array, srgb=True)`.** Each verb assumes what
+   its source usually is — a file is a picture, an array is data — and neither can be told
+   otherwise. Both defaults are right and both are wrong sometimes, and a PBR asset is where
+   it bites: a normal map is vectors and a metallic-roughness map is coefficients, both
+   shipped as PNG, and the sRGB curve bends every value (128 means "zero" in a normal map and
+   decodes to about 55). `examples/34_showcase` already pays for this — it decodes its bump
+   maps in PIL and uploads them as arrays SPECIFICALLY to dodge `load_image`'s sRGB, and says
+   so in a comment. The mirror case is a picture that had to be resized in Python, which
+   `load_image` cannot do.
+
+   One kwarg each, defaulting to today's behaviour, so nothing existing changes. **~120 lines
+   for the pair**, mostly the three `load_image` overloads and the two `create_image` ones.
+   `srgb=True` on a float or 1/2-channel array should be refused rather than ignored: a
+   transfer function has no meaning there.
+9. **`Format.RG16F` and `Format.RGB10A2`.** The table has no two-channel float and no 10-bit
+   packed format. RG16F is a motion-vector target and an exact 2D BRDF lookup table;
+   RGB10A2 is what a G-buffer normal wants, because eight bits per axis bands visibly on a
+   slowly curving surface and sixteen costs twice the bandwidth to store a direction. Rows in
+   `Format`, the two tables in `Format.hpp`, `Enums.cpp`, the stub, tests. Both pack, so
+   neither reads back, exactly like `R11G11B10F`. Priced against the 118 lines
+   `BlendMode.MULTIPLY` plus the integer vertex formats cost as a pair. **~120 lines.**
+
+   `float16 x 2` should infer `RG16F` on the `create_image(array)` path, or the format is
+   reachable as an attachment and not as an upload.
 
 ### Moved in from the ceilings, by the 0.22 audit
 
@@ -2699,6 +2847,32 @@ used to claim.
 
 Defects small enough that each is a line, plus one thing the review raised that turned out to
 be fine — recorded so it does not get re-raised.
+
+- **The automatic descriptor pool warns on every bindless program.** `create_descriptor_pool()`
+  with no arguments is documented to size itself, and it does — REACTIVELY. `allocate_` takes
+  the newest block, and only when `vkAllocateDescriptorSets` answers
+  `VK_ERROR_OUT_OF_POOL_MEMORY` does `grow_for_` build a block sized for the request and
+  retry (`src/DescriptorSet.hpp:551-572`). The result is right; the doomed first attempt is
+  what the validation layers report:
+
+      vkAllocateDescriptorSets(): Trying to allocate 84 of
+      VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER descriptors from VkDescriptorPool, but this
+      pool only has a total of 64 descriptors for this type
+
+  So the documented default prints a warning on the way to working, which is the one thing a
+  self-sizing pool must not do. Fix: compare the request against the newest block's DECLARED
+  per-type capacity first and skip straight to growth when it cannot fit — declared rather
+  than remaining, so there is no per-allocation bookkeeping and being wrong low falls through
+  to the retry that already exists. Roughly 40 lines: one `needed_` helper factored out of
+  `grow_for_`, an `exceeds_block_` beside it, and a map of the newest block's sizes.
+
+  **Two things about how it was found are worth more than the fix.** It surfaced from an
+  example whose set 1 was three bindings of 28 textures — the sixth defect an example has
+  found that no test looked for. And it survived every existing test BY CONSTRUCTION: the
+  `ctx` fixture fails a test on validation ERRORS, this is a WARNING, so the suite is blind to
+  the whole class. A regression test for it has to capture its own `Logger` and assert on the
+  text, because the `messages` fixture reads the SESSION Context's logger while
+  `extra_context` gives each Context a private one.
 
 - ✅ **`cull_mode(CullMode.NONE)` could not be spelled** — FIXED in 0.25. `front_face` had
   no default, so a pipeline that culls nothing still had to name a winding that means
