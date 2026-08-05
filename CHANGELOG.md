@@ -7,125 +7,136 @@ patch versions never do).
 
 ## [0.26.0] — 2026-08-05
 
-"How much data one shader can reach". A bazalt program could allocate a buffer
-of any size the driver would take, and then only ever read the first
-`maxStorageBufferRange` bytes of it — 4 GiB on the desktop drivers that report
-the most, and far less on some. The limit belongs to the DESCRIPTOR, not to the
-memory: the same devices happily make a buffer of a terabyte. Nothing in bazalt
-said so, and nothing offered the other way of reaching one.
+Large buffers, the limits that describe a device, and a workgroup size the
+pipeline sets.
+
+A bazalt program could make a buffer of any size the driver accepted. It could
+then read only the first `maxStorageBufferRange` bytes of it. On the desktop
+drivers that report the most, that is 4 GiB. The limit belongs to the DESCRIPTOR
+and not to the memory. The same devices make a buffer of one terabyte. Bazalt
+did not report the limit, and it offered no other way to reach the memory.
 
 `Feature.BUFFER_ADDRESS` and `buffer.address` are that other way. The shader
-takes a pointer in a push constant and reads through it, with no descriptor
-anywhere, so the ceiling stops being the binding and becomes what the device can
-allocate. A `uint` index still reaches 16 GiB of a `uint` buffer, which is to say
-the shader code does not change.
+reads a pointer out of a push constant. No descriptor takes part, so the limit
+becomes the amount the device can allocate. A `uint` index still reaches 16 GiB
+of a `uint` buffer, so the shader code does not change.
 
-Two things had to come with it. `ctx.limits` reports the numbers this was all
-about — until now the only way to learn a device's limit was to exceed it and
-read the driver's complaint. And a STATIC upload is now staged in 64 MiB pieces
-instead of one buffer the size of the whole thing, because filling GPU memory
-should cost GPU memory rather than that much again in RAM.
+Two changes had to come with it. `ctx.limits` reports the numbers. Before this
+release, the only way to learn a limit was to exceed it and read the error.
+Also, a STATIC upload now stages in 64 MiB pieces instead of one buffer as large
+as the upload. A program that fills GPU memory must not need that much host
+memory as well.
 
-`Feature.WORKGROUP_SIZE` closes a ceiling standing since 0.17: a workgroup size
-chosen by the pipeline rather than written into the shader text. It works out to
-one feature bit — maintenance4 — which the 0.17 entry read as "needs Vulkan 1.3"
-when 1.2 has it as an extension.
+`Feature.WORKGROUP_SIZE` closes a limit that stood since 0.17. The pipeline now
+sets the workgroup size, instead of the shader text. The capability is one
+feature bit, maintenance4. The 0.17 entry read that bit as "needs Vulkan 1.3".
+Vulkan 1.2 offers the same bit as an extension.
 
 ### Added
-- **`Feature.BUFFER_ADDRESS` and `buffer.address`.** The device address of a
-  buffer, to push as a push constant and read in the shader through
+- **`Feature.BUFFER_ADDRESS` and `buffer.address`.** The address of a buffer on
+  the device. Push it as a push constant and read it in the shader through
   `GL_EXT_buffer_reference`. `examples/41_buffer_address` reads a 4.5 GiB buffer
-  this way — half a gigabyte past what any descriptor on that GPU could bind.
+  this way. That is half a gigabyte more than a descriptor on that GPU can bind.
 
-  Two consequences, both the price of leaving the descriptor behind, and both
-  documented on the property. Automatic barriers work off what a recording
-  binds, and this binds nothing, so a hazard on a buffer reached by address is
-  `cmd.barrier()` by hand. And reading `.address` BLOCKS once on that buffer's
-  own upload, for the same reason: it is the only call the caller must pass
-  through, so the wait that nothing else can see goes there.
+  Two effects come with the address, and the property documents both. Automatic
+  barriers use what a recording binds, and an address binds nothing. A hazard on
+  a buffer that a shader reads by address therefore needs `cmd.barrier()`.
+  Reading `.address` also BLOCKS once, until the upload of that buffer
+  completes. The reason is the same. Nothing downstream can see the dependency,
+  so the wait goes at the one call the caller must make.
 
-  Every buffer of a Context with the feature carries the usage flag, rather than
-  a per-buffer kwarg — the wrong setting of that kwarg would only surface much
-  later, at the call that wants the address.
-- **`ctx.limits`.** What this GPU allows, in numbers: how much of a buffer one
-  descriptor reaches, how large a buffer and an allocation may be, the shape and
-  cost of a workgroup, how many groups one dispatch may launch, the push
-  constant budget, and the subgroup range.
+  Every buffer of a Context with the feature carries the usage flag. A
+  per-buffer keyword argument would report a wrong setting much later, at the
+  call that wants the address.
+- **`ctx.limits` and `Device.limits`.** What this GPU allows, in numbers. How
+  much of a buffer one descriptor reaches, how large a buffer and an allocation
+  may be, the size and cost of a workgroup, how many groups one dispatch starts,
+  the push constant budget, the subgroup range, and the size of the device-local
+  heaps.
 
-  Not a dump of `VkPhysicalDeviceLimits`, which has about a hundred members. A
-  number is here because some code takes a different path on it.
-- **`Feature.WORKGROUP_SIZE`.** `layout(local_size_x_id = 0)` plus
-  `.constant(0, n)` — one compute shader specialized to several workgroup sizes,
-  which is how you tune one against `limits.max_workgroup_invocations` without
-  editing the shader. Without the feature the SPIR-V glslang emits for that
-  layout is undefined behaviour that the validation layers report, which is what
-  the 0.17 ceiling entry was really about.
+  `Device.limits` answers before a Context exists, which is when a program picks
+  the card. Both paths return the same object.
+
+  This is not a copy of `VkPhysicalDeviceLimits`, which has about a hundred
+  members. A number appears here because some code takes a different path on it.
+- **`Feature.WORKGROUP_SIZE`.** Write `layout(local_size_x_id = 0)` in the
+  shader and `.constant(0, n)` on the pipeline. One compute shader then serves
+  several workgroup sizes. This is how a program tunes one against
+  `limits.max_workgroup_invocations` without an edit to the shader. Without the
+  feature, the SPIR-V that glslang writes for that layout is undefined behavior,
+  and the validation layers report it.
 - **`Access.TRANSFER_WRITE` and `Access.TRANSFER_READ`.** What `cmd.fill_buffer`,
-  `cmd.copy_buffer` and a staging upload do, so `cmd.barrier()` can name them.
-  The automatic tracker always knew — it puts a transfer floor under a buffer's
-  first reader — but the manual vocabulary could not say it, and this release is
-  what made that reachable: a buffer read through its address is invisible to
-  the tracker, so zeroing a counter with `fill_buffer` and reading it from a
-  dispatch was a hazard neither half could express.
-- **`Device.limits`, and `memory_mb` moves into it.** See Changed.
-- **`Feature.SHADER_INT64`.** `uint64_t` in a shader. Its own row rather than a
-  silent part of BUFFER_ADDRESS: passing an address needs neither, and doing
-  arithmetic on one needs this.
+  `cmd.copy_buffer` and a staging upload do, so that `cmd.barrier()` can name
+  them. The automatic tracker always knew these accesses. It puts a transfer
+  floor under the first reader of a buffer. The manual vocabulary could not say
+  them, and this release is what made that reachable. A shader that reads a
+  buffer by address is invisible to the tracker. To zero a counter with
+  `fill_buffer` and read it from a dispatch was a hazard that neither half could
+  express.
+- **`Feature.SHADER_INT64`.** `uint64_t` in a shader. This is a row of its own
+  and not a silent part of BUFFER_ADDRESS. To pass an address needs neither
+  feature. To do arithmetic on one needs this feature.
 
 ### Changed
+- **BREAKING: `mouse.dy` is positive DOWNWARD.** Vulkan points y down. So do the
+  framebuffer rows and `mouse.y`. Only `mouse.dy` disagreed, because the
+  callback flipped it for the benefit of a first-person camera. That made the
+  mouse the one part of bazalt with its own idea of which way y goes. A camera
+  now SUBTRACTS `mouse.dy` from its pitch, and every example does. The scroll
+  keeps its sign, because a wheel is not a screen axis.
 - **BREAKING: `device.memory_mb` is now `device.limits.device_memory`, in
-  bytes.** One GPU's numbers came from two places depending on whether a Context
-  existed yet — `ctx.limits` for most of them and a lone property on `Device` for
-  the capacity. `Device.limits` is the same `Limits` object `ctx.limits` answers
-  with, filled by the same rule, so the two cannot drift. Bytes because
-  everything else in there is bytes, and a rounded megabyte cannot be
-  un-rounded.
+  bytes.** The numbers about one GPU came from two places. Which place depended
+  on whether a Context existed yet. `Device.limits` is the same `Limits` object
+  that `ctx.limits` returns, and one rule fills both, so the two cannot drift.
+  The unit is bytes because every other size there is bytes. A rounded megabyte
+  cannot be made exact again.
 - **`ctx.memory_stats()` counts the device-local heaps only.** It summed every
-  heap, which on a laptop includes the system memory the GPU may spill into: an
-  8 GiB card reported a budget of 18.9 GiB. Code that sized a load against that
-  filled VRAM and then crawled over PCIe. Which heap an allocation lands in is a
-  driver decision, but "how much fits on the GPU" is not a question about the
-  host's RAM.
-- **The self-sizing descriptor pool stopped warning on its way to working.**
-  Growth was reactive: it took the newest block, and only when
-  `vkAllocateDescriptorSets` answered `VK_ERROR_OUT_OF_POOL_MEMORY` did a block
-  sized for the request get built and the call retried. The result was right and
-  the doomed first attempt is what the validation layers reported, so the
-  documented default printed a warning on every bindless program. It compares
-  the request against the newest block's declared capacity first. Declared, not
-  remaining: no per-allocation bookkeeping, and being wrong low falls through to
-  the retry that already exists.
-- **A STATIC buffer uploads through bounded staging.** 64 MiB at a time, waiting
-  for each piece before refilling, instead of one host buffer as large as the
-  upload. A buffer under 64 MiB behaves exactly as before — one staging buffer,
-  one submit, no wait. A larger one trades that asynchrony for a memory ceiling,
-  which is the trade that makes a multi-gigabyte buffer possible at all on a
-  machine with ordinary RAM.
-- **The device buffer is allocated before its staging buffer**, so a request
-  that is too large fails before any host memory is reserved for it.
+  heap. On a laptop that includes the system memory the GPU can spill into, so
+  an 8 GiB card reported a budget of 18.9 GiB. A program that sized a load
+  against that number filled VRAM and then ran very slowly over PCIe. The driver
+  decides which heap an allocation uses. But "how much fits on the GPU" is not a
+  question about the memory of the host.
+- **The descriptor pool no longer reports a warning on its way to working.**
+  Growth was reactive. `allocate_` took the newest block, and it built a larger
+  block only after `vkAllocateDescriptorSets` answered
+  `VK_ERROR_OUT_OF_POOL_MEMORY`. The result was correct. The first attempt was
+  not, and the validation layers reported it, so the documented default printed
+  a warning on every bindless program. The pool now compares the request against
+  the capacity that the newest block declares. Declared and not remaining: this
+  needs no bookkeeping per allocation, and a low answer falls through to the
+  retry that already exists.
+- **A STATIC buffer uploads through staging of a bounded size.** The upload
+  copies 64 MiB at a time and waits for each piece before it refills. Before,
+  one host buffer as large as the upload held all of it. A buffer under 64 MiB
+  behaves as it did before: one staging buffer, one submit, and no wait. A
+  larger buffer trades that asynchrony for a memory limit. That trade is what
+  makes a buffer of several gigabytes possible on a machine with usual RAM.
+- **`create_buffer` allocates the device buffer before the staging buffer.** A
+  request that is too large now fails before the host reserves memory for it.
 
 ### Fixed
 - **Closing the last window reported "The GLFW library is not initialized".** A
-  destructor body runs before its members are destroyed, so `~Window` terminated
-  GLFW and left its own window handle to be destroyed afterwards — a call into a
-  library that had just been shut down. GLFW answers that with an error instead
-  of a crash, which is why it went unnoticed: nothing broke, and at interpreter
-  shutdown no logger is listening any more. It shows up when a window dies while
-  the program is still running, which is what closing one usually means.
-- **`bz.list_devices()` crashed when it was a program's first bazalt call.** It
-  is the one function meant to run before any Context exists, and since 0.25 it
-  read the device extension list through volk's instance-level global — which is
-  null until a Context calls `volkLoadInstanceOnly`. The entry point is a
-  parameter now, like the feature query beside it has always been.
+  destructor body runs before the members are destroyed. `~Window` terminated
+  GLFW in its body and left its own window handle to the member. The handle then
+  went to a library that had already stopped. GLFW reports this and does not
+  crash, so nothing broke. At interpreter shutdown no logger listens any more,
+  which is why the message stayed hidden. It appears when a window dies while
+  the program still runs, and that is what closing a window usually means.
+- **`bz.list_devices()` crashed when it was the first bazalt call of a program.**
+  This is the one function that must run before any Context exists. Since 0.25
+  it read the device extension list through the instance-level global of volk.
+  That global is null until a Context calls `volkLoadInstanceOnly`. The entry
+  point is a parameter now, like the feature query beside it.
 
-  The suite never saw it: a test file gets a session Context first, so the
-  global is loaded by the time any test asks. Only a fresh process starting with
-  `list_devices()` reproduces it, and the regression test is a subprocess for
-  exactly that reason.
-- **A DYNAMIC buffer got no device-address usage flag** while a STATIC one did,
-  so `buffer.address` on it was a validation error rather than an address. Found
-  by the test that asks a DYNAMIC buffer for one. The flag now rides in
-  `buffer_usage_for`, the single place both kinds of buffer compute their usage.
+  The suite never saw this. A test file gets a session Context first, so the
+  global is loaded before any test asks. Only a fresh process that starts with
+  `list_devices()` reproduces it. The regression test is a subprocess for that
+  reason.
+- **A DYNAMIC buffer got no device-address usage flag** while a STATIC buffer
+  did. `buffer.address` on a DYNAMIC buffer was therefore a validation error and
+  not an address. The test that asks a DYNAMIC buffer for its address found it.
+  The flag now rides in `buffer_usage_for`, the one place where both kinds of
+  buffer compute their usage.
 
 ## [0.25.0] — 2026-08-04
 

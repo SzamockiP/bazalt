@@ -485,6 +485,15 @@ class MouseState:
     during the last poll_events() cycle, so a camera uses them directly and
     keeps no previous value of its own. Reading twice in one frame gives the
     same answer.
+
+    dx and dy point the way Vulkan's y does: +x is right and **+y is DOWN**,
+    the same as the framebuffer rows and the cursor position above. dy was
+    positive upwards before 0.26, which made the mouse the one thing here whose
+    y disagreed with the rest. A first-person camera therefore SUBTRACTS dy from
+    its pitch.
+
+    scroll_dy keeps GLFW's sign — positive is a scroll away from the user. A
+    wheel is not a screen axis, so the convention above says nothing about it.
     """
     @property
     def x(self) -> float: ...

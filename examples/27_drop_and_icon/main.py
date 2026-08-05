@@ -141,7 +141,7 @@ while window.is_open():
             looking = True
         mouse = window.get_mouse_state()
         yaw += mouse.dx * 0.25
-        pitch = max(min(pitch + mouse.dy * 0.25, 85.0), -85.0)
+        pitch = max(min(pitch - mouse.dy * 0.25, 85.0), -85.0)
     elif looking:
         window.set_cursor_mode(bz.CursorMode.NORMAL)
         looking = False

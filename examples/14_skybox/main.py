@@ -137,7 +137,7 @@ while window.is_open():
 
     mouse = window.get_mouse_state()
     yaw += mouse.dx * 0.002
-    pitch = max(-math.pi / 2 + 0.01, min(math.pi / 2 - 0.01, pitch + mouse.dy * 0.002))
+    pitch = max(-math.pi / 2 + 0.01, min(math.pi / 2 - 0.01, pitch - mouse.dy * 0.002))
 
     record(cmd, yaw, pitch)
     renderer.present(cmd)

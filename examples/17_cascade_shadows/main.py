@@ -49,7 +49,7 @@ class Camera:
     def update_mouse(self, dx, dy):
         self.yaw += dx * self.sensitivity
         limit = math.pi / 2 - 0.01
-        self.pitch = max(-limit, min(limit, self.pitch + dy * self.sensitivity))
+        self.pitch = max(-limit, min(limit, self.pitch - dy * self.sensitivity))
         self._update()
 
     def process_keyboard(self, window, dt):
