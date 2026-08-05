@@ -46,7 +46,7 @@ SIZE = 512
 # Two devices where the machine has them, otherwise the same one twice.
 devices = bz.list_devices()
 for d in devices:
-    print(f"  {d.name} ({d.type}, {d.memory_mb} MB, Vulkan {d.api_version})")
+    print(f"  {d.name} ({d.type}, {d.limits.device_memory // 2**20} MB, Vulkan {d.api_version})")
 
 baker = bz.Context(logger, device=devices[0])
 viewer = bz.Context(logger, device=devices[1] if len(devices) > 1 else devices[0])
