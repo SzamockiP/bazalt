@@ -241,8 +241,14 @@ def test_closing_the_last_window_reports_nothing(extra_context):
     logger = bz.Logger(min_severity=bz.Severity.INFO)
     logger.on_message(messages.append)
 
-    window = bz.Window(64, 64, "teardown", logger=logger)
+    try:
+        window = bz.Window(64, 64, "teardown", logger=logger)
+    except bz.WindowError:
+        pytest.skip("no display available")
+
     context = extra_context()
+    if context.headless:
+        pytest.skip("no swapchain support (headless Context)")
     renderer = context.create_renderer(window)
 
     del renderer
