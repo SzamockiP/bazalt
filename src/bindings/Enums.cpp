@@ -288,7 +288,9 @@ void bind_enums(py::module_& m)
         .value("VERTEX_READ", Access::VERTEX_READ)
         .value("INDEX_READ", Access::INDEX_READ)
         .value("UNIFORM_READ", Access::UNIFORM_READ)
-        .value("INDIRECT_READ", Access::INDIRECT_READ);
+        .value("INDIRECT_READ", Access::INDIRECT_READ)
+        .value("TRANSFER_WRITE", Access::TRANSFER_WRITE)
+        .value("TRANSFER_READ", Access::TRANSFER_READ);
 
     // Pixel formats — the name VertexFormat freed in 0.4.
     py::enum_<Format>(m, "Format")

@@ -42,7 +42,7 @@ def test_device_reports_readable_properties():
         assert d.name
         assert d.type in ("discrete", "integrated", "virtual", "cpu", "other")
         assert d.api_version.count(".") == 2
-        assert d.memory_mb >= 0
+        assert d.limits.device_memory >= 0
 
 
 @pytest.mark.parametrize("feature", ALL_FEATURES)
@@ -112,3 +112,36 @@ def test_list_devices_works_as_the_first_call(tmp_path):
 
     done = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=120)
     assert done.returncode == 0, f"exit {done.returncode}\nstdout: {done.stdout}\nstderr: {done.stderr}"
+
+
+def test_a_device_answers_the_same_limits_a_context_does(ctx):
+    """One set of numbers about a GPU, reachable from either side.
+
+    `Device.memory_mb` used to sit beside `ctx.limits`, so what a caller asked
+    depended on whether a Context existed yet. It is `limits.device_memory` now
+    and both paths fill it from the same heap rule — a difference here would
+    mean the two had drifted, which is the thing having one type prevents.
+    """
+    same = [d for d in bz.list_devices() if d.name == ctx.device_name]
+    if not same:
+        pytest.skip("the Context is not on a device list_devices reports")
+
+    device = same[0]
+    assert device.limits.device_memory == ctx.limits.device_memory
+    assert device.limits.max_storage_buffer == ctx.limits.max_storage_buffer
+    assert device.limits.max_workgroup_size == ctx.limits.max_workgroup_size
+
+
+def test_the_memory_budget_stays_within_the_device(ctx):
+    """memory_stats() counts the device-local heaps and nothing else.
+
+    It summed every heap until 0.26, which on a laptop includes the system
+    memory the GPU may spill into — an 8 GiB card reported a budget of 18.9
+    GiB. Code that sizes a load against that number fills VRAM and then crawls.
+    """
+    stats = ctx.memory_stats()
+    capacity = ctx.limits.device_memory
+    assert stats.budget <= capacity, (
+        f"budget {stats.budget} exceeds the device-local heaps ({capacity}), "
+        "so it is counting host memory again")
+    assert stats.used <= stats.reserved

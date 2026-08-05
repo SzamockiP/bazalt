@@ -20,7 +20,19 @@ enum class Access
     // rather than by a shader. Appended, not inserted, because pybind enum values
     // are API. One entry covers both draw and dispatch: DRAW_INDIRECT is the stage
     // the spec names for indirect *and* dispatch-indirect data.
-    INDIRECT_READ
+    INDIRECT_READ,
+    // What cmd.fill_buffer, cmd.copy_buffer and a staging upload do (0.26).
+    //
+    // The automatic tracker has always known about these — it puts a
+    // TRANSFER_WRITE floor under the first reader of a buffer, a few dozen
+    // lines below. The manual vocabulary could not SAY them, which did not
+    // matter while every reader the tracker missed was rare. buffer.address
+    // made it matter: a buffer reached by a pointer is invisible to the
+    // tracker, so zeroing a counter with fill_buffer and reading it from a
+    // dispatch was a hazard nobody could express — not automatically, because
+    // the read is unseen, and not by hand, because the write had no name.
+    TRANSFER_WRITE,
+    TRANSFER_READ
 };
 
 struct StageAccess
@@ -56,6 +68,10 @@ inline constexpr StageAccess to_vk(Access access, VkPipelineStageFlags all_shade
             return {all_shader_stages, VK_ACCESS_UNIFORM_READ_BIT};
         case Access::INDIRECT_READ:
             return {VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT};
+        case Access::TRANSFER_WRITE:
+            return {VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT};
+        case Access::TRANSFER_READ:
+            return {VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT};
     }
     // Not std::unreachable(): pybind enums accept arbitrary ints.
     return {all_shader_stages, VK_ACCESS_SHADER_READ_BIT};

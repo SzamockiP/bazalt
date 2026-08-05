@@ -202,6 +202,10 @@ inline DeviceFeatures query_device_features(
 // path.
 struct DeviceLimits
 {
+    // Sum of the DEVICE_LOCAL heaps. On an integrated GPU that is shared system
+    // memory, which is exactly what "how much can I put on it" means there.
+    // The capacity, not the free space — ctx.memory_stats() answers that.
+    VkDeviceSize device_memory = 0;
     // The most one DESCRIPTOR may see. Commonly 4 GiB - 1 on desktop drivers,
     // and the reason Feature::BUFFER_ADDRESS exists: an address is not a
     // descriptor, so a buffer read through one is not held to this.

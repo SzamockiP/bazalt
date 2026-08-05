@@ -1292,6 +1292,31 @@ subtlety is that the earlier pieces must be destroyed on the spot instead of han
 `defer_destroy`: deferred handles retire when the Context next drains, so deferring them
 would keep every piece alive at once and reinstate the exact problem the loop removes.
 
+**A limit and a live number are different questions, and so are their homes.**
+`Limits` is what the device permits and never changes; `memory_stats()` is what
+is used right now. Putting the heap CAPACITY in the first and the heap USAGE in
+the second is why `device.limits.device_memory` exists and why `memory_mb` no
+longer sits beside it: a caller asking "will this fit" needs both numbers, and
+before 0.26 one came from a Device and the other from a Context, so the pair
+could only be assembled by matching a GPU by name. One type reachable from both
+sides settles it.
+
+The same audit found `memory_stats()` summing every heap. It reported 18.9 GiB
+free on an 8 GiB card, because a laptop's GPU may spill into system memory. That
+number is not wrong about Vulkan and is useless for the only question it is
+asked, which is the shape of mistake worth naming: a sum over things the caller
+does not distinguish is not a summary, it is an average of two answers.
+
+**What `cmd.barrier()` can say has to cover what the tracker cannot see.** The
+manual vocabulary had no word for a transfer write, and that was survivable
+while every unseen reader was exotic. `buffer.address` ended it: the tracker
+works from what a recording binds, an address binds nothing, and `fill_buffer`
+is the documented way to reset a counter an atomic increments. So the one verb
+for zeroing and the one mechanism for reaching a big buffer could not be used in
+the same frame. The rule this leaves: every hazard the automatic path knows how
+to insert must also be spellable by hand, because the escape hatch is only an
+escape if it covers the same ground.
+
 ### Shader stages, and the mask they broke
 
 - **Geometry is not redundant with tessellation, and mesh shaders do not settle it**

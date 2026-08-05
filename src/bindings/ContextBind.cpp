@@ -25,6 +25,7 @@ void bind_context(py::module_& m)
     // Read-only like MemoryStats above, and for a stronger reason: these are
     // the driver's numbers, so a settable one would be a lie with a setter.
     py::class_<DeviceLimits>(m, "Limits")
+        .def_readonly("device_memory", &DeviceLimits::device_memory)
         .def_readonly("max_storage_buffer", &DeviceLimits::max_storage_buffer)
         .def_readonly("max_uniform_buffer", &DeviceLimits::max_uniform_buffer)
         .def_readonly("max_buffer", &DeviceLimits::max_buffer)

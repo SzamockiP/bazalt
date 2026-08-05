@@ -35,12 +35,15 @@ struct Device
     // wants to read rather than decode.
     std::string type;
     std::uint32_t api_version = 0;
-    // Sum of the DEVICE_LOCAL heaps. On an integrated GPU this is shared system
-    // memory, which is exactly what "how much can I put on it" means there.
-    std::uint64_t memory_bytes = 0;
     DeviceUUID uuid{};
 
     DeviceFeatures features{};
+    // The same object ctx.limits answers with, asked before there is a Context
+    // — so "which of these cards can hold the file" is answerable at the moment
+    // the card is being chosen. `memory_bytes` used to live here beside it,
+    // which made the numbers about a GPU come from two places depending on
+    // whether a Context existed yet; it is limits.device_memory now (0.26).
+    DeviceLimits limits{};
 
     // Same question as ctx.supports(), asked before there is a Context — so a
     // caller can pick the card that can do the job instead of finding out at
@@ -207,7 +210,6 @@ inline std::expected<std::vector<Device>, Error> list_devices()
         device.name = props2.properties.deviceName;
         device.type = device_type_name(props2.properties.deviceType);
         device.api_version = props2.properties.apiVersion;
-        device.memory_bytes = device_local;
         std::copy(std::begin(id.deviceUUID), std::end(id.deviceUUID), device.uuid.begin());
         // Asked per device, because the portability rows read the opposite way for
         // a device that is a subset and one that is not (see feature_available).
@@ -227,6 +229,8 @@ inline std::expected<std::vector<Device>, Error> list_devices()
         }
         device.features = query_device_features(
             get_features2, enumerate_device_extensions, handle, portability_subset, props2.properties.apiVersion);
+        device.limits = query_device_limits(get_properties2, handle, device.features);
+        device.limits.device_memory = device_local;
         devices.push_back(std::move(device));
     }
 

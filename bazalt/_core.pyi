@@ -379,6 +379,12 @@ class Access(IntEnum):
     #: The draw or dispatch arguments themselves, read by the command processor
     #: rather than by a shader — the hazard behind cmd.draw_indirect (0.19).
     INDIRECT_READ = 5
+    #: What cmd.fill_buffer, cmd.copy_buffer and a staging upload do (0.26).
+    #: Automatic barriers already knew about these; the manual vocabulary could
+    #: not say them, which only became reachable when buffer.address made a
+    #: whole buffer invisible to the tracker.
+    TRANSFER_WRITE = 6
+    TRANSFER_READ = 7
 
 class Format(IntEnum):
     """Pixel formats.
@@ -1923,11 +1929,11 @@ class Device:
     @property
     def api_version(self) -> str: ...
     @property
-    def memory_mb(self) -> int:
-        """Total device-local memory. On an integrated GPU this is shared
-        system memory."""
+    def limits(self) -> Limits:
+        """What this GPU allows, before a Context exists — the same object and
+        the same numbers `ctx.limits` answers with. `memory_mb` used to sit here
+        instead; it is `limits.device_memory`, in bytes, since 0.26."""
         ...
-
     def supports(self, feature: Feature) -> bool:
         """The same question as ctx.supports(), asked before there is a
         Context — so you can pick the card that can do the job."""
@@ -2149,7 +2155,12 @@ def list_monitors() -> list[Monitor]:
     ...
 
 class Limits:
-    """The numbers this GPU holds a caller to, from `ctx.limits`.
+    """The numbers this GPU holds a caller to.
+
+    Reachable two ways for one reason: `ctx.limits` asks about the device a
+    Context chose, and `device.limits` asks about a candidate from
+    `bz.list_devices()` before any Context exists — which is when "can this card
+    hold the file" has to be answered. One type, one set of numbers.
 
     A limit is not a Feature: every device has a value for all of these, so the
     question is never "may I" but "how much". Which numbers are here is a
@@ -2158,6 +2169,14 @@ class Limits:
 
     All sizes are in bytes.
     """
+    @property
+    def device_memory(self) -> int:
+        """Total size of the device-local heaps — the card's capacity.
+
+        Not the free space: `ctx.memory_stats()` answers that. On an integrated
+        GPU this is shared system memory, which is what "how much can I put on
+        it" means there."""
+        ...
     @property
     def max_storage_buffer(self) -> int:
         """The most one DESCRIPTOR may see of a storage buffer.

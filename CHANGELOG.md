@@ -60,11 +60,41 @@ when 1.2 has it as an extension.
   editing the shader. Without the feature the SPIR-V glslang emits for that
   layout is undefined behaviour that the validation layers report, which is what
   the 0.17 ceiling entry was really about.
+- **`Access.TRANSFER_WRITE` and `Access.TRANSFER_READ`.** What `cmd.fill_buffer`,
+  `cmd.copy_buffer` and a staging upload do, so `cmd.barrier()` can name them.
+  The automatic tracker always knew — it puts a transfer floor under a buffer's
+  first reader — but the manual vocabulary could not say it, and this release is
+  what made that reachable: a buffer read through its address is invisible to
+  the tracker, so zeroing a counter with `fill_buffer` and reading it from a
+  dispatch was a hazard neither half could express.
+- **`Device.limits`, and `memory_mb` moves into it.** See Changed.
 - **`Feature.SHADER_INT64`.** `uint64_t` in a shader. Its own row rather than a
   silent part of BUFFER_ADDRESS: passing an address needs neither, and doing
   arithmetic on one needs this.
 
 ### Changed
+- **BREAKING: `device.memory_mb` is now `device.limits.device_memory`, in
+  bytes.** One GPU's numbers came from two places depending on whether a Context
+  existed yet — `ctx.limits` for most of them and a lone property on `Device` for
+  the capacity. `Device.limits` is the same `Limits` object `ctx.limits` answers
+  with, filled by the same rule, so the two cannot drift. Bytes because
+  everything else in there is bytes, and a rounded megabyte cannot be
+  un-rounded.
+- **`ctx.memory_stats()` counts the device-local heaps only.** It summed every
+  heap, which on a laptop includes the system memory the GPU may spill into: an
+  8 GiB card reported a budget of 18.9 GiB. Code that sized a load against that
+  filled VRAM and then crawled over PCIe. Which heap an allocation lands in is a
+  driver decision, but "how much fits on the GPU" is not a question about the
+  host's RAM.
+- **The self-sizing descriptor pool stopped warning on its way to working.**
+  Growth was reactive: it took the newest block, and only when
+  `vkAllocateDescriptorSets` answered `VK_ERROR_OUT_OF_POOL_MEMORY` did a block
+  sized for the request get built and the call retried. The result was right and
+  the doomed first attempt is what the validation layers reported, so the
+  documented default printed a warning on every bindless program. It compares
+  the request against the newest block's declared capacity first. Declared, not
+  remaining: no per-allocation bookkeeping, and being wrong low falls through to
+  the retry that already exists.
 - **A STATIC buffer uploads through bounded staging.** 64 MiB at a time, waiting
   for each piece before refilling, instead of one host buffer as large as the
   upload. A buffer under 64 MiB behaves exactly as before — one staging buffer,

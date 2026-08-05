@@ -971,14 +971,20 @@ public:
     // external tool.
     //
     // VMA already keeps the numbers, so this is a read rather than new
-    // bookkeeping. Summed across heaps: per-heap detail is a different question
-    // (which heap is a driver decision), and a single pair is what the question
-    // above actually wants.
+    // bookkeeping.
+    //
+    // Summed over the DEVICE_LOCAL heaps only, since 0.26. It used to sum every
+    // heap, which on a laptop includes the system memory the GPU may spill
+    // into — so an 8 GiB card reported a budget of 18.9 GiB, and code that
+    // sized a load against it filled VRAM and then crawled over PCIe. Whichever
+    // heap a given allocation lands in is a driver decision, but "how much fits
+    // on the GPU" is not a question about the host's RAM, and that is the only
+    // question these three numbers are asked.
     struct MemoryStats
     {
-        std::uint64_t used = 0;     // bytes VMA has allocated for this Context
-        std::uint64_t reserved = 0; // bytes VMA has reserved from the driver
-        std::uint64_t budget = 0;   // bytes the driver says the process may use
+        std::uint64_t used = 0;     // bytes VMA has allocated in device-local heaps
+        std::uint64_t reserved = 0; // bytes VMA has reserved from those heaps
+        std::uint64_t budget = 0;   // bytes of those heaps the driver says the process may use
     };
 
     MemoryStats memory_stats() const
@@ -992,6 +998,10 @@ public:
         MemoryStats stats;
         for (std::uint32_t i = 0; i < memory_props.memoryHeapCount; ++i)
         {
+            if ((memory_props.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0)
+            {
+                continue;
+            }
             stats.used += budgets[i].statistics.allocationBytes;
             stats.reserved += budgets[i].statistics.blockBytes;
             stats.budget += budgets[i].budget;
@@ -1403,6 +1413,18 @@ private:
         // follows from them.
         ctx.limits_ =
             query_device_limits(vkGetPhysicalDeviceProperties2, ctx.vkb_physical_device_.physical_device, available);
+        // The heap sizes are not in VkPhysicalDeviceLimits, so they are read
+        // beside them — by the same rule list_devices uses, so ctx.limits and
+        // device.limits report one number and not two.
+        VkPhysicalDeviceMemoryProperties heaps{};
+        vkGetPhysicalDeviceMemoryProperties(ctx.vkb_physical_device_.physical_device, &heaps);
+        for (std::uint32_t i = 0; i < heaps.memoryHeapCount; ++i)
+        {
+            if (heaps.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+            {
+                ctx.limits_.device_memory += heaps.memoryHeaps[i].size;
+            }
+        }
 
         // Dynamic rendering: core in 1.3, an extension on 1.2. Same capability,
         // two spellings — resolve it here so nothing else has to care.
