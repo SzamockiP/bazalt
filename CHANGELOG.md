@@ -7,14 +7,12 @@ patch versions never do).
 
 ## [0.26.0] — 2026-08-05
 
-Large buffers, the limits that describe a device, and a workgroup size the
-pipeline sets.
-
-A bazalt program could make a buffer of any size the driver accepted. It could
-then read only the first `maxStorageBufferRange` bytes of it. On the desktop
-drivers that report the most, that is 4 GiB. The limit belongs to the DESCRIPTOR
-and not to the memory. The same devices make a buffer of one terabyte. Bazalt
-did not report the limit, and it offered no other way to reach the memory.
+"Buffers larger than a binding". A bazalt program could make a buffer of any
+size the driver accepted. It could then read only the first
+`maxStorageBufferRange` bytes of it. On the desktop drivers that report the
+most, that is 4 GiB. The limit belongs to the DESCRIPTOR and not to the memory.
+The same devices make a buffer of one terabyte. Bazalt did not report the limit,
+and it offered no other way to reach the memory.
 
 `Feature.BUFFER_ADDRESS` and `buffer.address` are that other way. The shader
 reads a pointer out of a push constant. No descriptor takes part, so the limit
@@ -78,18 +76,6 @@ Vulkan 1.2 offers the same bit as an extension.
   feature. To do arithmetic on one needs this feature.
 
 ### Changed
-- **BREAKING: `mouse.dy` is positive DOWNWARD.** Vulkan points y down. So do the
-  framebuffer rows and `mouse.y`. Only `mouse.dy` disagreed, because the
-  callback flipped it for the benefit of a first-person camera. That made the
-  mouse the one part of bazalt with its own idea of which way y goes. A camera
-  now SUBTRACTS `mouse.dy` from its pitch, and every example does. The scroll
-  keeps its sign, because a wheel is not a screen axis.
-- **BREAKING: `device.memory_mb` is now `device.limits.device_memory`, in
-  bytes.** The numbers about one GPU came from two places. Which place depended
-  on whether a Context existed yet. `Device.limits` is the same `Limits` object
-  that `ctx.limits` returns, and one rule fills both, so the two cannot drift.
-  The unit is bytes because every other size there is bytes. A rounded megabyte
-  cannot be made exact again.
 - **`ctx.memory_stats()` counts the device-local heaps only.** It summed every
   heap. On a laptop that includes the system memory the GPU can spill into, so
   an 8 GiB card reported a budget of 18.9 GiB. A program that sized a load
@@ -113,6 +99,26 @@ Vulkan 1.2 offers the same bit as an extension.
   makes a buffer of several gigabytes possible on a machine with usual RAM.
 - **`create_buffer` allocates the device buffer before the staging buffer.** A
   request that is too large now fails before the host reserves memory for it.
+
+### Changed (breaking)
+- **`mouse.dy` is positive DOWNWARD.** Vulkan points y down. So do the
+  framebuffer rows and `mouse.y`. Only `mouse.dy` disagreed, because the cursor
+  callback flipped it for the benefit of a first-person camera. That made the
+  mouse the one part of bazalt with its own idea of which way y goes. A camera
+  now SUBTRACTS `mouse.dy` from its pitch, and every example does.
+
+  The 0.21 notes below already describe the behavior this restores. They say
+  that `GamepadAxis.LEFT_Y` and `mouse.dy` point opposite ways on purpose,
+  because a mouse delta is a screen measurement and a stick is not. The code
+  stopped agreeing with that sentence at some point. It agrees again.
+
+  The scroll keeps its sign, because a wheel is not a screen axis.
+- **`device.memory_mb` is now `device.limits.device_memory`, in bytes.** The
+  numbers about one GPU came from two places. Which place depended on whether a
+  Context existed yet. `Device.limits` is the same `Limits` object that
+  `ctx.limits` returns, and one rule fills both, so the two cannot drift. The
+  unit is bytes because every other size there is bytes. A rounded megabyte
+  cannot be made exact again.
 
 ### Fixed
 - **Closing the last window reported "The GLFW library is not initialized".** A
