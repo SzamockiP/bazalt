@@ -599,10 +599,12 @@ public:
     }
 
 private:
-    Context(std::shared_ptr<Logger> logger)
-        : logger_(logger)
-    {
-    }
+    // Out of line for the same reason the destructor is, and it is easy to miss:
+    // a constructor has to be able to unwind, so an INLINE one instantiates the
+    // deleters of upload_manager_ and hot_reload_ — both unique_ptrs to
+    // incomplete types here. MSVC delays that instantiation and accepts it;
+    // clang does not, which is how the clang-tidy job found this.
+    explicit Context(std::shared_ptr<Logger> logger);
 
     // ── create() steps ────────────────────────────────────────────────────────
     //

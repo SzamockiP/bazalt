@@ -67,6 +67,11 @@ std::expected<std::shared_ptr<Context>, Error> Context::create(
     return context;
 }
 
+Context::Context(std::shared_ptr<Logger> logger)
+    : logger_(std::move(logger))
+{
+}
+
 Context::~Context()
 {
     // Stops the threads and finishes the GPU work, if close() has not

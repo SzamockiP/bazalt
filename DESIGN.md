@@ -390,6 +390,33 @@ entry. The release is a label, not the organizing axis.
   later, if anyone ever wants to pay for it. **The reason to keep the split is the structure,
   and the release note says so rather than claiming a speed-up it does not have.**
 
+- **The core stopped being header-only** (0.27), which retires the second paragraph of the
+  entry above. The 0.20 reasoning was "they are templated and `inline`, so splitting them
+  would be a rewrite", and that was true of the cost and wrong about the benefit — it priced
+  only build time, which the same entry had just shown the split cannot buy.
+
+  Three things paid for it instead, and none of them is a stopwatch. **The first is that
+  header-only had exactly one consumer.** Nobody links bazalt as a C++ library; the core is
+  compiled into `bazalt._core` and nowhere else, so every `inline` in it was a keyword
+  serving a use case that does not exist. **The second is the include cycle**, which was not
+  free: `UploadManager.hpp` and `HotReload.hpp` include `Context.hpp`, so `Context` could not
+  name the two classes it owns, and the way out was `UploadManagerBase` and `HotReloadBase` —
+  two pure-virtual interfaces with one implementation each, i.e. the exact shape rule 1
+  rejects everywhere else. A `Context.cpp` deletes both, because a translation unit may
+  include what a header may not. **The third is that the owner asked for readable code**, and
+  a 1,950-line header where every declaration is buried in its own body is not that.
+
+  What the split does NOT claim: a faster full build. The 0.20 measurement still holds — a
+  full build parses everything once whatever the file count — and the gain is on the
+  incremental edit, where a change to `Context.cpp` no longer recompiles eight binding
+  translation units.
+
+  The rule for what stays in a header after the split: the class definition, an accessor
+  short enough to be worth inlining, anything templated or `constexpr`, and the comments that
+  describe the API. The bodies and the comments that describe THEM move. A header is a table
+  of contents, and if a reader has to scroll past an implementation to find the next
+  declaration, the split did not happen.
+
 - **`bindings/Common.hpp` is `inline`, not an anonymous namespace** (0.20), and this is the
   one part of the split that fails silently rather than loudly. The shared helpers were an
   anonymous namespace in `main.cpp`, which is correct for one translation unit and wrong for
@@ -436,6 +463,35 @@ entry. The release is a label, not the organizing axis.
   the ceiling on what the split could ever be worth. Had the baseline not been taken first,
   the release would have credited the split with a 66→26s improvement that was mostly a
   configuration default.
+
+### The checks that gate a release
+
+- **A check that does not gate is a check that drifts** (0.22 for the formatter, 0.27 for the
+  rest). 0.22 learned it once: `.clang-format` existed from the start and was enforced by
+  remembering, so every release ended with a "style(0.N)" commit. The 0.27 audit found the
+  same shape three more times — no C++ static analysis at all, no Python linter at all, and a
+  hand-written stub that nothing compared against the module. All three now run in CI.
+
+- **When a check and the code disagree, the code changes** (0.27, and this one is the owner's
+  ruling rather than a derivation). The plan proposed disabling `modernize-make-shared` and
+  `cppcoreguidelines-owning-memory`, because bazalt uses `shared_ptr<T>(new T(...))` about ten
+  times to construct a class whose constructor is private. The owner refused the shortcut and
+  asked the obvious question: if the rule exists, why are we the exception? The answer is the
+  **passkey idiom** — a private tag type the factory can name and nobody else can, so the
+  constructor becomes public, `make_shared` works, and the intent ("only the factory builds
+  one of these") moves from a comment into the signature. A `NOLINT` would have kept the
+  intent in a comment and the defect in the code.
+
+  The general form, and the reason this is a decision rather than a preference: **a disabled
+  check is a permanent claim that the tool is wrong about this codebase.** That claim is
+  sometimes true — `readability-identifier-length` on a Vulkan file full of `x`, `y` and `vk`
+  is noise, and `.clang-tidy` says so with the reason beside it. It is rarely true when the
+  check names a real defect class, and "we already wrote it this way" is not evidence.
+
+- **Every gate is pinned to one version.** The formatter, the analyzer and the linter all come
+  from PyPI with an exact version, because each of them changes its output between releases.
+  An unpinned tool turns somebody else's release day into a red build here, which is debt #4's
+  lesson applied to the tools instead of to the drivers.
 
 ### Dispatch and volk
 

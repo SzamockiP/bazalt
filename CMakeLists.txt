@@ -110,7 +110,17 @@ FetchContent_MakeAvailable(stb)
 # build purpose does.
 add_library(_core MODULE
     src/main.cpp
+    src/Buffer.cpp
+    src/CommandBuffer.cpp
     src/Context.cpp
+    src/DescriptorSet.cpp
+    src/Image.cpp
+    src/Pipeline.cpp
+    src/RenderTarget.cpp
+    src/Renderer.cpp
+    src/ShaderCompiler.cpp
+    src/UploadManager.cpp
+    src/window.cpp
     src/bindings/Enums.cpp
     src/bindings/Resources.cpp
     src/bindings/Pipelines.cpp

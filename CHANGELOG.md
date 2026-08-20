@@ -5,6 +5,62 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.27.0] — unreleased
+
+"The quality gates, and what they found". This release adds no feature. It adds
+the two checks that a codebase of this size needs, and it removes what an audit
+found when nothing was checking.
+
+`clang-tidy` now runs in CI beside `clang-format`, over the first-party
+translation units. `ruff` checks the Python side, which had no linter at all.
+Both are pinned to one version, for the reason the formatter is: a check that
+follows somebody else's release schedule turns their work into a red build here.
+
+The checks found real defects on the first run. The stub declared its overload
+groups without `@overload`, so a type checker saw only the last signature of
+each. The stub also gave wrong values to ten `Feature` members and to
+`Topology.PATCH_LIST`. The module was always right, and only the stub was wrong,
+so this changed no behavior. It did mislead every reader.
+
+The audit removed about 2000 lines. The largest single item is the keyboard,
+which the library bound twice.
+
+The C++ core is no longer header-only. Each large header is now a header and a
+translation unit. Nobody links bazalt as a C++ library, so header-only bought
+nothing, and it cost an include cycle. That cycle is why two interfaces with one
+implementation each existed. Both are gone.
+
+### Removed
+- **The `KEY_*`, `MOUSE_BUTTON_*` and `CURSOR_*` module integers.** BREAKING.
+  They are the pre-enum spelling of `Key`, `MouseButton` and `CursorMode`, which
+  0.23 added. No example used them. Use the enum member, or a plain integer with
+  the same value. Every query accepts both.
+- **`api_coverage.md`.** The gate that reads the census stays. The report it
+  wrote is gone, together with the part of the census that counted enum members
+  and exception classes. That part matched names with a regular expression over
+  the test sources, so a name in a comment counted as a use. `test_stubs.py`
+  asserts that those names exist, which is all a constant can be wrong about.
+
+### Fixed
+- **The stub declared overload groups without `@overload`.** A type checker saw
+  only the last signature of each group. `Context.create_buffer`,
+  `Context.create_image`, `Context.load_image`, `Context.compile_shader`,
+  `Buffer.update`, `CommandBuffer.barrier` and five more are affected.
+- **The stub gave wrong values to ten `Feature` members.** `PRECISE_OCCLUSION`
+  is 12 and not 19, and the eight members after it move by one.
+  `Topology.PATCH_LIST` is 6 and not 5, where 5 is `TRIANGLE_FAN`. The module
+  always reported the right numbers.
+
+### Changed
+- **`clang-tidy` gates the build.** The configuration is at `.clang-tidy`. Each
+  disabled check names its reason. Where a check and the code disagree, the code
+  changes.
+- **`ruff` checks the Python sources.** The rule set is explicit, because the
+  defaults of that tool move between versions.
+- **The core is a set of header and source pairs.** This changes no API. It
+  removes `UploadManagerBase` and `HotReloadBase`, which were interfaces with
+  one implementation each, and it makes an incremental build faster.
+
 ## [0.26.0] — 2026-08-05
 
 "Buffers larger than a binding". A bazalt program could make a buffer of any
