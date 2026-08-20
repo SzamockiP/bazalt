@@ -546,7 +546,8 @@ def test_line_mode_draws_edges_and_leaves_the_interior(extra_context):
     assert filled[37, 32, :3].any(), "the filled triangle missed its own centroid"
     assert not lined[37, 32, :3].any(), "LINE painted the interior"
 
-    painted = lambda px: int(np.count_nonzero(px[:, :, :3].any(axis=2)))
+    def painted(px):
+        return int(np.count_nonzero(px[:, :, :3].any(axis=2)))
     assert 0 < painted(lined) < painted(filled) // 2, \
         f"line {painted(lined)} px vs fill {painted(filled)} px"
 

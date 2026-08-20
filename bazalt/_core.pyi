@@ -720,7 +720,9 @@ class Cursor(IntEnum):
 # ── Resources ──────────────────────────────────────────────────────────
 
 class Buffer:
+    @overload
     def update(self, data: bytes, *, offset: int = 0) -> None: ...
+    @overload
     def update(self, array: Any, *, offset: int = 0) -> None:
         """Upload from any C-contiguous buffer-protocol object.
 
@@ -733,6 +735,7 @@ class Buffer:
         `numpy.ascontiguousarray(arr)` to be explicit.
         """
         ...
+    @overload
     def update(self, data: list, data_type: Optional[DataType] = None, *,
                offset: int = 0) -> None: ...
 
@@ -1485,11 +1488,13 @@ class CommandBuffer:
         """
         ...
 
+    @overload
     def barrier(self, buffer: Buffer, src: Access, dst: Access) -> CommandBuffer:
         """Record a buffer barrier by hand. Required between dependent uses
         when auto_barriers=False; legal (if redundant) in auto mode. Refused
         inside a rendering scope — record it before begin_rendering."""
         ...
+    @overload
     def barrier(self, image: Image, src: Access, dst: Access) -> CommandBuffer:
         """Transition an image between shader accesses by hand, across every mip
         and layer. The layout follows the access: SHADER_WRITE = GENERAL (a
@@ -1600,9 +1605,11 @@ class CommandBuffer:
         scope."""
         ...
 
+    @overload
     def push_constants(self, pipeline: Pipeline, offset: int, data: bytes) -> CommandBuffer:
         """The Pipeline already knows which stages its range covers."""
         ...
+    @overload
     def push_constants(self, offset: int, data: bytes) -> CommandBuffer:
         """The short form: the pipeline that is already bound (0.25).
 
@@ -1612,8 +1619,10 @@ class CommandBuffer:
         """
         ...
 
+    @overload
     def bind_descriptor_set(self, descriptor_set: DescriptorSet, pipeline: Pipeline,
                             set: int = 0) -> CommandBuffer: ...
+    @overload
     def bind_descriptor_set(self, descriptor_set: DescriptorSet) -> CommandBuffer:
         """The short form (0.25): the set knows the index it was allocated for and
         at which bind point, and bind_pipeline already recorded the pipeline.
@@ -2382,10 +2391,13 @@ class Context:
         samples=) and SwapchainRenderer(..., samples=)."""
         ...
 
+    @overload
     def create_buffer(self, data: list, type: BufferType, usage: MemoryUsage,
                       data_type: Optional[DataType] = None, *, name: str = "") -> Buffer: ...
+    @overload
     def create_buffer(self, data: Any, type: BufferType, usage: MemoryUsage,
                       *, name: str = "") -> Buffer: ...
+    @overload
     def create_buffer(self, data: int, type: BufferType,
                       usage: MemoryUsage, *, name: str = "") -> Buffer:
         """A GPU buffer from a list, any C-contiguous array, or a size in bytes.
@@ -2404,6 +2416,7 @@ class Context:
 
     def graphics_pipeline(self) -> GraphicsPipelineBuilder: ...
     def compute_pipeline(self) -> ComputePipelineBuilder: ...
+    @overload
     def compile_shader(self, path: str, stage: ShaderStage, *,
                        language: Optional[ShaderLanguage] = None,
                        include_dirs: Sequence[str] = (),
@@ -2444,6 +2457,7 @@ class Context:
         """
         ...
 
+    @overload
     def compile_shader(self, *, source: str | bytes, stage: ShaderStage,
                        language: Optional[ShaderLanguage] = None,
                        name: str = "",
@@ -2468,6 +2482,7 @@ class Context:
         """
         ...
 
+    @overload
     def load_image(self, data: bytes, *, mipmaps: bool = True, name: str = "") -> Image:
         """Decode encoded image BYTES rather than a file: a PNG off the network,
         out of a zip, or straight from PIL, none of which has a path on disk.
@@ -2480,6 +2495,7 @@ class Context:
         """
         ...
 
+    @overload
     def load_image(self, path: str, *, mipmaps: bool = True, name: str = "") -> Image:
         """Decode an image file into an sRGB GPU image, with a full mip chain by
         default (`mipmaps=False` for a single level — e.g. a UI sprite sampled
@@ -2500,6 +2516,7 @@ class Context:
         """
         ...
 
+    @overload
     def load_image(self, paths: Sequence[str], *, cube: bool = False,
                    mipmaps: bool = True, name: str = "") -> Image:
         """From a list of image files → a layered image (async, sRGB, mipped by
@@ -2528,6 +2545,7 @@ class Context:
         one-shot copies of create_buffer and create_image(array), which have
         nothing to decode and join the batch already submitted."""
         ...
+    @overload
     def create_render_target(self, width: int, height: int,
                              color: Optional[Format | Sequence[Format]] = Format.RGBA8,
                              depth: Optional[Format] = None, samples: int = 1, *,
@@ -2561,6 +2579,7 @@ class Context:
         memory — so it is off by default.
         """
         ...
+    @overload
     def create_render_target(self, *, color: Optional[Image | Sequence[Image]] = None,
                              depth: Optional[Image] = None, samples: int = 1,
                              name: str = "", keep_samples: bool = False) -> RenderTarget:
@@ -2585,6 +2604,7 @@ class Context:
         """
         ...
 
+    @overload
     def create_renderer(self, window: Window, *,
                         present_mode: PresentMode = PresentMode.MAILBOX,
                         samples: int = 1, stencil: bool = False) -> SwapchainRenderer:
@@ -2604,6 +2624,7 @@ class Context:
         with depth=Format.DEPTH_STENCIL.
         """
         ...
+    @overload
     def create_renderer(self, *, win32_hwnd: int,
                         present_mode: PresentMode = PresentMode.MAILBOX,
                         samples: int = 1, stencil: bool = False) -> SwapchainRenderer:
@@ -2611,6 +2632,7 @@ class Context:
         anything with an HWND. Windows only; elsewhere it raises WindowError.
         See examples/08_pyqt_integration."""
         ...
+    @overload
     def create_image(self, width: int, height: int,
                      format: Format = Format.RGBA8, *, depth: int = 1,
                      layers: int = 1, cube: bool = False, mip_levels: int = 1,
@@ -2628,6 +2650,7 @@ class Context:
         `cmd.generate_mipmaps(img)` to fill the rest. Depth counts toward the
         chain: a 1x1x64 volume has 7 levels."""
         ...
+    @overload
     def create_image(self, array: Any, *, mipmaps: bool = False,
                      cube: bool = False, name: str = "") -> Image:
         """From one numpy array; shape + dtype pick the format (UNORM — arrays
@@ -2645,6 +2668,7 @@ class Context:
         — a submit that samples the image waits for it GPU-side, and read()
         waits CPU-side."""
         ...
+    @overload
     def create_image(self, images: Sequence[Any], *, mipmaps: bool = False,
                      cube: bool = False, name: str = "") -> Image:
         """From a list of numpy arrays → a layered image: a texture array, or a
@@ -2652,6 +2676,7 @@ class Context:
         +X,-X,+Y,-Y,+Z,-Z). Every layer must share shape and dtype. `mipmaps=True`
         generates the full chain across every layer."""
         ...
+    @overload
     def create_image(self, source: Image, *, name: str = "") -> Image:
         """From an Image on another Context (or this one — that is a clone).
 

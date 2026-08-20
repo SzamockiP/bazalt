@@ -569,7 +569,7 @@ def test_the_clipboard_round_trips(ctx):
         bz.set_clipboard("")
         assert bz.get_clipboard() == ""
     finally:
-        window = None
+        del window
 
 
 def test_a_fresh_window_is_open_and_retitles(ctx):
@@ -634,7 +634,7 @@ def test_wait_events_rotates_the_per_cycle_state(ctx):
 
 
 def test_wait_events_rejects_a_negative_timeout(ctx):
-    window = a_window()
+    _window = a_window()  # wait_events needs a live window to get past its guard
     with pytest.raises(ValueError, match="negative"):
         bz.wait_events(timeout=-1.0)
 

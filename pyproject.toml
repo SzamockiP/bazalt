@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "bazalt"
-version = "0.26.0"
+version = "0.27.0"
 description = "Python library for rapid GPU shader prototyping using Vulkan"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -38,6 +38,23 @@ test = ["pytest", "numpy", "pillow"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# An explicit rule set, not the default: ruff's defaults move between versions,
+# and a gate that changes on somebody else's release schedule is the clang-format
+# lesson again. CI runs `ruff check .` in the format job.
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# The package IS a star-re-export shim: the star import and the names __all__
+# lists "may be undefined" are its entire job.
+"bazalt/__init__.py" = ["F403", "F405"]
+# The examples read as prose. The compact `if pressed: move` camera one-liners
+# are that prose, not an error.
+"examples/**" = ["E701"]
 
 [tool.scikit-build]
 wheel.packages = ["bazalt"]

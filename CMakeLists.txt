@@ -4,6 +4,8 @@ project(${SKBUILD_PROJECT_NAME} LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+# clang-tidy reads the compile database. Costs nothing when unused.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(pybind11 CONFIG REQUIRED)
 
@@ -12,8 +14,8 @@ find_package(Vulkan REQUIRED COMPONENTS shaderc_combined)
 include(FetchContent)
 
 # glfw
-set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+# Only DOCS needs saying: EXAMPLES and TESTS already default to OFF when glfw is
+# a subproject (they follow GLFW_STANDALONE), DOCS defaults ON regardless.
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
   glfw
@@ -31,25 +33,22 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(volk)
-if(TARGET volk)
-    set_target_properties(volk PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-    # PUBLIC, and on VOLK rather than on _core, because the platform macro changes
-    # the LAYOUT of VolkDeviceTable: every win32-only entry point is behind
-    # `#if defined(VK_USE_PLATFORM_WIN32_KHR)` in volk.h. Defining it for _core
-    # alone gave the two translation units two different structs — one definition
-    # rule broken, and every field after the guarded ones read at the wrong
-    # offset. Found in 0.25 by the first call that needed one of those entry
-    # points (vkAcquireFullScreenExclusiveModeEXT), which crashed.
-    #
-    # PUBLIC propagates to everything that links volk, so the definition cannot
-    # drift between them again.
-    if(WIN32)
-        target_compile_definitions(volk PUBLIC VK_USE_PLATFORM_WIN32_KHR)
-    elseif(APPLE)
-        # The same rule for the Metal surface entry point.
-        target_compile_definitions(volk PUBLIC VK_USE_PLATFORM_METAL_EXT)
-    endif()
+# PUBLIC, and on VOLK rather than on _core, because the platform macro changes
+# the LAYOUT of VolkDeviceTable: every win32-only entry point is behind
+# `#if defined(VK_USE_PLATFORM_WIN32_KHR)` in volk.h. Defining it for _core
+# alone gave the two translation units two different structs — one definition
+# rule broken, and every field after the guarded ones read at the wrong
+# offset. Found in 0.25 by the first call that needed one of those entry
+# points (vkAcquireFullScreenExclusiveModeEXT), which crashed.
+#
+# PUBLIC propagates to everything that links volk, so the definition cannot
+# drift between them again.
+if(WIN32)
+    target_compile_definitions(volk PUBLIC VK_USE_PLATFORM_WIN32_KHR)
+elseif(APPLE)
+    # The same rule for the Metal surface entry point.
+    target_compile_definitions(volk PUBLIC VK_USE_PLATFORM_METAL_EXT)
 endif()
 
 #vma
@@ -61,12 +60,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(vma)
 
-if(NOT TARGET vma)
-    add_library(vma INTERFACE)
-    target_include_directories(vma INTERFACE ${vma_SOURCE_DIR}/include)
-    target_compile_definitions(vma INTERFACE VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=1)
-endif()
-
 #vk-bootstrap
 FetchContent_Declare(
     vk-bootstrap
@@ -75,9 +68,10 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(vk-bootstrap)
-if(TARGET vk-bootstrap)
-    set_target_properties(vk-bootstrap PROPERTIES POSITION_INDEPENDENT_CODE ON)
-endif()
+# Not redundant with the global CMAKE_POSITION_INDEPENDENT_CODE: vk-bootstrap
+# overrides PIC from its own option (default BUILD_SHARED_LIBS, OFF here), so
+# the global never reaches it. volk has no such override and needs nothing.
+set_target_properties(vk-bootstrap PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 #stb
 # A commit, not a branch. stb publishes no tags, so `master` used to be the only
@@ -126,14 +120,17 @@ add_library(_core MODULE
     src/stb_impl.cpp
 )
 
-target_link_libraries(_core PRIVATE 
+target_link_libraries(_core PRIVATE
     pybind11::module
     glfw
     volk
-    vma
+    GPUOpen::VulkanMemoryAllocator
     vk-bootstrap::vk-bootstrap
     Vulkan::shaderc_combined
 )
+# On the target, not per file: every TU that includes vk_mem_alloc.h must agree,
+# or the header's function-pointer table changes shape between TUs.
+target_compile_definitions(_core PRIVATE VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=1)
 # src/ on the path because the binding files sit in src/bindings/ and include the
 # core headers by name.
 target_include_directories(_core PRIVATE ${stb_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -156,7 +153,6 @@ set_target_properties(_core PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}" SUFFIX "
 # in CI and not on a contributor's machine.
 target_compile_definitions(_core PRIVATE VK_ENABLE_BETA_EXTENSIONS)
 
-target_compile_features(_core PRIVATE cxx_std_23)
 if(MSVC)
     # /bigobj: every pybind lambda is a template instantiation, and 0.14 pushed
     # the binding layer past COFF's 65,536-section limit. The 0.20 split into
