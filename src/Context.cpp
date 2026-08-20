@@ -12,7 +12,7 @@
 #include <string_view>
 
 std::expected<std::shared_ptr<Context>, Error> Context::create(
-    std::shared_ptr<Logger> logger,
+    const std::shared_ptr<Logger>& logger,
     const ContextConfig& config)
 {
     if (config.frames_in_flight < 1 || config.frames_in_flight > 4)
@@ -471,7 +471,7 @@ Context::MemoryStats Context::memory_stats() const
     return stats;
 }
 
-void Context::set_debug_name(VkObjectType type, std::uint64_t handle, const std::string& name)
+void Context::set_debug_name(VkObjectType type, std::uint64_t handle, const std::string& name) const
 {
     if (name.empty() || handle == 0 || vkSetDebugUtilsObjectNameEXT == nullptr)
     {
@@ -527,7 +527,7 @@ std::expected<std::uint32_t, Error> Context::create_instance_(
     // entry points alone would only crash, since a device that never enabled the
     // KHR extension has no KHR entry points to alias to either.
     const char* force_1_2 = std::getenv("BAZALT_FORCE_VULKAN_1_2");
-    const bool has_1_3 = system_info->is_instance_version_available(1, 3) && !(force_1_2 && force_1_2[0] == '1');
+    const bool has_1_3 = system_info->is_instance_version_available(1, 3) && (!force_1_2 || force_1_2[0] != '1');
     const std::uint32_t target_api = has_1_3 ? VK_API_VERSION_1_3 : VK_API_VERSION_1_2;
 
     // Instance + Debug Messenger
@@ -1216,7 +1216,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL Context::debug_callback(
     const VkDebugUtilsMessengerCallbackDataEXT* callback_data,
     void* user_data)
 {
-    Logger* logger = static_cast<Logger*>(user_data);
+    auto* logger = static_cast<Logger*>(user_data);
     if (!logger)
     {
         return VK_FALSE;

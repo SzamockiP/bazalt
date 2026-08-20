@@ -88,7 +88,7 @@ public:
     ShaderModule(
         std::shared_ptr<Context> context,
         VkShaderModule module,
-        const std::string& path,
+        std::string path,
         ShaderStage stage,
         std::vector<std::string> includes,
         std::vector<uint32_t> spirv,

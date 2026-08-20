@@ -68,12 +68,12 @@ public:
     // (which is the only way depth_test(compare=GREATER) can ever pass). It is
     // ignored when the pass preserves.
     CommandBuffer& begin_rendering(
-        std::shared_ptr<RenderTarget> target,
+        const std::shared_ptr<RenderTarget>& target,
         const std::optional<std::vector<std::array<float, 4>>>& clear_colors,
         float clear_depth = 1.0f,
         std::uint32_t clear_stencil = 0);
 
-    CommandBuffer& end_rendering(std::shared_ptr<RenderTarget> target);
+    CommandBuffer& end_rendering(const std::shared_ptr<RenderTarget>& target);
 
     // Explicit override for split-screen and similar. The no-argument version is
     // gone: begin_rendering already covers the whole-target case.
@@ -81,15 +81,15 @@ public:
 
     CommandBuffer& set_scissor(std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height);
 
-    CommandBuffer& bind_pipeline(std::shared_ptr<Pipeline> pipeline);
+    CommandBuffer& bind_pipeline(const std::shared_ptr<Pipeline>& pipeline);
 
     // binding= selects which of the pipeline's vertex bindings this buffer
     // feeds: 0 is vertex_format (per vertex), 1 is instance_format (per
     // instance). A kwarg on the existing verb rather than a second method —
     // binding one buffer and binding the other are the same operation.
-    CommandBuffer& bind_vertex_buffer(std::shared_ptr<Buffer> buffer, std::uint32_t binding = 0);
+    CommandBuffer& bind_vertex_buffer(const std::shared_ptr<Buffer>& buffer, std::uint32_t binding = 0);
 
-    CommandBuffer& bind_index_buffer(std::shared_ptr<Buffer> buffer);
+    CommandBuffer& bind_index_buffer(const std::shared_ptr<Buffer>& buffer);
 
     // instances= is a kwarg on both draw verbs rather than a third verb: the
     // instance count is one argument of a draw, and draw_indexed_instanced was a
@@ -349,7 +349,11 @@ public:
 
     // No stage argument: the Pipeline already knows which stages its push constant
     // range covers, so passing a mismatched one was a validation error for no gain.
-    CommandBuffer& push_constants(std::shared_ptr<Pipeline> pipeline, uint32_t offset, uint32_t size, const void* data);
+    CommandBuffer& push_constants(
+        const std::shared_ptr<Pipeline>& pipeline,
+        uint32_t offset,
+        uint32_t size,
+        const void* data);
 
     // The short form: bind the set where it was allocated to go, on the pipeline
     // that is already bound (0.25, ergonomics #3). Both arguments the long form
@@ -360,11 +364,11 @@ public:
     // The long form stays for a recording split across functions, where the
     // pipeline was bound somewhere this code cannot see, and for binding a set
     // against a DIFFERENT pipeline with a compatible layout.
-    std::expected<void, Error> bind_descriptor_set(std::shared_ptr<DescriptorSet> descSet);
+    std::expected<void, Error> bind_descriptor_set(const std::shared_ptr<DescriptorSet>& descSet);
 
     CommandBuffer& bind_descriptor_set(
-        std::shared_ptr<DescriptorSet> descSet,
-        std::shared_ptr<Pipeline> pipeline,
+        const std::shared_ptr<DescriptorSet>& descSet,
+        const std::shared_ptr<Pipeline>& pipeline,
         uint32_t setIndex);
 
     const std::vector<std::shared_ptr<DescriptorSet>>& used_sets() const
@@ -497,7 +501,7 @@ private:
     // with no pipeline bound there is nothing to ask, and the answer has to be the
     // conservative one — a draw with no pipeline is a bug the layers name precisely,
     // and guessing "not written" there would silently drop a real barrier.
-    bool pipeline_writes_(const std::shared_ptr<Pipeline>& pipeline, std::uint32_t set, std::uint32_t binding) const;
+    static bool pipeline_writes_(const std::shared_ptr<Pipeline>& pipeline, std::uint32_t set, std::uint32_t binding);
 
     // The shared body of track_draw_ and track_dispatch_. Before 0.19 these were
     // two functions that disagreed about the same question: the graphics one called

@@ -85,11 +85,15 @@ Image::~Image()
              allocation = allocation_]
             {
                 if (view != VK_NULL_HANDLE)
+                {
                     vk->vkDestroyImageView(device, view, nullptr);
+                }
                 // A separate 2D_ARRAY view exists only for cubemaps (storage
                 // binding can't use a CUBE view); non-cube images share view_.
                 if (storage_view != VK_NULL_HANDLE)
+                {
                     vk->vkDestroyImageView(device, storage_view, nullptr);
+                }
                 if (image != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE)
                 {
                     vmaDestroyImage(allocator, image, allocation);
@@ -118,8 +122,9 @@ bool Image::ready() const
     {
         case UploadState::None:
             return has_contents_.load();
+        // Both mean "not usable": one will be, one never will, and wait()
+        // is what tells them apart.
         case UploadState::Pending:
-            return false;
         case UploadState::Failed:
             return false;
         case UploadState::Submitted:
@@ -217,17 +222,29 @@ VkImageUsageFlags Image::usage_for(Context& context, Format format)
 
     VkImageUsageFlags usage = 0;
     if (feat & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)
+    {
         usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    }
     if (feat & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT)
+    {
         usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    }
     if (feat & VK_FORMAT_FEATURE_TRANSFER_DST_BIT)
+    {
         usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    }
     if (feat & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)
+    {
         usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    }
     if (feat & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+    {
         usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    }
     if (feat & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)
+    {
         usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    }
     return usage;
 }
 
@@ -323,16 +340,26 @@ std::expected<std::shared_ptr<Image>, Error> Image::create_empty(
             "does not offer. Ask ctx.supports(bz.Feature.MULTISAMPLE_ARRAYS), or render the layers one "
             "at a time into single-layer multisampled targets."));
     }
-    const FormatInfo info = format_info(format);
     const VkFormat vk_fmt = context.vk_format(format);
     if (vk_fmt == VK_FORMAT_UNDEFINED)
     {
         return std::unexpected(err_unsupported(std::format("This device supports no {} format", format_name(format))));
     }
     const VkImageAspectFlags aspect = aspect_mask_for(vk_fmt);
-    const VkImageViewType view_type = depth > 1 ? VK_IMAGE_VIEW_TYPE_3D
-                                      : cube    ? VK_IMAGE_VIEW_TYPE_CUBE
-                                             : (array_layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D);
+    // A volume has one array layer and a cube has six, so the three cases are
+    // exclusive and the order only decides which name a reader sees first.
+    const VkImageViewType view_type = [&]
+    {
+        if (depth > 1)
+        {
+            return VK_IMAGE_VIEW_TYPE_3D;
+        }
+        if (cube)
+        {
+            return VK_IMAGE_VIEW_TYPE_CUBE;
+        }
+        return array_layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    }();
 
     // 2D_ARRAY_COMPATIBLE is what later lets a 2D view select one Z slice
     // of the volume as a render-target attachment. It costs nothing where
@@ -766,12 +793,12 @@ void Image::record_generate_mipmaps(
         mip_levels_ - 1,
         barrier_layers(array_layers_));
 
-    std::int32_t mip_width = static_cast<std::int32_t>(width_);
-    std::int32_t mip_height = static_cast<std::int32_t>(height_);
+    auto mip_width = static_cast<std::int32_t>(width_);
+    auto mip_height = static_cast<std::int32_t>(height_);
     // Depth halves alongside width and height for a volume (it is 1 and
     // stays 1 for everything else), so the loop terminates exactly where
     // full_mip_count says the chain ends.
-    std::int32_t mip_depth = static_cast<std::int32_t>(depth_);
+    auto mip_depth = static_cast<std::int32_t>(depth_);
 
     for (std::uint32_t i = 1; i < mip_levels_; ++i)
     {
@@ -957,9 +984,9 @@ void Image::record_mip_generation(
     std::uint32_t layers,
     std::uint32_t depth)
 {
-    std::int32_t mip_width = static_cast<std::int32_t>(width);
-    std::int32_t mip_height = static_cast<std::int32_t>(height);
-    std::int32_t mip_depth = static_cast<std::int32_t>(depth);
+    auto mip_width = static_cast<std::int32_t>(width);
+    auto mip_height = static_cast<std::int32_t>(height);
+    auto mip_depth = static_cast<std::int32_t>(depth);
     // Barriers on a volume name VK_REMAINING_ARRAY_LAYERS; see barrier_layers.
     const std::uint32_t barrier_span = depth > 1 ? VK_REMAINING_ARRAY_LAYERS : layers;
 

@@ -23,9 +23,13 @@ std::expected<void, Error> DescriptorSet::set_image(
     uint32_t index)
 {
     if (!context_)
+    {
         return std::unexpected(err_init("Context destroyed"));
+    }
     if (!image)
+    {
         return std::unexpected(err_resource("set_image: image is null"));
+    }
 
     // A typo in the binding index used to surface only as a validation error
     // at submit time (or not at all with the layers off). Diagnose it here.
@@ -78,9 +82,13 @@ std::expected<void, Error> DescriptorSet::set_storage_image(
     uint32_t index)
 {
     if (!context_)
+    {
         return std::unexpected(err_init("Context destroyed"));
+    }
     if (!image)
+    {
         return std::unexpected(err_resource("set_storage_image: image is null"));
+    }
 
     auto decl = check_binding(binding, index, "set_storage_image");
     if (!decl)
@@ -132,9 +140,13 @@ std::expected<void, Error> DescriptorSet::set_storage_image(
 std::expected<void, Error> DescriptorSet::set_buffer(uint32_t binding, std::shared_ptr<Buffer> buffer, uint32_t index)
 {
     if (!context_)
+    {
         return std::unexpected(err_init("Context destroyed"));
+    }
     if (!buffer)
+    {
         return std::unexpected(err_resource("set_buffer: buffer is null"));
+    }
 
     if (!is_frame_set_ && buffer->is_dynamic())
     {
@@ -178,7 +190,7 @@ std::expected<void, Error> DescriptorSet::set_buffer(uint32_t binding, std::shar
             .pTexelBufferView = nullptr};
         context_->vk().vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
     }
-    replace_or_append_(buffers_, {std::move(buffer), descType, binding, index});
+    replace_or_append_(buffers_, {.buffer = std::move(buffer), .type = descType, .binding = binding, .index = index});
     return {};
 }
 
@@ -222,7 +234,14 @@ void DescriptorSet::record_image_(
     std::shared_ptr<Image> image,
     std::shared_ptr<Sampler> sampler)
 {
-    replace_or_append_(bound_images_, BoundImage{std::move(image), type, binding, index, std::move(sampler)});
+    replace_or_append_(
+        bound_images_,
+        BoundImage{
+            .image = std::move(image),
+            .type = type,
+            .binding = binding,
+            .index = index,
+            .sampler = std::move(sampler)});
 }
 
 std::expected<std::shared_ptr<DescriptorPool>, Error> DescriptorPool::create(
@@ -293,12 +312,14 @@ DescriptorPool::~DescriptorPool()
 }
 
 std::expected<std::shared_ptr<DescriptorSet>, Error> DescriptorPool::allocate_(
-    std::shared_ptr<Pipeline> pipeline,
+    const std::shared_ptr<Pipeline>& pipeline,
     uint32_t setIndex,
     bool frame_set)
 {
     if (!context_)
+    {
         return std::unexpected(err_init("Context destroyed"));
+    }
 
     VkDescriptorSetLayout layout = pipeline->descriptor_set_layout(setIndex);
     if (layout == VK_NULL_HANDLE)
@@ -431,7 +452,7 @@ std::expected<VkDescriptorPool, Error> DescriptorPool::create_block_(
         .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
         .pPoolSizes = poolSizes.data()};
 
-    VkDescriptorPool pool;
+    VkDescriptorPool pool = nullptr;
     if (auto e = check(
             context.vk().vkCreateDescriptorPool(context.device(), &poolInfo, nullptr, &pool),
             "create descriptor pool",
@@ -464,13 +485,12 @@ bool DescriptorPool::exceeds_(
     {
         return true;
     }
-    for (const auto& [type, count] : needed)
-    {
-        const auto it = block.capacity.find(type);
-        if (it == block.capacity.end() || it->second < count)
+    return std::ranges::any_of(
+        needed,
+        [&block](const auto& entry)
         {
-            return true;
-        }
-    }
-    return false;
+            const auto& [type, count] = entry;
+            const auto it = block.capacity.find(type);
+            return it == block.capacity.end() || it->second < count;
+        });
 }

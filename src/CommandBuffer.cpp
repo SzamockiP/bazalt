@@ -92,12 +92,12 @@ CommandBuffer& CommandBuffer::begin()
 }
 
 CommandBuffer& CommandBuffer::begin_rendering(
-    std::shared_ptr<RenderTarget> target,
+    const std::shared_ptr<RenderTarget>& target,
     const std::optional<std::vector<std::array<float, 4>>>& clear_colors,
     float clear_depth,
     std::uint32_t clear_stencil)
 {
-    commands_.push_back(
+    commands_.emplace_back(
         [clear_colors, clear_depth, clear_stencil, target](VkCommandBuffer cmd, const FrameContext& frame)
         {
             RenderTarget* rt = target.get();
@@ -235,10 +235,16 @@ CommandBuffer& CommandBuffer::begin_rendering(
             colorAttachments.reserve(rt->color_count());
             for (uint32_t i = 0; i < rt->color_count(); ++i)
             {
-                const std::array<float, 4> cc = preserve || clear_colors->empty()
-                                                    ? std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}
-                                                    : (i < clear_colors->size() ? (*clear_colors)[i]
-                                                                                : (*clear_colors)[0]);
+                // One entry clears every attachment, N entries clear attachment
+                // i with entry i, and a preserving pass has no clear at all.
+                const std::array<float, 4> cc = [&]() -> std::array<float, 4>
+                {
+                    if (preserve || clear_colors->empty())
+                    {
+                        return {0.0f, 0.0f, 0.0f, 1.0f};
+                    }
+                    return i < clear_colors->size() ? (*clear_colors)[i] : (*clear_colors)[0];
+                }();
                 // MSAA: render into the multisampled view, resolve (averaging
                 // the samples) into the single-sample target. The multisampled
                 // image is discarded afterwards unless the target asked to keep
@@ -338,9 +344,9 @@ CommandBuffer& CommandBuffer::begin_rendering(
     return *this;
 }
 
-CommandBuffer& CommandBuffer::end_rendering(std::shared_ptr<RenderTarget> target)
+CommandBuffer& CommandBuffer::end_rendering(const std::shared_ptr<RenderTarget>& target)
 {
-    commands_.push_back(
+    commands_.emplace_back(
         [target](VkCommandBuffer cmd, const FrameContext& frame)
         {
             frame.vk->vkCmdEndRendering(cmd);
@@ -473,7 +479,7 @@ CommandBuffer& CommandBuffer::end_rendering(std::shared_ptr<RenderTarget> target
 
 CommandBuffer& CommandBuffer::set_viewport(float x, float y, float width, float height)
 {
-    commands_.push_back(
+    commands_.emplace_back(
         [x, y, width, height](VkCommandBuffer cmd, const FrameContext& frame)
         {
             VkViewport viewport{.x = x, .y = y, .width = width, .height = height, .minDepth = 0.0f, .maxDepth = 1.0f};
@@ -484,7 +490,7 @@ CommandBuffer& CommandBuffer::set_viewport(float x, float y, float width, float 
 
 CommandBuffer& CommandBuffer::set_scissor(std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height)
 {
-    commands_.push_back(
+    commands_.emplace_back(
         [x, y, width, height](VkCommandBuffer cmd, const FrameContext& frame)
         {
             VkRect2D scissor{.offset = {x, y}, .extent = {width, height}};
@@ -493,7 +499,7 @@ CommandBuffer& CommandBuffer::set_scissor(std::int32_t x, std::int32_t y, std::u
     return *this;
 }
 
-CommandBuffer& CommandBuffer::bind_pipeline(std::shared_ptr<Pipeline> pipeline)
+CommandBuffer& CommandBuffer::bind_pipeline(const std::shared_ptr<Pipeline>& pipeline)
 {
     // Remembered as record-time state, not only pushed as a replay lambda: the
     // tracker needs the bound pipeline to ask its shaders what they write, and
@@ -517,32 +523,32 @@ CommandBuffer& CommandBuffer::bind_pipeline(std::shared_ptr<Pipeline> pipeline)
             bound_last_pipeline_ = pipeline;
         }
     }
-    commands_.push_back([pipeline](VkCommandBuffer cmd, const FrameContext& frame)
-                        { frame.vk->vkCmdBindPipeline(cmd, pipeline->bind_point(), pipeline->get()); });
+    commands_.emplace_back([pipeline](VkCommandBuffer cmd, const FrameContext& frame)
+                           { frame.vk->vkCmdBindPipeline(cmd, pipeline->bind_point(), pipeline->get()); });
     return *this;
 }
 
-CommandBuffer& CommandBuffer::bind_vertex_buffer(std::shared_ptr<Buffer> buffer, std::uint32_t binding)
+CommandBuffer& CommandBuffer::bind_vertex_buffer(const std::shared_ptr<Buffer>& buffer, std::uint32_t binding)
 {
     // The read truly happens at draw, but a barrier placed before the bind
     // is still before the draw — sound, and simpler than deferring it.
     track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT, false);
     record_buffer_use_(buffer);
-    commands_.push_back(
+    commands_.emplace_back(
         [buffer, binding](VkCommandBuffer cmd, const FrameContext& frame)
         {
-            VkBuffer vertexBuffers[] = {buffer->get()};
-            VkDeviceSize offsets[] = {0};
-            frame.vk->vkCmdBindVertexBuffers(cmd, binding, 1, vertexBuffers, offsets);
+            const std::array<VkBuffer, 1> vertexBuffers = {buffer->get()};
+            const std::array<VkDeviceSize, 1> offsets = {0};
+            frame.vk->vkCmdBindVertexBuffers(cmd, binding, 1, vertexBuffers.data(), offsets.data());
         });
     return *this;
 }
 
-CommandBuffer& CommandBuffer::bind_index_buffer(std::shared_ptr<Buffer> buffer)
+CommandBuffer& CommandBuffer::bind_index_buffer(const std::shared_ptr<Buffer>& buffer)
 {
     track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_INDEX_READ_BIT, false);
     record_buffer_use_(buffer);
-    commands_.push_back(
+    commands_.emplace_back(
         [buffer](VkCommandBuffer cmd, const FrameContext& frame)
         {
             // Derived from the buffer rather than hardcoded to UINT32: create_buffer
@@ -555,8 +561,8 @@ CommandBuffer& CommandBuffer::bind_index_buffer(std::shared_ptr<Buffer> buffer)
 CommandBuffer& CommandBuffer::draw(uint32_t vertexCount, uint32_t instances)
 {
     track_draw_();
-    commands_.push_back([vertexCount, instances](VkCommandBuffer cmd, const FrameContext& frame)
-                        { frame.vk->vkCmdDraw(cmd, vertexCount, instances, 0, 0); });
+    commands_.emplace_back([vertexCount, instances](VkCommandBuffer cmd, const FrameContext& frame)
+                           { frame.vk->vkCmdDraw(cmd, vertexCount, instances, 0, 0); });
     return *this;
 }
 
@@ -567,7 +573,7 @@ CommandBuffer& CommandBuffer::draw_indexed(
     uint32_t instances)
 {
     track_draw_();
-    commands_.push_back(
+    commands_.emplace_back(
         [indexCount, firstIndex, vertexOffset, instances](VkCommandBuffer cmd, const FrameContext& frame)
         { frame.vk->vkCmdDrawIndexed(cmd, indexCount, instances, firstIndex, vertexOffset, 0); });
     return *this;
@@ -576,8 +582,8 @@ CommandBuffer& CommandBuffer::draw_indexed(
 CommandBuffer& CommandBuffer::dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {
     track_dispatch_();
-    commands_.push_back([groupCountX, groupCountY, groupCountZ](VkCommandBuffer cmd, const FrameContext& frame)
-                        { frame.vk->vkCmdDispatch(cmd, groupCountX, groupCountY, groupCountZ); });
+    commands_.emplace_back([groupCountX, groupCountY, groupCountZ](VkCommandBuffer cmd, const FrameContext& frame)
+                           { frame.vk->vkCmdDispatch(cmd, groupCountX, groupCountY, groupCountZ); });
     return *this;
 }
 
@@ -610,7 +616,7 @@ std::expected<void, Error> CommandBuffer::draw_indirect(
         track_indirect_(count_buffer);
     }
     track_draw_();
-    commands_.push_back(
+    commands_.emplace_back(
         [buffer = std::move(buffer), offset, count, count_buffer = std::move(count_buffer), count_offset, draw_stride](
             VkCommandBuffer cmd, const FrameContext& frame)
         {
@@ -658,7 +664,7 @@ std::expected<void, Error> CommandBuffer::draw_indexed_indirect(
         track_indirect_(count_buffer);
     }
     track_draw_();
-    commands_.push_back(
+    commands_.emplace_back(
         [buffer = std::move(buffer), offset, count, count_buffer = std::move(count_buffer), count_offset, draw_stride](
             VkCommandBuffer cmd, const FrameContext& frame)
         {
@@ -697,8 +703,8 @@ std::expected<void, Error> CommandBuffer::dispatch_indirect(std::shared_ptr<Buff
     }
     track_indirect_(buffer);
     track_dispatch_();
-    commands_.push_back([buffer = std::move(buffer), offset](VkCommandBuffer cmd, const FrameContext& frame)
-                        { frame.vk->vkCmdDispatchIndirect(cmd, buffer->get(), offset); });
+    commands_.emplace_back([buffer = std::move(buffer), offset](VkCommandBuffer cmd, const FrameContext& frame)
+                           { frame.vk->vkCmdDispatchIndirect(cmd, buffer->get(), offset); });
     return {};
 }
 
@@ -717,7 +723,9 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Buffer> buffer
     const StageAccess s = to_vk(src, context_->all_shader_stages());
     const StageAccess d = to_vk(dst, context_->all_shader_stages());
     Buffer* buf = buffer.get();
-    record_barrier_(std::move(buffer), {s.stages, d.stages, s.access, d.access});
+    record_barrier_(
+        std::move(buffer),
+        {.src_stages = s.stages, .dst_stages = d.stages, .src_access = s.access, .dst_access = d.access});
     // Keep the auto-tracker in sync, for the reason the image overload below
     // does it: the caller just expressed this dependency, so the next
     // automatic use of the buffer must not emit the first-use floor on top of
@@ -752,7 +760,14 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Image> image, 
     const StageAccess s = to_vk(src, context_->all_shader_stages());
     const StageAccess d = to_vk(dst, context_->all_shader_stages());
     Image* img = image.get();
-    record_image_barrier_(std::move(image), {*old_layout, *new_layout, s.stages, d.stages, s.access, d.access});
+    record_image_barrier_(
+        std::move(image),
+        {.old_layout = *old_layout,
+         .new_layout = *new_layout,
+         .src_stages = s.stages,
+         .dst_stages = d.stages,
+         .src_access = s.access,
+         .dst_access = d.access});
     // Keep the auto-tracker in sync: a later automatic use of this image in
     // the same recording must see the post-barrier layout, not re-transition
     // from a stale one. No-op in manual mode (the tracker is never consulted).
@@ -796,7 +811,7 @@ std::expected<void, Error> CommandBuffer::generate_mipmaps(std::shared_ptr<Image
     }
     const StageAccess s = to_vk(src, context_->all_shader_stages());
     Image* img = image.get();
-    commands_.push_back(
+    commands_.emplace_back(
         [image = std::move(image), layout = *src_layout, s](VkCommandBuffer cmd, const FrameContext& frame)
         { image->record_generate_mipmaps(cmd, layout, s.stages, s.access); });
     // The image now rests in SHADER_READ_ONLY across every level; keep the
@@ -859,9 +874,9 @@ std::expected<void, Error> CommandBuffer::copy_image(
     }
     Image* src_ptr = src.get();
     Image* dst_ptr = dst.get();
-    commands_.push_back([src = std::move(src), dst = std::move(dst), layout = *src_layout](
-                            VkCommandBuffer cmd, const FrameContext& frame)
-                        { record_image_copy(*frame.vk, cmd, *src, *dst, layout); });
+    commands_.emplace_back([src = std::move(src), dst = std::move(dst), layout = *src_layout](
+                               VkCommandBuffer cmd, const FrameContext& frame)
+                           { record_image_copy(*frame.vk, cmd, *src, *dst, layout); });
     finish_image_transfer_(src_ptr, dst_ptr);
     return {};
 }
@@ -926,9 +941,9 @@ std::expected<void, Error> CommandBuffer::blit_image(
     }
     Image* src_ptr = src.get();
     Image* dst_ptr = dst.get();
-    commands_.push_back([src = std::move(src), dst = std::move(dst), layout = *src_layout, filter](
-                            VkCommandBuffer cmd, const FrameContext& frame)
-                        { record_image_blit(*frame.vk, cmd, *src, *dst, layout, filter); });
+    commands_.emplace_back([src = std::move(src), dst = std::move(dst), layout = *src_layout, filter](
+                               VkCommandBuffer cmd, const FrameContext& frame)
+                           { record_image_blit(*frame.vk, cmd, *src, *dst, layout, filter); });
     finish_image_transfer_(src_ptr, dst_ptr);
     return {};
 }
@@ -950,7 +965,7 @@ std::expected<void, Error> CommandBuffer::copy_buffer(
             "cmd.copy_buffer() is not allowed inside a rendering scope. "
             "Record it before begin_rendering"));
     }
-    const VkDeviceSize length = size != 0 ? size : (src->size() > src_offset ? src->size() - src_offset : 0);
+    const VkDeviceSize length = size != 0 ? size : bytes_after(src->size(), src_offset);
     if (length == 0)
     {
         return std::unexpected(err_resource("copy_buffer: nothing to copy (size is 0)"));
@@ -972,7 +987,7 @@ std::expected<void, Error> CommandBuffer::copy_buffer(
     track_use_(dst, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, true);
     record_buffer_use_(src);
     record_buffer_use_(dst);
-    commands_.push_back(
+    commands_.emplace_back(
         [src = std::move(src), dst = std::move(dst), src_offset, dst_offset, length](
             VkCommandBuffer cmd, const FrameContext& frame)
         {
@@ -1009,7 +1024,7 @@ std::expected<void, Error> CommandBuffer::fill_buffer(
                 offset,
                 size)));
     }
-    const VkDeviceSize length = size != 0 ? size : (buffer->size() > offset ? buffer->size() - offset : 0);
+    const VkDeviceSize length = size != 0 ? size : bytes_after(buffer->size(), offset);
     if (length == 0 || !fits_within(offset, length, buffer->size()))
     {
         return std::unexpected(err_resource(
@@ -1022,7 +1037,7 @@ std::expected<void, Error> CommandBuffer::fill_buffer(
 
     track_use_(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, true);
     record_buffer_use_(buffer);
-    commands_.push_back(
+    commands_.emplace_back(
         [buffer = std::move(buffer), value, offset, length](VkCommandBuffer cmd, const FrameContext& frame)
         { frame.vk->vkCmdFillBuffer(cmd, buffer->get(), offset, length, value); });
     return {};
@@ -1047,8 +1062,8 @@ std::expected<void, Error> CommandBuffer::clear_image(std::shared_ptr<Image> ima
             "(cmd.rendering(target, clear_depth=...))"));
     }
     Image* img = image.get();
-    commands_.push_back([image = std::move(image), color](VkCommandBuffer cmd, const FrameContext& frame)
-                        { record_image_clear(*frame.vk, cmd, *image, color); });
+    commands_.emplace_back([image = std::move(image), color](VkCommandBuffer cmd, const FrameContext& frame)
+                           { record_image_clear(*frame.vk, cmd, *image, color); });
     img->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     if (auto_barriers_)
     {
@@ -1067,7 +1082,7 @@ std::size_t CommandBuffer::start_timer()
 
 void CommandBuffer::stop_timer(std::size_t index)
 {
-    record_timer_write_(static_cast<std::uint32_t>(2 * index + 1), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    record_timer_write_(static_cast<std::uint32_t>((2 * index) + 1), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 }
 
 CommandBuffer::TimerReading CommandBuffer::read_timer(std::size_t index, std::uint64_t generation) const
@@ -1076,41 +1091,41 @@ CommandBuffer::TimerReading CommandBuffer::read_timer(std::size_t index, std::ui
     // recording that replaced it — that is still the stale handle's fault.
     if (generation != recording_generation_)
     {
-        return {QueryStatus::Superseded};
+        return {.status = QueryStatus::Superseded};
     }
     // timer_supported_ is only filled in at the first execute, so an unset
     // one means "nobody has asked the device yet", which is NotReady rather
     // than a verdict.
     if (timer_supported_.has_value() && !*timer_supported_)
     {
-        return {QueryStatus::Unsupported};
+        return {.status = QueryStatus::Unsupported};
     }
     if (timer_pool_ == VK_NULL_HANDLE || index >= timer_count_)
     {
-        return {QueryStatus::NotReady};
+        return {.status = QueryStatus::NotReady};
     }
-    std::uint64_t ts[2] = {0, 0};
+    std::array<std::uint64_t, 2> ts = {0, 0};
     if (context_->vk().vkGetQueryPoolResults(
             context_->device(),
             timer_pool_,
             static_cast<std::uint32_t>(2 * index),
             2,
             sizeof(ts),
-            ts,
+            ts.data(),
             sizeof(std::uint64_t),
             VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
     {
-        return {QueryStatus::NotReady}; // VK_NOT_READY: submit not finished
+        return {.status = QueryStatus::NotReady}; // VK_NOT_READY: submit not finished
     }
     const std::uint64_t mask = timer_valid_bits_ >= 64 ? ~std::uint64_t{0}
                                                        : ((std::uint64_t{1} << timer_valid_bits_) - 1);
     const std::uint64_t delta = (ts[1] - ts[0]) & mask;
-    return {QueryStatus::Ok, static_cast<double>(delta) * static_cast<double>(timer_period_) / 1.0e6};
+    return {.status = QueryStatus::Ok, .ms = static_cast<double>(delta) * static_cast<double>(timer_period_) / 1.0e6};
 }
 
 CommandBuffer& CommandBuffer::begin_label(const std::string& name)
 {
-    commands_.push_back(
+    commands_.emplace_back(
         [name](VkCommandBuffer cmd, const FrameContext&)
         {
             if (vkCmdBeginDebugUtilsLabelEXT == nullptr)
@@ -1139,7 +1154,7 @@ CommandBuffer& CommandBuffer::end_label()
         return *this;
     }
     --open_labels_;
-    commands_.push_back(
+    commands_.emplace_back(
         [](VkCommandBuffer cmd, const FrameContext&)
         {
             if (vkCmdEndDebugUtilsLabelEXT != nullptr)
@@ -1159,7 +1174,7 @@ std::expected<std::size_t, Error> CommandBuffer::start_occlusion_query()
             "query to begin and end within one render pass. Move it inside `with cmd.rendering(target):`."));
     }
     const std::size_t index = occlusion_count_++;
-    commands_.push_back(
+    commands_.emplace_back(
         [this, index](VkCommandBuffer cmd, const FrameContext& frame)
         {
             if (occlusion_pool_ != VK_NULL_HANDLE)
@@ -1181,7 +1196,7 @@ std::expected<std::size_t, Error> CommandBuffer::start_occlusion_query()
 
 void CommandBuffer::stop_occlusion_query(std::size_t index)
 {
-    commands_.push_back(
+    commands_.emplace_back(
         [this, index](VkCommandBuffer cmd, const FrameContext& frame)
         {
             if (occlusion_pool_ != VK_NULL_HANDLE)
@@ -1195,11 +1210,11 @@ CommandBuffer::OcclusionReading CommandBuffer::read_occlusion_query(std::size_t 
 {
     if (generation != recording_generation_)
     {
-        return {QueryStatus::Superseded};
+        return {.status = QueryStatus::Superseded};
     }
     if (occlusion_pool_ == VK_NULL_HANDLE || index >= occlusion_count_)
     {
-        return {QueryStatus::NotReady};
+        return {.status = QueryStatus::NotReady};
     }
     std::uint64_t samples = 0;
     if (context_->vk().vkGetQueryPoolResults(
@@ -1212,9 +1227,9 @@ CommandBuffer::OcclusionReading CommandBuffer::read_occlusion_query(std::size_t 
             sizeof(std::uint64_t),
             VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
     {
-        return {QueryStatus::NotReady}; // VK_NOT_READY: submit not finished
+        return {.status = QueryStatus::NotReady}; // VK_NOT_READY: submit not finished
     }
-    return {QueryStatus::Ok, samples};
+    return {.status = QueryStatus::Ok, .samples = samples};
 }
 
 std::expected<void, Error> CommandBuffer::push_constants(uint32_t offset, uint32_t size, const void* data)
@@ -1231,13 +1246,13 @@ std::expected<void, Error> CommandBuffer::push_constants(uint32_t offset, uint32
 }
 
 CommandBuffer& CommandBuffer::push_constants(
-    std::shared_ptr<Pipeline> pipeline,
+    const std::shared_ptr<Pipeline>& pipeline,
     uint32_t offset,
     uint32_t size,
     const void* data)
 {
     std::vector<uint8_t> buffer(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
-    commands_.push_back(
+    commands_.emplace_back(
         [pipeline, offset, size, buffer](VkCommandBuffer cmd, const FrameContext& frame)
         {
             frame.vk->vkCmdPushConstants(
@@ -1246,7 +1261,7 @@ CommandBuffer& CommandBuffer::push_constants(
     return *this;
 }
 
-std::expected<void, Error> CommandBuffer::bind_descriptor_set(std::shared_ptr<DescriptorSet> descSet)
+std::expected<void, Error> CommandBuffer::bind_descriptor_set(const std::shared_ptr<DescriptorSet>& descSet)
 {
     const bool compute = descSet->bind_point() == VK_PIPELINE_BIND_POINT_COMPUTE;
     std::shared_ptr<Pipeline> pipeline = compute ? bound_compute_pipeline_ : bound_graphics_pipeline_;
@@ -1260,13 +1275,13 @@ std::expected<void, Error> CommandBuffer::bind_descriptor_set(std::shared_ptr<De
                 compute ? "compute" : "graphics")));
     }
     const std::uint32_t set_index = descSet->set_index();
-    bind_descriptor_set(std::move(descSet), std::move(pipeline), set_index);
+    bind_descriptor_set(descSet, pipeline, set_index);
     return {};
 }
 
 CommandBuffer& CommandBuffer::bind_descriptor_set(
-    std::shared_ptr<DescriptorSet> descSet,
-    std::shared_ptr<Pipeline> pipeline,
+    const std::shared_ptr<DescriptorSet>& descSet,
+    const std::shared_ptr<Pipeline>& pipeline,
     uint32_t setIndex)
 {
     // Remembered so submit paths can walk the images this recording
@@ -1284,7 +1299,7 @@ CommandBuffer& CommandBuffer::bind_descriptor_set(
     {
         bound_graphics_sets_[setIndex] = descSet;
     }
-    commands_.push_back(
+    commands_.emplace_back(
         [descSet, pipeline, setIndex](VkCommandBuffer cmd, const FrameContext& frame)
         {
             VkDescriptorSet set = descSet->get(frame.frame_index);
@@ -1436,7 +1451,7 @@ void CommandBuffer::hoist_or_push_(std::function<void(VkCommandBuffer, const Fra
 {
     if (in_rendering_)
     {
-        commands_.insert(commands_.begin() + rendering_insert_pos_, std::move(lambda));
+        commands_.insert(commands_.begin() + static_cast<std::ptrdiff_t>(rendering_insert_pos_), std::move(lambda));
         ++rendering_insert_pos_;
     }
     else
@@ -1447,7 +1462,7 @@ void CommandBuffer::hoist_or_push_(std::function<void(VkCommandBuffer, const Fra
 
 void CommandBuffer::record_timer_write_(std::uint32_t slot, VkPipelineStageFlagBits stage)
 {
-    commands_.push_back(
+    commands_.emplace_back(
         [this, slot, stage](VkCommandBuffer cmd, const FrameContext& frame)
         {
             if (timer_pool_ != VK_NULL_HANDLE)
@@ -1598,7 +1613,7 @@ std::expected<void, Error> CommandBuffer::check_indirect_(
     // padding stride= leaves is BETWEEN commands, so a buffer sized exactly
     // for the data is legal and must not be refused. With the default packed
     // stride the two are the same number.
-    const VkDeviceSize needed = static_cast<VkDeviceSize>(count - 1) * stride + argument_size;
+    const VkDeviceSize needed = (static_cast<VkDeviceSize>(count - 1) * stride) + argument_size;
     if (!fits_within(offset, needed, buffer->size()))
     {
         return std::unexpected(err_resource(
@@ -1728,7 +1743,7 @@ void CommandBuffer::track_image_use_(
 bool CommandBuffer::pipeline_writes_(
     const std::shared_ptr<Pipeline>& pipeline,
     std::uint32_t set,
-    std::uint32_t binding) const
+    std::uint32_t binding)
 {
     if (!pipeline)
     {

@@ -514,6 +514,10 @@ private:
     // "slice i" exactly when slices_ > 1.
     std::uint32_t slices_ = 1;
 
+    // The destructor's whole body, out of line so the destructor itself can wrap
+    // it: this allocates, and a throwing destructor terminates.
+    void retire_subresource_views_();
+
     // Lazily created views, keyed (VkImage handle, base layer, layer count, mip).
     // Owned here, destroyed (deferred) in the destructor.
     std::map<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t>, VkImageView> subresource_views_;

@@ -18,7 +18,7 @@ void bind_resources(py::module_& m)
             py::arg("offset") = 0)
         .def(
             "update",
-            [](Buffer& buffer, py::buffer b, size_t offset)
+            [](Buffer& buffer, const py::buffer& b, size_t offset)
             {
                 require_open(buffer.owner(), "Buffer.update");
                 py::buffer_info info = b.request();
@@ -30,11 +30,13 @@ void bind_resources(py::module_& m)
             py::arg("offset") = 0)
         .def(
             "update",
-            [](Buffer& buffer, py::list list, std::optional<DataType> dataType, size_t offset)
+            [](Buffer& buffer, const py::list& list, std::optional<DataType> dataType, size_t offset)
             {
                 require_open(buffer.owner(), "Buffer.update");
                 if (list.empty())
+                {
                     return;
+                }
                 DataType actualType = resolve_data_type(list, dataType, DataType::INT32);
                 with_list_bytes(
                     list,
@@ -50,7 +52,7 @@ void bind_resources(py::module_& m)
         // caller has to say how to interpret the bytes.
         .def(
             "read",
-            [](Buffer& self, py::object dtype) -> py::array
+            [](Buffer& self, const py::object& dtype) -> py::array
             {
                 require_open(self.owner(), "Buffer.read");
                 auto bytes = unwrap(self.read_bytes(), nullptr);
@@ -176,7 +178,7 @@ void bind_resources(py::module_& m)
                 // ResourceError, not ValueError: every one of these needs the image
                 // to decide, and image.read() answers the same questions the same
                 // way. See "Which exception a user error gets" in DESIGN.md.
-                Context* context = const_cast<Context*>(self->owner());
+                auto* context = const_cast<Context*>(self->owner());
                 if (!context)
                 {
                     raise_error(err_resource("update(): this image has no Context"));
@@ -202,10 +204,15 @@ void bind_resources(py::module_& m)
                 const std::uint32_t level_w = mip_extent(self->width(), mip);
                 const std::uint32_t level_h = mip_extent(self->height(), mip);
                 const std::uint32_t level_d = mip_extent(self->depth(), mip);
-                std::uint32_t x = 0, y = 0, z = 0, w = level_w, h = level_h, d = level_d;
+                std::uint32_t x = 0;
+                std::uint32_t y = 0;
+                std::uint32_t z = 0;
+                std::uint32_t w = level_w;
+                std::uint32_t h = level_h;
+                std::uint32_t d = level_d;
                 if (!region.is_none())
                 {
-                    py::sequence seq = py::cast<py::sequence>(region);
+                    auto seq = py::cast<py::sequence>(region);
                     // ValueError, unlike the rest of them: a wrong-length tuple is
                     // malformed on its own, and no image has to be consulted to say
                     // so. A 2D image takes 4 numbers, a volume takes 6 — the
@@ -258,7 +265,7 @@ void bind_resources(py::module_& m)
 
                 std::vector<std::byte> pixels = update_pixels_from_numpy(*self, array, w, h, d);
 
-                auto* manager = static_cast<UploadManager*>(context->upload_manager());
+                auto* manager = context->upload_manager();
                 manager->update(
                     std::move(self),
                     std::move(pixels),

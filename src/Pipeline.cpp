@@ -2,6 +2,7 @@
 
 #include <format>
 #include <string>
+#include <utility>
 
 VkStencilOpState StencilState::to_vk_state() const
 {
@@ -53,7 +54,7 @@ Pipeline::Pipeline(
     VkShaderStageFlags pushConstantStages,
     VkPipelineBindPoint bindPoint,
     PipelineDesc desc)
-    : context_(context),
+    : context_(std::move(context)),
       pipeline_(pipeline),
       layout_(layout),
       desc_layouts_(std::move(descLayouts)),
@@ -67,40 +68,6 @@ Pipeline::Pipeline(
 Pipeline::~Pipeline()
 {
     destroy();
-}
-
-Pipeline::Pipeline(Pipeline&& other) noexcept
-    : context_(std::move(other.context_)),
-      pipeline_(other.pipeline_),
-      layout_(other.layout_),
-      desc_layouts_(std::move(other.desc_layouts_)),
-      binding_types_(std::move(other.binding_types_)),
-      push_constant_stages_(other.push_constant_stages_),
-      bind_point_(other.bind_point_),
-      desc_(std::move(other.desc_))
-{
-    other.pipeline_ = VK_NULL_HANDLE;
-    other.layout_ = VK_NULL_HANDLE;
-}
-
-Pipeline& Pipeline::operator=(Pipeline&& other) noexcept
-{
-    if (this != &other)
-    {
-        destroy();
-        context_ = std::move(other.context_);
-        pipeline_ = other.pipeline_;
-        layout_ = other.layout_;
-        desc_layouts_ = std::move(other.desc_layouts_);
-        binding_types_ = std::move(other.binding_types_);
-        push_constant_stages_ = other.push_constant_stages_;
-        bind_point_ = other.bind_point_;
-        desc_ = std::move(other.desc_);
-
-        other.pipeline_ = VK_NULL_HANDLE;
-        other.layout_ = VK_NULL_HANDLE;
-    }
-    return *this;
 }
 
 std::expected<void, Error> Pipeline::rebuild()
@@ -164,7 +131,7 @@ void Pipeline::destroy()
             {
                 vk->vkDestroyPipelineLayout(device, layout, nullptr);
             }
-            for (auto dl : desc_layouts)
+            for (auto* dl : desc_layouts)
             {
                 if (dl != VK_NULL_HANDLE)
                 {
@@ -280,7 +247,7 @@ std::expected<void, Error> PipelineLayoutBuilder::create_set_layouts(
             .bindingCount = has_bindings ? static_cast<uint32_t>(it->second.size()) : 0,
             .pBindings = has_bindings ? it->second.data() : nullptr};
 
-        VkDescriptorSetLayout layout;
+        VkDescriptorSetLayout layout = nullptr;
         if (auto e = check(
                 context.vk().vkCreateDescriptorSetLayout(context.device(), &layoutInfo, nullptr, &layout),
                 "create descriptor set layout for set " + std::to_string(s)))
@@ -294,7 +261,7 @@ std::expected<void, Error> PipelineLayoutBuilder::create_set_layouts(
             Pipeline::BindingTypeMap btm;
             for (const auto& b : it->second)
             {
-                btm[b.binding] = {b.descriptorType, b.descriptorCount};
+                btm[b.binding] = {.type = b.descriptorType, .count = b.descriptorCount};
             }
             bindingTypes[s] = std::move(btm);
         }
@@ -315,7 +282,7 @@ std::expected<VkPipelineLayout, Error> PipelineLayoutBuilder::create_layout(
         .pushConstantRangeCount = static_cast<uint32_t>(push_constant_ranges_.size()),
         .pPushConstantRanges = push_constant_ranges_.data()};
 
-    VkPipelineLayout pipelineLayout;
+    VkPipelineLayout pipelineLayout = nullptr;
     if (auto e = check(
             context.vk().vkCreatePipelineLayout(context.device(), &pipelineLayoutInfo, nullptr, &pipelineLayout),
             "create pipeline layout"))
@@ -444,7 +411,7 @@ namespace
             {
                 return;
             }
-            for (auto dl : set_layouts)
+            for (auto* dl : set_layouts)
             {
                 context_.vk().vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
             }
@@ -547,13 +514,21 @@ GraphicsPipelineBuilder& GraphicsPipelineBuilder::color_mask(
 {
     VkColorComponentFlags mask = 0;
     if (red)
+    {
         mask |= VK_COLOR_COMPONENT_R_BIT;
+    }
     if (green)
+    {
         mask |= VK_COLOR_COMPONENT_G_BIT;
+    }
     if (blue)
+    {
         mask |= VK_COLOR_COMPONENT_B_BIT;
+    }
     if (alpha)
+    {
         mask |= VK_COLOR_COMPONENT_A_BIT;
+    }
 
     if (attachment < 0)
     {
@@ -1054,7 +1029,7 @@ std::expected<VkPipeline, Error> GraphicsPipelineBuilder::create_pipeline_(
         .basePipelineHandle = VK_NULL_HANDLE,
         .basePipelineIndex = -1};
 
-    VkPipeline graphicsPipeline;
+    VkPipeline graphicsPipeline = nullptr;
     // ErrorCode::Shader, not Initialization: a pipeline that fails to build is
     // almost always a shader/state mismatch the caller can fix and retry, and
     // hot reload (0.8) depends on catching exactly this as recoverable.
@@ -1140,11 +1115,17 @@ VkPipelineRasterizationStateCreateInfo GraphicsPipelineBuilder::rasterization_st
 {
     VkCullModeFlags vkCullMode = VK_CULL_MODE_NONE;
     if (s.cull_mode == CullMode::BACK)
+    {
         vkCullMode = VK_CULL_MODE_BACK_BIT;
+    }
     else if (s.cull_mode == CullMode::FRONT)
+    {
         vkCullMode = VK_CULL_MODE_FRONT_BIT;
+    }
     else if (s.cull_mode == CullMode::FRONT_AND_BACK)
+    {
         vkCullMode = VK_CULL_MODE_FRONT_AND_BACK;
+    }
 
     return {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
@@ -1170,11 +1151,14 @@ VkPipelineColorBlendAttachmentState GraphicsPipelineBuilder::color_blend_attachm
     // so the equation is read only when it is on. Vulkan ignores these
     // fields with blendEnable false; writing them anyway keeps
     // blend(False, ...) from depending on that.
-    const BlendEquation eq =
-        s.enable
-            ? s.equation
-            : BlendEquation{
-                  BlendFactor::ONE, BlendFactor::ZERO, BlendOp::ADD, BlendFactor::ONE, BlendFactor::ZERO, BlendOp::ADD};
+    const BlendEquation eq = s.enable ? s.equation
+                                      : BlendEquation{
+                                            .src_color = BlendFactor::ONE,
+                                            .dst_color = BlendFactor::ZERO,
+                                            .color_op = BlendOp::ADD,
+                                            .src_alpha = BlendFactor::ONE,
+                                            .dst_alpha = BlendFactor::ZERO,
+                                            .alpha_op = BlendOp::ADD};
 
     return {
         .blendEnable = s.enable ? VK_TRUE : VK_FALSE,
@@ -1324,7 +1308,7 @@ std::expected<VkPipeline, Error> ComputePipelineBuilder::create_pipeline_(
         .basePipelineHandle = VK_NULL_HANDLE,
         .basePipelineIndex = -1};
 
-    VkPipeline computePipeline;
+    VkPipeline computePipeline = nullptr;
     // ErrorCode::Shader for the same reason as graphics: a pipeline that
     // fails to build is a shader/state mismatch the caller can fix and
     // retry, and hot reload (0.8) depends on catching exactly that.

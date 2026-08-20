@@ -13,6 +13,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -63,7 +64,12 @@ namespace
 
             // Each result gets its own heap Holder: shaderc may hold several results
             // at once, and every one must stay valid until its ReleaseInclude.
-            auto* holder = new Holder{};
+            //
+            // Owned here and released to shaderc on the way out, which hands it
+            // back to ReleaseInclude below. A bare `new` leaked the Holder if
+            // anything between the two threw — resizing the content for a large
+            // include is the realistic one.
+            auto holder = std::make_unique<Holder>();
 
             std::ifstream file(resolved, std::ios::ate | std::ios::binary);
             if (!file.is_open())
@@ -71,31 +77,42 @@ namespace
                 // shaderc convention: empty source_name marks failure, content
                 // carries the error message.
                 holder->content = "Cannot open include file: " + resolved.generic_string();
-                holder->result = {"", 0, holder->content.c_str(), holder->content.size(), holder};
-                return &holder->result;
+                holder->result = {
+                    .source_name = "",
+                    .source_name_length = 0,
+                    .content = holder->content.c_str(),
+                    .content_length = holder->content.size(),
+                    .user_data = holder.get()};
+                return &holder.release()->result;
             }
 
-            size_t size = static_cast<size_t>(file.tellg());
+            const auto size = static_cast<std::size_t>(file.tellg());
             holder->content.resize(size);
             file.seekg(0);
-            file.read(holder->content.data(), size);
+            file.read(holder->content.data(), static_cast<std::streamsize>(size));
             holder->name = resolved.generic_string();
             holder->result = {
-                holder->name.c_str(), holder->name.size(), holder->content.c_str(), holder->content.size(), holder};
+                .source_name = holder->name.c_str(),
+                .source_name_length = holder->name.size(),
+                .content = holder->content.c_str(),
+                .content_length = holder->content.size(),
+                .user_data = holder.get()};
 
             if (!std::ranges::contains(included_, holder->name))
             {
                 included_.push_back(holder->name);
             }
-            return &holder->result;
+            return &holder.release()->result;
         }
 
+        // The other half of the release above: shaderc hands the Holder back, and
+        // taking ownership into a unique_ptr frees it at the end of this scope.
         void ReleaseInclude(shaderc_include_result* result) override
         {
-            delete static_cast<Holder*>(result->user_data);
+            const std::unique_ptr<Holder> owned(static_cast<Holder*>(result->user_data));
         }
 
-        const std::vector<std::string>& included() const
+        [[nodiscard]] const std::vector<std::string>& included() const
         {
             return included_;
         }
@@ -113,7 +130,9 @@ namespace
         std::filesystem::path resolve_(const std::filesystem::path& including_dir, const char* requested) const
         {
             namespace fs = std::filesystem;
-            const fs::path primary = normalize_(including_dir / requested);
+            // Not const: it is returned by value on two paths, and const would
+            // turn both into copies of a path that is about to die anyway.
+            fs::path primary = normalize_(including_dir / requested);
             std::error_code ec;
             if (fs::exists(primary, ec))
             {
@@ -153,7 +172,7 @@ namespace
 ShaderModule::ShaderModule(
     std::shared_ptr<Context> context,
     VkShaderModule module,
-    const std::string& path,
+    std::string path,
     ShaderStage stage,
     std::vector<std::string> includes,
     std::vector<uint32_t> spirv,
@@ -161,9 +180,9 @@ ShaderModule::ShaderModule(
     std::string entry_point,
     ShaderReflection reflection,
     ShaderLanguage language)
-    : context_(context),
+    : context_(std::move(context)),
       module_(module),
-      path_(path),
+      path_(std::move(path)),
       stage_(stage),
       includes_(std::move(includes)),
       spirv_(std::move(spirv)),
@@ -368,10 +387,10 @@ std::expected<ShaderCompiler::CompiledParts, Error> ShaderCompiler::compile_text
             return std::unexpected(err_resource("Failed to open shader file: " + path));
         }
 
-        size_t fileSize = static_cast<size_t>(file.tellg());
+        const auto fileSize = static_cast<std::size_t>(file.tellg());
         text.resize(fileSize);
         file.seekg(0);
-        file.read(text.data(), fileSize);
+        file.read(text.data(), static_cast<std::streamsize>(fileSize));
     }
 
     shaderc::Compiler compiler;
@@ -481,7 +500,11 @@ std::expected<ShaderCompiler::CompiledParts, Error> ShaderCompiler::compile_text
     {
         return std::unexpected(vk_module.error());
     }
-    return CompiledParts{*vk_module, recorder->included(), std::move(spirv), std::move(reflection)};
+    return CompiledParts{
+        .module = *vk_module,
+        .includes = recorder->included(),
+        .spirv = std::move(spirv),
+        .reflection = std::move(reflection)};
 }
 
 std::expected<ShaderCompiler::CompiledParts, Error> ShaderCompiler::load_spv(
@@ -506,7 +529,7 @@ std::expected<ShaderCompiler::CompiledParts, Error> ShaderCompiler::load_spv(
 
     std::vector<uint32_t> spirv(fileSize / sizeof(uint32_t));
     file.seekg(0);
-    file.read(reinterpret_cast<char*>(spirv.data()), fileSize);
+    file.read(reinterpret_cast<char*>(spirv.data()), static_cast<std::streamsize>(fileSize));
 
     return parts_from_spirv(context, std::move(spirv), stage, path);
 }
@@ -554,7 +577,8 @@ std::expected<ShaderCompiler::CompiledParts, Error> ShaderCompiler::parts_from_s
     {
         return std::unexpected(vk_module.error());
     }
-    return CompiledParts{*vk_module, {}, std::move(spirv), std::move(reflection)};
+    return CompiledParts{
+        .module = *vk_module, .includes = {}, .spirv = std::move(spirv), .reflection = std::move(reflection)};
 }
 
 std::expected<VkShaderModule, Error> ShaderCompiler::make_vk_module(
@@ -568,7 +592,7 @@ std::expected<VkShaderModule, Error> ShaderCompiler::make_vk_module(
         .codeSize = spirv.size() * sizeof(uint32_t),
         .pCode = spirv.data()};
 
-    VkShaderModule vk_module;
+    VkShaderModule vk_module = nullptr;
     if (auto e = check(
             context.vk().vkCreateShaderModule(context.device(), &createInfo, nullptr, &vk_module),
             "create shader module",

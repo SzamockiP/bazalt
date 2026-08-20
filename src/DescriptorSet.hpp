@@ -253,7 +253,7 @@ private:
     // One body for both set kinds: they differ only by how many sets one call
     // allocates, and the two used to disagree about nothing but their strings.
     std::expected<std::shared_ptr<DescriptorSet>, Error> allocate_(
-        std::shared_ptr<Pipeline> pipeline,
+        const std::shared_ptr<Pipeline>& pipeline,
         uint32_t setIndex,
         bool frame_set);
 

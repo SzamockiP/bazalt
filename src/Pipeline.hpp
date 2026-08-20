@@ -517,12 +517,16 @@ public:
 
     ~Pipeline();
 
+    // Neither copyable nor movable, and the move half is a 0.27 deletion rather
+    // than an omission: a Pipeline is always reached through the shared_ptr its
+    // builder returns, so the move constructor and move assignment had no caller
+    // in the whole tree. They also claimed noexcept while member-wise moving an
+    // unordered_map, whose move the standard does not promise is noexcept —
+    // which is how clang-tidy found them.
     Pipeline(const Pipeline&) = delete;
     Pipeline& operator=(const Pipeline&) = delete;
-
-    Pipeline(Pipeline&& other) noexcept;
-
-    Pipeline& operator=(Pipeline&& other) noexcept;
+    Pipeline(Pipeline&&) = delete;
+    Pipeline& operator=(Pipeline&&) = delete;
 
     VkPipeline get() const
     {

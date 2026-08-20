@@ -70,7 +70,7 @@ void bind_windowing(py::module_& m)
                 [](int width,
                    int height,
                    const std::string& title,
-                   std::shared_ptr<Logger> logger,
+                   const std::shared_ptr<Logger>& logger,
                    WindowMode mode,
                    std::optional<Monitor> monitor)
                 {
@@ -125,7 +125,7 @@ void bind_windowing(py::module_& m)
             [](const Window& self) { return py::str(self.text_input()); })
         .def(
             "set_icon",
-            [](Window& self, py::object icon)
+            [](Window& self, const py::object& icon)
             {
                 if (icon.is_none())
                 {
@@ -231,7 +231,10 @@ void bind_windowing(py::module_& m)
             [](const Device& d)
             {
                 return std::format(
-                    "<bazalt.Device '{}' ({}, {} MB)>", d.name, d.type, d.limits.device_memory / (1024 * 1024));
+                    "<bazalt.Device '{}' ({}, {} MB)>",
+                    d.name,
+                    d.type,
+                    d.limits.device_memory / (VkDeviceSize{1024} * 1024));
             });
 
     // Free function, not a Window method: GLFW's event queue is process-wide.

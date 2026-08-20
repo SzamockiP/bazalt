@@ -1,5 +1,7 @@
 #include "Buffer.hpp"
 
+#include <utility>
+
 // ── Buffer ────────────────────────────────────────────────────────────────────
 
 std::expected<void, Error> Buffer::update(std::span<const std::byte> /*data*/, size_t /*offset*/)
@@ -32,7 +34,7 @@ std::expected<VkDeviceAddress, Error> Buffer::address()
 // ── StaticBuffer ──────────────────────────────────────────────────────────────
 
 StaticBuffer::StaticBuffer(std::shared_ptr<Context> context, VkBuffer buffer, VmaAllocation allocation, size_t size)
-    : context_(context),
+    : context_(std::move(context)),
       buffer_(buffer),
       allocation_(allocation),
       size_(size)
@@ -116,8 +118,8 @@ std::expected<std::shared_ptr<StaticBuffer>, Error> StaticBuffer::create(
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-    VkBuffer buffer;
-    VmaAllocation allocation;
+    VkBuffer buffer = nullptr;
+    VmaAllocation allocation = nullptr;
     if (auto e = check(
             vmaCreateBuffer(context.allocator(), &bufferInfo, &allocInfo, &buffer, &allocation, nullptr),
             "create device local buffer",
@@ -215,7 +217,7 @@ DynamicBuffer::DynamicBuffer(
     std::vector<VmaAllocation> allocations,
     size_t size,
     BufferType type)
-    : context_(context),
+    : context_(std::move(context)),
       buffers_(std::move(buffers)),
       allocations_(std::move(allocations)),
       size_(size),
@@ -267,7 +269,7 @@ std::expected<void, Error> DynamicBuffer::update(std::span<const std::byte> data
                 "Update of {} bytes at offset {} exceeds the buffer size of {} bytes", data.size(), offset, size_)));
     }
     uint32_t frame = context_->frame_index();
-    void* mappedData;
+    void* mappedData = nullptr;
     if (auto e = check(
             vmaMapMemory(context_->allocator(), allocations_[frame], &mappedData),
             "map dynamic buffer memory for update",
@@ -322,7 +324,7 @@ std::expected<std::shared_ptr<DynamicBuffer>, Error> DynamicBuffer::create(
 
         if (data != nullptr && data_size > 0)
         {
-            void* mappedData;
+            void* mappedData = nullptr;
             vmaMapMemory(context.allocator(), allocations[i], &mappedData);
             std::memcpy(mappedData, data, data_size);
             vmaUnmapMemory(context.allocator(), allocations[i]);

@@ -120,10 +120,16 @@ jobs:
 
       # vma_impl.cpp and stb_impl.cpp are third-party implementations and are
       # not listed. Header diagnostics follow .clang-tidy's filters.
+      #
+      # -Wno-unknown-warning-option because the compile database is written by
+      # GCC and carries -Wno-interference-size, which clang does not know. With
+      # --warnings-as-errors='*' that unknown flag is itself an error, so the
+      # job would fail on a flag rather than on a finding.
       - name: Run clang-tidy
         run: |
           ls src/main.cpp src/*.cpp src/bindings/*.cpp | grep -v -e vma_impl -e stb_impl | sort -u | \
-            xargs -P "$(nproc)" -n1 clang-tidy -p build-tidy --quiet --warnings-as-errors='*'
+            xargs -P "$(nproc)" -n1 clang-tidy -p build-tidy --quiet \
+              --warnings-as-errors='*' --extra-arg=-Wno-unknown-warning-option
 
   # ── Source distribution ───────────────────────────────────────
   # Published beside the wheels, so `pip install bazalt` on a platform with no

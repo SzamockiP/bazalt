@@ -2,7 +2,10 @@
 
 void bind_pipelines(py::module_& m)
 {
-    py::class_<Pipeline, std::shared_ptr<Pipeline>>(m, "Pipeline");
+    // Registered and nothing more: a Pipeline is built by a builder and handed
+    // to cmd.bind_pipeline, so it has no methods of its own. Named rather than a
+    // discarded temporary — see the comment in Targets.cpp.
+    [[maybe_unused]] const py::class_<Pipeline, std::shared_ptr<Pipeline>> pipeline_type(m, "Pipeline");
 
     py::class_<GraphicsPipelineBuilder, std::shared_ptr<GraphicsPipelineBuilder>> graphics(
         m, "GraphicsPipelineBuilder");
@@ -182,14 +185,16 @@ void bind_pipelines(py::module_& m)
             py::arg("name"))
         .def(
             "build",
-            [](GraphicsPipelineBuilder& builder, std::shared_ptr<RenderTarget> target) -> py::object
+            [](GraphicsPipelineBuilder& builder, const std::shared_ptr<RenderTarget>& target) -> py::object
             {
                 require_same_context(&builder.context(), target->owner(), "build");
                 auto pipeline = unwrap(builder.build(*target), nullptr);
                 // Watch unconditionally: a pipeline whose shaders were all unwatched
                 // (source=, .spv from a gone file) simply never fires.
                 if (auto* hr = builder.context().hot_reload())
+                {
                     hr->watch_pipeline(pipeline);
+                }
                 return py::cast(pipeline);
             },
             py::arg("target"));
@@ -267,7 +272,9 @@ void bind_pipelines(py::module_& m)
             {
                 auto pipeline = unwrap(builder.build(), nullptr);
                 if (auto* hr = builder.context().hot_reload())
+                {
                     hr->watch_pipeline(pipeline);
+                }
                 return py::cast(pipeline);
             });
 
@@ -319,7 +326,7 @@ void bind_pipelines(py::module_& m)
     py::class_<DescriptorPool, std::shared_ptr<DescriptorPool>>(m, "DescriptorPool")
         .def(
             "allocate_set",
-            [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object
+            [](DescriptorPool& pool, const std::shared_ptr<Pipeline>& pipeline, uint32_t setIndex) -> py::object
             {
                 require_same_context(pool.owner(), pipeline->owner(), "allocate_set");
                 return py::cast(unwrap(pool.allocate_descriptor_set(pipeline, setIndex), pool.logger().get()));
@@ -328,7 +335,7 @@ void bind_pipelines(py::module_& m)
             py::arg("set") = 0)
         .def(
             "allocate_frame_set",
-            [](DescriptorPool& pool, std::shared_ptr<Pipeline> pipeline, uint32_t setIndex) -> py::object
+            [](DescriptorPool& pool, const std::shared_ptr<Pipeline>& pipeline, uint32_t setIndex) -> py::object
             {
                 require_same_context(pool.owner(), pipeline->owner(), "allocate_frame_set");
                 return py::cast(unwrap(pool.allocate_frame_descriptor_set(pipeline, setIndex), pool.logger().get()));

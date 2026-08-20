@@ -57,9 +57,21 @@ clang-format --dry-run -Werror src/*.hpp src/*.cpp src/bindings/*.hpp src/bindin
 ```
 
 Since 0.27 two more gates run in CI. **clang-tidy** (`.clang-tidy` at the root, pinned to
-20.1) analyses the eight first-party TUs; the house rule is that a check and the code
-disagreeing means **the code changes** — the `shared_ptr(new T)` sites became the passkey
-idiom rather than a `NOLINT`, and every disabled check in the config names its reason.
+20.1) analyses the first-party TUs; the house rule is that a check and the code disagreeing
+means **the code changes** (the `py::class_` registrations got names rather than a `NOLINT`),
+that a check which only PARTLY misfires gets narrowed rather than switched off, and that
+every disabled or narrowed entry in the config names its reason. Do not disable a check
+before you have seen it fire — the 0.27 plan wanted `modernize-make-shared` off and the check
+turned out to have nothing to say about a private constructor behind a factory.
+
+**Its `--fix` output is a suggestion, not a patch.** The 0.27 run produced an extra
+parenthesis in three `modernize-use-integer-sign-comparison` rewrites and a variable named
+`give_me_a_name` four times. Build and run the suite after every `--fix`, and read the diff.
+Running `--fix` twice over the same file also duplicates the includes it inserts.
+
+A local Windows run reports two findings CI does not: MSVC deprecates `getenv` (glibc does
+not), and the two call sites in `Context.cpp` are the negotiation knobs. `std::getenv` is
+the portable spelling and stays; `_dupenv_s` is a Microsoft extension.
 **ruff** checks the Python side with an explicit rule set (its defaults move between
 versions). Locally:
 

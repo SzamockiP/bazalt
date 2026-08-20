@@ -2,13 +2,14 @@
 
 #include <cstddef>
 #include <cstring>
+#include <utility>
 
 SwapchainSupportDetails query_swapchain_support(VkPhysicalDevice device, VkSurfaceKHR surface)
 {
     SwapchainSupportDetails details;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities);
 
-    uint32_t formatCount;
+    uint32_t formatCount = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nullptr);
     if (formatCount != 0)
     {
@@ -16,7 +17,7 @@ SwapchainSupportDetails query_swapchain_support(VkPhysicalDevice device, VkSurfa
         vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, details.formats.data());
     }
 
-    uint32_t presentModeCount;
+    uint32_t presentModeCount = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nullptr);
     if (presentModeCount != 0)
     {
@@ -49,19 +50,17 @@ VkExtent2D choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabilities, int 
     {
         return capabilities.currentExtent;
     }
-    else
-    {
-        VkExtent2D actualExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
-        actualExtent.width = (std::max)(capabilities.minImageExtent.width,
-                                        (std::min)(capabilities.maxImageExtent.width, actualExtent.width));
-        actualExtent.height = (std::max)(capabilities.minImageExtent.height,
-                                         (std::min)(capabilities.maxImageExtent.height, actualExtent.height));
-        return actualExtent;
-    }
+
+    VkExtent2D actualExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+    actualExtent.width = (std::max)(capabilities.minImageExtent.width,
+                                    (std::min)(capabilities.maxImageExtent.width, actualExtent.width));
+    actualExtent.height = (std::max)(capabilities.minImageExtent.height,
+                                     (std::min)(capabilities.maxImageExtent.height, actualExtent.height));
+    return actualExtent;
 }
 
 std::expected<std::unique_ptr<SwapchainRenderer>, Error> SwapchainRenderer::create(
-    std::shared_ptr<Context> context,
+    const std::shared_ptr<Context>& context,
     SurfaceProvider surface_provider,
     PresentMode present_mode,
     std::uint32_t samples,
@@ -191,15 +190,21 @@ SwapchainRenderer::~SwapchainRenderer()
     for (size_t i = 0; i < image_available_semaphores_.size(); ++i)
     {
         if (image_available_semaphores_[i])
+        {
             context_->vk().vkDestroySemaphore(context_->device(), image_available_semaphores_[i], nullptr);
+        }
         if (in_flight_fences_[i])
+        {
             context_->vk().vkDestroyFence(context_->device(), in_flight_fences_[i], nullptr);
+        }
     }
 
-    for (auto sem : render_finished_semaphores_)
+    for (auto* sem : render_finished_semaphores_)
     {
         if (sem)
+        {
             context_->vk().vkDestroySemaphore(context_->device(), sem, nullptr);
+        }
     }
 
     if (timestamp_pool_)
@@ -223,7 +228,7 @@ SwapchainRenderer::~SwapchainRenderer()
     }
     destroy_msaa_color_();
 
-    for (auto iv : swapchain_image_views_)
+    for (auto* iv : swapchain_image_views_)
     {
         context_->vk().vkDestroyImageView(context_->device(), iv, nullptr);
     }
@@ -488,13 +493,15 @@ std::expected<bool, Error> SwapchainRenderer::acquire()
         frame_skipped_ = true;
         return false;
     }
-    else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
     {
         if (auto l = context_->logger())
+        {
             l->log(
                 Severity::Error,
                 Source::Device,
                 std::format("Failed to acquire swapchain image ({})", vk_result_name(result)));
+        }
         frame_skipped_ = true;
         return false;
     }
@@ -521,21 +528,23 @@ void SwapchainRenderer::end_frame(VkCommandBuffer cmd, std::uint64_t upload_wait
     // against semaphores this one already signalled.
     image_acquired_ = false;
 
-    VkSemaphore waitSemaphores[] = {image_available_semaphores_[current_frame()], context_->submit_timeline()};
-    VkPipelineStageFlags waitStages[] = {
+    const std::array<VkSemaphore, 2> waitSemaphores = {
+        image_available_semaphores_[current_frame()], context_->submit_timeline()};
+    const std::array<VkPipelineStageFlags, 2> waitStages = {
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
-    std::uint64_t waitValues[] = {0, upload_wait_serial}; // binary sem value ignored
+    const std::array<std::uint64_t, 2> waitValues = {0, upload_wait_serial}; // binary sem value ignored
 
-    VkSemaphore signalSemaphores[] = {render_finished_semaphores_[image_index_], context_->submit_timeline()};
-    VkSwapchainKHR swapchains[] = {swapchain_};
+    const std::array<VkSemaphore, 2> signalSemaphores = {
+        render_finished_semaphores_[image_index_], context_->submit_timeline()};
+    const std::array<VkSwapchainKHR, 1> swapchains = {swapchain_};
 
     VkPresentInfoKHR presentInfo{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .pNext = nullptr,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = signalSemaphores,
+        .pWaitSemaphores = signalSemaphores.data(),
         .swapchainCount = 1,
-        .pSwapchains = swapchains,
+        .pSwapchains = swapchains.data(),
         .pImageIndices = &image_index_,
         .pResults = nullptr};
 
@@ -548,36 +557,38 @@ void SwapchainRenderer::end_frame(VkCommandBuffer cmd, std::uint64_t upload_wait
 
         // Every submit signals the timeline; the serial is reserved under
         // the same lock that orders the submits.
-        std::uint64_t signalValues[] = {0, context_->advance_submit_serial()};
+        const std::array<std::uint64_t, 2> signalValues = {0, context_->advance_submit_serial()};
 
         VkTimelineSemaphoreSubmitInfo timelineInfo{
             .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
             .pNext = nullptr,
             .waitSemaphoreValueCount = 2,
-            .pWaitSemaphoreValues = waitValues,
+            .pWaitSemaphoreValues = waitValues.data(),
             .signalSemaphoreValueCount = 2,
-            .pSignalSemaphoreValues = signalValues};
+            .pSignalSemaphoreValues = signalValues.data()};
 
         VkSubmitInfo submitInfo{
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .pNext = &timelineInfo,
             .waitSemaphoreCount = 2,
-            .pWaitSemaphores = waitSemaphores,
-            .pWaitDstStageMask = waitStages,
+            .pWaitSemaphores = waitSemaphores.data(),
+            .pWaitDstStageMask = waitStages.data(),
             .commandBufferCount = 1,
             .pCommandBuffers = &cmd,
             .signalSemaphoreCount = 2,
-            .pSignalSemaphores = signalSemaphores};
+            .pSignalSemaphores = signalSemaphores.data()};
 
         if (VkResult submit_result = context_->vk().vkQueueSubmit(
                 context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
             submit_result != VK_SUCCESS)
         {
             if (auto l = context_->logger())
+            {
                 l->log(
                     Severity::Error,
                     Source::Device,
                     std::format("Failed to submit draw command buffer ({})", vk_result_name(submit_result)));
+            }
         }
         else
         {
@@ -630,7 +641,7 @@ void SwapchainRenderer::abandon_frame_()
 }
 
 SwapchainRenderer::SwapchainRenderer(std::shared_ptr<Context> context, SurfaceProvider surface_provider)
-    : context_(context),
+    : context_(std::move(context)),
       surface_provider_(std::move(surface_provider))
 {
 }
@@ -687,14 +698,14 @@ void SwapchainRenderer::read_timestamps_()
         last_gpu_time_ms_ = std::nullopt;
         return;
     }
-    std::uint64_t ts[2] = {0, 0};
+    std::array<std::uint64_t, 2> ts = {0, 0};
     if (context_->vk().vkGetQueryPoolResults(
             context_->device(),
             timestamp_pool_,
             2 * slot,
             2,
             sizeof(ts),
-            ts,
+            ts.data(),
             sizeof(std::uint64_t),
             VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
     {
@@ -718,10 +729,12 @@ std::expected<void, Error> SwapchainRenderer::create_swapchain_manually(
     if (present_mode != to_vk(preferred_present_mode_))
     {
         if (auto l = context_->logger())
+        {
             l->log(
                 Severity::Info,
                 Source::Device,
                 "Requested present mode is not supported by this surface. Bazalt uses FIFO (vsync) instead");
+        }
     }
     active_present_mode_ = present_mode;
     auto extent = choose_swap_extent(details.capabilities, width, height);
@@ -829,7 +842,7 @@ std::expected<void, Error> SwapchainRenderer::create_swapchain_manually(
         }
     }
 
-    VkSwapchainKHR new_swapchain;
+    VkSwapchainKHR new_swapchain = nullptr;
     if (auto e = check(
             context_->vk().vkCreateSwapchainKHR(context_->device(), &createInfo, nullptr, &new_swapchain),
             "create swapchain"))
@@ -886,7 +899,7 @@ std::expected<void, Error> SwapchainRenderer::create_swapchain_manually(
 #endif
 
     // Retrieve swapchain images
-    uint32_t actual_image_count;
+    uint32_t actual_image_count = 0;
     context_->vk().vkGetSwapchainImagesKHR(context_->device(), swapchain_, &actual_image_count, nullptr);
     swapchain_images_.resize(actual_image_count);
     context_->vk().vkGetSwapchainImagesKHR(
@@ -948,15 +961,17 @@ void SwapchainRenderer::recreate_swapchain()
     destroy_msaa_color_();
 
     // Destroy old render-finished semaphores
-    for (auto sem : render_finished_semaphores_)
+    for (auto* sem : render_finished_semaphores_)
     {
         if (sem)
+        {
             context_->vk().vkDestroySemaphore(context_->device(), sem, nullptr);
+        }
     }
     render_finished_semaphores_.clear();
 
     // Destroy old swapchain image views
-    for (auto iv : swapchain_image_views_)
+    for (auto* iv : swapchain_image_views_)
     {
         context_->vk().vkDestroyImageView(context_->device(), iv, nullptr);
     }
@@ -971,7 +986,9 @@ void SwapchainRenderer::recreate_swapchain()
         // logs the propagated Error (VkResult name included), not a hand-written
         // string.
         if (auto l = context_->logger())
+        {
             l->log(Severity::Error, Source::Device, "Failed to recreate swapchain: " + r.error().message);
+        }
         return;
     }
 
@@ -989,7 +1006,9 @@ void SwapchainRenderer::recreate_swapchain()
                 context_->device(), &semaphoreInfo, nullptr, &render_finished_semaphores_[i]) != VK_SUCCESS)
         {
             if (auto l = context_->logger())
+            {
                 l->log(Severity::Error, Source::Device, "Failed to recreate render finished semaphores");
+            }
             return;
         }
     }
@@ -998,15 +1017,19 @@ void SwapchainRenderer::recreate_swapchain()
     if (auto r = create_depth_resources(); !r)
     {
         if (auto l = context_->logger())
+        {
             l->log(Severity::Error, Source::Device, "Failed to recreate depth resources: " + r.error().message);
+        }
         return;
     }
 
     if (auto l = context_->logger())
+    {
         l->log(
             Severity::Info,
             Source::Device,
             std::format("Swapchain recreated ({}x{})", swapchain_extent_.width, swapchain_extent_.height));
+    }
 }
 
 std::expected<void, Error> SwapchainRenderer::create_depth_resources()

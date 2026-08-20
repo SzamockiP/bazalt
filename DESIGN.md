@@ -473,20 +473,37 @@ entry. The release is a label, not the organizing axis.
   hand-written stub that nothing compared against the module. All three now run in CI.
 
 - **When a check and the code disagree, the code changes** (0.27, and this one is the owner's
-  ruling rather than a derivation). The plan proposed disabling `modernize-make-shared` and
-  `cppcoreguidelines-owning-memory`, because bazalt uses `shared_ptr<T>(new T(...))` about ten
-  times to construct a class whose constructor is private. The owner refused the shortcut and
-  asked the obvious question: if the rule exists, why are we the exception? The answer is the
-  **passkey idiom** — a private tag type the factory can name and nobody else can, so the
-  constructor becomes public, `make_shared` works, and the intent ("only the factory builds
-  one of these") moves from a comment into the signature. A `NOLINT` would have kept the
-  intent in a comment and the defect in the code.
+  ruling rather than a derivation). The plan proposed pre-emptively disabling
+  `modernize-make-shared` and `cppcoreguidelines-owning-memory`, because bazalt writes
+  `shared_ptr<T>(new T(...))` eight times to construct a class whose constructor is private.
+  The owner refused the shortcut and asked the obvious question: if the rule exists, why are
+  we the exception?
+
+  **The first run answered it: neither check fires on those eight sites.**
+  `modernize-make-shared` verifies that the constructor is reachable before it suggests
+  anything, and a private constructor behind a factory is not. So the disable would have
+  silenced a check that had nothing to say, which is worse than useless — it would also have
+  silenced the sites where the check IS right. The lesson is narrower than the ruling and
+  worth keeping on its own: **do not disable a check before you have seen it fire.**
+
+  Where a check and the code really did disagree, the code changed. `bugprone-unused-raii`
+  flagged four `py::class_<T>(m, "Name");` registrations — pybind11 does its work in the
+  CONSTRUCTOR, so a discarded temporary is the idiom, and the check cannot tell it from
+  `std::lock_guard(mutex);`, which is a genuine bug. The fix is a named
+  `[[maybe_unused]] const` variable at each site: the check is satisfied, the registration
+  now says what it is, and no `NOLINT` claims the tool is wrong forever. (The check's own
+  automatic fix, for the record, invented a variable called `give_me_a_name` three times in
+  one scope, which does not compile. An auto-fix is a suggestion, not a patch.)
 
   The general form, and the reason this is a decision rather than a preference: **a disabled
   check is a permanent claim that the tool is wrong about this codebase.** That claim is
   sometimes true — `readability-identifier-length` on a Vulkan file full of `x`, `y` and `vk`
-  is noise, and `.clang-tidy` says so with the reason beside it. It is rarely true when the
-  check names a real defect class, and "we already wrote it this way" is not evidence.
+  is noise, and `.clang-tidy` says so with the reason beside it. Where only PART of a check
+  misfires, narrow it instead of switching it off: `readability-uppercase-literal-suffix` is
+  restricted to the long-family suffixes, because a lowercase `l` really does read as a `1`
+  and a lowercase `f` does not, and `bugprone-unused-return-value` is told that an explicit
+  `static_cast<void>` is a deliberate discard. Both are smaller claims than "off", and both
+  say why in the file.
 
 - **Every gate is pinned to one version.** The formatter, the analyzer and the linter all come
   from PyPI with an exact version, because each of them changes its output between releases.

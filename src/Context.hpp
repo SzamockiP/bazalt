@@ -138,7 +138,7 @@ class Context : public std::enable_shared_from_this<Context>
 {
 public:
     static std::expected<std::shared_ptr<Context>, Error> create(
-        std::shared_ptr<Logger> logger,
+        const std::shared_ptr<Logger>& logger,
         const ContextConfig& config = {});
 
     // Defined in Context.cpp: upload_manager_ and hot_reload_ are incomplete
@@ -587,7 +587,7 @@ public:
     // it (volkLoadInstanceOnly does) and vkGetDeviceProcAddr may legitimately
     // return null for it. The pointer is a loader trampoline dispatching on the
     // VkDevice argument, so it is correct for every Context in the process.
-    void set_debug_name(VkObjectType type, std::uint64_t handle, const std::string& name);
+    void set_debug_name(VkObjectType type, std::uint64_t handle, const std::string& name) const;
 
     // VkQueue is externally synchronized. Today every submit happens on the main
     // thread, so this mutex is uncontended — it exists because 0.5's upload

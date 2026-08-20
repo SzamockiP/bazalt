@@ -10,6 +10,7 @@
 
 #include <format>
 #include <string_view>
+#include <utility>
 
 std::expected<std::unique_ptr<Window>, Error> Window::create(
     int width,
@@ -252,9 +253,11 @@ std::expected<void, Error> Window::set_mode(
         // a mode from another monitor lands on something sane instead of
         // failing, and refusing it would mean re-enumerating to say what the
         // driver is about to work out anyway.
-        const VideoMode wanted = video_mode_choice
-                                     ? *video_mode_choice
-                                     : VideoMode{video_mode->width, video_mode->height, video_mode->refreshRate};
+        const VideoMode wanted = video_mode_choice ? *video_mode_choice
+                                                   : VideoMode{
+                                                         .width = video_mode->width,
+                                                         .height = video_mode->height,
+                                                         .refresh_rate = video_mode->refreshRate};
 
         if (mode == WindowMode::FULLSCREEN)
         {
@@ -318,7 +321,8 @@ SurfaceProvider Window::get_surface_provider()
 
     sp.get_framebuffer_size = [raw]() -> std::pair<int, int>
     {
-        int w, h;
+        int w = 0;
+        int h = 0;
         glfwGetFramebufferSize(raw, &w, &h);
         return {w, h};
     };
@@ -344,10 +348,10 @@ SurfaceProvider Window::get_surface_provider()
     return sp;
 }
 
-Window::Window(int width, int height, const std::string& title)
+Window::Window(int width, int height, std::string title)
     : width_(width),
       height_(height),
-      title_(title)
+      title_(std::move(title))
 {
 }
 
@@ -440,12 +444,14 @@ void Window::rotate_() const
 
 void Window::mouse_callback(GLFWwindow* window, double xpos, double ypos)
 {
-    Window* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
+    auto* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
     if (!win)
+    {
         return;
+    }
 
-    const float fx = static_cast<float>(xpos);
-    const float fy = static_cast<float>(ypos);
+    const auto fx = static_cast<float>(xpos);
+    const auto fy = static_cast<float>(ypos);
 
     if (win->first_mouse_)
     {
@@ -470,7 +476,7 @@ void Window::mouse_callback(GLFWwindow* window, double xpos, double ypos)
 
 void Window::scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
 {
-    Window* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
+    auto* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
     if (win)
     {
         win->pending_.scroll_dx += static_cast<float>(xoffset);
@@ -480,7 +486,7 @@ void Window::scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
 
 void Window::key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
 {
-    Window* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
+    auto* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
     if (win && action == GLFW_PRESS)
     {
         win->pending_.keys.push_back(key);
@@ -489,7 +495,7 @@ void Window::key_callback(GLFWwindow* window, int key, int scancode, int action,
 
 void Window::mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 {
-    Window* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
+    auto* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
     if (win && action == GLFW_PRESS)
     {
         win->pending_.buttons.push_back(button);
@@ -498,7 +504,7 @@ void Window::mouse_button_callback(GLFWwindow* window, int button, int action, i
 
 void Window::framebuffer_resize_callback(GLFWwindow* window, int width, int height)
 {
-    Window* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
+    auto* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
     if (win)
     {
         win->framebuffer_resized_ = true;
@@ -508,7 +514,7 @@ void Window::framebuffer_resize_callback(GLFWwindow* window, int width, int heig
 GLFWcursor* Window::standard_cursor_(int shape)
 {
     const int index = shape - GLFW_ARROW_CURSOR;
-    if (index < 0 || index >= static_cast<int>(cursors_.size()))
+    if (index < 0 || std::cmp_greater_equal(index, cursors_.size()))
     {
         return nullptr;
     }
@@ -553,7 +559,7 @@ void Window::append_utf8(std::string& out, unsigned int codepoint)
 
 void Window::char_callback(GLFWwindow* window, unsigned int codepoint)
 {
-    Window* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
+    auto* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
     if (win)
     {
         append_utf8(win->pending_.text, codepoint);
@@ -562,9 +568,11 @@ void Window::char_callback(GLFWwindow* window, unsigned int codepoint)
 
 void Window::drop_callback(GLFWwindow* window, int count, const char** paths)
 {
-    Window* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
+    auto* win = static_cast<Window*>(glfwGetWindowUserPointer(window));
     if (!win)
+    {
         return;
+    }
 
     // GLFW owns `paths` only for the duration of this call, so the strings are
     // copied, not referenced.
@@ -655,7 +663,8 @@ std::expected<std::vector<Monitor>, Error> list_monitors()
         glfwGetMonitorContentScale(monitors[i], &monitor.scale_x, &monitor.scale_y);
         if (const GLFWvidmode* current = glfwGetVideoMode(monitors[i]))
         {
-            monitor.current_mode = {current->width, current->height, current->refreshRate};
+            monitor.current_mode = {
+                .width = current->width, .height = current->height, .refresh_rate = current->refreshRate};
         }
 
         int mode_count = 0;
@@ -663,7 +672,8 @@ std::expected<std::vector<Monitor>, Error> list_monitors()
         monitor.video_modes.reserve(static_cast<std::size_t>(mode_count));
         for (int m = 0; m < mode_count; ++m)
         {
-            monitor.video_modes.push_back({modes[m].width, modes[m].height, modes[m].refreshRate});
+            monitor.video_modes.push_back(
+                {.width = modes[m].width, .height = modes[m].height, .refresh_rate = modes[m].refreshRate});
         }
         out.push_back(std::move(monitor));
     }
@@ -717,7 +727,7 @@ std::expected<std::optional<Gamepad>, Error> get_gamepad(int index, float deadzo
         // An empty slot forgets its history, so a pad that is unplugged and
         // plugged back in starts level instead of reporting whatever it held
         // before as an edge.
-        if (index >= 0 && index < static_cast<int>(gamepad_history_.size()))
+        if (index >= 0 && std::cmp_less(index, gamepad_history_.size()))
         {
             gamepad_history_[static_cast<std::size_t>(index)] = GamepadHistory{};
         }
@@ -775,7 +785,7 @@ std::expected<std::optional<Gamepad>, Error> get_gamepad(int index, float deadzo
 
     // The buttons, not the axes: an axis edge is a threshold the caller picks,
     // and bazalt has no business picking it.
-    if (index >= 0 && index < static_cast<int>(gamepad_history_.size()))
+    if (index >= 0 && std::cmp_less(index, gamepad_history_.size()))
     {
         GamepadHistory& history = gamepad_history_[static_cast<std::size_t>(index)];
         const std::uint64_t generation = Window::poll_generation_.load(std::memory_order_relaxed);

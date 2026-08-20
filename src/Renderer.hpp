@@ -69,7 +69,7 @@ class SwapchainRenderer : public RenderTarget
 {
 public:
     static std::expected<std::unique_ptr<SwapchainRenderer>, Error> create(
-        std::shared_ptr<Context> context,
+        const std::shared_ptr<Context>& context,
         SurfaceProvider surface_provider,
         PresentMode present_mode = PresentMode::MAILBOX,
         std::uint32_t samples = 1,

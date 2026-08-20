@@ -190,6 +190,22 @@ constexpr bool fits_within(T offset, U length, V size)
     return offset_bytes <= size_bytes && length_bytes <= size_bytes - offset_bytes;
 }
 
+// How much of `size` is left after `offset`, saturating at 0 rather than
+// wrapping. What "size=0 means the rest of the buffer" resolves to in
+// copy_buffer and fill_buffer, which both spelled it as a nested conditional
+// until 0.27. The subtraction is guarded for the reason above: on unsigned
+// types `size - offset` past the end is a huge number, not a negative one.
+template <typename T, typename U>
+constexpr std::common_type_t<T, U> bytes_after(T size, U offset)
+{
+    using Widest = std::common_type_t<T, U>;
+    static_assert(std::is_unsigned_v<Widest>, "bytes_after compares sizes, and a size is never negative");
+
+    const auto size_bytes = static_cast<Widest>(size);
+    const auto offset_bytes = static_cast<Widest>(offset);
+    return size_bytes > offset_bytes ? size_bytes - offset_bytes : 0;
+}
+
 // Constructors for non-Vulkan failures.
 
 inline Error err_init(std::string message)

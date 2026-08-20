@@ -349,7 +349,7 @@ public:
     SurfaceProvider get_surface_provider();
 
 private:
-    Window(int width, int height, const std::string& title);
+    Window(int width, int height, std::string title);
 
     // GLFW's error callback is global rather than per-window, so the routing has
     // to be global too. weak_ptr so this never keeps a Logger alive.

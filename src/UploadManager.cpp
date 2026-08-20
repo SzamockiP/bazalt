@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <format>
+#include <utility>
 
 UploadManager::UploadManager(Context& context)
     : context_(context)
@@ -15,7 +16,7 @@ UploadManager::UploadManager(Context& context)
     // Command pools are externally synchronized; the worker gets its own.
     context.vk().vkCreateCommandPool(context.device(), &poolInfo, nullptr, &pool_);
 
-    worker_ = std::jthread([this](std::stop_token stop) { run_(stop); });
+    worker_ = std::jthread([this](std::stop_token stop) { run_(std::move(stop)); });
 }
 
 UploadManager::~UploadManager()
@@ -50,7 +51,9 @@ UploadManager::~UploadManager()
 
 std::expected<std::shared_ptr<Image>, Error> UploadManager::load(const std::string& path, bool mipmaps)
 {
-    int width = 0, height = 0, comp = 0;
+    int width = 0;
+    int height = 0;
+    int comp = 0;
     if (!stbi_info(path.c_str(), &width, &height, &comp))
     {
         const char* reason = stbi_failure_reason();
@@ -80,7 +83,7 @@ std::expected<std::shared_ptr<Image>, Error> UploadManager::load(const std::stri
     {
         std::lock_guard lock(mutex_);
         ++batch_started_;
-        jobs_.push_back({*image, path, mips});
+        jobs_.push_back({.image = *image, .path = path, .mips = mips});
     }
     cv_.notify_all();
     return image;
@@ -88,7 +91,9 @@ std::expected<std::shared_ptr<Image>, Error> UploadManager::load(const std::stri
 
 std::expected<std::shared_ptr<Image>, Error> UploadManager::load_memory(std::vector<std::byte> blob, bool mipmaps)
 {
-    int width = 0, height = 0, comp = 0;
+    int width = 0;
+    int height = 0;
+    int comp = 0;
     if (!stbi_info_from_memory(
             reinterpret_cast<const stbi_uc*>(blob.data()), static_cast<int>(blob.size()), &width, &height, &comp))
     {
@@ -141,10 +146,14 @@ std::expected<std::shared_ptr<Image>, Error> UploadManager::load_layered(
             err_resource(std::format("load_image(cube=True): a cubemap needs exactly 6 faces, got {}", paths.size())));
     }
 
-    int width = 0, height = 0, comp = 0;
+    int width = 0;
+    int height = 0;
+    int comp = 0;
     for (std::size_t i = 0; i < paths.size(); ++i)
     {
-        int w = 0, h = 0, c = 0;
+        int w = 0;
+        int h = 0;
+        int c = 0;
         if (!stbi_info(paths[i].c_str(), &w, &h, &c))
         {
             const char* reason = stbi_failure_reason();
@@ -217,7 +226,7 @@ void UploadManager::reload(std::shared_ptr<Image> image, std::string path)
     const std::uint32_t mips = image->mip_levels();
     {
         std::lock_guard lock(mutex_);
-        jobs_.push_back({std::move(image), std::move(path), mips, /*reload=*/true});
+        jobs_.push_back({.image = std::move(image), .path = std::move(path), .mips = mips, .reload = true});
     }
     cv_.notify_all();
 }
@@ -432,7 +441,9 @@ void UploadManager::process_(Job& job)
     // Decode. Forcing RGBA to match the RGBA8_SRGB image. From memory when
     // the job carries the bytes, from the path otherwise — the two differ by
     // this call and nothing else.
-    int width = 0, height = 0, channels = 0;
+    int width = 0;
+    int height = 0;
+    int channels = 0;
     stbi_uc* pixels = job.encoded.empty() ? stbi_load(job.path.c_str(), &width, &height, &channels, STBI_rgb_alpha)
                                           : stbi_load_from_memory(
                                                 reinterpret_cast<const stbi_uc*>(job.encoded.data()),
@@ -446,9 +457,13 @@ void UploadManager::process_(Job& job)
         // A load failure poisons the image (waiters get the error); a reload
         // failure just warns and keeps the good contents already on the GPU.
         if (job.reload)
+        {
             warn_reload_(job, stbi_failure_reason());
+        }
         else
+        {
             fail_(job, stbi_failure_reason());
+        }
         return;
     }
     if (static_cast<std::uint32_t>(width) != job.image->width() ||
@@ -460,6 +475,7 @@ void UploadManager::process_(Job& job)
             // v1 reloads are same-size only: a new size needs a new VkImage and
             // every descriptor set holding it rewritten. Keep the old image.
             if (auto logger = context_.logger())
+            {
                 logger->log(
                     Severity::Warning,
                     Source::Upload,
@@ -471,6 +487,7 @@ void UploadManager::process_(Job& job)
                         job.image->height(),
                         static_cast<std::uint32_t>(width),
                         static_cast<std::uint32_t>(height)));
+            }
         }
         else
         {
@@ -486,9 +503,13 @@ void UploadManager::process_(Job& job)
     if (!staging)
     {
         if (job.reload)
-            warn_reload_(job, staging.error().message.c_str());
+        {
+            warn_reload_(job, staging.error().message);
+        }
         else
-            fail_(job, staging.error().message.c_str());
+        {
+            fail_(job, staging.error().message);
+        }
         return;
     }
     auto [stagingBuffer, stagingAllocation] = *staging;
@@ -503,17 +524,25 @@ void UploadManager::process_(Job& job)
         [&](VkCommandBuffer cmd)
         {
             if (job.reload)
+            {
                 job.image->record_reload_commands(cmd, stagingBuffer, job.mips);
+            }
             else
+            {
                 job.image->record_upload_commands(cmd, stagingBuffer, job.mips);
+            }
         },
         [&](std::string_view reason) { fail_(job, reason); },
         [&]
         {
             if (job.reload)
+            {
                 warn_reload_(job, "the GPU upload was refused");
+            }
             else
+            {
                 fail_(job, "the GPU upload was refused");
+            }
         });
 }
 
@@ -522,7 +551,7 @@ void UploadManager::process_update_(Job& job)
     auto staging = create_staging_buffer(context_, job.pixels.size(), Staging::Upload, job.pixels.data());
     if (!staging)
     {
-        fail_update_(job, staging.error().message.c_str());
+        fail_update_(job, staging.error().message);
         return;
     }
     auto [stagingBuffer, stagingAllocation] = *staging;
@@ -564,28 +593,30 @@ void UploadManager::process_layered_(Job& job)
     std::vector<stbi_uc> pixels(layer_bytes * job.layers.size());
     for (std::size_t i = 0; i < job.layers.size(); ++i)
     {
-        int lw = 0, lh = 0, lc = 0;
+        int lw = 0;
+        int lh = 0;
+        int lc = 0;
         stbi_uc* p = stbi_load(job.layers[i].c_str(), &lw, &lh, &lc, STBI_rgb_alpha);
         if (!p)
         {
             fail_(job, stbi_failure_reason());
             return;
         }
-        if (static_cast<std::uint32_t>(lw) != w || static_cast<std::uint32_t>(lh) != h)
+        if (std::cmp_not_equal(lw, w) || std::cmp_not_equal(lh, h))
         {
             // A face changed between the load_layered header check and now.
             stbi_image_free(p);
             fail_(job, "a layer changed size on disk while it was being loaded");
             return;
         }
-        std::memcpy(pixels.data() + i * layer_bytes, p, layer_bytes);
+        std::memcpy(pixels.data() + (i * layer_bytes), p, layer_bytes);
         stbi_image_free(p);
     }
 
     auto staging = job.image->create_filled_staging(context_, pixels.data());
     if (!staging)
     {
-        fail_(job, staging.error().message.c_str());
+        fail_(job, staging.error().message);
         return;
     }
     auto [stagingBuffer, stagingAllocation] = *staging;

@@ -164,7 +164,7 @@ std::expected<std::shared_ptr<OffscreenTarget>, Error> OffscreenTarget::create(
     }
 
     auto target = std::shared_ptr<OffscreenTarget>(new OffscreenTarget(context.shared_from_this()));
-    target->extent_ = {width, height};
+    target->extent_ = {.width = width, .height = height};
     target->samples_ = *vk_samples;
     target->layers_ = layers;
     target->mip_levels_ = mip_levels;
@@ -339,7 +339,7 @@ std::expected<std::shared_ptr<OffscreenTarget>, Error> OffscreenTarget::create_f
     }
 
     auto target = std::shared_ptr<OffscreenTarget>(new OffscreenTarget(context.shared_from_this()));
-    target->extent_ = {first->width(), first->height()};
+    target->extent_ = {.width = first->width(), .height = first->height()};
     target->samples_ = *vk_samples;
     target->layers_ = first->array_layers();
     target->slices_ = first->depth();
@@ -534,6 +534,32 @@ OffscreenTarget::~OffscreenTarget()
     // beyond its Images (which self-destruct, deferred). A SubresourceTarget
     // borrows these — they live exactly as long as the parent, so it never owns
     // Vulkan objects itself and can be created/discarded freely.
+    //
+    // Wrapped, because this allocates twice (the handle list, then the closure
+    // the deletion queue stores) and a destructor may not throw. Under memory
+    // exhaustion the views leak, which is strictly better than std::terminate
+    // during teardown — and by then the process has a larger problem.
+    try
+    {
+        retire_subresource_views_();
+    }
+    catch (...)
+    {
+        // Catch-all rather than bad_alloc alone, and the difference is not
+        // paranoia: a destructor that can throw ANY type makes every closure
+        // holding a shared_ptr to this target throw on destruction too, which
+        // is how clang-tidy reported it — three recorded lambdas, none of which
+        // had a throwing line of its own.
+        //
+        // Nothing to retry with: recording the destroy needs the memory that
+        // just ran out. The views then live until vkDestroyDevice takes them,
+        // which is the same end they were headed for.
+        subresource_views_.clear();
+    }
+}
+
+void OffscreenTarget::retire_subresource_views_()
+{
     if (!subresource_views_.empty() && context_)
     {
         std::vector<VkImageView> views;
