@@ -50,6 +50,17 @@ implementation each existed. Both are gone.
   is 12 and not 19, and the eight members after it move by one.
   `Topology.PATCH_LIST` is 6 and not 5, where 5 is `TRIANGLE_FAN`. The module
   always reported the right numbers.
+- **A render target could stop the process while it was destroyed.** The
+  destructor of an offscreen target allocates twice to record the destruction of
+  its views. A destructor must not raise, and an allocation can. The failure
+  needs an out-of-memory condition, so no report exists. The views now stay
+  until the device goes, which is the same end they had.
+- **A shader include leaked its buffer if the read of the file raised.** The
+  include machinery of shaderc takes a raw pointer. Bazalt now holds that
+  pointer in a `unique_ptr` until it hands it over.
+- **A pipeline promised more than it could keep.** The move constructor said
+  `noexcept` while it moved a map, which the standard does not promise. Nothing
+  in the library moved a pipeline, so both move operations are gone.
 
 ### Changed
 - **`clang-tidy` gates the build.** The configuration is at `.clang-tidy`. Each
