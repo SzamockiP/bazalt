@@ -39,7 +39,7 @@
 // RecordingIncluder, and calling vkCreate* / the upload worker. Everything a
 // watcher registers is held weakly, so a dropped Pipeline/Image is simply pruned
 // on the next drain rather than kept alive.
-class HotReloadWatcher final : public HotReloadBase
+class HotReloadWatcher final
 {
 public:
     explicit HotReloadWatcher(Context& context)
@@ -51,12 +51,12 @@ public:
 
     // The jthread destructor requests the stop and joins; the interruptible wait
     // wakes immediately on the request.
-    ~HotReloadWatcher() override = default;
+    ~HotReloadWatcher() = default;
 
     HotReloadWatcher(const HotReloadWatcher&) = delete;
     HotReloadWatcher& operator=(const HotReloadWatcher&) = delete;
 
-    void watch_shader(std::shared_ptr<ShaderModule> module) override
+    void watch_shader(std::shared_ptr<ShaderModule> module)
     {
         std::lock_guard lock(mutex_);
         ensure_watched_(module->path());
@@ -67,13 +67,13 @@ public:
         shaders_.push_back(std::move(module));
     }
 
-    void watch_pipeline(std::shared_ptr<Pipeline> pipeline) override
+    void watch_pipeline(std::shared_ptr<Pipeline> pipeline)
     {
         std::lock_guard lock(mutex_);
         pipelines_.push_back(std::move(pipeline));
     }
 
-    void watch_image(std::shared_ptr<Image> image, std::string path) override
+    void watch_image(std::shared_ptr<Image> image, std::string path)
     {
         std::lock_guard lock(mutex_);
         ensure_watched_(path);
@@ -81,7 +81,7 @@ public:
     }
 
     // Main thread only. Apply everything that changed since the last call.
-    void drain() override
+    void drain()
     {
         // Cheap in the steady state: one uncontended lock — the poll thread only
         // holds mutex_ for a 250ms-interval mtime scan.

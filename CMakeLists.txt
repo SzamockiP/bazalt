@@ -97,18 +97,20 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb)
 
-# The binding layer is eight translation units, not one. Until 0.20 main.cpp
-# carried every binding and included the whole header-only core, so a rebuild used
-# one core out of however many the machine has. The headers stay header-only --
-# they are templated and inline, and splitting them would be a rewrite for a cost
-# the precompiled header already removes.
+# The binding layer is eight translation units, not one (0.20), and since 0.27
+# the fat core headers are .hpp/.cpp pairs too. Header-only was an optimization
+# for a consumer that does not exist -- nobody links bazalt as a C++ library, so
+# every binding TU was paying to re-parse ~19k lines of implementation, and the
+# include cycle it forced needed two pure-virtual interfaces with one
+# implementation each just to let Context name its own members.
 #
-# The .hpp files used to be listed here for IDE display. They are gone because the
-# list drifted: HotReload.hpp, Device.hpp, SpirvReflect.hpp, ResourceTracker.hpp
-# and MpscQueue.hpp were all missing, and nothing noticed, which is what a list
-# that serves no build purpose does.
+# The .hpp files are not listed here. That list used to exist for IDE display and
+# drifted: HotReload.hpp, Device.hpp, SpirvReflect.hpp and ResourceTracker.hpp
+# were all missing, and nothing noticed, which is what a list that serves no
+# build purpose does.
 add_library(_core MODULE
     src/main.cpp
+    src/Context.cpp
     src/bindings/Enums.cpp
     src/bindings/Resources.cpp
     src/bindings/Pipelines.cpp

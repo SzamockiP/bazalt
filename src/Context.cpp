@@ -1,0 +1,1295 @@
+#include "Context.hpp"
+
+// The other two corners of the triangle. Only this TU may see them: their
+// headers include Context.hpp, so the header side of Context can only name
+// the classes (see the forward declarations there).
+#include "UploadManager.hpp"
+#include "HotReload.hpp"
+
+#include <algorithm>
+#include <cstdlib>
+#include <format>
+#include <string_view>
+
+std::expected<std::shared_ptr<Context>, Error> Context::create(
+    std::shared_ptr<Logger> logger,
+    const ContextConfig& config)
+{
+    if (config.frames_in_flight < 1 || config.frames_in_flight > 4)
+    {
+        return std::unexpected(
+            err_init(std::format("frames_in_flight must be between 1 and 4, got {}", config.frames_in_flight)));
+    }
+
+    auto context = std::shared_ptr<Context>(new Context(logger));
+    context->frames_in_flight_ = config.frames_in_flight;
+    context->auto_barriers_ = config.auto_barriers;
+    context->gpu_timing_ = config.gpu_timing;
+
+    auto target_api = create_instance_(*context, config, logger);
+    if (!target_api)
+    {
+        return std::unexpected(target_api.error());
+    }
+    if (auto r = select_physical_device_(*context, config); !r)
+    {
+        return std::unexpected(r.error());
+    }
+    if (auto r = configure_features_(*context, config, logger, *target_api); !r)
+    {
+        return std::unexpected(r.error());
+    }
+    if (auto r = create_device_(*context); !r)
+    {
+        return std::unexpected(r.error());
+    }
+    if (auto r = create_allocator_and_pool_(*context); !r)
+    {
+        return std::unexpected(r.error());
+    }
+
+    if (logger)
+    {
+        // Spell out which path was negotiated: a bug report from an unfamiliar
+        // machine is unreadable without knowing whether it took the 1.3-core or
+        // the 1.2+KHR route, and whether it went headless.
+        logger->log(
+            Severity::Info,
+            Source::General,
+            std::format(
+                "Vulkan: Initialized ({}, API {}, dynamic rendering: {}{})",
+                context->device_name(),
+                api_version_string(context->api_version()),
+                context->dynamic_rendering_khr_ ? "KHR extension" : "core",
+                context->headless_ ? ", headless" : ""));
+    }
+
+    return context;
+}
+
+Context::~Context()
+{
+    // Stops the threads and finishes the GPU work, if close() has not
+    // already. What is left below is the device itself and the objects this
+    // Context owns outright, which only the destructor may take: by the time
+    // it runs, every resource has released its shared_ptr to us.
+    close();
+
+    // Resources that died AFTER close() queued their handles here, and this
+    // is the drain that frees them — before the pool and the allocator below
+    // disappear out from under the lambdas.
+    for (auto& [serial, fn] : deletion_queue_)
+    {
+        fn();
+    }
+    deletion_queue_.clear();
+
+    for (auto& [key, sampler] : sampler_cache_)
+    {
+        vk_.vkDestroySampler(vkb_device_.device, sampler->get(), nullptr);
+    }
+    sampler_cache_.clear();
+
+    if (submit_timeline_)
+    {
+        vk_.vkDestroySemaphore(vkb_device_.device, submit_timeline_, nullptr);
+    }
+
+    if (command_pool_)
+    {
+        vk_.vkDestroyCommandPool(vkb_device_.device, command_pool_, nullptr);
+    }
+
+    if (pipeline_cache_)
+    {
+        vk_.vkDestroyPipelineCache(vkb_device_.device, pipeline_cache_, nullptr);
+    }
+
+    if (allocator_)
+    {
+        vmaDestroyAllocator(allocator_);
+    }
+
+    vkb::destroy_device(vkb_device_);
+    vkb::destroy_instance(vkb_instance_);
+}
+
+void Context::close()
+{
+    if (closed_)
+    {
+        return;
+    }
+
+    // Before anything it observes goes away: stop the watcher thread. It
+    // touches no Vulkan and no Python (errors go through the Logger's own
+    // queue), so joining it is unconditional and needs no atexit dance — the
+    // jthread destructor requests the stop and joins.
+    hot_reload_.reset();
+
+    // Then the upload worker. Its destructor abandons undecoded jobs,
+    // finishes at most one in-flight submit, joins, and destroys its command
+    // pool — all of which needs the device still alive.
+    upload_manager_.reset();
+
+    if (vkb_device_.device)
+    {
+        vk_.vkDeviceWaitIdle(vkb_device_.device);
+    }
+
+    // Everything is complete, so drain the queue outright rather than
+    // through flush_deletion_queue(): that one asks the timeline how far the
+    // GPU got, and a Context whose construction failed has no device to ask.
+    // (It reaches here through ~Context — see test_printf_needs_the_
+    // validation_layers, which is the caller that found this.) An empty queue
+    // makes the loop a no-op, which is exactly that case.
+    for (auto& [serial, fn] : deletion_queue_)
+    {
+        fn();
+    }
+    deletion_queue_.clear();
+
+    // The queue stays usable afterwards: a resource dropped after close()
+    // still parks its handles here, and the destructor drains them again.
+    closed_ = true;
+}
+
+std::uint32_t Context::max_samples() const
+{
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(vkb_physical_device_.physical_device, &props);
+    VkSampleCountFlags counts = props.limits.framebufferColorSampleCounts & props.limits.framebufferDepthSampleCounts;
+    for (VkSampleCountFlagBits bit :
+         {VK_SAMPLE_COUNT_64_BIT,
+          VK_SAMPLE_COUNT_32_BIT,
+          VK_SAMPLE_COUNT_16_BIT,
+          VK_SAMPLE_COUNT_8_BIT,
+          VK_SAMPLE_COUNT_4_BIT,
+          VK_SAMPLE_COUNT_2_BIT})
+    {
+        if (counts & bit)
+        {
+            return static_cast<std::uint32_t>(bit);
+        }
+    }
+    return 1;
+}
+
+void Context::begin_frame()
+{
+    advance_frame();
+
+    // Apply any pending hot reloads before this frame records: pipeline
+    // rebuilds are handle swaps and old handles retire through the deletion
+    // queue keyed by the current submit serial, so in-flight frames are safe.
+    if (hot_reload_)
+    {
+        hot_reload_->drain();
+    }
+
+    // A frame boundary is the natural point to reclaim deferred handles;
+    // the submission timeline says how far the GPU actually got.
+    flush_deletion_queue();
+}
+
+std::uint64_t Context::completed_submit_serial() const
+{
+    std::uint64_t value = 0;
+    vk_.vkGetSemaphoreCounterValue(vkb_device_.device, submit_timeline_, &value);
+    return value;
+}
+
+void Context::note_slot_submit(std::uint64_t serial)
+{
+    if (slot_serial_.size() != frames_in_flight_)
+    {
+        slot_serial_.assign(frames_in_flight_, 0);
+    }
+    slot_serial_[frame_serial_ % frames_in_flight_] = serial;
+}
+
+void Context::wait_for_slot()
+{
+    if (slot_serial_.size() != frames_in_flight_)
+    {
+        return;
+    }
+    // Frame pacing: a failure here surfaces at the next submit, which is
+    // where a caller can be told about it.
+    static_cast<void>(wait_for_serial(slot_serial_[frame_serial_ % frames_in_flight_]));
+}
+
+std::expected<void, Error> Context::wait_for_submits()
+{
+    // Uploads first: a job still in the decode queue has no serial yet, so
+    // waiting the timeline before it submits would miss it.
+    if (upload_manager_)
+    {
+        upload_manager_->wait_all();
+    }
+    auto r = wait_for_serial(submit_serial_.load());
+    flush_deletion_queue();
+    return r;
+}
+
+std::expected<std::uint64_t, Error> Context::submit_one_shot(VkCommandBuffer cmd, std::uint64_t after)
+{
+    std::lock_guard lock(queue_mutex_);
+    const std::uint64_t serial = advance_submit_serial();
+
+    VkSemaphore timeline = submit_timeline_;
+    // TRANSFER, not TOP_OF_PIPE: an upload's first real work is a copy, and
+    // there is nothing before it worth letting run early.
+    const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    const bool ordered = after != 0;
+    VkTimelineSemaphoreSubmitInfo timelineInfo{
+        .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+        .pNext = nullptr,
+        .waitSemaphoreValueCount = ordered ? 1u : 0u,
+        .pWaitSemaphoreValues = ordered ? &after : nullptr,
+        .signalSemaphoreValueCount = 1,
+        .pSignalSemaphoreValues = &serial};
+    VkSubmitInfo submitInfo{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = &timelineInfo,
+        .waitSemaphoreCount = ordered ? 1u : 0u,
+        .pWaitSemaphores = ordered ? &timeline : nullptr,
+        .pWaitDstStageMask = ordered ? &wait_stage : nullptr,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &cmd,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &timeline};
+    if (auto e = check(
+            vk_.vkQueueSubmit(graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
+            "submit one-shot command buffer",
+            ErrorCode::Resource))
+    {
+        return std::unexpected(*e);
+    }
+    return serial;
+}
+
+std::expected<void, Error> Context::wait_for_serial(std::uint64_t serial)
+{
+    if (serial == 0)
+    {
+        return {};
+    }
+    VkSemaphore timeline = submit_timeline_;
+    VkSemaphoreWaitInfo waitInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .semaphoreCount = 1,
+        .pSemaphores = &timeline,
+        .pValues = &serial};
+    if (auto e = check(
+            vk_.vkWaitSemaphores(vkb_device_.device, &waitInfo, UINT64_MAX),
+            "wait for submitted GPU work",
+            ErrorCode::Resource))
+    {
+        return std::unexpected(*e);
+    }
+    return {};
+}
+
+void Context::defer_destroy(std::function<void()> fn)
+{
+    std::lock_guard lock(deletion_mutex_);
+    deletion_queue_.emplace_back(submit_serial_.load(), std::move(fn));
+}
+
+void Context::flush_deletion_queue()
+{
+    const std::uint64_t completed = completed_submit_serial();
+
+    // Run the ready entries outside the lock: a destructor lambda must be
+    // free to enqueue (it doesn't today, but that trap is invisible).
+    std::vector<std::function<void()>> ready;
+    {
+        std::lock_guard lock(deletion_mutex_);
+        // Two producers interleave, so keys are not strictly ordered —
+        // scan rather than pop-from-front. The queue stays tiny.
+        for (auto it = deletion_queue_.begin(); it != deletion_queue_.end();)
+        {
+            if (it->first <= completed)
+            {
+                ready.push_back(std::move(it->second));
+                it = deletion_queue_.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+    for (auto& fn : ready)
+    {
+        fn();
+    }
+}
+
+void Context::set_upload_manager(std::unique_ptr<UploadManager> manager)
+{
+    upload_manager_ = std::move(manager);
+}
+
+void Context::note_upload_serial(std::uint64_t serial)
+{
+    if (upload_manager_)
+    {
+        upload_manager_->note_direct_upload(serial);
+    }
+}
+
+void Context::set_hot_reload(std::unique_ptr<HotReloadWatcher> watcher)
+{
+    hot_reload_ = std::move(watcher);
+}
+
+std::expected<std::shared_ptr<Sampler>, Error> Context::get_sampler(const SamplerDesc& desc, const std::string& name)
+{
+    // Full Vulkan always allows both of these, so they are questions only on a
+    // portability driver — and there the layers report a sampler the driver
+    // then ignores. Refusing here turns "the shadows look wrong on a Mac" into
+    // a sentence naming the capability to ask about (0.22).
+    if (desc.compare && !supports(Feature::COMPARISON_SAMPLER))
+    {
+        return std::unexpected(err_unsupported(
+            "create_sampler(compare=) needs the COMPARISON_SAMPLER feature, which this driver does not "
+            "offer. Ask ctx.supports(bz.Feature.COMPARISON_SAMPLER) and sample the depth texture "
+            "yourself where it answers False."));
+    }
+    if (desc.mip_lod_bias != 0.0f && !supports(Feature::SAMPLER_MIP_LOD_BIAS))
+    {
+        return std::unexpected(err_unsupported(
+            "create_sampler(mip_lod_bias=) needs the SAMPLER_MIP_LOD_BIAS feature, which this driver does "
+            "not offer. Ask ctx.supports(bz.Feature.SAMPLER_MIP_LOD_BIAS), or bias the level in the "
+            "shader with textureLod()."));
+    }
+
+    const std::uint32_t key = sampler_cache_key(desc);
+    // The key hashes a float, so equality of keys is not equality of
+    // descriptions: compare the description before handing the handle back.
+    if (auto it = sampler_cache_.find(key); it != sampler_cache_.end() && it->second->desc() == desc)
+    {
+        // A cache hit with a new name renames the shared object to list both
+        // users. See Sampler::add_debug_name for why that beats dropping the
+        // name or splitting the cache entry.
+        if (it->second->add_debug_name(name))
+        {
+            set_debug_name(
+                VK_OBJECT_TYPE_SAMPLER, reinterpret_cast<std::uint64_t>(it->second->get()), it->second->debug_name());
+        }
+        return it->second;
+    }
+
+    const bool anisotropy = desc.anisotropy && supports(Feature::ANISOTROPIC_FILTERING);
+    const VkFilter filter = to_vk_filter(desc.filter);
+    VkSamplerAddressMode address = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    switch (desc.address_mode)
+    {
+        case AddressMode::REPEAT:
+            address = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            break;
+        case AddressMode::CLAMP:
+            address = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            break;
+        case AddressMode::MIRROR:
+            address = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+            break;
+        case AddressMode::CLAMP_TO_BORDER:
+            address = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+            break;
+    }
+
+    VkSamplerCreateInfo info{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .magFilter = filter,
+        .minFilter = filter,
+        .mipmapMode = desc.filter == Filter::NEAREST ? VK_SAMPLER_MIPMAP_MODE_NEAREST : VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .addressModeU = address,
+        .addressModeV = address,
+        .addressModeW = address,
+        .mipLodBias = desc.mip_lod_bias,
+        .anisotropyEnable = anisotropy ? VK_TRUE : VK_FALSE,
+        .maxAnisotropy = anisotropy ? 16.0f : 1.0f,
+        .compareEnable = desc.compare ? VK_TRUE : VK_FALSE,
+        .compareOp = desc.compare ? to_vk(*desc.compare) : VK_COMPARE_OP_ALWAYS,
+        .minLod = 0.0f,
+        // The whole mip chain. The old per-texture sampler had maxLod = 0,
+        // which would have clamped every mip away the moment mips existed.
+        .maxLod = VK_LOD_CLAMP_NONE,
+        // Float rather than int: every sampled format bazalt exposes reads
+        // as floats, and an int border on a float image is undefined.
+        .borderColor = desc.border_color == BorderColor::OPAQUE_WHITE ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE
+                                                                      : VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+        .unnormalizedCoordinates = VK_FALSE};
+
+    VkSampler handle = VK_NULL_HANDLE;
+    if (auto e = check(
+            vk_.vkCreateSampler(vkb_device_.device, &info, nullptr, &handle), "create sampler", ErrorCode::Resource))
+    {
+        return std::unexpected(*e);
+    }
+
+    auto sampler = std::make_shared<Sampler>(handle, desc);
+    if (sampler->add_debug_name(name))
+    {
+        set_debug_name(VK_OBJECT_TYPE_SAMPLER, reinterpret_cast<std::uint64_t>(handle), sampler->debug_name());
+    }
+    sampler_cache_.insert_or_assign(key, sampler);
+    return sampler;
+}
+
+Context::MemoryStats Context::memory_stats() const
+{
+    VkPhysicalDeviceMemoryProperties memory_props{};
+    vkGetPhysicalDeviceMemoryProperties(vkb_physical_device_.physical_device, &memory_props);
+
+    std::vector<VmaBudget> budgets(memory_props.memoryHeapCount);
+    vmaGetHeapBudgets(allocator_, budgets.data());
+
+    MemoryStats stats;
+    for (std::uint32_t i = 0; i < memory_props.memoryHeapCount; ++i)
+    {
+        if ((memory_props.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0)
+        {
+            continue;
+        }
+        stats.used += budgets[i].statistics.allocationBytes;
+        stats.reserved += budgets[i].statistics.blockBytes;
+        stats.budget += budgets[i].budget;
+    }
+    return stats;
+}
+
+void Context::set_debug_name(VkObjectType type, std::uint64_t handle, const std::string& name)
+{
+    if (name.empty() || handle == 0 || vkSetDebugUtilsObjectNameEXT == nullptr)
+    {
+        return;
+    }
+    VkDebugUtilsObjectNameInfoEXT info{
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+        .pNext = nullptr,
+        .objectType = type,
+        .objectHandle = handle,
+        .pObjectName = name.c_str()};
+    vkSetDebugUtilsObjectNameEXT(vkb_device_.device, &info);
+}
+
+// ── create() steps ────────────────────────────────────────────────────────────
+
+std::expected<std::uint32_t, Error> Context::create_instance_(
+    Context& ctx,
+    const ContextConfig& config,
+    const std::shared_ptr<Logger>& logger)
+{
+    if (volkInitialize() != VK_SUCCESS)
+    {
+        return std::unexpected(err_no_vulkan_loader());
+    }
+
+    // printf is implemented by the validation layers, so the two settings
+    // contradict each other. Say so instead of building a Context whose
+    // shader_printf silently prints nothing.
+    if (config.shader_printf && config.validation == ValidationMode::Off)
+    {
+        return std::unexpected(err_init(
+            "shader_printf=True needs the validation layers, which validation=\"off\" turns off. "
+            "Use validation=\"on\" (or leave it at \"auto\")."));
+    }
+    ctx.shader_printf_ = config.shader_printf;
+
+    auto system_info = vkb::SystemInfo::get_system_info();
+    if (!system_info)
+    {
+        return std::unexpected(err_init("Vulkan: " + system_info.error().message()));
+    }
+
+    // Take 1.3 where it exists, otherwise 1.2. Requiring 1.3 outright — as this
+    // used to — rejects older Intel iGPUs, MoltenVK and any driver still on 1.2,
+    // which is a large slice of real machines. Everything bazalt needs from 1.3
+    // is available on 1.2 through VK_KHR_dynamic_rendering.
+    // A test/CI knob, not public API (same species as BAZALT_HOT_RELOAD_POLL_MS):
+    // negotiate 1.2 even where 1.3 exists, so the 1.2 + VK_KHR_dynamic_rendering
+    // path is reachable on a 1.3 machine. Debt #2 — that path had no coverage
+    // anywhere since 0.5, because both CI (lavapipe) and the dev GPU report 1.3+.
+    // It forces the whole negotiation, not just the aliasing: nulling the core
+    // entry points alone would only crash, since a device that never enabled the
+    // KHR extension has no KHR entry points to alias to either.
+    const char* force_1_2 = std::getenv("BAZALT_FORCE_VULKAN_1_2");
+    const bool has_1_3 = system_info->is_instance_version_available(1, 3) && !(force_1_2 && force_1_2[0] == '1');
+    const std::uint32_t target_api = has_1_3 ? VK_API_VERSION_1_3 : VK_API_VERSION_1_2;
+
+    // Instance + Debug Messenger
+    auto inst_builder =
+        vkb::InstanceBuilder{}.set_app_name("Bazalt Engine").set_app_version(1, 0, 0).require_api_version(target_api);
+
+    // Validation is independent of whether a logger was supplied. It used to
+    // be gated on `logger != nullptr`, which meant the default path rendered
+    // with the layers off and stayed silent about its own bugs.
+    if (config.validation != ValidationMode::Off)
+    {
+        if (config.validation == ValidationMode::On || config.validation == ValidationMode::Sync)
+        {
+            inst_builder.enable_validation_layers();
+        }
+        else
+        {
+            // Enables the layers only if they are actually present.
+            inst_builder.request_validation_layers();
+        }
+
+        if (config.validation == ValidationMode::Sync)
+        {
+            inst_builder.add_validation_feature_enable(VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
+            // Verified empirically on SDK 1.4.350: without this setting the
+            // layer does not track shader descriptor accesses at all, so a
+            // missing barrier between two dispatches goes UNREPORTED — which
+            // would make the whole Sync mode a placebo.
+            //
+            // Gated on the extension: add_layer_setting() hard-requires
+            // VK_EXT_layer_settings, and older layers (e.g. Ubuntu's apt
+            // package) neither expose it nor need it — there the shader
+            // accesses are tracked by default and the setting doesn't exist.
+            if (system_info->is_extension_available(VK_EXT_LAYER_SETTINGS_EXTENSION_NAME))
+            {
+                static const VkBool32 syncval_shader_accesses = VK_TRUE;
+                inst_builder.add_layer_setting(
+                    VkLayerSettingEXT{
+                        .pLayerName = "VK_LAYER_KHRONOS_validation",
+                        .pSettingName = "syncval_shader_accesses_heuristic",
+                        .type = VK_LAYER_SETTING_TYPE_BOOL32_EXT,
+                        .valueCount = 1,
+                        .pValues = &syncval_shader_accesses});
+            }
+        }
+
+        // Shader printf is a validation-layer service, so it rides the same
+        // instance the layers are on. The layer reports the output at INFO
+        // severity, which is why the messenger mask has to open up for it —
+        // and why debug_callback drops every OTHER info message, so asking
+        // for printf does not also subscribe to loader chatter.
+        if (config.shader_printf)
+        {
+            inst_builder.add_validation_feature_enable(VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT);
+            // validation="auto" only *requests* the layers, so on a machine
+            // with no SDK installed printf has nothing behind it. That is not
+            // an error — auto exists precisely to keep running — but it must
+            // not look like a shader that never printed.
+            if (!system_info->validation_layers_available && logger)
+            {
+                logger->log(
+                    Severity::Warning,
+                    Source::Shader,
+                    "shader_printf=True, but the Vulkan validation layers are not installed on this "
+                    "machine, so debugPrintfEXT() output cannot be delivered.");
+            }
+        }
+
+        VkDebugUtilsMessageSeverityFlagsEXT severities = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+                                                         VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
+        if (config.shader_printf)
+        {
+            severities |= VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT;
+        }
+
+        inst_builder.set_debug_callback(debug_callback)
+            .set_debug_callback_user_data_pointer(logger.get())
+            .set_debug_messenger_severity(severities)
+            .set_debug_messenger_type(
+                VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT);
+    }
+
+    // Surface extensions are NOT enabled by hand. vk-bootstrap already adds the
+    // right ones per platform (win32/xcb/xlib/wayland/metal), and the previous
+    // hand-rolled enable_extension("VK_KHR_surface") was both redundant and a
+    // hard failure path: enable_extension refuses to build when absent.
+    // It also silently ignored the extension list GLFW reports.
+    for (const auto& extension : config.raw_extensions)
+    {
+        inst_builder.enable_extension(extension.c_str());
+    }
+
+    // VK_EXT_full_screen_exclusive is a DEVICE extension that requires an
+    // INSTANCE one, so asking for the Feature has to reach this far back —
+    // the device does not exist yet, and by the time it does the instance is
+    // fixed. Checked against system_info rather than enabled outright,
+    // because enable_extension refuses to build when the extension is absent
+    // and a missing one here must degrade to "the Feature answers False".
+    const bool wants_exclusive_fullscreen =
+        std::ranges::find(config.required, Feature::EXCLUSIVE_FULLSCREEN) != config.required.end() ||
+        std::ranges::find(config.optional, Feature::EXCLUSIVE_FULLSCREEN) != config.optional.end();
+    if (wants_exclusive_fullscreen &&
+        system_info->is_extension_available(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME))
+    {
+        inst_builder.enable_extension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+    }
+
+    // A test knob in the same family as BAZALT_FORCE_VULKAN_1_2, and not
+    // public API: it asks for the headless instance on a machine that has a
+    // display, so the fallback below is reachable where anyone can run it.
+    // Without it that path only executes on a display-less server — which is
+    // exactly where a remote notebook runs, and where nobody was testing.
+    const char* force_headless = std::getenv("BAZALT_FORCE_HEADLESS");
+    const bool forced_headless = force_headless && force_headless[0] == '1';
+    if (forced_headless)
+    {
+        inst_builder.set_headless(true);
+    }
+
+    auto inst_ret = inst_builder.build();
+
+    // A machine with no display has no windowing extensions, and vk-bootstrap
+    // treats that as fatal. Fall back to a headless instance instead: whether a
+    // window is involved is decided later by creating a SwapchainRenderer (or
+    // not), so Context has no business demanding one — and no business making
+    // the user pass headless=True to say so.
+    if (!inst_ret && inst_ret.error() == vkb::InstanceError::windowing_extensions_not_present)
+    {
+        inst_builder.set_headless(true);
+        inst_ret = inst_builder.build();
+        if (inst_ret)
+        {
+            ctx.headless_ = true;
+            if (logger)
+            {
+                logger->log(
+                    Severity::Info, Source::General, "Vulkan: no windowing extensions present, continuing headless");
+            }
+        }
+    }
+    else if (inst_ret && forced_headless)
+    {
+        ctx.headless_ = true;
+    }
+
+    if (!inst_ret)
+    {
+        Error error = err_init("Vulkan: " + inst_ret.error().message());
+        error.result = inst_ret.vk_result();
+        return std::unexpected(error);
+    }
+    ctx.vkb_instance_ = inst_ret.value();
+    // ...Only, not volkLoadInstance: the device-level globals must stay null
+    // so a call site that skipped Context::vk() fails loudly (see vk()). What
+    // this does load is instance-level — loader trampolines that dispatch on
+    // the handle passed in, hence correct no matter which Context created
+    // them last. It also loads the global vkGetDeviceProcAddr that
+    // volkLoadDeviceTable needs, so it must run before create_device_.
+    volkLoadInstanceOnly(ctx.vkb_instance_.instance);
+
+    return target_api;
+}
+
+std::expected<void, Error> Context::select_physical_device_(Context& ctx, const ContextConfig& config)
+{
+    // Nothing is required here beyond the API version: swapchain support used to
+    // be a required extension, which rejected headless-only GPUs outright and
+    // made the require_present(false) on the next line pointless. Optional bits
+    // are enabled per-device in configure_features_, once we know what this
+    // device actually has.
+    //
+    // The minimum is the BASELINE, not the version the instance negotiated, and
+    // the difference is a real machine rather than a hypothetical one. A device
+    // may be older than its loader: on macOS the LunarG loader reports 1.4 while
+    // MoltenVK's device reports 1.2. Selecting with the instance's version — which
+    // vk-bootstrap also does by default — rejected that device outright, and 0.22
+    // found the whole macOS suite failing with "no suitable GPU found". Only the
+    // DEVICE version may decide the 1.3-or-KHR path, and configure_features_ has
+    // always read it off the device (`device_has_1_3`). This one line was asking
+    // the wrong object.
+    auto selector = vkb::PhysicalDeviceSelector{ctx.vkb_instance_}
+                        .set_minimum_version(1, 2)
+                        .prefer_gpu_device_type(vkb::PreferredDeviceType::discrete)
+                        .require_present(false);
+
+    // Required features must gate *selection*, so a machine with two GPUs picks
+    // the one that can do the job rather than failing on the preferred one.
+    //
+    // Only the base-feature column can do that, and the reason is vk-bootstrap's
+    // rather than ours: set_required_features_11/12 put a feature struct into the
+    // library's own pNext chain, and build() then refuses a chain that also holds
+    // ours (VkPhysicalDeviceFeatures2_in_pNext_chain_while_using_add_required_
+    // extension_features). Moving every struct into vkb's chain would rewrite the
+    // 1.2/1.3 negotiation for a machine that has two GPUs of which only the
+    // non-preferred one has descriptor indexing. A required pNext feature is
+    // therefore diagnosed in configure_features_ instead, by name.
+    DeviceFeatures required_features{};
+    for (Feature feature : config.required)
+    {
+        enable_feature(required_features, feature);
+    }
+    selector.set_required_features(required_features.core);
+
+    // An explicitly chosen GPU still has to pass the same suitability gate —
+    // required features and API version are not preferences. select_devices()
+    // is select() without the "and now pick the best one" step, so the choice
+    // is the caller's while the filtering stays ours.
+    if (config.device)
+    {
+        auto all = selector.select_devices();
+        if (all)
+        {
+            for (auto& candidate : all.value())
+            {
+                if (device_uuid(vkGetPhysicalDeviceProperties2, candidate.physical_device) == *config.device)
+                {
+                    ctx.vkb_physical_device_ = candidate;
+                    return {};
+                }
+            }
+        }
+        return std::unexpected(err_init(
+            "Vulkan: the selected GPU is not available to this Context. It may have "
+            "been removed since list_devices(), or it may not meet the requirements "
+            "(check device.supports() for every feature passed as required)."));
+    }
+
+    auto phys_ret = selector.select();
+    if (!phys_ret)
+    {
+        std::string detail;
+        for (Feature feature : config.required)
+        {
+            detail += (detail.empty() ? "" : ", ");
+            detail += feature_name(feature);
+        }
+        Error error = err_init(
+            "Vulkan: no suitable GPU found" +
+            (detail.empty() ? std::string() : " for required features [" + detail + "]") + ": " +
+            phys_ret.error().message());
+        error.result = phys_ret.vk_result();
+        return std::unexpected(error);
+    }
+    ctx.vkb_physical_device_ = phys_ret.value();
+    return {};
+}
+
+// A Feature whose Vulkan spelling is an extension turns that extension on
+// rather than a bit in a feature struct (0.25). Same position in
+// configure_features_ as every other enable_*, and for the same reason: the
+// DeviceBuilder takes the PhysicalDevice by value.
+void Context::enable_extension_for(Context& ctx, Feature feature)
+{
+    if (const char* extension = feature_info(feature).extension)
+    {
+        ctx.vkb_physical_device_.enable_extension_if_present(extension);
+    }
+}
+
+// EVERY enable_* call in here must happen BEFORE the DeviceBuilder exists
+// (i.e. before create_device_): its constructor takes the PhysicalDevice
+// *by value*, so anything enabled afterwards is written to a copy and
+// silently dropped. That mistake cost a swapchain that was never enabled on
+// the device — an access violation with no diagnostic.
+std::expected<void, Error> Context::configure_features_(
+    Context& ctx,
+    const ContextConfig& config,
+    const std::shared_ptr<Logger>& logger,
+    std::uint32_t target_api)
+{
+    // vkb::PhysicalDevice::features is documented as the *selected* features,
+    // not the available ones, so ask the driver directly. One query for all
+    // three structs, through the same helper list_devices uses.
+    // vk-bootstrap enables VK_KHR_portability_subset by default when the device
+    // reports it, so the struct is legal to ask for exactly when this is true.
+    ctx.portability_subset_ = ctx.vkb_physical_device_.is_extension_present(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+    const DeviceFeatures available = query_device_features(
+        vkGetPhysicalDeviceFeatures2,
+        vkEnumerateDeviceExtensionProperties,
+        ctx.vkb_physical_device_.physical_device,
+        ctx.portability_subset_,
+        (std::min)(target_api, ctx.vkb_physical_device_.properties.apiVersion));
+
+    // Here rather than in a lazy accessor: this is the only place holding
+    // the available features, and which property structs may be chained
+    // follows from them.
+    ctx.limits_ =
+        query_device_limits(vkGetPhysicalDeviceProperties2, ctx.vkb_physical_device_.physical_device, available);
+    // The heap sizes are not in VkPhysicalDeviceLimits, so they are read
+    // beside them — by the same rule list_devices uses, so ctx.limits and
+    // device.limits report one number and not two.
+    VkPhysicalDeviceMemoryProperties heaps{};
+    vkGetPhysicalDeviceMemoryProperties(ctx.vkb_physical_device_.physical_device, &heaps);
+    for (std::uint32_t i = 0; i < heaps.memoryHeapCount; ++i)
+    {
+        if (heaps.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+        {
+            ctx.limits_.device_memory += heaps.memoryHeaps[i].size;
+        }
+    }
+
+    // Dynamic rendering: core in 1.3, an extension on 1.2. Same capability,
+    // two spellings — resolve it here so nothing else has to care.
+    ctx.dynamic_rendering_khr_ = false;
+    const bool has_1_3 = target_api >= VK_API_VERSION_1_3;
+    const bool device_has_1_3 = ctx.vkb_physical_device_.properties.apiVersion >= VK_API_VERSION_1_3;
+
+    if (has_1_3 && device_has_1_3)
+    {
+        // core path — VkPhysicalDeviceVulkan13Features in create_device_
+        ctx.negotiated_api_version_ = VK_API_VERSION_1_3;
+    }
+    else if (ctx.vkb_physical_device_.enable_extension_if_present(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME))
+    {
+        ctx.dynamic_rendering_khr_ = true;
+        ctx.negotiated_api_version_ = VK_API_VERSION_1_2;
+    }
+    else
+    {
+        return std::unexpected(err_init(
+            "Vulkan: this GPU/driver supports neither Vulkan 1.3 nor "
+            "VK_KHR_dynamic_rendering, which bazalt requires. Updating the "
+            "graphics driver usually fixes this."));
+    }
+
+    // Presentation is optional: a headless or compute-only Context is legitimate.
+    // SwapchainRenderer verifies present support at its own creation time.
+    //
+    // And impossible on a headless INSTANCE, which is the half this used to
+    // miss. VK_KHR_swapchain requires VK_KHR_surface at the instance level, so
+    // enabling the device extension without it is
+    // VUID-vkCreateDevice-ppEnabledExtensionNames-01387 — every Context on a
+    // display-less machine emitted that error. The driver advertises the device
+    // extension there regardless, so enable_extension_if_present answers yes and
+    // has no way to know what the instance did. Found by BAZALT_FORCE_HEADLESS on
+    // the first run, which is the argument for the knob in one line.
+    ctx.swapchain_supported_ = !ctx.headless_ &&
+                               ctx.vkb_physical_device_.enable_extension_if_present(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
+    // debugPrintfEXT() compiles to OpExtInst against the NonSemantic.DebugPrintf
+    // instruction set, which the device must permit through
+    // VK_KHR_shader_non_semantic_info — core in 1.3, an extension on the 1.2
+    // path. Same "one capability, two spellings" shape as dynamic rendering
+    // above, so it is resolved here and nothing downstream asks the version.
+    //
+    // Enabled whenever the device has it, not only for a printf Context. A
+    // shader that prints is legal to COMPILE anywhere -- it simply prints
+    // nothing without the layers -- and vkCreateShaderModule refuses SPIR-V
+    // that declares SPV_KHR_non_semantic_info unless the extension is on. So a
+    // printing shader compiled in an ordinary Context was a validation error on
+    // every 1.2 device, which before macOS meant a path nothing in CI ran.
+    const bool non_semantic_info =
+        ctx.negotiated_api_version_ >= VK_API_VERSION_1_3 ||
+        ctx.vkb_physical_device_.enable_extension_if_present(VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME);
+    if (ctx.shader_printf_ && !non_semantic_info)
+    {
+        return std::unexpected(err_init(
+            "shader_printf=True needs VK_KHR_shader_non_semantic_info (or Vulkan 1.3), which this "
+            "GPU/driver does not offer. Updating the graphics driver usually fixes this."));
+    }
+
+    // Optional features: enable what this device happens to have, and record
+    // what stuck so supports() can answer honestly.
+    DeviceFeatures& enabled_features = ctx.negotiated_features_;
+    for (Feature feature : config.required)
+    {
+        // A required feature in a pNext struct could not gate device selection
+        // (see select_physical_device_), so this is where it is caught. The
+        // base-feature ones cannot reach here missing, because the selector
+        // already rejected every device without them.
+        if (!feature_available(available, feature))
+        {
+            return std::unexpected(err_init(
+                std::format(
+                    "Vulkan: the required feature {} is not supported by this GPU. Pass it as "
+                    "optional and ask ctx.supports() instead, or choose a device whose "
+                    "device.supports() answers True.",
+                    feature_name(feature))));
+        }
+        enable_extension_for(ctx, feature);
+        enable_feature(enabled_features, feature);
+        ctx.enabled_features_.insert(feature);
+    }
+    for (Feature feature : config.optional)
+    {
+        if (feature_available(available, feature))
+        {
+            enable_extension_for(ctx, feature);
+            enable_feature(enabled_features, feature);
+            ctx.enabled_features_.insert(feature);
+        }
+        else if (logger)
+        {
+            logger->log(
+                Severity::Info,
+                Source::General,
+                std::format("Vulkan: optional feature {} is not supported by this GPU", feature_name(feature)));
+        }
+    }
+
+    // Two capabilities are on by default when present, because bazalt itself
+    // uses them and asking for them would be a knob with one sensible setting.
+    // ANISOTROPIC_FILTERING used to be *required*, which turned a nicety into a
+    // reach blocker. MULTIVIEW joins it in 0.21: target.all_layers() has offered
+    // it since 0.13 without an opt-in, and making the Feature row the way to ASK
+    // must not also make it a thing to request.
+    for (Feature implicit : {Feature::ANISOTROPIC_FILTERING, Feature::MULTIVIEW})
+    {
+        if (feature_available(available, implicit))
+        {
+            enable_feature(enabled_features, implicit);
+            ctx.enabled_features_.insert(implicit);
+        }
+    }
+
+    // The portability rows are lifted restrictions, not opt-in capabilities, so
+    // they go on whenever the device has them. Nobody would ask for "samplers
+    // may compare" — full Vulkan never made it a question — and leaving one off
+    // is how a comparison sampler becomes a validation error on a driver that
+    // could have done it. Enabling costs nothing: the bit is the driver's own
+    // statement that the restriction does not apply.
+    //
+    // The set is recorded either way (see the loop condition), so supports()
+    // answers True on every non-portability driver without a struct to read.
+    for (Feature portability :
+         {Feature::COMPARISON_SAMPLER,
+          Feature::SAMPLER_MIP_LOD_BIAS,
+          Feature::MULTISAMPLE_ARRAYS,
+          Feature::IMAGE_VIEW_2D_ON_3D,
+          Feature::TRIANGLE_FANS})
+    {
+        if (feature_available(available, portability))
+        {
+            enable_feature(enabled_features, portability);
+            ctx.enabled_features_.insert(portability);
+        }
+        else if (logger)
+        {
+            logger->log(
+                Severity::Info,
+                Source::General,
+                std::format(
+                    "Vulkan: this driver is a Vulkan portability subset and does not offer {}",
+                    feature_name(portability)));
+        }
+    }
+
+    // descriptorIndexing is a roll-up: the spec says enabling it "does not imply
+    // the other minimum descriptor indexing features are also enabled", so the
+    // bits an array binding actually needs are turned on one by one.
+    if (ctx.enabled_features_.contains(Feature::BINDLESS))
+    {
+        enable_descriptor_indexing(enabled_features, available);
+    }
+
+    // Timeline semaphores pace the deletion queue and async uploads. They are
+    // core in 1.2 (our floor), so the entry points are always loaded — but the
+    // feature bit still has to be enabled at device creation, and checking it
+    // here turns a cryptic device-creation error code into a sentence. Not a
+    // Feature row: bazalt does not work without it, so there is nothing to ask.
+    enabled_features.v12.timelineSemaphore = VK_TRUE;
+    if (!available.v12.timelineSemaphore)
+    {
+        return std::unexpected(err_init(
+            "Vulkan: this GPU/driver does not support timeline semaphores, which "
+            "bazalt requires (they are mandatory in conformant Vulkan 1.2 drivers). "
+            "Updating the graphics driver usually fixes this."));
+    }
+
+    // Computed here, after every insertion into enabled_features_, because
+    // that set is the only honest source: a barrier mask may name the
+    // tessellation or geometry stage only when the feature behind it is on.
+    ctx.all_shader_stages_ = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    if (ctx.enabled_features_.contains(Feature::TESSELLATION))
+    {
+        ctx.all_shader_stages_ |= VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+                                  VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT;
+    }
+    if (ctx.enabled_features_.contains(Feature::GEOMETRY_SHADER))
+    {
+        ctx.all_shader_stages_ |= VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
+    }
+
+    ctx.vkb_physical_device_.enable_features_if_present(enabled_features.core);
+    return {};
+}
+
+// Only entered once the PhysicalDevice is final and safe to copy.
+std::expected<void, Error> Context::create_device_(Context& ctx)
+{
+    // shaderDemoteToHelperInvocation / shaderTerminateInvocation are mandatory
+    // in Vulkan 1.3, and glslang compiles `discard` to one of those opcodes
+    // when targeting SPIR-V 1.6 — so a fragment shader with `discard` breaks
+    // unless they are enabled alongside the 1.3 target.
+    VkPhysicalDeviceVulkan13Features features13{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        .pNext = nullptr,
+        .shaderDemoteToHelperInvocation = VK_TRUE,
+        .shaderTerminateInvocation = VK_TRUE,
+        .dynamicRendering = VK_TRUE};
+    // maintenance4 has two homes and the spec forbids sending both: a chain
+    // holding VkPhysicalDeviceVulkan13Features must not also hold
+    // VkPhysicalDeviceMaintenance4Features. So the bit is copied into the
+    // roll-up on the 1.3 path and the standalone struct rides the 1.2 one
+    // (0.26).
+    features13.maintenance4 = ctx.negotiated_features_.maintenance4.maintenance4;
+    VkPhysicalDeviceMaintenance4Features maintenance4 = ctx.negotiated_features_.maintenance4;
+    VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_khr{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR,
+        .pNext = nullptr,
+        .dynamicRendering = VK_TRUE};
+
+    // The 1.1 and 1.2 structs come from configure_features_ rather than being
+    // spelled again here: it is the only place that knows what the device
+    // offered and what the caller asked for, and a second literal would be a
+    // second answer. Both rode this path before 0.21 too — timelineSemaphore
+    // (core in 1.2, so no KHR aliasing, unlike dynamic rendering) and multiview
+    // are simply two of the bits in them now.
+    VkPhysicalDeviceVulkan12Features features12 = ctx.negotiated_features_.v12;
+    VkPhysicalDeviceVulkan11Features features11 = ctx.negotiated_features_.v11;
+    VkPhysicalDevicePortabilitySubsetFeaturesKHR portability = ctx.negotiated_features_.portability;
+
+    auto dev_builder = vkb::DeviceBuilder{ctx.vkb_physical_device_};
+    dev_builder.add_pNext(&features12);
+    dev_builder.add_pNext(&features11);
+    // Only when the device claims the extension. Chaining it otherwise is a
+    // struct for an extension nobody enabled, and the layers say so. When the
+    // device DOES claim it, this chain is the whole point: an unlisted
+    // portability feature defaults to off, so a driver that supports comparison
+    // samplers still refuses them if nobody asked.
+    if (ctx.portability_subset_)
+    {
+        dev_builder.add_pNext(&portability);
+    }
+    if (ctx.dynamic_rendering_khr_)
+    {
+        dev_builder.add_pNext(&dynamic_rendering_khr);
+        if (maintenance4.maintenance4 == VK_TRUE)
+        {
+            dev_builder.add_pNext(&maintenance4);
+        }
+    }
+    else
+    {
+        dev_builder.add_pNext(&features13);
+    }
+
+    auto dev_ret = dev_builder.build();
+
+    if (!dev_ret)
+    {
+        Error error = err_init("Vulkan: " + dev_ret.error().message());
+        error.result = dev_ret.vk_result();
+        return std::unexpected(error);
+    }
+    ctx.vkb_device_ = dev_ret.value();
+    // Into this Context's own table, never into volk's globals — see vk().
+    volkLoadDeviceTable(&ctx.vk_, ctx.vkb_device_.device);
+    ctx.alias_dynamic_rendering_entry_points();
+
+    auto gq = ctx.vkb_device_.get_queue(vkb::QueueType::graphics);
+    if (!gq)
+    {
+        return std::unexpected(err_init("Vulkan: Failed to get graphics queue"));
+    }
+    ctx.graphics_queue_ = gq.value();
+    ctx.graphics_queue_family_ = ctx.vkb_device_.get_queue_index(vkb::QueueType::graphics).value();
+
+    return {};
+}
+
+std::expected<void, Error> Context::create_allocator_and_pool_(Context& ctx)
+{
+    VmaVulkanFunctions vulkanFunctions = {};
+    vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+    vulkanFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
+
+    VmaAllocatorCreateInfo allocatorInfo = {};
+    allocatorInfo.physicalDevice = ctx.vkb_physical_device_.physical_device;
+    allocatorInfo.device = ctx.vkb_device_.device;
+    allocatorInfo.instance = ctx.vkb_instance_.instance;
+    allocatorInfo.pVulkanFunctions = &vulkanFunctions;
+    // The negotiated version, not a hardcoded one: telling VMA 1.3 on the
+    // 1.2+KHR path would let it call entry points the device never promised.
+    allocatorInfo.vulkanApiVersion = ctx.negotiated_api_version_;
+    // Buffers that will be asked for their address must be allocated from
+    // memory that carries VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT, and only
+    // the allocator can do that — per-buffer usage flags are too late. So
+    // the whole allocator opts in whenever the feature is on (0.26).
+    if (ctx.enabled_features_.contains(Feature::BUFFER_ADDRESS))
+    {
+        allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+    }
+
+    if (auto e = check(vmaCreateAllocator(&allocatorInfo, &ctx.allocator_), "create VMA allocator"))
+    {
+        return std::unexpected(*e);
+    }
+
+    VkCommandPoolCreateInfo poolInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = ctx.graphics_queue_family_};
+
+    if (auto e = check(
+            ctx.vk_.vkCreateCommandPool(ctx.vkb_device_.device, &poolInfo, nullptr, &ctx.command_pool_),
+            "create command pool"))
+    {
+        return std::unexpected(*e);
+    }
+
+    // Which combined depth/stencil format this device gets. The float
+    // variant comes first where it exists: bazalt's plain depth format is
+    // D32F, and a depth_bias tuned against a float buffer would mean
+    // something else entirely on a 24-bit integer one (the bias is scaled in
+    // units of the format). Falling back the other way is still correct —
+    // the spec promises at least one of the two.
+    for (const VkFormat candidate : {VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT})
+    {
+        VkFormatProperties props{};
+        vkGetPhysicalDeviceFormatProperties(ctx.vkb_physical_device_.physical_device, candidate, &props);
+        if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+        {
+            ctx.depth_stencil_format_ = candidate;
+            break;
+        }
+    }
+
+    // The pipeline cache is an optimization, so a failure here is not an
+    // error: vkCreate*Pipelines takes VK_NULL_HANDLE and compiles from
+    // scratch, which is exactly what happened before this existed.
+    VkPipelineCacheCreateInfo cacheInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .initialDataSize = 0,
+        .pInitialData = nullptr};
+    if (ctx.vk_.vkCreatePipelineCache(ctx.vkb_device_.device, &cacheInfo, nullptr, &ctx.pipeline_cache_) != VK_SUCCESS)
+    {
+        ctx.pipeline_cache_ = VK_NULL_HANDLE;
+    }
+
+    // The submission timeline (see submit_timeline() in the header). Core 1.2;
+    // the feature bit was enabled in create_device_.
+    VkSemaphoreTypeCreateInfo timelineType{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+        .pNext = nullptr,
+        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+        .initialValue = 0};
+    VkSemaphoreCreateInfo timelineInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &timelineType, .flags = 0};
+    if (auto e = check(
+            ctx.vk_.vkCreateSemaphore(ctx.vkb_device_.device, &timelineInfo, nullptr, &ctx.submit_timeline_),
+            "create submission timeline semaphore"))
+    {
+        return std::unexpected(*e);
+    }
+
+    return {};
+}
+
+// On a 1.2 device the dynamic-rendering entry points are loaded under their
+// KHR names and the core symbols stay null. Call sites use the core names
+// (vkCmdBeginRendering), so point them at the KHR implementations here. The
+// structs are already aliases, so nothing else has to know which path we took.
+void Context::alias_dynamic_rendering_entry_points()
+{
+#if defined(VK_VERSION_1_3) && defined(VK_KHR_dynamic_rendering)
+    if (!vk_.vkCmdBeginRendering && vk_.vkCmdBeginRenderingKHR)
+    {
+        vk_.vkCmdBeginRendering = vk_.vkCmdBeginRenderingKHR;
+    }
+    if (!vk_.vkCmdEndRendering && vk_.vkCmdEndRenderingKHR)
+    {
+        vk_.vkCmdEndRendering = vk_.vkCmdEndRenderingKHR;
+    }
+#endif
+}
+
+VKAPI_ATTR VkBool32 VKAPI_CALL Context::debug_callback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT message_severity,
+    VkDebugUtilsMessageTypeFlagsEXT message_type,
+    const VkDebugUtilsMessengerCallbackDataEXT* callback_data,
+    void* user_data)
+{
+    Logger* logger = static_cast<Logger*>(user_data);
+    if (!logger)
+    {
+        return VK_FALSE;
+    }
+
+    // Shader printf arrives on this same channel, and it is NOT a validation
+    // finding: it is the shader talking. Routing it as Source::Shader is what
+    // keeps the validation-as-assert test fixture (which fails a test on any
+    // Source::VALIDATION error) from treating a print as a bug.
+    //
+    // Matched on the message id rather than on the text, because the id is
+    // structured data and the text is not. The layer has spelled it
+    // UNASSIGNED-DEBUG-PRINTF and WARNING-DEBUG-PRINTF across versions, so the
+    // stable part is the suffix.
+    const std::string_view id_name{callback_data->pMessageIdName ? callback_data->pMessageIdName : ""};
+    if (id_name.find("DEBUG-PRINTF") != std::string_view::npos)
+    {
+        // The layer wraps the shader's own words in its report boilerplate:
+        // "Validation Information: [ WARNING-DEBUG-PRINTF ] | MessageID = 0x…
+        //  | vkQueueSubmit(): pSubmits[0] DebugPrintf:\n<the print>".
+        // Handing that whole blob back per print would bury the value the
+        // user asked for behind two hundred characters of object handles,
+        // once per print — for a print inside a loop, the difference between
+        // a tool and a wall of text.
+        //
+        // "DebugPrintf:" is the marker this layer puts immediately before the
+        // shader's own words, so it is tried first. The two generic
+        // separators stay as a fallback for versions that do not emit it, and
+        // a message matching none of them passes through whole: peeling is a
+        // convenience, and losing the text would be worse than an ugly line.
+        std::string_view text{callback_data->pMessage ? callback_data->pMessage : ""};
+        if (const auto marker = text.rfind("DebugPrintf:"); marker != std::string_view::npos)
+        {
+            text.remove_prefix(marker + std::string_view("DebugPrintf:").size());
+        }
+        else
+        {
+            if (const auto bar = text.rfind(" | "); bar != std::string_view::npos)
+            {
+                text.remove_prefix(bar + 3);
+            }
+            if (const auto call = text.find("(): "); call != std::string_view::npos)
+            {
+                text.remove_prefix(call + 4);
+            }
+        }
+        // The marker is followed by a newline, and the generic separators by
+        // padding spaces.
+        if (const auto first = text.find_first_not_of(" \n\t"); first != std::string_view::npos)
+        {
+            text.remove_prefix(first);
+            text.remove_suffix(text.size() - text.find_last_not_of(" \n\t") - 1);
+        }
+        else
+        {
+            text = {};
+        }
+        // log_always, not log: the layer reports printf at INFO and the default
+        // floor is Warning, so the filter would swallow the channel the user
+        // switched on by name.
+        logger->log_always(Severity::Info, Source::Shader, std::string(text));
+        return VK_FALSE;
+    }
+
+    // Everything else at INFO is loader and layer chatter. The messenger only
+    // subscribes to INFO when shader_printf is on, so dropping it here is what
+    // stops "I want prints" from also meaning "I want that".
+    if (!(message_severity &
+          (VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)))
+    {
+        return VK_FALSE;
+    }
+
+    // The severity travels as data. It used to be glued onto the front of
+    // the text as "ERROR: ", which is why the callback named on_error was
+    // receiving warnings and info messages indistinguishably.
+    const Severity severity = (message_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? Severity::Error
+                                                                                                 : Severity::Warning;
+    logger->log(severity, Source::Validation, callback_data->pMessage);
+    return VK_FALSE;
+}

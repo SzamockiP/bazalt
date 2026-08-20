@@ -33,7 +33,7 @@
 // The worker NEVER touches the GIL — the deadlock class this rules out is why
 // the invariant is stated here. One thread on purpose: stbi_failure_reason()
 // is a global buffer; a pool would need that revisited.
-class UploadManager final : public UploadManagerBase
+class UploadManager final
 {
 public:
     explicit UploadManager(Context& context)
@@ -53,7 +53,7 @@ public:
     // Abandons undecoded jobs (their images end Failed so any waiter wakes),
     // finishes at most the job in flight, joins, and tears down the pool.
     // ~Context runs this before vkDeviceWaitIdle, while the device is alive.
-    ~UploadManager() override
+    ~UploadManager()
     {
         worker_.request_stop();
         {
@@ -330,7 +330,7 @@ public:
     // create_buffer / create_image(array) submitted on the calling thread. It is
     // started and submitted in the same breath, so both counters move together
     // and the CPU-side predicate in wait_all() stays balanced.
-    void note_direct_upload(std::uint64_t serial) override
+    void note_direct_upload(std::uint64_t serial)
     {
         {
             std::lock_guard lock(mutex_);
@@ -342,7 +342,7 @@ public:
 
     // Progress of the current batch, 0.0 .. 1.0 (1.0 when idle). The batch
     // resets once fully done, so a second loading screen starts from 0 again.
-    double upload_progress() override
+    double upload_progress()
     {
         std::lock_guard lock(mutex_);
         if (batch_started_ == 0)
@@ -358,7 +358,7 @@ public:
         return static_cast<double>(done) / static_cast<double>(batch_started_);
     }
 
-    void wait_all() override
+    void wait_all()
     {
         std::uint64_t wait_serial = 0;
         {
