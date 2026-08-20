@@ -357,7 +357,15 @@ jobs:
           WHEEL=$(ls wheelhouse/*.whl | head -1)
           rm -rf /tmp/wheel-check && mkdir -p /tmp/wheel-check
           unzip -q "$WHEEL" -d /tmp/wheel-check
-          otool -L /tmp/wheel-check/bazalt/_core*.so | tee /dev/stderr | (! grep -i libvulkan)
+          # Spelled out rather than `otool … | (! grep …)`: that pipeline failed
+          # the step while its own output proved the assertion held, and a check
+          # that reports the opposite of what it measured is worse than no check.
+          LINKS=$(otool -L /tmp/wheel-check/bazalt/_core*.so)
+          echo "$LINKS"
+          if echo "$LINKS" | grep -qi libvulkan; then
+            echo "::error::the macOS wheel links a Vulkan loader; it must load the user's own"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v7
         with:
