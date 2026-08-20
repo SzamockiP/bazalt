@@ -114,6 +114,7 @@ jobs:
             -DSKBUILD_PROJECT_NAME=bazalt \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
+            -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
             -DCMAKE_PREFIX_PATH="$VULKAN_SDK" \
             -Dpybind11_DIR="$(python -m pybind11 --cmakedir)"
 
@@ -454,23 +455,16 @@ jobs:
       # headless-INSTANCE path — the one a display-less server takes, and the one
       # that had no coverage at all — is exercised inside the ordinary run.
       #
-      # --api-coverage on one leg only: it patches every public callable to
-      # record the call, and one measurement of the same suite is enough. It
-      # reports here and gates nowhere — the gate needs a run with no skips, and
-      # lavapipe has no display and not every feature (see conftest.py).
+      # No --api-coverage here: the gate needs a run with no skips, and
+      # lavapipe has no display and not every feature. It runs on a developer
+      # GPU (see conftest.py); 0.27 dropped the markdown report it used to
+      # upload from this leg.
       - name: Run test suite
         working-directory: ${{ runner.temp }}
         env:
           BAZALT_FORCE_VULKAN_1_2: ${{ matrix.api == '1.2' && '1' || '0' }}
           # BAZALT_SYNCVAL_UNSUPPORTED is inherited from GITHUB_ENV.
-        run: python -m pytest ${{ github.workspace }}/tests -q -rs ${{ matrix.api == '1.3' && '--api-coverage' || '' }}
-
-      - name: Upload the API coverage report
-        if: matrix.api == '1.3'
-        uses: actions/upload-artifact@v7
-        with:
-          name: api-coverage
-          path: ${{ runner.temp }}/api_coverage.md
+        run: python -m pytest ${{ github.workspace }}/tests -q -rs
 
   # ── Full GPU suite on MoltenVK (Metal, real hardware) ─────────
   # The acceptance test for 0.22: the release claims bazalt runs on macOS, and
@@ -561,8 +555,8 @@ jobs:
     permissions:
       id-token: write
     steps:
-      # By pattern, not everything: the run also carries api_coverage.md, and a
-      # markdown file in dist/ is a file the upload has no idea what to do with.
+      # By pattern, not everything: a stray non-wheel artifact in dist/ is a
+      # file the upload has no idea what to do with.
       - uses: actions/download-artifact@v8
         with:
           pattern: wheels-*

@@ -156,48 +156,48 @@ class Feature(IntEnum):
     #: The same for the pre-rasterization stages — vertex, tessellation, geometry
     #: (vertexPipelineStoresAndAtomics).
     VERTEX_STAGE_STORES = 11
-    #: One pass into every layer of a layered target (RenderTarget.all_layers()).
-    #: Enabled by itself wherever the device has it, so this is a question, not a
-    #: request.
-    MULTIVIEW = 12
-    #: Descriptor arrays: count= on a binding declarator, index= on set_image and
-    #: friends. Also covers indexing the array from a value that differs per
-    #: invocation (nonuniformEXT), and rewriting a descriptor while an earlier
-    #: frame still reads the set.
-    BINDLESS = 13
-    #: A draw count the GPU decides: count_buffer= on draw_indirect and
-    #: draw_indexed_indirect.
-    DRAW_INDIRECT_COUNT = 14
-    #: create_sampler(compare=), which GLSL reads as sampler2DShadow. True on every
-    #: full Vulkan driver. A Vulkan portability subset may answer False: Metal has
-    #: no mutable comparison samplers, so MoltenVK can refuse them.
-    COMPARISON_SAMPLER = 15
-    #: create_sampler(mip_lod_bias=). True on every full Vulkan driver, and a
-    #: portability subset may answer False. Where it does, bias the level in the
-    #: shader with textureLod().
-    SAMPLER_MIP_LOD_BIAS = 16
-    #: A multisampled image with layers > 1. True on every full Vulkan driver, and
-    #: a portability subset may answer False, because Metal has no multisampled
-    #: texture array.
-    MULTISAMPLE_ARRAYS = 17
-    #: Rendering into one Z slice of a 3D image (target.layer(z)). True on every
-    #: full Vulkan driver; MoltenVK answers False. Where it is False, fill the
-    #: volume with a compute shader through a storage image instead.
-    IMAGE_VIEW_2D_ON_3D = 18
     #: An occlusion query counts SAMPLES rather than answering "something
     #: passed". Without it the spec allows any non-zero value, so
     #: OcclusionQuery.samples means two different things depending on the driver
     #: — which is what this row exists to say (0.25).
-    PRECISE_OCCLUSION = 19
+    PRECISE_OCCLUSION = 12
+    #: One pass into every layer of a layered target (RenderTarget.all_layers()).
+    #: Enabled by itself wherever the device has it, so this is a question, not a
+    #: request.
+    MULTIVIEW = 13
+    #: Descriptor arrays: count= on a binding declarator, index= on set_image and
+    #: friends. Also covers indexing the array from a value that differs per
+    #: invocation (nonuniformEXT), and rewriting a descriptor while an earlier
+    #: frame still reads the set.
+    BINDLESS = 14
+    #: A draw count the GPU decides: count_buffer= on draw_indirect and
+    #: draw_indexed_indirect.
+    DRAW_INDIRECT_COUNT = 15
+    #: create_sampler(compare=), which GLSL reads as sampler2DShadow. True on every
+    #: full Vulkan driver. A Vulkan portability subset may answer False: Metal has
+    #: no mutable comparison samplers, so MoltenVK can refuse them.
+    COMPARISON_SAMPLER = 16
+    #: create_sampler(mip_lod_bias=). True on every full Vulkan driver, and a
+    #: portability subset may answer False. Where it does, bias the level in the
+    #: shader with textureLod().
+    SAMPLER_MIP_LOD_BIAS = 17
+    #: A multisampled image with layers > 1. True on every full Vulkan driver, and
+    #: a portability subset may answer False, because Metal has no multisampled
+    #: texture array.
+    MULTISAMPLE_ARRAYS = 18
+    #: Rendering into one Z slice of a 3D image (target.layer(z)). True on every
+    #: full Vulkan driver; MoltenVK answers False. Where it is False, fill the
+    #: volume with a compute shader through a storage image instead.
+    IMAGE_VIEW_2D_ON_3D = 19
+    #: Topology.TRIANGLE_FAN. True on every full Vulkan driver; MoltenVK answers
+    #: False, because Metal has no triangle fan at all. Where it is False, emit
+    #: the same shape as an indexed TRIANGLE_LIST (0.25).
+    TRIANGLE_FANS = 20
     #: Taking the display outright instead of drawing through the compositor
     #: (SwapchainRenderer.set_fullscreen_exclusive). The first Feature backed by
     #: an extension rather than a device feature bit, and Win32-only in
     #: practice, so it answers False elsewhere (0.25).
-    EXCLUSIVE_FULLSCREEN = 20
-    #: Topology.TRIANGLE_FAN. True on every full Vulkan driver; MoltenVK answers
-    #: False, because Metal has no triangle fan at all. Where it is False, emit
-    #: the same shape as an indexed TRIANGLE_LIST (0.25).
-    TRIANGLE_FANS = 21
+    EXCLUSIVE_FULLSCREEN = 21
     #: `buffer.address`, and with it a shader that reads a buffer through a
     #: `buffer_reference` pointer instead of a descriptor (0.26). What it buys is
     #: reach: a descriptor sees at most `ctx.limits.max_storage_buffer` (4 GiB on
@@ -299,7 +299,7 @@ class Topology(IntEnum):
     #: The input to a tessellation control shader: a run of patch_control_points
     #: vertices with no implied topology. Only valid with tessellation shaders,
     #: and they are only valid with this — the pipeline build checks both ways.
-    PATCH_LIST = 5
+    PATCH_LIST = 6
 
 class BlendMode(IntEnum):
     """How a fragment combines with what the attachment already holds.
@@ -552,10 +552,10 @@ class GamepadAxis(IntEnum):
 class Key(IntEnum):
     """The keyboard, the gamepad's way (0.23): the values are GLFW's own.
 
-    The bare KEY_* module ints stay valid — every query takes either. D0..D9
+    Every query takes the member or a plain int with the same value. D0..D9
     are the top-row digits (a name cannot start with one); the keypad is
-    KP_*. There is no LAST member: that is GLFW's array-size sentinel, and
-    the KEY_LAST int remains for anyone who wants it.
+    KP_*. There is no LAST member: that is GLFW's array-size sentinel, not
+    a key.
     """
     SPACE = 32
     APOSTROPHE = 39
@@ -679,7 +679,7 @@ class Key(IntEnum):
     MENU = 348
 
 class MouseButton(IntEnum):
-    """Mouse buttons by name; the MOUSE_BUTTON_* ints stay valid (0.23)."""
+    """Mouse buttons by name; every query also takes a plain int (0.23)."""
     LEFT = 0
     RIGHT = 1
     MIDDLE = 2
@@ -1970,7 +1970,7 @@ def poll_events() -> None:
     reads one window's own state, which this dispatch is what updates:
 
         bz.poll_events()
-        if window_a.is_key_pressed(bz.KEY_W):   # only while A has focus
+        if window_a.is_key_pressed(bz.Key.W):   # only while A has focus
             ...
         if renderer_b.acquire():                # False while B is minimized
             renderer_b.present(cmd_b)
@@ -2948,139 +2948,3 @@ class SwapchainRenderer(RenderTargetBase):
     def width(self) -> int: ...
     @property
     def height(self) -> int: ...
-
-# ── Keyboard Constants ─────────────────────────────────────────────────
-
-KEY_SPACE: int
-KEY_APOSTROPHE: int
-KEY_COMMA: int
-KEY_MINUS: int
-KEY_PERIOD: int
-KEY_SLASH: int
-KEY_0: int
-KEY_1: int
-KEY_2: int
-KEY_3: int
-KEY_4: int
-KEY_5: int
-KEY_6: int
-KEY_7: int
-KEY_8: int
-KEY_9: int
-KEY_SEMICOLON: int
-KEY_EQUAL: int
-KEY_A: int
-KEY_B: int
-KEY_C: int
-KEY_D: int
-KEY_E: int
-KEY_F: int
-KEY_G: int
-KEY_H: int
-KEY_I: int
-KEY_J: int
-KEY_K: int
-KEY_L: int
-KEY_M: int
-KEY_N: int
-KEY_O: int
-KEY_P: int
-KEY_Q: int
-KEY_R: int
-KEY_S: int
-KEY_T: int
-KEY_U: int
-KEY_V: int
-KEY_W: int
-KEY_X: int
-KEY_Y: int
-KEY_Z: int
-KEY_LEFT_BRACKET: int
-KEY_BACKSLASH: int
-KEY_RIGHT_BRACKET: int
-KEY_GRAVE_ACCENT: int
-KEY_WORLD_1: int
-KEY_WORLD_2: int
-KEY_ESCAPE: int
-KEY_ENTER: int
-KEY_TAB: int
-KEY_BACKSPACE: int
-KEY_INSERT: int
-KEY_DELETE: int
-KEY_RIGHT: int
-KEY_LEFT: int
-KEY_DOWN: int
-KEY_UP: int
-KEY_PAGE_UP: int
-KEY_PAGE_DOWN: int
-KEY_HOME: int
-KEY_END: int
-KEY_CAPS_LOCK: int
-KEY_SCROLL_LOCK: int
-KEY_NUM_LOCK: int
-KEY_PRINT_SCREEN: int
-KEY_PAUSE: int
-KEY_F1: int
-KEY_F2: int
-KEY_F3: int
-KEY_F4: int
-KEY_F5: int
-KEY_F6: int
-KEY_F7: int
-KEY_F8: int
-KEY_F9: int
-KEY_F10: int
-KEY_F11: int
-KEY_F12: int
-KEY_F13: int
-KEY_F14: int
-KEY_F15: int
-KEY_F16: int
-KEY_F17: int
-KEY_F18: int
-KEY_F19: int
-KEY_F20: int
-KEY_F21: int
-KEY_F22: int
-KEY_F23: int
-KEY_F24: int
-KEY_F25: int
-KEY_KP_0: int
-KEY_KP_1: int
-KEY_KP_2: int
-KEY_KP_3: int
-KEY_KP_4: int
-KEY_KP_5: int
-KEY_KP_6: int
-KEY_KP_7: int
-KEY_KP_8: int
-KEY_KP_9: int
-KEY_KP_DECIMAL: int
-KEY_KP_DIVIDE: int
-KEY_KP_MULTIPLY: int
-KEY_KP_SUBTRACT: int
-KEY_KP_ADD: int
-KEY_KP_ENTER: int
-KEY_KP_EQUAL: int
-KEY_LEFT_SHIFT: int
-KEY_LEFT_CONTROL: int
-KEY_LEFT_ALT: int
-KEY_LEFT_SUPER: int
-KEY_RIGHT_SHIFT: int
-KEY_RIGHT_CONTROL: int
-KEY_RIGHT_ALT: int
-KEY_RIGHT_SUPER: int
-KEY_MENU: int
-KEY_LAST: int
-
-# ── Mouse Constants ────────────────────────────────────────────────────
-
-MOUSE_BUTTON_LEFT: int
-MOUSE_BUTTON_RIGHT: int
-MOUSE_BUTTON_MIDDLE: int
-
-# ── Cursor Mode Constants ──────────────────────────────────────────────
-
-CURSOR_NORMAL: int
-CURSOR_DISABLED: int
-CURSOR_HIDDEN: int

@@ -34,7 +34,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--api-coverage",
         action="store_true",
-        help="report which public symbols the suite touches, into api_coverage.md")
+        help="record which public symbols the suite touches, and gate on the baseline")
 
 
 def pytest_configure(config):
@@ -48,26 +48,22 @@ def pytest_configure(config):
 
 
 def pytest_sessionfinish(session, exitstatus):
-    """Write the report, and fail on a symbol that is untouched and unexpected.
+    """Fail on a symbol that is untouched and unexpected.
 
     The measurement is only meaningful for a whole, passing run: a failed test
     stops calling things, `-k` never reaches most of the API, and a SKIPPED test
     is a symbol nobody called on this machine rather than a symbol nobody
-    tested. All three write the report and skip the gate, so the number is never
-    read as a regression when it is really a partial run.
+    tested. All three skip the gate, so the number is never read as a
+    regression when it is really a partial run.
 
-    The skip rule is what lets CI ask for the report at all: lavapipe has no
-    display and not every feature, so it always skips something, while a
-    developer GPU runs the suite with no skips and gets the gate.
+    That rule is why the gate lives on a developer GPU: lavapipe has no display
+    and not every feature, so CI always skips something.
     """
     if _recorder is None:
         return
     import api_coverage
 
-    surface = api_coverage.public_surface()
-    missing = api_coverage.untouched(
-        surface, _recorder.used, api_coverage.names_in_tests(pathlib.Path(__file__).parent))
-    api_coverage.write_report(api_coverage._REPORT, surface, missing)
+    missing = api_coverage.untouched(api_coverage.public_surface(), _recorder.used)
 
     if os.environ.get("BAZALT_WRITE_API_BASELINE") == "1":
         api_coverage.write_baseline(missing)
@@ -84,7 +80,7 @@ def pytest_sessionfinish(session, exitstatus):
             or session.config.option.keyword or session.config.option.markexpr):
         return
 
-    new = sorted(key for key, _ in missing if key not in api_coverage.read_baseline())
+    new = sorted(key for key in missing if key not in api_coverage.read_baseline())
     if new:
         session.exitstatus = 1
         print("\nAPI coverage: these public symbols are untouched by any test and are not in")
