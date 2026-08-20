@@ -375,6 +375,68 @@ def test_memory_stats_shrink_again(ctx):
     assert ctx.memory_stats().used < peak
 
 
+def test_the_recording_verbs_release_what_they_borrow(ctx, triangle_shaders, triangle_buffers):
+    """Every resource a recording touches must be released when the recording is.
+
+    This is the one class of defect the rest of the suite cannot see. A binding
+    that keeps a `shared_ptr` it should have dropped changes no behaviour and
+    breaks no test: the resource simply never dies. It surfaces as "VkDevice has
+    N leaked objects" when the device is destroyed, which for the session
+    Context happens after the last test has asserted anything.
+
+    So the instrument is memory rather than an assertion about lifetime: churn
+    the verbs that take a resource, drain the deletion queue the way a frame
+    loop does, and require the allocator to be no larger than it started.
+
+    Written for 0.27, which converted 38 binding parameters from a `shared_ptr`
+    taken by value to a const reference. It found nothing — and it is the test
+    that would have.
+    """
+    vert, frag = triangle_shaders
+    vbuf, ibuf = triangle_buffers
+
+    def drain():
+        ctx.wait()
+        gc.collect()
+        for _ in range(ctx.frames_in_flight + 1):
+            ctx.begin_frame()
+
+    def churn():
+        target = ctx.create_render_target(32, 32, bz.Format.RGBA8, bz.Format.D32F)
+        pipeline = (ctx.graphics_pipeline()
+                    .vertex_shader(vert)
+                    .fragment_shader(frag)
+                    .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+                    .build(target))
+        layered = ctx.create_render_target(16, 16, bz.Format.RGBA8, layers=2)
+        cmd = ctx.create_command_buffer()
+        cmd.begin()
+        with cmd.rendering(target):
+            cmd.bind_pipeline(pipeline)
+            cmd.bind_vertex_buffer(vbuf)
+            cmd.bind_index_buffer(ibuf)
+            cmd.draw_indexed(3)
+        with cmd.rendering(layered.layer(0)):
+            cmd.bind_pipeline(pipeline)
+            cmd.bind_vertex_buffer(vbuf)
+            cmd.draw(3)
+        ctx.submit(cmd)
+
+    # A warm-up round first: the descriptor pools, the command pool and the
+    # pipeline cache all allocate on first use and keep what they take, and
+    # counting that as a leak would fail every run.
+    churn()
+    drain()
+    baseline = ctx.memory_stats().used
+
+    for _ in range(6):
+        churn()
+    drain()
+
+    assert ctx.memory_stats().used <= baseline, (
+        "a recording verb kept a reference to something it only borrowed")
+
+
 def test_subgroup_size_is_a_power_of_two(ctx):
     """Zero is legal (a driver need not report one), so the assertion covers
     both: either unreported, or a plausible width."""
