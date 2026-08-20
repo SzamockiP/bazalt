@@ -166,16 +166,18 @@ jobs:
   # pipeline costs what one wheel costs. The runners are free on a public repo,
   # so this only spends minutes, not money.
   #
-  # A branch push builds the one interpreter the lavapipe legs install. Every
-  # event that gates something — a pull request before merge, a release before
-  # publish, a manual run — builds all five.
+  # A branch push builds the two interpreters the test legs install: cp312, and
+  # since 0.27 cp314 as well — the newest one is where a wheel breaks first, and
+  # it had never been built on a branch push, so a break waited for the pull
+  # request. Every event that gates something — a pull request before merge, a
+  # release before publish, a manual run — builds all five.
   wheels_linux:
     name: Wheels · linux ${{ matrix.python }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
+        python: ${{ github.event_name == 'push' && fromJSON('["cp312", "cp314"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -235,7 +237,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
+        python: ${{ github.event_name == 'push' && fromJSON('["cp312", "cp314"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -295,7 +297,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
+        python: ${{ github.event_name == 'push' && fromJSON('["cp312", "cp314"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -381,25 +383,43 @@ jobs:
   # the core names. That second path had no coverage anywhere from 0.5 to 0.15
   # (both CI and the dev GPU report 1.3+), which is what made every touch of
   # version negotiation a leap of faith.
+  # A third leg since 0.27, and it varies the INTERPRETER rather than the API
+  # version: every GPU test the project has ever run ran on one Python. The
+  # wheels prove that 3.14 builds and imports, which is not the same claim — the
+  # numpy buffer protocol carries every readback and every upload, and that is
+  # where a new interpreter breaks a library like this one if it breaks it.
+  #
+  # 3.14 pairs with api 1.3 only. The 1.2 path is about what the DEVICE offers
+  # and has nothing to do with the interpreter, so a fourth leg would buy a
+  # slower pipeline and no new path.
   test_lavapipe:
-    name: Tests · lavapipe (api ${{ matrix.api }})
+    name: Tests · lavapipe (api ${{ matrix.api }}, ${{ matrix.python }})
     needs: wheels_linux
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        api: ["1.3", "1.2"]
+        include:
+          - api: "1.3"
+            python: cp312
+            python-version: "3.12"
+          - api: "1.2"
+            python: cp312
+            python-version: "3.12"
+          - api: "1.3"
+            python: cp314
+            python-version: "3.14"
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "${{ matrix.python-version }}"
 
-      # cp312 is built on every event, so this name always exists.
+      # Both tags are built on every event — see the wheels_linux matrix.
       - uses: actions/download-artifact@v8
         with:
-          name: wheels-linux-cp312
+          name: wheels-linux-${{ matrix.python }}
           path: wheelhouse
 
       # libvulkan1 is the Vulkan LOADER — mesa-vulkan-drivers ships only the
@@ -445,7 +465,7 @@ jobs:
       # [test] so pyproject.toml stays the one list of test dependencies.
       - name: Install wheel + test deps
         run: |
-          WHEEL=$(ls wheelhouse/bazalt-*-cp312-*manylinux*.whl)
+          WHEEL=$(ls wheelhouse/bazalt-*-${{ matrix.python }}-*manylinux*.whl)
           pip install "${WHEEL}[test]"
 
       # cwd is OUTSIDE the repo on purpose: the source tree's bazalt/ package
