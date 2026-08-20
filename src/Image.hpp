@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <condition_variable>
 #include <cstddef>
 #include <cstring>
@@ -661,14 +662,7 @@ public:
     // defaults to 1 so every 2D caller reads as before.
     static std::uint32_t full_mip_count(std::uint32_t width, std::uint32_t height, std::uint32_t depth = 1)
     {
-        std::uint32_t mips = 1;
-        std::uint32_t size = (std::ranges::max)({width, height, depth});
-        while (size > 1)
-        {
-            size /= 2;
-            ++mips;
-        }
-        return mips;
+        return static_cast<std::uint32_t>(std::bit_width((std::ranges::max)({width, height, depth})));
     }
 
     // An empty image: no contents, layout UNDEFINED. The building block for
@@ -1351,108 +1345,6 @@ public:
         {
             fn(layer, mip);
         }
-    }
-
-    // Move the WHOLE image into `to`, whatever state its subresources are in.
-    // One barrier when they agree, one per subresource when they do not — a
-    // barrier names a single oldLayout, so a split image cannot be covered by
-    // one. The layout state is left alone: the caller is a scoped operation
-    // (readback, copy) that puts the image back with record_transition_out_of_.
-    void record_transition_into_(
-        VkCommandBuffer cmd,
-        VkImageLayout to,
-        VkAccessFlags src_access,
-        VkAccessFlags dst_access,
-        VkPipelineStageFlags src_stage,
-        VkPipelineStageFlags dst_stage,
-        VkImageAspectFlags aspect) const
-    {
-        if (const auto uniform = layouts_.uniform())
-        {
-            record_image_transition(
-                context_->vk(),
-                cmd,
-                image_,
-                *uniform,
-                to,
-                src_access,
-                dst_access,
-                src_stage,
-                dst_stage,
-                aspect,
-                0,
-                mip_levels_,
-                barrier_layers(array_layers_));
-            return;
-        }
-        layouts_.for_each(
-            [&](VkImageLayout from, std::uint32_t layer, std::uint32_t mip)
-            {
-                record_image_transition(
-                    context_->vk(),
-                    cmd,
-                    image_,
-                    from,
-                    to,
-                    src_access,
-                    dst_access,
-                    src_stage,
-                    dst_stage,
-                    aspect,
-                    mip,
-                    1,
-                    barrier_layers(1),
-                    layer);
-            });
-    }
-
-    // The same walk backwards: every subresource returns to the layout it held.
-    void record_transition_out_of_(
-        VkCommandBuffer cmd,
-        VkImageLayout from,
-        VkAccessFlags src_access,
-        VkAccessFlags dst_access,
-        VkPipelineStageFlags src_stage,
-        VkPipelineStageFlags dst_stage,
-        VkImageAspectFlags aspect) const
-    {
-        if (const auto uniform = layouts_.uniform())
-        {
-            record_image_transition(
-                context_->vk(),
-                cmd,
-                image_,
-                from,
-                *uniform,
-                src_access,
-                dst_access,
-                src_stage,
-                dst_stage,
-                aspect,
-                0,
-                mip_levels_,
-                barrier_layers(array_layers_));
-            return;
-        }
-        layouts_.for_each(
-            [&](VkImageLayout to, std::uint32_t layer, std::uint32_t mip)
-            {
-                record_image_transition(
-                    context_->vk(),
-                    cmd,
-                    image_,
-                    from,
-                    to,
-                    src_access,
-                    dst_access,
-                    src_stage,
-                    dst_stage,
-                    aspect,
-                    mip,
-                    1,
-                    barrier_layers(1),
-                    layer);
-            });
     }
 
 private:

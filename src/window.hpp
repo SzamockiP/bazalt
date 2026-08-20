@@ -402,11 +402,6 @@ public:
             .scroll_dy = current_.scroll_dy};
     }
 
-    GLFWwindow* get_native_handle() const
-    {
-        return window_.get();
-    }
-
     void set_title(const std::string& title)
     {
         title_ = title;
@@ -583,14 +578,6 @@ public:
         float y = 1.0f;
         glfwGetWindowContentScale(window_.get(), &x, &y);
         return {x, y};
-    }
-    bool was_framebuffer_resized() const
-    {
-        return framebuffer_resized_;
-    }
-    void reset_framebuffer_resized()
-    {
-        framebuffer_resized_ = false;
     }
 
     void get_framebuffer_size(int& width, int& height) const

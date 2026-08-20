@@ -421,16 +421,6 @@ public:
         return depth_stencil_format_;
     }
 
-    // Internal — for use by renderers and other subsystems
-    const vkb::Instance& vkb_instance() const
-    {
-        return vkb_instance_;
-    }
-    const vkb::Device& vkb_device() const
-    {
-        return vkb_device_;
-    }
-
     // ── Capabilities ──────────────────────────────────────────────────────────
 
     bool supports(Feature feature) const
@@ -615,10 +605,6 @@ public:
     std::uint64_t advance_submit_serial()
     {
         return ++submit_serial_;
-    }
-    std::uint64_t submit_serial() const
-    {
-        return submit_serial_.load();
     }
 
     std::uint64_t completed_submit_serial() const
@@ -1862,13 +1848,14 @@ private:
             }
             // The marker is followed by a newline, and the generic separators by
             // padding spaces.
-            while (!text.empty() && (text.front() == ' ' || text.front() == '\n' || text.front() == '\t'))
+            if (const auto first = text.find_first_not_of(" \n\t"); first != std::string_view::npos)
             {
-                text.remove_prefix(1);
+                text.remove_prefix(first);
+                text.remove_suffix(text.size() - text.find_last_not_of(" \n\t") - 1);
             }
-            while (!text.empty() && (text.back() == ' ' || text.back() == '\n' || text.back() == '\t'))
+            else
             {
-                text.remove_suffix(1);
+                text = {};
             }
             // log_always, not log: the layer reports printf at INFO and the default
             // floor is Warning, so the filter would swallow the channel the user

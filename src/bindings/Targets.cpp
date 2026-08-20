@@ -1,5 +1,18 @@
 #include "Bindings.hpp"
 
+namespace
+{
+    py::tuple tuple_of(const auto& items)
+    {
+        py::tuple out(items.size());
+        for (size_t i = 0; i < items.size(); ++i)
+        {
+            out[i] = py::cast(items[i]);
+        }
+        return out;
+    }
+} // namespace
+
 void bind_targets(py::module_& m)
 {
     // ── RenderTarget ──
@@ -14,17 +27,7 @@ void bind_targets(py::module_& m)
         .def_property_readonly("height", [](const OffscreenTarget& t) { return t.extent().height; })
         // The attachments are ordinary Images — this is the whole
         // render-to-texture API: target.color[0] / target.depth into set_image.
-        .def_property_readonly(
-            "color",
-            [](const OffscreenTarget& t)
-            {
-                py::tuple out(t.colors().size());
-                for (size_t i = 0; i < t.colors().size(); ++i)
-                {
-                    out[i] = py::cast(t.colors()[i]);
-                }
-                return out;
-            })
+        .def_property_readonly("color", [](const OffscreenTarget& t) { return tuple_of(t.colors()); })
         .def_property_readonly(
             "depth",
             [](const OffscreenTarget& t) -> py::object { return t.depth() ? py::cast(t.depth()) : py::none(); })
@@ -33,16 +36,7 @@ void bind_targets(py::module_& m)
         // unless samples > 1, and `color` / `depth` above stay the resolve — the
         // images almost everything wants.
         .def_property_readonly(
-            "multisampled_color",
-            [](const OffscreenTarget& t)
-            {
-                py::tuple out(t.multisampled_colors().size());
-                for (size_t i = 0; i < t.multisampled_colors().size(); ++i)
-                {
-                    out[i] = py::cast(t.multisampled_colors()[i]);
-                }
-                return out;
-            })
+            "multisampled_color", [](const OffscreenTarget& t) { return tuple_of(t.multisampled_colors()); })
         .def_property_readonly(
             "multisampled_depth",
             [](const OffscreenTarget& t) -> py::object

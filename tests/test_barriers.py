@@ -22,11 +22,6 @@ from conftest import SHADER_DIR
 
 
 @pytest.fixture
-def fullscreen_vert(ctx):
-    return ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
-
-
-@pytest.fixture
 def double_pipeline(ctx):
     comp = ctx.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
     return ctx.compute_pipeline().shader(comp).storage_buffer(0).build()

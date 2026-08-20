@@ -531,60 +531,28 @@ private:
         }
         auto [stagingBuffer, stagingAllocation] = *staging;
 
-        // One-shot command buffer from the worker's own pool.
-        VkCommandBuffer cmd = VK_NULL_HANDLE;
-        if (const VkResult r = allocate_cmd_(cmd); r != VK_SUCCESS)
-        {
-            vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
-            fail_(job, std::format("the GPU upload could not start ({})", vk_result_name(r)));
-            return;
-        }
-
-        VkCommandBufferBeginInfo beginInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .pNext = nullptr,
-            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-            .pInheritanceInfo = nullptr};
-        context_.vk().vkBeginCommandBuffer(cmd, &beginInfo);
-        // Only the initial layout transition differs: a reload preserves the live
-        // contents against in-flight reads, a first upload discards UNDEFINED.
-        if (job.reload)
-            job.image->record_reload_commands(cmd, stagingBuffer, job.mips);
-        else
-            job.image->record_upload_commands(cmd, stagingBuffer, job.mips);
-        context_.vk().vkEndCommandBuffer(cmd);
-
-        std::uint64_t serial = 0;
-        if (!submit_(cmd, serial, job.image->upload_serial()))
-        {
-            vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
-            context_.vk().vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
-            if (job.reload)
-                warn_reload_(job, "the GPU upload was refused");
-            else
-                fail_(job, "the GPU upload was refused");
-            return;
-        }
-
-        // The staging buffer retires through the shared deletion queue (VMA is
-        // internally synchronized, so the main thread may free it). The command
-        // buffer does NOT: freeing it back into pool_ must happen on THIS
-        // thread — command pools are externally synchronized, and the main
-        // thread draining the deletion queue while the worker allocates from
-        // the same pool is a race the validation layers rightly flag.
-        context_.defer_destroy([allocator = context_.allocator(), stagingBuffer, stagingAllocation]
-                               { vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation); });
-        retired_.emplace_back(serial, cmd);
-
-        // Both paths point the image at the new serial, so frames wait for the
-        // re-upload and img.ready/.wait() track it. Only a load feeds the batch
-        // accounting; a reload deliberately does not (see Job::reload).
-        job.image->set_upload_submitted(serial);
-        if (!job.reload)
-        {
-            std::lock_guard lock(mutex_);
-            submitted_serials_.push_back(serial);
-        }
+        submit_recorded_(
+            job,
+            stagingBuffer,
+            stagingAllocation,
+            // Only the initial layout transition differs: a reload preserves the
+            // live contents against in-flight reads, a first upload discards
+            // UNDEFINED.
+            [&](VkCommandBuffer cmd)
+            {
+                if (job.reload)
+                    job.image->record_reload_commands(cmd, stagingBuffer, job.mips);
+                else
+                    job.image->record_upload_commands(cmd, stagingBuffer, job.mips);
+            },
+            [&](std::string_view reason) { fail_(job, reason); },
+            [&]
+            {
+                if (job.reload)
+                    warn_reload_(job, "the GPU upload was refused");
+                else
+                    fail_(job, "the GPU upload was refused");
+            });
     }
 
     // A pixel update: no decode at all, because the caller handed over bytes in
@@ -601,42 +569,17 @@ private:
         }
         auto [stagingBuffer, stagingAllocation] = *staging;
 
-        VkCommandBuffer cmd = VK_NULL_HANDLE;
-        if (const VkResult r = allocate_cmd_(cmd); r != VK_SUCCESS)
-        {
-            vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
-            fail_update_(job, std::format("the GPU upload could not start ({})", vk_result_name(r)));
-            return;
-        }
-
-        VkCommandBufferBeginInfo beginInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .pNext = nullptr,
-            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-            .pInheritanceInfo = nullptr};
-        context_.vk().vkBeginCommandBuffer(cmd, &beginInfo);
-        job.image->record_update_commands(
-            cmd, stagingBuffer, job.layer, job.mip, job.offset, job.extent, job.from_layout);
-        context_.vk().vkEndCommandBuffer(cmd);
-
-        std::uint64_t serial = 0;
-        if (!submit_(cmd, serial, job.image->upload_serial()))
-        {
-            vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
-            context_.vk().vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
-            fail_update_(job, "failed to submit the update command buffer");
-            return;
-        }
-
-        context_.defer_destroy([allocator = context_.allocator(), stagingBuffer, stagingAllocation]
-                               { vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation); });
-        retired_.emplace_back(serial, cmd);
-
-        job.image->set_upload_submitted(serial);
-        {
-            std::lock_guard lock(mutex_);
-            submitted_serials_.push_back(serial);
-        }
+        submit_recorded_(
+            job,
+            stagingBuffer,
+            stagingAllocation,
+            [&](VkCommandBuffer cmd)
+            {
+                job.image->record_update_commands(
+                    cmd, stagingBuffer, job.layer, job.mip, job.offset, job.extent, job.from_layout);
+            },
+            [&](std::string_view reason) { fail_update_(job, reason); },
+            [&] { fail_update_(job, "failed to submit the update command buffer"); });
     }
 
     // An update cannot poison the image the way a failed load does: the pixels
@@ -708,6 +651,69 @@ private:
         return true;
     }
 
+    // The tail every job shares once its staging buffer is filled: one-shot
+    // command buffer, record, submit ordered behind the image's own chain,
+    // retire the staging buffer, point the image at the new serial. The callers
+    // differ only in what they record and how they report a failure — `record`
+    // fills the command buffer, `on_alloc_fail(reason)` reports an allocation
+    // failure, `on_submit_fail()` reports a refused submit (its message and its
+    // reload handling are the caller's).
+    //
+    // The staging buffer retires through the shared deletion queue (VMA is
+    // internally synchronized, so the main thread may free it). The command
+    // buffer does NOT: freeing it back into pool_ must happen on THIS
+    // thread — command pools are externally synchronized, and the main
+    // thread draining the deletion queue while the worker allocates from
+    // the same pool is a race the validation layers rightly flag.
+    void submit_recorded_(
+        Job& job,
+        VkBuffer stagingBuffer,
+        VmaAllocation stagingAllocation,
+        auto&& record,
+        auto&& on_alloc_fail,
+        auto&& on_submit_fail)
+    {
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        if (const VkResult r = allocate_cmd_(cmd); r != VK_SUCCESS)
+        {
+            vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
+            on_alloc_fail(std::format("the GPU upload could not start ({})", vk_result_name(r)));
+            return;
+        }
+
+        VkCommandBufferBeginInfo beginInfo{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .pNext = nullptr,
+            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            .pInheritanceInfo = nullptr};
+        context_.vk().vkBeginCommandBuffer(cmd, &beginInfo);
+        record(cmd);
+        context_.vk().vkEndCommandBuffer(cmd);
+
+        std::uint64_t serial = 0;
+        if (!submit_(cmd, serial, job.image->upload_serial()))
+        {
+            vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
+            context_.vk().vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
+            on_submit_fail();
+            return;
+        }
+
+        context_.defer_destroy([allocator = context_.allocator(), stagingBuffer, stagingAllocation]
+                               { vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation); });
+        retired_.emplace_back(serial, cmd);
+
+        // Both paths point the image at the new serial, so frames wait for the
+        // re-upload and img.ready/.wait() track it. Only a load feeds the batch
+        // accounting; a reload deliberately does not (see Job::reload).
+        job.image->set_upload_submitted(serial);
+        if (!job.reload)
+        {
+            std::lock_guard lock(mutex_);
+            submitted_serials_.push_back(serial);
+        }
+    }
+
     // A layered load: decode every face into one contiguous N-layer block, then
     // the exact same staging → copy → mipgen → submit path as a single upload
     // (Image handles the per-layer copy). Layered loads are never hot reloads,
@@ -747,41 +753,13 @@ private:
         }
         auto [stagingBuffer, stagingAllocation] = *staging;
 
-        VkCommandBuffer cmd = VK_NULL_HANDLE;
-        if (const VkResult r = allocate_cmd_(cmd); r != VK_SUCCESS)
-        {
-            vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
-            fail_(job, std::format("the GPU upload could not start ({})", vk_result_name(r)));
-            return;
-        }
-
-        VkCommandBufferBeginInfo beginInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .pNext = nullptr,
-            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-            .pInheritanceInfo = nullptr};
-        context_.vk().vkBeginCommandBuffer(cmd, &beginInfo);
-        job.image->record_upload_commands(cmd, stagingBuffer, job.mips);
-        context_.vk().vkEndCommandBuffer(cmd);
-
-        std::uint64_t serial = 0;
-        if (!submit_(cmd, serial, job.image->upload_serial()))
-        {
-            vmaDestroyBuffer(context_.allocator(), stagingBuffer, stagingAllocation);
-            context_.vk().vkFreeCommandBuffers(context_.device(), pool_, 1, &cmd);
-            fail_(job, "the GPU upload was refused");
-            return;
-        }
-
-        context_.defer_destroy([allocator = context_.allocator(), stagingBuffer, stagingAllocation]
-                               { vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation); });
-        retired_.emplace_back(serial, cmd);
-
-        job.image->set_upload_submitted(serial);
-        {
-            std::lock_guard lock(mutex_);
-            submitted_serials_.push_back(serial);
-        }
+        submit_recorded_(
+            job,
+            stagingBuffer,
+            stagingAllocation,
+            [&](VkCommandBuffer cmd) { job.image->record_upload_commands(cmd, stagingBuffer, job.mips); },
+            [&](std::string_view reason) { fail_(job, reason); },
+            [&] { fail_(job, "the GPU upload was refused"); });
     }
 
     // Worker thread only: free one-shot command buffers whose upload the GPU

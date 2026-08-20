@@ -14,7 +14,6 @@
 #include "ShaderCompiler.hpp"
 #include "Context.hpp"
 #include "RenderTarget.hpp"
-#include "ScopeGuard.hpp"
 // For CompareOp, which the depth test shares with compare samplers rather than
 // declaring a second eight-value enum of its own.
 #include "Sampler.hpp"
@@ -671,11 +670,6 @@ public:
         return VK_NULL_HANDLE;
     }
 
-    uint32_t descriptor_set_layout_count() const
-    {
-        return static_cast<uint32_t>(desc_layouts_.size());
-    }
-
     const BindingTypeMap& binding_types(uint32_t setIndex) const
     {
         static const BindingTypeMap empty;
@@ -1045,6 +1039,67 @@ inline std::expected<void, Error> check_descriptor_arrays(Context& context, cons
     return {};
 }
 
+// The identical front half of both build() methods: the descriptor set layouts
+// and the pipeline layout. Created once and reused across every hot-reload
+// rebuild, because they come from the builder's binding/push-constant calls,
+// not the shader source. The struct owns the handles — every failure branch
+// after create() unwinds them — until release() hands them to the Pipeline.
+struct PipelineLayouts
+{
+    explicit PipelineLayouts(Context& context)
+        : context_(context)
+    {
+    }
+
+    PipelineLayouts(const PipelineLayouts&) = delete;
+    PipelineLayouts& operator=(const PipelineLayouts&) = delete;
+
+    ~PipelineLayouts()
+    {
+        if (released_)
+        {
+            return;
+        }
+        for (auto dl : set_layouts)
+        {
+            context_.vk().vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
+        }
+        if (pipeline_layout != VK_NULL_HANDLE)
+        {
+            context_.vk().vkDestroyPipelineLayout(context_.device(), pipeline_layout, nullptr);
+        }
+    }
+
+    std::expected<void, Error> create(const PipelineLayoutBuilder& builder)
+    {
+        if (auto r = builder.create_set_layouts(context_, set_layouts, binding_types); !r)
+        {
+            return std::unexpected(r.error());
+        }
+        auto layout = builder.create_layout(context_, set_layouts);
+        if (!layout)
+        {
+            return std::unexpected(layout.error());
+        }
+        pipeline_layout = layout.value();
+        return {};
+    }
+
+    // Call once the handles have found their owner.
+    void release()
+    {
+        released_ = true;
+    }
+
+    std::vector<VkDescriptorSetLayout> set_layouts;
+    std::map<uint32_t, Pipeline::BindingTypeMap> binding_types;
+    VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+
+private:
+    Context& context_;
+    bool released_ = false;
+};
+
 class GraphicsPipelineBuilder
 {
 public:
@@ -1060,67 +1115,58 @@ public:
         return context_;
     }
 
-    // Chained setters use C++23 deducing this: the object parameter's value
-    // category is forwarded, so a chain on a temporary builder moves instead of
-    // pinning an lvalue. The pybind layer binds these through lambdas — an
-    // explicit object parameter turns &GraphicsPipelineBuilder::vertex_shader into a
-    // plain function-pointer type that .def() would misread.
+    // Chained setters return *this: nothing ever chains on a temporary builder,
+    // because the only way to reach one is ctx.graphics_pipeline() /
+    // compute_pipeline(), which hand out shared_ptrs.
 
-    template <typename Self>
-    Self&& vertex_shader(this Self&& self, std::shared_ptr<ShaderModule> shader)
+    GraphicsPipelineBuilder& vertex_shader(std::shared_ptr<ShaderModule> shader)
     {
-        self.vertex_shader_ = std::move(shader);
-        return std::forward<Self>(self);
+        vertex_shader_ = std::move(shader);
+        return *this;
     }
 
-    template <typename Self>
-    Self&& fragment_shader(this Self&& self, std::shared_ptr<ShaderModule> shader)
+    GraphicsPipelineBuilder& fragment_shader(std::shared_ptr<ShaderModule> shader)
     {
-        self.fragment_shader_ = std::move(shader);
-        return std::forward<Self>(self);
+        fragment_shader_ = std::move(shader);
+        return *this;
     }
 
     // One verb per stage rather than a `shader(module, stage)` taking the stage as
     // an argument: a module already knows its own stage, so that argument could
     // disagree with it, and vertex_shader/fragment_shader set the pattern in 0.2.
     // The two tessellation stages are set together or not at all — see build().
-    template <typename Self>
-    Self&& tess_control_shader(this Self&& self, std::shared_ptr<ShaderModule> shader)
+    GraphicsPipelineBuilder& tess_control_shader(std::shared_ptr<ShaderModule> shader)
     {
-        self.tess_control_shader_ = std::move(shader);
-        return std::forward<Self>(self);
+        tess_control_shader_ = std::move(shader);
+        return *this;
     }
 
-    template <typename Self>
-    Self&& tess_evaluation_shader(this Self&& self, std::shared_ptr<ShaderModule> shader)
+    GraphicsPipelineBuilder& tess_evaluation_shader(std::shared_ptr<ShaderModule> shader)
     {
-        self.tess_evaluation_shader_ = std::move(shader);
-        return std::forward<Self>(self);
+        tess_evaluation_shader_ = std::move(shader);
+        return *this;
     }
 
-    template <typename Self>
-    Self&& geometry_shader(this Self&& self, std::shared_ptr<ShaderModule> shader)
+    GraphicsPipelineBuilder& geometry_shader(std::shared_ptr<ShaderModule> shader)
     {
-        self.geometry_shader_ = std::move(shader);
-        return std::forward<Self>(self);
+        geometry_shader_ = std::move(shader);
+        return *this;
     }
 
     // How many vertices the vertex buffer groups into one patch — the INPUT size,
     // which is why it belongs on the pipeline and not in the shader. The control
     // shader's own `layout(vertices = N) out` is its OUTPUT count, a different
     // number, and nothing here can derive one from the other.
-    template <typename Self>
-    Self&& patch_control_points(this Self&& self, std::uint32_t count)
+    GraphicsPipelineBuilder& patch_control_points(std::uint32_t count)
     {
-        self.patch_control_points_ = count;
-        return std::forward<Self>(self);
+        patch_control_points_ = count;
+        return *this;
     }
 
-    template <typename Self>
-    Self&& vertex_format(this Self&& self, const std::vector<VertexFormat>& formats)
+    GraphicsPipelineBuilder& vertex_format(const std::vector<VertexFormat>& formats)
     {
-        self.formats_ = formats;
-        return std::forward<Self>(self);
+        formats_ = formats;
+        return *this;
     }
 
     // The attributes of a SECOND vertex buffer, advanced once per instance
@@ -1135,11 +1181,10 @@ public:
     // attribute at location 3), which is the same "location is the index in the
     // list" rule the vertex side already follows. A mat4 is four FLOAT4s and so
     // takes four locations.
-    template <typename Self>
-    Self&& instance_format(this Self&& self, const std::vector<VertexFormat>& formats)
+    GraphicsPipelineBuilder& instance_format(const std::vector<VertexFormat>& formats)
     {
-        self.instance_formats_ = formats;
-        return std::forward<Self>(self);
+        instance_formats_ = formats;
+        return *this;
     }
 
     // write=False keeps the test but stops the pass from updating the depth
@@ -1147,13 +1192,12 @@ public:
     // transparent geometry must test against the opaque depth without occluding
     // its own siblings. compare= replaces the LESS_OR_EQUAL that used to be
     // hard-coded — GREATER is a reversed-depth buffer, ALWAYS a full-screen pass.
-    template <typename Self>
-    Self&& depth_test(this Self&& self, bool enable, bool write = true, CompareOp compare = CompareOp::LESS_OR_EQUAL)
+    GraphicsPipelineBuilder& depth_test(bool enable, bool write = true, CompareOp compare = CompareOp::LESS_OR_EQUAL)
     {
-        self.depth_test_ = enable;
-        self.depth_write_ = write;
-        self.depth_compare_ = compare;
-        return std::forward<Self>(self);
+        depth_test_ = enable;
+        depth_write_ = write;
+        depth_compare_ = compare;
+        return *this;
     }
 
     // The stencil test, in one verb. Two passes make an outline: the first
@@ -1174,9 +1218,7 @@ public:
     // pipeline and two op-states, so any call sets the bit, and the last
     // `enable` wins. Pretending otherwise would invent a state the hardware does
     // not have.
-    template <typename Self>
-    Self&& stencil_test(
-        this Self&& self,
+    GraphicsPipelineBuilder& stencil_test(
         bool enable,
         CompareOp compare = CompareOp::ALWAYS,
         std::uint32_t ref = 0,
@@ -1187,10 +1229,10 @@ public:
         std::uint32_t write_mask = 0xFF,
         Face face = Face::FRONT_AND_BACK)
     {
-        self.stencil_.enable = enable;
-        for (StencilState* side : {&self.stencil_, &self.stencil_back_})
+        stencil_.enable = enable;
+        for (StencilState* side : {&stencil_, &stencil_back_})
         {
-            const bool is_front = side == &self.stencil_;
+            const bool is_front = side == &stencil_;
             if (face == Face::FRONT && !is_front)
             {
                 continue;
@@ -1207,7 +1249,7 @@ public:
             side->read_mask = read_mask;
             side->write_mask = write_mask;
         }
-        return std::forward<Self>(self);
+        return *this;
     }
 
     // front_face defaults to the value the builder already starts with, so
@@ -1215,12 +1257,11 @@ public:
     // meaningless, and requiring an argument that means nothing is how a caller
     // ends up picking one at random and being wrong later — the 0.24 rule that a
     // default belongs on every call that asks for the value.
-    template <typename Self>
-    Self&& cull_mode(this Self&& self, CullMode mode, FrontFace frontFace = FrontFace::COUNTER_CLOCKWISE)
+    GraphicsPipelineBuilder& cull_mode(CullMode mode, FrontFace frontFace = FrontFace::COUNTER_CLOCKWISE)
     {
-        self.cull_mode_ = mode;
-        self.front_face_ = frontFace;
-        return std::forward<Self>(self);
+        cull_mode_ = mode;
+        front_face_ = frontFace;
+        return *this;
     }
 
     // One verb for the question "how does this blend", whether the answer is a
@@ -1234,32 +1275,29 @@ public:
     // color_mask(attachment=1) compose in either order — a resolution that read
     // the default at call time would make the result depend on which line came
     // first, which is exactly the kind of rule nobody remembers at 3am.
-    template <typename Self>
-    Self&& blend(
-        this Self&& self,
+    GraphicsPipelineBuilder& blend(
         bool enable,
         BlendEquation equation = blend_equation_for(BlendMode::ALPHA),
         int attachment = -1)
     {
         if (attachment < 0)
         {
-            self.blend_.enable = enable;
-            self.blend_.equation = equation;
+            blend_.enable = enable;
+            blend_.equation = equation;
         }
         else
         {
-            auto& o = self.blend_overrides_[static_cast<std::uint32_t>(attachment)];
+            auto& o = blend_overrides_[static_cast<std::uint32_t>(attachment)];
             o.enable = enable;
             o.equation = equation;
         }
-        return std::forward<Self>(self);
+        return *this;
     }
 
     // Which channels this pipeline writes. A g-buffer pass that must not touch
     // the alpha of an attachment it shares, or a depth-prepass-style colour
     // write of nothing at all (all four false).
-    template <typename Self>
-    Self&& color_mask(this Self&& self, bool red, bool green, bool blue, bool alpha, int attachment = -1)
+    GraphicsPipelineBuilder& color_mask(bool red, bool green, bool blue, bool alpha, int attachment = -1)
     {
         VkColorComponentFlags mask = 0;
         if (red)
@@ -1273,13 +1311,13 @@ public:
 
         if (attachment < 0)
         {
-            self.blend_.write_mask = mask;
+            blend_.write_mask = mask;
         }
         else
         {
-            self.blend_overrides_[static_cast<std::uint32_t>(attachment)].write_mask = mask;
+            blend_overrides_[static_cast<std::uint32_t>(attachment)].write_mask = mask;
         }
-        return std::forward<Self>(self);
+        return *this;
     }
 
     // Clamp depth to the view volume instead of clipping the primitive. What a
@@ -1287,29 +1325,26 @@ public:
     // has to cast, and clipping it away is a hole in the shadow. Needs the
     // DEPTH_CLAMP feature, which is why the Feature existed with nothing using
     // it until now.
-    template <typename Self>
-    Self&& depth_clamp(this Self&& self, bool enable)
+    GraphicsPipelineBuilder& depth_clamp(bool enable)
     {
-        self.depth_clamp_ = enable;
-        return std::forward<Self>(self);
+        depth_clamp_ = enable;
+        return *this;
     }
 
     // Turn a fragment's alpha into a coverage mask on an MSAA target: cutout
     // foliage and hair get antialiased edges from the same `discard`-free
     // shader, without sorting. Does nothing on a single-sample target, which is
     // Vulkan's rule and not ours.
-    template <typename Self>
-    Self&& alpha_to_coverage(this Self&& self, bool enable)
+    GraphicsPipelineBuilder& alpha_to_coverage(bool enable)
     {
-        self.alpha_to_coverage_ = enable;
-        return std::forward<Self>(self);
+        alpha_to_coverage_ = enable;
+        return *this;
     }
 
-    template <typename Self>
-    Self&& polygon_mode(this Self&& self, PolygonMode mode)
+    GraphicsPipelineBuilder& polygon_mode(PolygonMode mode)
     {
-        self.polygon_mode_ = mode;
-        return std::forward<Self>(self);
+        polygon_mode_ = mode;
+        return *this;
     }
 
     // Width in pixels of a LINE polygon mode or a LINE_LIST topology. Anything
@@ -1317,11 +1352,10 @@ public:
     // otherwise — because a driver is free to support exactly one width.
     // A wireframe at 1.0 nearly disappears on a HiDPI display, which is what
     // this is for.
-    template <typename Self>
-    Self&& line_width(this Self&& self, float width)
+    GraphicsPipelineBuilder& line_width(float width)
     {
-        self.line_width_ = width;
-        return std::forward<Self>(self);
+        line_width_ = width;
+        return *this;
     }
 
     // Offset every depth value this pipeline writes. The fix for shadow acne:
@@ -1332,12 +1366,11 @@ public:
     // slope scales with the polygon's depth gradient, which is what makes one
     // setting work at every angle. The bias clamp stays 0: a non-zero clamp is
     // the depthBiasClamp feature, and nothing here needs it.
-    template <typename Self>
-    Self&& depth_bias(this Self&& self, float constant, float slope = 0.0f)
+    GraphicsPipelineBuilder& depth_bias(float constant, float slope = 0.0f)
     {
-        self.depth_bias_constant_ = constant;
-        self.depth_bias_slope_ = slope;
-        return std::forward<Self>(self);
+        depth_bias_constant_ = constant;
+        depth_bias_slope_ = slope;
+        return *this;
     }
 
     // restart= turns the largest representable index (0xFFFF or 0xFFFFFFFF, by
@@ -1348,12 +1381,11 @@ public:
     //
     // A kwarg on topology() rather than a verb of its own — it is meaningless
     // without a strip topology, and Vulkan rejects it on a list.
-    template <typename Self>
-    Self&& topology(this Self&& self, Topology topology, bool restart = false)
+    GraphicsPipelineBuilder& topology(Topology topology, bool restart = false)
     {
-        self.topology_ = topology;
-        self.primitive_restart_ = restart;
-        return std::forward<Self>(self);
+        topology_ = topology;
+        primitive_restart_ = restart;
+        return *this;
     }
 
     // Per-sample fragment shading on an MSAA target: the fragment shader runs once
@@ -1361,28 +1393,25 @@ public:
     // that plain MSAA (edge coverage only) leaves behind. Needs the
     // SAMPLE_RATE_SHADING feature — build() rejects it otherwise. min_fraction
     // (0..1) is the minimum fraction of samples shaded uniquely.
-    template <typename Self>
-    Self&& sample_shading(this Self&& self, bool enable, float min_fraction = 1.0f)
+    GraphicsPipelineBuilder& sample_shading(bool enable, float min_fraction = 1.0f)
     {
-        self.sample_shading_ = enable;
-        self.min_sample_shading_ = min_fraction;
-        return std::forward<Self>(self);
+        sample_shading_ = enable;
+        min_sample_shading_ = min_fraction;
+        return *this;
     }
 
     // Debug name applied to the VkPipeline (validation diagnostics). No-op
     // without VK_EXT_debug_utils — see Context::set_debug_name.
-    template <typename Self>
-    Self&& name(this Self&& self, std::string name)
+    GraphicsPipelineBuilder& name(std::string name)
     {
-        self.name_ = std::move(name);
-        return std::forward<Self>(self);
+        name_ = std::move(name);
+        return *this;
     }
 
-    template <typename Self>
-    Self&& push_constant(this Self&& self, uint32_t size, ShaderStage stage)
+    GraphicsPipelineBuilder& push_constant(uint32_t size, ShaderStage stage)
     {
-        self.layout_.add_push_constant(size, static_cast<VkShaderStageFlags>(to_vk(stage)));
-        return std::forward<Self>(self);
+        layout_.add_push_constant(size, static_cast<VkShaderStageFlags>(to_vk(stage)));
+        return *this;
     }
 
     // A specialization constant for one stage. It takes a stage for the same
@@ -1395,72 +1424,65 @@ public:
     // TESS_CONTROL constant would have been baked into the vertex shader — and a
     // switch would only have moved that bug into a default case. A map has no
     // illegal state: a bucket no module claims is simply never read.
-    template <typename Self>
-    Self&& constant(this Self&& self, std::uint32_t id, std::uint32_t bytes, ShaderStage stage)
+    GraphicsPipelineBuilder& constant(std::uint32_t id, std::uint32_t bytes, ShaderStage stage)
     {
-        self.constants_[stage].push_back({id, bytes});
-        return std::forward<Self>(self);
+        constants_[stage].push_back({id, bytes});
+        return *this;
     }
 
-    template <typename Self>
-    Self&& uniform_buffer(
-        this Self&& self,
+    GraphicsPipelineBuilder& uniform_buffer(
         uint32_t binding,
         ShaderStage stage,
         uint32_t set,
         uint32_t count,
         std::optional<bool> update_after_bind)
     {
-        self.layout_.add_binding(
+        layout_.add_binding(
             binding,
             static_cast<VkShaderStageFlags>(to_vk(stage)),
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             set,
             count,
             update_after_bind);
-        return std::forward<Self>(self);
+        return *this;
     }
 
-    template <typename Self>
-    Self&& storage_buffer(
-        this Self&& self,
+    GraphicsPipelineBuilder& storage_buffer(
         uint32_t binding,
         ShaderStage stage,
         uint32_t set,
         uint32_t count,
         std::optional<bool> update_after_bind)
     {
-        self.layout_.add_binding(
+        layout_.add_binding(
             binding,
             static_cast<VkShaderStageFlags>(to_vk(stage)),
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             set,
             count,
             update_after_bind);
-        return std::forward<Self>(self);
+        return *this;
     }
 
     // count > 1 declares a descriptor ARRAY — one binding holding N textures, the
     // shader picking one per draw or per fragment. It is a kwarg rather than a
     // second declarator because a bindless texture and a plain one differ by how
     // many there are, which is the definition of a variant (rule 1).
-    template <typename Self>
-    Self&& texture(
-        this Self&& self,
+    GraphicsPipelineBuilder& texture(
         uint32_t binding,
         ShaderStage stage,
         uint32_t set,
         uint32_t count,
         std::optional<bool> update_after_bind)
     {
-        self.layout_.add_binding(
+        layout_.add_binding(
             binding,
             static_cast<VkShaderStageFlags>(to_vk(stage)),
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             set,
             count,
             update_after_bind);
-        return std::forward<Self>(self);
+        return *this;
     }
 
     // A read/write image addressed by coordinate — the graphics counterpart of
@@ -1470,23 +1492,21 @@ public:
     // writes it has no reflection for, so a storage image written by a graphics
     // pipeline needs `cmd.barrier(image, ...)` exactly like an SSBO written the
     // same way (tech debt #3).
-    template <typename Self>
-    Self&& storage_image(
-        this Self&& self,
+    GraphicsPipelineBuilder& storage_image(
         uint32_t binding,
         ShaderStage stage,
         uint32_t set,
         uint32_t count,
         std::optional<bool> update_after_bind)
     {
-        self.layout_.add_binding(
+        layout_.add_binding(
             binding,
             static_cast<VkShaderStageFlags>(to_vk(stage)),
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             set,
             count,
             update_after_bind);
-        return std::forward<Self>(self);
+        return *this;
     }
 
     // Build the pipeline with explicit color/depth formats (decoupled from renderer)
@@ -1683,33 +1703,11 @@ public:
             }
         }
 
-        // Descriptor set layouts and the pipeline layout are created ONCE and
-        // reused across every hot-reload rebuild: they come from the builder's
-        // binding/push-constant calls, not the shader source. Owned by guards
-        // until the Pipeline exists.
-        std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
-        std::map<uint32_t, Pipeline::BindingTypeMap> allBindingTypes;
-        ScopeGuard cleanup_layouts(
-            [&]
-            {
-                for (auto dl : descriptorSetLayouts)
-                {
-                    context_.vk().vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
-                }
-            });
-        if (auto r = layout_.create_set_layouts(context_, descriptorSetLayouts, allBindingTypes); !r)
+        PipelineLayouts layouts(context_);
+        if (auto r = layouts.create(layout_); !r)
         {
             return std::unexpected(r.error());
         }
-
-        auto layout = layout_.create_layout(context_, descriptorSetLayouts);
-        if (!layout)
-        {
-            return std::unexpected(layout.error());
-        }
-        VkPipelineLayout pipelineLayout = layout.value();
-        ScopeGuard cleanup_pipeline_layout(
-            [&] { context_.vk().vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr); });
 
         // The rebuildable slice of state: everything vkCreateGraphicsPipelines
         // needs except the layout. Copied into the recreate closure below so a
@@ -1748,7 +1746,7 @@ public:
             .sample_shading = sample_shading_,
             .min_sample_shading = min_sample_shading_};
 
-        auto pipeline = create_pipeline_(context_, state, pipelineLayout);
+        auto pipeline = create_pipeline_(context_, state, layouts.pipeline_layout);
         if (!pipeline)
         {
             return std::unexpected(pipeline.error());
@@ -1759,8 +1757,7 @@ public:
         }
 
         // Everything now belongs to the Pipeline.
-        cleanup_layouts.release();
-        cleanup_pipeline_layout.release();
+        layouts.release();
 
         PipelineDesc desc;
         // Every stage the pipeline has, because Pipeline::uses() matches against
@@ -1775,15 +1772,15 @@ public:
                 desc.shaders.push_back(*slot);
             }
         }
-        desc.recreate = [state = std::move(state), pipelineLayout](Context& c)
+        desc.recreate = [state = std::move(state), pipelineLayout = layouts.pipeline_layout](Context& c)
         { return create_pipeline_(c, state, pipelineLayout); };
 
         return std::make_shared<Pipeline>(
             context_.shared_from_this(),
             pipeline.value(),
-            pipelineLayout,
-            std::move(descriptorSetLayouts),
-            std::move(allBindingTypes),
+            layouts.pipeline_layout,
+            std::move(layouts.set_layouts),
+            std::move(layouts.binding_types),
             layout_.push_constant_stages(),
             VK_PIPELINE_BIND_POINT_GRAPHICS,
             std::move(desc));
@@ -2230,38 +2227,33 @@ public:
         return context_;
     }
 
-    template <typename Self>
-    Self&& shader(this Self&& self, std::shared_ptr<ShaderModule> shader)
+    ComputePipelineBuilder& shader(std::shared_ptr<ShaderModule> shader)
     {
-        self.shader_ = std::move(shader);
-        return std::forward<Self>(self);
+        shader_ = std::move(shader);
+        return *this;
     }
 
-    template <typename Self>
-    Self&& uniform_buffer(
-        this Self&& self,
+    ComputePipelineBuilder& uniform_buffer(
         uint32_t binding,
         uint32_t set,
         uint32_t count,
         std::optional<bool> update_after_bind)
     {
-        self.layout_.add_binding(
+        layout_.add_binding(
             binding, VK_SHADER_STAGE_COMPUTE_BIT, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, set, count, update_after_bind);
-        return std::forward<Self>(self);
+        return *this;
     }
 
     // count > 1 is a descriptor array, same as on the graphics builder.
-    template <typename Self>
-    Self&& storage_buffer(
-        this Self&& self,
+    ComputePipelineBuilder& storage_buffer(
         uint32_t binding,
         uint32_t set,
         uint32_t count,
         std::optional<bool> update_after_bind)
     {
-        self.layout_.add_binding(
+        layout_.add_binding(
             binding, VK_SHADER_STAGE_COMPUTE_BIT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, set, count, update_after_bind);
-        return std::forward<Self>(self);
+        return *this;
     }
 
     // A sampled image in a compute shader. Missing until 0.21 for no reason
@@ -2270,58 +2262,51 @@ public:
     // was the declaration and nothing else. Without it a compute shader could
     // only reach an image as a storage image -- no filtering, no mip selection,
     // no address mode.
-    template <typename Self>
-    Self&& texture(
-        this Self&& self,
+    ComputePipelineBuilder& texture(
         uint32_t binding,
         uint32_t set,
         uint32_t count,
         std::optional<bool> update_after_bind)
     {
-        self.layout_.add_binding(
+        layout_.add_binding(
             binding,
             VK_SHADER_STAGE_COMPUTE_BIT,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             set,
             count,
             update_after_bind);
-        return std::forward<Self>(self);
+        return *this;
     }
 
     // A read/write image the shader accesses by coordinate (imageLoad/imageStore).
-    template <typename Self>
-    Self&& storage_image(
-        this Self&& self,
+    ComputePipelineBuilder& storage_image(
         uint32_t binding,
         uint32_t set,
         uint32_t count,
         std::optional<bool> update_after_bind)
     {
-        self.layout_.add_binding(
+        layout_.add_binding(
             binding, VK_SHADER_STAGE_COMPUTE_BIT, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, set, count, update_after_bind);
-        return std::forward<Self>(self);
+        return *this;
     }
 
-    template <typename Self>
-    Self&& push_constant(this Self&& self, uint32_t size)
+    ComputePipelineBuilder& push_constant(uint32_t size)
     {
-        self.layout_.add_push_constant(size, VK_SHADER_STAGE_COMPUTE_BIT);
-        return std::forward<Self>(self);
+        layout_.add_push_constant(size, VK_SHADER_STAGE_COMPUTE_BIT);
+        return *this;
     }
 
     // No stage argument, for the same reason nothing else here has one.
-    template <typename Self>
-    Self&& constant(this Self&& self, std::uint32_t id, std::uint32_t bytes)
+    ComputePipelineBuilder& constant(std::uint32_t id, std::uint32_t bytes)
     {
-        self.constants_.push_back({id, bytes});
-        return std::forward<Self>(self);
+        constants_.push_back({id, bytes});
+        return *this;
     }
 
-    template <typename Self>
-    Self&& name(this Self&& self, std::string name)
+    ComputePipelineBuilder& name(std::string name)
     {
-        self.name_ = std::move(name);
-        return std::forward<Self>(self);
+        name_ = std::move(name);
+        return *this;
     }
 
     // No target argument: compute has no attachments.
@@ -2336,32 +2321,13 @@ public:
             return std::unexpected(e.error());
         }
 
-        // Layouts once, reused across hot-reload rebuilds (see graphics build()).
-        std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
-        std::map<uint32_t, Pipeline::BindingTypeMap> allBindingTypes;
-        ScopeGuard cleanup_layouts(
-            [&]
-            {
-                for (auto dl : descriptorSetLayouts)
-                {
-                    context_.vk().vkDestroyDescriptorSetLayout(context_.device(), dl, nullptr);
-                }
-            });
-        if (auto r = layout_.create_set_layouts(context_, descriptorSetLayouts, allBindingTypes); !r)
+        PipelineLayouts layouts(context_);
+        if (auto r = layouts.create(layout_); !r)
         {
             return std::unexpected(r.error());
         }
 
-        auto layout = layout_.create_layout(context_, descriptorSetLayouts);
-        if (!layout)
-        {
-            return std::unexpected(layout.error());
-        }
-        VkPipelineLayout pipelineLayout = layout.value();
-        ScopeGuard cleanup_pipeline_layout(
-            [&] { context_.vk().vkDestroyPipelineLayout(context_.device(), pipelineLayout, nullptr); });
-
-        auto pipeline = create_pipeline_(context_, shader_, pipelineLayout, constants_);
+        auto pipeline = create_pipeline_(context_, shader_, layouts.pipeline_layout, constants_);
         if (!pipeline)
         {
             return std::unexpected(pipeline.error());
@@ -2371,20 +2337,19 @@ public:
             context_.set_debug_name(VK_OBJECT_TYPE_PIPELINE, reinterpret_cast<std::uint64_t>(pipeline.value()), name_);
         }
 
-        cleanup_layouts.release();
-        cleanup_pipeline_layout.release();
+        layouts.release();
 
         PipelineDesc desc;
         desc.shaders.push_back(shader_);
-        desc.recreate = [shader = shader_, pipelineLayout, constants = constants_](Context& c)
+        desc.recreate = [shader = shader_, pipelineLayout = layouts.pipeline_layout, constants = constants_](Context& c)
         { return create_pipeline_(c, shader, pipelineLayout, constants); };
 
         return std::make_shared<Pipeline>(
             context_.shared_from_this(),
             pipeline.value(),
-            pipelineLayout,
-            std::move(descriptorSetLayouts),
-            std::move(allBindingTypes),
+            layouts.pipeline_layout,
+            std::move(layouts.set_layouts),
+            std::move(layouts.binding_types),
             layout_.push_constant_stages(),
             VK_PIPELINE_BIND_POINT_COMPUTE,
             std::move(desc));

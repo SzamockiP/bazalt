@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
-#include <stdexcept>
+#include <charconv>
 #include <memory>
 #include <expected>
 #include <optional>
@@ -858,33 +858,28 @@ private:
     {
         for (std::size_t i = 0; i + 1 < log.size(); ++i)
         {
-            if (log[i] != ':')
+            if (log[i] != ':' || !std::isdigit(static_cast<unsigned char>(log[i + 1])))
             {
                 continue;
             }
 
-            std::size_t j = i + 1;
-            while (j < log.size() && std::isdigit(static_cast<unsigned char>(log[j])))
+            int line = 0;
+            const char* const last = log.data() + log.size();
+            const auto [end, ec] = std::from_chars(log.data() + i + 1, last, line);
+            if (end == last || *end != ':')
             {
-                ++j;
+                continue;
             }
-
-            if (j > i + 1 && j < log.size() && log[j] == ':')
+            if (ec != std::errc{})
             {
-                ErrorLocation loc;
-                try
-                {
-                    loc.line = std::stoi(log.substr(i + 1, j - i - 1));
-                }
-                catch (const std::exception&)
-                {
-                    return {};
-                }
-                std::size_t start = log.rfind('\n', i);
-                start = (start == std::string::npos) ? 0 : start + 1;
-                loc.path = log.substr(start, i - start);
-                return loc;
+                return {}; // a line number that overflows int: give up, as before
             }
+            ErrorLocation loc;
+            loc.line = line;
+            std::size_t start = log.rfind('\n', i);
+            start = (start == std::string::npos) ? 0 : start + 1;
+            loc.path = log.substr(start, i - start);
+            return loc;
         }
         return {};
     }

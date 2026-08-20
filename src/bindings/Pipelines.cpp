@@ -4,35 +4,21 @@ void bind_pipelines(py::module_& m)
 {
     py::class_<Pipeline, std::shared_ptr<Pipeline>>(m, "Pipeline");
 
-    // Lambdas, not member pointers: the setters take a deducing-this object
-    // parameter, so &GraphicsPipelineBuilder::vertex_shader would be a plain
-    // function pointer that .def() cannot treat as a method.
-    py::class_<GraphicsPipelineBuilder, std::shared_ptr<GraphicsPipelineBuilder>>(m, "GraphicsPipelineBuilder")
-        .def(
-            "vertex_shader",
-            [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
-            { return self.vertex_shader(std::move(shader)); },
-            py::arg("shader"))
-        .def(
-            "fragment_shader",
-            [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
-            { return self.fragment_shader(std::move(shader)); },
-            py::arg("shader"))
-        .def(
-            "tess_control_shader",
-            [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
-            { return self.tess_control_shader(std::move(shader)); },
-            py::arg("shader"))
-        .def(
-            "tess_evaluation_shader",
-            [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
-            { return self.tess_evaluation_shader(std::move(shader)); },
-            py::arg("shader"))
-        .def(
-            "geometry_shader",
-            [](GraphicsPipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> GraphicsPipelineBuilder&
-            { return self.geometry_shader(std::move(shader)); },
-            py::arg("shader"))
+    py::class_<GraphicsPipelineBuilder, std::shared_ptr<GraphicsPipelineBuilder>> graphics(
+        m, "GraphicsPipelineBuilder");
+
+    using GraphicsShaderSetter = GraphicsPipelineBuilder& (GraphicsPipelineBuilder::*)(std::shared_ptr<ShaderModule>);
+    for (auto [name, setter] : std::initializer_list<std::pair<const char*, GraphicsShaderSetter>>{
+             {"vertex_shader", &GraphicsPipelineBuilder::vertex_shader},
+             {"fragment_shader", &GraphicsPipelineBuilder::fragment_shader},
+             {"tess_control_shader", &GraphicsPipelineBuilder::tess_control_shader},
+             {"tess_evaluation_shader", &GraphicsPipelineBuilder::tess_evaluation_shader},
+             {"geometry_shader", &GraphicsPipelineBuilder::geometry_shader}})
+    {
+        graphics.def(name, setter, py::arg("shader"));
+    }
+
+    graphics
         .def(
             "patch_control_points",
             [](GraphicsPipelineBuilder& self, std::uint32_t count) -> GraphicsPipelineBuilder&
@@ -186,76 +172,6 @@ void bind_pipelines(py::module_& m)
             { return self.push_constant(size, stage); },
             py::arg("size"),
             py::arg("stage"))
-        .def(
-            "uniform_buffer",
-            [](GraphicsPipelineBuilder& self,
-               uint32_t binding,
-               ShaderStage stage,
-               uint32_t set,
-               uint32_t count,
-               std::optional<bool> update_after_bind) -> GraphicsPipelineBuilder&
-            { return self.uniform_buffer(binding, stage, set, count, update_after_bind); },
-            py::arg("binding"),
-            py::arg("stage"),
-            // Defaulted to match the compute builder: the same declarator asked
-            // for the set on one side and assumed it on the other, so a
-            // single-set pipeline paid `set=0` on every line for nothing.
-            py::arg("set") = 0,
-            py::arg("count") = 1,
-            py::arg("update_after_bind") = py::none())
-        .def(
-            "storage_buffer",
-            [](GraphicsPipelineBuilder& self,
-               uint32_t binding,
-               ShaderStage stage,
-               uint32_t set,
-               uint32_t count,
-               std::optional<bool> update_after_bind) -> GraphicsPipelineBuilder&
-            { return self.storage_buffer(binding, stage, set, count, update_after_bind); },
-            py::arg("binding"),
-            py::arg("stage"),
-            // Defaulted to match the compute builder: the same declarator asked
-            // for the set on one side and assumed it on the other, so a
-            // single-set pipeline paid `set=0` on every line for nothing.
-            py::arg("set") = 0,
-            py::arg("count") = 1,
-            py::arg("update_after_bind") = py::none())
-        // count>1 declares a descriptor array: one binding holding N textures,
-        // written with set_image(..., index=i) and indexed in the shader.
-        .def(
-            "texture",
-            [](GraphicsPipelineBuilder& self,
-               uint32_t binding,
-               ShaderStage stage,
-               uint32_t set,
-               uint32_t count,
-               std::optional<bool> update_after_bind) -> GraphicsPipelineBuilder&
-            { return self.texture(binding, stage, set, count, update_after_bind); },
-            py::arg("binding"),
-            py::arg("stage"),
-            // Defaulted to match the compute builder: the same declarator asked
-            // for the set on one side and assumed it on the other, so a
-            // single-set pipeline paid `set=0` on every line for nothing.
-            py::arg("set") = 0,
-            py::arg("count") = 1,
-            py::arg("update_after_bind") = py::none())
-        .def(
-            "storage_image",
-            [](GraphicsPipelineBuilder& self,
-               uint32_t binding,
-               ShaderStage stage,
-               uint32_t set,
-               uint32_t count,
-               std::optional<bool> update_after_bind) -> GraphicsPipelineBuilder&
-            { return self.storage_image(binding, stage, set, count, update_after_bind); },
-            py::arg("binding"),
-            py::arg("stage"),
-            // Defaulted to match the compute builder: the same declarator asked
-            // for the set on one side and assumed it on the other, so a
-            // single-set pipeline paid `set=0` on every line for nothing.
-            py::arg("set") = 0,
-            py::arg("count") = 1,
-            py::arg("update_after_bind") = py::none())
         // Takes any RenderTarget. A SwapchainRenderer *is* one, so windowed code
         // reads the same as offscreen code — build(renderer) still works, it just
         // isn't a special case any more.
@@ -278,66 +194,57 @@ void bind_pipelines(py::module_& m)
             },
             py::arg("target"));
 
+    // The four descriptor declarators share one signature and one arg list.
+    // set= defaulted to match the compute builder: the same declarator asked
+    // for the set on one side and assumed it on the other, so a single-set
+    // pipeline paid `set=0` on every line for nothing.
+    using GraphicsDeclarator = GraphicsPipelineBuilder& (
+        GraphicsPipelineBuilder::*)(uint32_t, ShaderStage, uint32_t, uint32_t, std::optional<bool>);
+    for (auto [name, declarator] : std::initializer_list<std::pair<const char*, GraphicsDeclarator>>{
+             {"uniform_buffer", &GraphicsPipelineBuilder::uniform_buffer},
+             {"storage_buffer", &GraphicsPipelineBuilder::storage_buffer},
+             // count>1 declares a descriptor array: one binding holding N textures,
+             // written with set_image(..., index=i) and indexed in the shader.
+             {"texture", &GraphicsPipelineBuilder::texture},
+             {"storage_image", &GraphicsPipelineBuilder::storage_image}})
+    {
+        graphics.def(
+            name,
+            declarator,
+            py::arg("binding"),
+            py::arg("stage"),
+            py::arg("set") = 0,
+            py::arg("count") = 1,
+            py::arg("update_after_bind") = py::none());
+    }
+
     // No stage arguments anywhere: compute has exactly one stage, so asking for
     // it could only ever be redundant or wrong. build() takes no target —
     // compute has no attachments.
-    py::class_<ComputePipelineBuilder, std::shared_ptr<ComputePipelineBuilder>>(m, "ComputePipelineBuilder")
-        .def(
-            "shader",
-            [](ComputePipelineBuilder& self, std::shared_ptr<ShaderModule> shader) -> ComputePipelineBuilder&
-            { return self.shader(std::move(shader)); },
-            py::arg("shader"))
-        .def(
-            "uniform_buffer",
-            [](ComputePipelineBuilder& self,
-               uint32_t binding,
-               uint32_t set,
-               uint32_t count,
-               std::optional<bool> update_after_bind) -> ComputePipelineBuilder&
-            { return self.uniform_buffer(binding, set, count, update_after_bind); },
+    py::class_<ComputePipelineBuilder, std::shared_ptr<ComputePipelineBuilder>> compute(m, "ComputePipelineBuilder");
+
+    // Same four declarators as the graphics builder, minus the stage.
+    using ComputeDeclarator =
+        ComputePipelineBuilder& (ComputePipelineBuilder::*)(uint32_t, uint32_t, uint32_t, std::optional<bool>);
+    for (auto [name, declarator] : std::initializer_list<std::pair<const char*, ComputeDeclarator>>{
+             {"uniform_buffer", &ComputePipelineBuilder::uniform_buffer},
+             {"storage_buffer", &ComputePipelineBuilder::storage_buffer},
+             // A sampled image in a compute shader: filtering, mips and address
+             // modes, which a storage image has none of. The declarator was simply
+             // missing until 0.21 -- everything downstream already handled it.
+             {"texture", &ComputePipelineBuilder::texture},
+             {"storage_image", &ComputePipelineBuilder::storage_image}})
+    {
+        compute.def(
+            name,
+            declarator,
             py::arg("binding"),
             py::arg("set") = 0,
             py::arg("count") = 1,
-            py::arg("update_after_bind") = py::none())
-        .def(
-            "storage_buffer",
-            [](ComputePipelineBuilder& self,
-               uint32_t binding,
-               uint32_t set,
-               uint32_t count,
-               std::optional<bool> update_after_bind) -> ComputePipelineBuilder&
-            { return self.storage_buffer(binding, set, count, update_after_bind); },
-            py::arg("binding"),
-            py::arg("set") = 0,
-            py::arg("count") = 1,
-            py::arg("update_after_bind") = py::none())
-        // A sampled image in a compute shader: filtering, mips and address modes,
-        // which a storage image has none of. The declarator was simply missing
-        // until 0.21 -- everything downstream already handled it.
-        .def(
-            "texture",
-            [](ComputePipelineBuilder& self,
-               uint32_t binding,
-               uint32_t set,
-               uint32_t count,
-               std::optional<bool> update_after_bind) -> ComputePipelineBuilder&
-            { return self.texture(binding, set, count, update_after_bind); },
-            py::arg("binding"),
-            py::arg("set") = 0,
-            py::arg("count") = 1,
-            py::arg("update_after_bind") = py::none())
-        .def(
-            "storage_image",
-            [](ComputePipelineBuilder& self,
-               uint32_t binding,
-               uint32_t set,
-               uint32_t count,
-               std::optional<bool> update_after_bind) -> ComputePipelineBuilder&
-            { return self.storage_image(binding, set, count, update_after_bind); },
-            py::arg("binding"),
-            py::arg("set") = 0,
-            py::arg("count") = 1,
-            py::arg("update_after_bind") = py::none())
+            py::arg("update_after_bind") = py::none());
+    }
+
+    compute.def("shader", &ComputePipelineBuilder::shader, py::arg("shader"))
         .def(
             "push_constant",
             [](ComputePipelineBuilder& self, uint32_t size) -> ComputePipelineBuilder&

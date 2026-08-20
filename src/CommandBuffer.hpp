@@ -185,57 +185,47 @@ public:
                     preserve ? (VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
                              : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
+                // LOAD_OP_LOAD reads the attachment, so preserving needs the
+                // read bit as well as the write.
+                const VkAccessFlags color_dst_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                                       (preserve ? VK_ACCESS_COLOR_ATTACHMENT_READ_BIT : 0);
                 for (uint32_t i = 0; i < rt->color_count(); ++i)
                 {
-                    VkImageMemoryBarrier barrier{
-                        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                        .pNext = nullptr,
-                        .srcAccessMask = color_src_access,
-                        // LOAD_OP_LOAD reads the attachment, so preserving needs
-                        // the read bit as well as the write.
-                        .dstAccessMask = static_cast<VkAccessFlags>(
-                            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                            (preserve ? VK_ACCESS_COLOR_ATTACHMENT_READ_BIT : 0)),
-                        .oldLayout = color_old_layout,
-                        .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .image = rt->color_image(i),
-                        .subresourceRange = {
-                            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                            .baseMipLevel = color_sr.base_mip,
-                            .levelCount = color_sr.mip_count,
-                            .baseArrayLayer = color_sr.base_layer,
-                            .layerCount = color_sr.layer_count}};
-
-                    frame.vk->vkCmdPipelineBarrier(
+                    record_image_transition(
+                        *frame.vk,
                         cmd,
+                        rt->color_image(i),
+                        color_old_layout,
+                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        color_src_access,
+                        color_dst_access,
                         color_src_stage,
                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                        0,
-                        0,
-                        nullptr,
-                        0,
-                        nullptr,
-                        1,
-                        &barrier);
+                        VK_IMAGE_ASPECT_COLOR_BIT,
+                        color_sr.base_mip,
+                        color_sr.mip_count,
+                        color_sr.layer_count,
+                        color_sr.base_layer);
 
                     // With MSAA the single-sample resolve target is a second
                     // attachment written this pass — it needs the same transition.
                     if (rt->color_resolve_image(i) != VK_NULL_HANDLE)
                     {
-                        barrier.image = rt->color_resolve_image(i);
-                        frame.vk->vkCmdPipelineBarrier(
+                        record_image_transition(
+                            *frame.vk,
                             cmd,
+                            rt->color_resolve_image(i),
+                            color_old_layout,
+                            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            color_src_access,
+                            color_dst_access,
                             color_src_stage,
                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                            0,
-                            0,
-                            nullptr,
-                            0,
-                            nullptr,
-                            1,
-                            &barrier);
+                            VK_IMAGE_ASPECT_COLOR_BIT,
+                            color_sr.base_mip,
+                            color_sr.mip_count,
+                            color_sr.layer_count,
+                            color_sr.base_layer);
                     }
                 }
 
@@ -252,53 +242,43 @@ public:
 
                 if (rt->depth_image() != VK_NULL_HANDLE)
                 {
-                    VkImageMemoryBarrier depthBarrier{
-                        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                        .pNext = nullptr,
-                        .srcAccessMask = depth_src_access,
-                        .dstAccessMask = static_cast<VkAccessFlags>(
-                            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
-                            (preserve ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT : 0)),
-                        .oldLayout = depth_old_layout,
-                        .newLayout = depth_layout,
-                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .image = rt->depth_image(),
-                        .subresourceRange = {
-                            .aspectMask = depth_aspect,
-                            .baseMipLevel = depth_sr.base_mip,
-                            .levelCount = depth_sr.mip_count,
-                            .baseArrayLayer = depth_sr.base_layer,
-                            .layerCount = depth_sr.layer_count}};
-
-                    frame.vk->vkCmdPipelineBarrier(
+                    const VkAccessFlags depth_dst_access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                                                           (preserve ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT : 0);
+                    record_image_transition(
+                        *frame.vk,
                         cmd,
+                        rt->depth_image(),
+                        depth_old_layout,
+                        depth_layout,
+                        depth_src_access,
+                        depth_dst_access,
                         depth_src_stage,
                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                        0,
-                        0,
-                        nullptr,
-                        0,
-                        nullptr,
-                        1,
-                        &depthBarrier);
+                        depth_aspect,
+                        depth_sr.base_mip,
+                        depth_sr.mip_count,
+                        depth_sr.layer_count,
+                        depth_sr.base_layer);
 
                     // MSAA depth resolves into a single-sample image (offscreen
                     // only — a swapchain's scratch depth has no resolve target).
                     if (rt->depth_resolve_image() != VK_NULL_HANDLE)
                     {
-                        depthBarrier.image = rt->depth_resolve_image();
-                        frame.vk->vkCmdPipelineBarrier(
+                        record_image_transition(
+                            *frame.vk,
                             cmd,
+                            rt->depth_resolve_image(),
+                            depth_old_layout,
+                            depth_layout,
+                            depth_src_access,
+                            depth_dst_access,
                             depth_src_stage,
                             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                            0,
-                            0,
-                            nullptr,
-                            0,
-                            nullptr,
-                            1,
-                            &depthBarrier);
+                            depth_aspect,
+                            depth_sr.base_mip,
+                            depth_sr.mip_count,
+                            depth_sr.layer_count,
+                            depth_sr.base_layer);
                     }
                 }
 
@@ -431,34 +411,21 @@ public:
                     VkImage final_image = target->color_resolve_image(i) != VK_NULL_HANDLE
                                               ? target->color_resolve_image(i)
                                               : target->color_image(i);
-                    VkImageMemoryBarrier barrier{
-                        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                        .pNext = nullptr,
-                        .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                        .dstAccessMask = 0,
-                        .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                        .newLayout = target->final_layout(),
-                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .image = final_image,
-                        .subresourceRange = {
-                            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                            .baseMipLevel = color_sr.base_mip,
-                            .levelCount = color_sr.mip_count,
-                            .baseArrayLayer = color_sr.base_layer,
-                            .layerCount = color_sr.layer_count}};
-
-                    frame.vk->vkCmdPipelineBarrier(
+                    record_image_transition(
+                        *frame.vk,
                         cmd,
+                        final_image,
+                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        target->final_layout(),
+                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                        0,
                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                        0,
-                        0,
-                        nullptr,
-                        0,
-                        nullptr,
-                        1,
-                        &barrier);
+                        VK_IMAGE_ASPECT_COLOR_BIT,
+                        color_sr.base_mip,
+                        color_sr.mip_count,
+                        color_sr.layer_count,
+                        color_sr.base_layer);
 
                     // A kept multisampled image retires too, since 0.25, because it
                     // is then readable: target.multisampled_color[i] goes into a
@@ -469,20 +436,21 @@ public:
                     // that gets presented.
                     if (target->keep_samples() && target->color_resolve_image(i) != VK_NULL_HANDLE)
                     {
-                        barrier.image = target->color_image(i);
-                        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-                        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                        frame.vk->vkCmdPipelineBarrier(
+                        record_image_transition(
+                            *frame.vk,
                             cmd,
+                            target->color_image(i),
+                            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                            VK_ACCESS_SHADER_READ_BIT,
                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                            0,
-                            0,
-                            nullptr,
-                            0,
-                            nullptr,
-                            1,
-                            &barrier);
+                            VK_IMAGE_ASPECT_COLOR_BIT,
+                            color_sr.base_mip,
+                            color_sr.mip_count,
+                            color_sr.layer_count,
+                            color_sr.base_layer);
                     }
                 }
 
@@ -500,34 +468,21 @@ public:
                     VkImage final_depth = target->depth_resolve_image() != VK_NULL_HANDLE
                                               ? target->depth_resolve_image()
                                               : target->depth_image();
-                    VkImageMemoryBarrier depthBarrier{
-                        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                        .pNext = nullptr,
-                        .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
-                        .oldLayout = depth_layout,
-                        .newLayout = target->depth_final_layout(),
-                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .image = final_depth,
-                        .subresourceRange = {
-                            .aspectMask = depth_aspect,
-                            .baseMipLevel = depth_sr.base_mip,
-                            .levelCount = depth_sr.mip_count,
-                            .baseArrayLayer = depth_sr.base_layer,
-                            .layerCount = depth_sr.layer_count}};
-
-                    frame.vk->vkCmdPipelineBarrier(
+                    record_image_transition(
+                        *frame.vk,
                         cmd,
+                        final_depth,
+                        depth_layout,
+                        target->depth_final_layout(),
+                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                        0,
-                        0,
-                        nullptr,
-                        0,
-                        nullptr,
-                        1,
-                        &depthBarrier);
+                        depth_aspect,
+                        depth_sr.base_mip,
+                        depth_sr.mip_count,
+                        depth_sr.layer_count,
+                        depth_sr.base_layer);
 
                     // The multisampled depth follows the multisampled colour, for
                     // the reason the colour comment gives. Symmetric on purpose:
@@ -536,19 +491,21 @@ public:
                     // as a validation error rather than as a message.
                     if (target->keep_samples() && target->depth_resolve_image() != VK_NULL_HANDLE)
                     {
-                        depthBarrier.image = target->depth_image();
-                        depthBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                        frame.vk->vkCmdPipelineBarrier(
+                        record_image_transition(
+                            *frame.vk,
                             cmd,
+                            target->depth_image(),
+                            depth_layout,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                            VK_ACCESS_SHADER_READ_BIT,
                             VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                            0,
-                            0,
-                            nullptr,
-                            0,
-                            nullptr,
-                            1,
-                            &depthBarrier);
+                            depth_aspect,
+                            depth_sr.base_mip,
+                            depth_sr.mip_count,
+                            depth_sr.layer_count,
+                            depth_sr.base_layer);
                     }
                 }
 
@@ -1051,28 +1008,7 @@ public:
         commands_.push_back([src = std::move(src), dst = std::move(dst), layout = *src_layout](
                                 VkCommandBuffer cmd, const FrameContext& frame)
                             { record_image_copy(*frame.vk, cmd, *src, *dst, layout); });
-        // BOTH ends, not just the destination: the copy leaves the source
-        // sampleable too, and an Image that still believed it was in GENERAL
-        // would hand a stale oldLayout to the next read() — a validation error
-        // with no obvious author.
-        src_ptr->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        dst_ptr->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        if (auto_barriers_)
-        {
-            // Both ends leave the copy sampleable, and the tracker has to learn
-            // it or the next automatic use transitions from a stale layout — the
-            // same rule the manual image barrier follows.
-            tracker_.note_image_layout(
-                src_ptr,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                context_->all_shader_stages(),
-                VK_ACCESS_SHADER_READ_BIT);
-            tracker_.note_image_layout(
-                dst_ptr,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                context_->all_shader_stages(),
-                VK_ACCESS_SHADER_READ_BIT);
-        }
+        finish_image_transfer_(src_ptr, dst_ptr);
         return {};
     }
 
@@ -1151,22 +1087,7 @@ public:
         commands_.push_back([src = std::move(src), dst = std::move(dst), layout = *src_layout, filter](
                                 VkCommandBuffer cmd, const FrameContext& frame)
                             { record_image_blit(*frame.vk, cmd, *src, *dst, layout, filter); });
-        // Both ends, for the reason copy_image spells out above.
-        src_ptr->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        dst_ptr->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        if (auto_barriers_)
-        {
-            tracker_.note_image_layout(
-                src_ptr,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                context_->all_shader_stages(),
-                VK_ACCESS_SHADER_READ_BIT);
-            tracker_.note_image_layout(
-                dst_ptr,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                context_->all_shader_stages(),
-                VK_ACCESS_SHADER_READ_BIT);
-        }
+        finish_image_transfer_(src_ptr, dst_ptr);
         return {};
     }
 
@@ -1741,6 +1662,27 @@ private:
     {
     }
 
+    // The tail copy_image and blit_image share. BOTH ends, not just the
+    // destination: the transfer leaves the source sampleable too, and an Image
+    // (or a tracker) that still believed it was in GENERAL would hand a stale
+    // oldLayout to the next use — a validation error with no obvious author.
+    void finish_image_transfer_(Image* src, Image* dst)
+    {
+        src->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        dst->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (auto_barriers_)
+        {
+            for (Image* image : {src, dst})
+            {
+                tracker_.note_image_layout(
+                    image,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    context_->all_shader_stages(),
+                    VK_ACCESS_SHADER_READ_BIT);
+            }
+        }
+    }
+
     // Records a buffer-barrier lambda. Inside a rendering scope it is hoisted
     // to just before the begin_rendering lambda (vkCmdPipelineBarrier is
     // illegal inside dynamic rendering); deferred recording makes the insert
@@ -1776,26 +1718,23 @@ private:
         hoist_or_push_(
             [image = std::move(image), b](VkCommandBuffer cmd, const FrameContext& frame)
             {
-                VkImageMemoryBarrier barrier{
-                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                    .pNext = nullptr,
-                    .srcAccessMask = b.src_access,
-                    .dstAccessMask = b.dst_access,
-                    .oldLayout = b.old_layout,
-                    .newLayout = b.new_layout,
-                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .image = image->vk_image(),
-                    .subresourceRange = {
-                        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                        .baseMipLevel = 0,
-                        .levelCount = image->mip_levels(),
-                        .baseArrayLayer = 0,
-                        // All layers transition together: the tracker holds one
-                        // layout per image, and a cube/array is used as a whole.
-                        // A volume spells that VK_REMAINING_ARRAY_LAYERS.
-                        .layerCount = image->barrier_layers(image->array_layers())}};
-                frame.vk->vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+                // All mips and all layers transition together: the tracker holds
+                // one layout per image, and a cube/array is used as a whole. A
+                // volume spells that VK_REMAINING_ARRAY_LAYERS.
+                record_image_transition(
+                    *frame.vk,
+                    cmd,
+                    image->vk_image(),
+                    b.old_layout,
+                    b.new_layout,
+                    b.src_access,
+                    b.dst_access,
+                    b.src_stages,
+                    b.dst_stages,
+                    VK_IMAGE_ASPECT_COLOR_BIT,
+                    0,
+                    image->mip_levels(),
+                    image->barrier_layers(image->array_layers()));
             });
     }
 

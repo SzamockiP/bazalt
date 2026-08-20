@@ -18,11 +18,6 @@ SHADER_DIR = pathlib.Path(__file__).parent / "shaders"
 CLEAR = [0.1, 0.2, 0.3, 1.0]
 
 
-@pytest.fixture
-def fullscreen_vert(ctx):
-    return ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
-
-
 def test_frames_in_flight_is_validated_before_touching_vulkan():
     """ValueError, not InitializationError: the argument is wrong on its own, and
     `except bz.InitializationError` is the fall-back-to-headless handler, which

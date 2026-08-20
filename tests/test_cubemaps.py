@@ -21,11 +21,6 @@ from conftest import SHADER_DIR
 FACE_DIRS = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
 
 
-@pytest.fixture
-def fullscreen_vert(ctx):
-    return ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
-
-
 def _cube_sampler(ctx, fullscreen_vert, target):
     """A graphics pipeline that samples a bound cubemap in a pushed direction."""
     frag = ctx.compile_shader(str(SHADER_DIR / "skybox.frag"), bz.ShaderStage.FRAGMENT)

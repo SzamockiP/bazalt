@@ -312,30 +312,10 @@ public:
     {
         return swapchain_;
     }
-    VkFormat swapchain_format() const
-    {
-        return swapchain_format_;
-    }
-    VkExtent2D swapchain_extent() const
-    {
-        return swapchain_extent_;
-    }
-    const std::vector<VkImage>& swapchain_images() const
-    {
-        return swapchain_images_;
-    }
-    const std::vector<VkImageView>& swapchain_image_views() const
-    {
-        return swapchain_image_views_;
-    }
 
     VkImage depth_image() const override
     {
         return depth_image_;
-    }
-    VkImageView depth_image_view() const
-    {
-        return depth_image_view_;
     }
 
     // ── RenderTarget ──────────────────────────────────────────────────────────
@@ -396,18 +376,6 @@ public:
     std::uint32_t current_frame() const
     {
         return context_->frame_index();
-    }
-    std::uint64_t current_serial() const
-    {
-        return context_->frame_serial();
-    }
-    std::uint32_t current_image_index() const
-    {
-        return image_index_;
-    }
-    bool frame_skipped() const
-    {
-        return frame_skipped_;
     }
 
     // The mode actually in use (post-fallback), not the requested preference.

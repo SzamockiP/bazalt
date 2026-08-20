@@ -283,11 +283,6 @@ public:
         return sets_[0];
     }
 
-    bool is_frame_set() const
-    {
-        return is_frame_set_;
-    }
-
     // The images this set references — walked at submit time for upload
     // residency and at record time by the ResourceTracker (the type tells a
     // storage image from a sampled one).

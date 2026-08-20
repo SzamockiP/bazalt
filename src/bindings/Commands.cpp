@@ -1,5 +1,25 @@
 #include "Bindings.hpp"
 
+namespace
+{
+    // The half of a QueryHandle binding the two instantiations share; the caller
+    // chains the reading property, which is the only difference between them.
+    template <typename Handle>
+    py::class_<Handle, std::shared_ptr<Handle>> bind_query_handle(py::module_& m, const char* name)
+    {
+        return py::class_<Handle, std::shared_ptr<Handle>>(m, name)
+            .def("stop", [](Handle& self) { self.stop(); })
+            .def("__enter__", [](std::shared_ptr<Handle> self) { return self; })
+            .def(
+                "__exit__",
+                [](Handle& self, py::object, py::object, py::object)
+                {
+                    self.stop();
+                    return false; // never swallow exceptions
+                });
+    }
+} // namespace
+
 void bind_commands(py::module_& m)
 {
     // Every recording method returns the command buffer itself, so the two
@@ -8,14 +28,14 @@ void bind_commands(py::module_& m)
     // and the statement-per-line style both work. The lambdas return the
     // shared_ptr self (not the C++ reference) so pybind hands back the SAME
     // Python object — `cmd.draw(3) is cmd`.
-    py::class_<CommandBuffer, std::shared_ptr<CommandBuffer>>(m, "CommandBuffer")
-        .def(
-            "begin",
-            [](std::shared_ptr<CommandBuffer> self)
-            {
-                self->begin();
-                return self;
-            })
+    auto cmd = py::class_<CommandBuffer, std::shared_ptr<CommandBuffer>>(m, "CommandBuffer");
+    cmd.def(
+           "begin",
+           [](std::shared_ptr<CommandBuffer> self)
+           {
+               self->begin();
+               return self;
+           })
         // The target is required. begin_rendering() silently meaning "the
         // swapchain" made presentation a special case disguised as the default.
         .def(
@@ -203,29 +223,38 @@ void bind_commands(py::module_& m)
             },
             py::arg("group_count_x"),
             py::arg("group_count_y") = 1,
-            py::arg("group_count_z") = 1)
-        // Indirect draw/dispatch: the arguments come out of a storage buffer the
-        // GPU can write, so a compute pass decides what gets drawn. Chaining is
-        // preserved (return self) even though these are fallible — unwrap raises,
-        // and a successful call keeps reading like every other recording verb.
-        .def(
-            "draw_indirect",
-            [](std::shared_ptr<CommandBuffer> self,
-               std::shared_ptr<Buffer> buffer,
-               VkDeviceSize offset,
-               std::uint32_t count,
-               std::shared_ptr<Buffer> count_buffer,
-               VkDeviceSize count_offset,
-               std::uint32_t stride)
+            py::arg("group_count_z") = 1);
+    // Indirect draw/dispatch: the arguments come out of a storage buffer the
+    // GPU can write, so a compute pass decides what gets drawn. Chaining is
+    // preserved (return self) even though these are fallible — unwrap raises,
+    // and a successful call keeps reading like every other recording verb.
+    //
+    // The two draw verbs are one loop: same signature, same guards, only the
+    // member called differs.
+    using IndirectDraw = std::expected<void, Error> (CommandBuffer::*)(
+        std::shared_ptr<Buffer>, VkDeviceSize, std::uint32_t, std::shared_ptr<Buffer>, VkDeviceSize, std::uint32_t);
+    for (auto [name, verb] : std::initializer_list<std::pair<const char*, IndirectDraw>>{
+             {"draw_indirect", &CommandBuffer::draw_indirect},
+             {"draw_indexed_indirect", &CommandBuffer::draw_indexed_indirect}})
+    {
+        cmd.def(
+            name,
+            [name, verb](
+                std::shared_ptr<CommandBuffer> self,
+                std::shared_ptr<Buffer> buffer,
+                VkDeviceSize offset,
+                std::uint32_t count,
+                std::shared_ptr<Buffer> count_buffer,
+                VkDeviceSize count_offset,
+                std::uint32_t stride)
             {
-                require_same_context(self->owner(), buffer->owner(), "draw_indirect");
+                require_same_context(self->owner(), buffer->owner(), name);
                 if (count_buffer)
                 {
-                    require_same_context(self->owner(), count_buffer->owner(), "draw_indirect");
+                    require_same_context(self->owner(), count_buffer->owner(), name);
                 }
                 unwrap(
-                    self->draw_indirect(
-                        std::move(buffer), offset, count, std::move(count_buffer), count_offset, stride),
+                    ((*self).*verb)(std::move(buffer), offset, count, std::move(count_buffer), count_offset, stride),
                     nullptr);
                 return self;
             },
@@ -234,44 +263,18 @@ void bind_commands(py::module_& m)
             py::arg("count") = 1,
             py::arg("count_buffer") = py::none(),
             py::arg("count_offset") = 0,
-            py::arg("stride") = 0)
-        .def(
-            "draw_indexed_indirect",
-            [](std::shared_ptr<CommandBuffer> self,
-               std::shared_ptr<Buffer> buffer,
-               VkDeviceSize offset,
-               std::uint32_t count,
-               std::shared_ptr<Buffer> count_buffer,
-               VkDeviceSize count_offset,
-               std::uint32_t stride)
-            {
-                require_same_context(self->owner(), buffer->owner(), "draw_indexed_indirect");
-                if (count_buffer)
-                {
-                    require_same_context(self->owner(), count_buffer->owner(), "draw_indexed_indirect");
-                }
-                unwrap(
-                    self->draw_indexed_indirect(
-                        std::move(buffer), offset, count, std::move(count_buffer), count_offset, stride),
-                    nullptr);
-                return self;
-            },
-            py::arg("buffer"),
-            py::arg("offset") = 0,
-            py::arg("count") = 1,
-            py::arg("count_buffer") = py::none(),
-            py::arg("count_offset") = 0,
-            py::arg("stride") = 0)
-        .def(
-            "dispatch_indirect",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, VkDeviceSize offset)
-            {
-                require_same_context(self->owner(), buffer->owner(), "dispatch_indirect");
-                unwrap(self->dispatch_indirect(std::move(buffer), offset), nullptr);
-                return self;
-            },
-            py::arg("buffer"),
-            py::arg("offset") = 0)
+            py::arg("stride") = 0);
+    }
+    cmd.def(
+           "dispatch_indirect",
+           [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, VkDeviceSize offset)
+           {
+               require_same_context(self->owner(), buffer->owner(), "dispatch_indirect");
+               unwrap(self->dispatch_indirect(std::move(buffer), offset), nullptr);
+               return self;
+           },
+           py::arg("buffer"),
+           py::arg("offset") = 0)
         .def(
             "barrier",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, Access src, Access dst)
@@ -507,19 +510,15 @@ void bind_commands(py::module_& m)
                 return false; // never swallow exceptions
             });
 
-    py::class_<OcclusionQuery, std::shared_ptr<OcclusionQuery>>(m, "OcclusionQuery")
-        .def("stop", [](OcclusionQuery& self) { self.stop(); })
-        .def("__enter__", [](std::shared_ptr<OcclusionQuery> self) { return self; })
-        .def(
-            "__exit__",
-            [](OcclusionQuery& self, py::object, py::object, py::object)
-            {
-                self.stop();
-                return false; // never swallow exceptions
-            })
-        // None means one thing now: the submit has not finished. A stale handle
-        // raises instead — see the Timer below for the argument, which is the
-        // same one.
+    // The stop/__enter__/__exit__ trio is the shared QueryHandle contract; the
+    // reading property below each call is the only difference between the two.
+    //
+    // Three answers, three shapes, on both readers. UnsupportedError when the
+    // device cannot answer at all, StateError when the handle predates a
+    // begin(), and None only for "the submit is still running". They used to be
+    // one nullopt, and a caller could not tell "wait longer" from "this GPU
+    // cannot" — which are opposite reactions.
+    bind_query_handle<OcclusionQuery>(m, "OcclusionQuery")
         .def_property_readonly(
             "samples",
             [](const OcclusionQuery& self) -> py::object
@@ -533,21 +532,7 @@ void bind_commands(py::module_& m)
                 return py::cast(reading.samples);
             });
 
-    py::class_<Timer, std::shared_ptr<Timer>>(m, "Timer")
-        .def("stop", [](Timer& self) { self.stop(); })
-        .def("__enter__", [](std::shared_ptr<Timer> self) { return self; })
-        .def(
-            "__exit__",
-            [](Timer& self, py::object, py::object, py::object)
-            {
-                self.stop();
-                return false; // never swallow exceptions
-            })
-        // Three answers, three shapes. UnsupportedError when the device has no
-        // usable timestamps, StateError when the handle predates a begin(), and
-        // None only for "the submit is still running". They used to be one
-        // nullopt, and a caller could not tell "wait longer" from "this GPU
-        // cannot" — which are opposite reactions.
+    bind_query_handle<Timer>(m, "Timer")
         .def_property_readonly(
             "ms",
             [](const Timer& self) -> py::object

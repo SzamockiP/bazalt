@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -32,9 +33,9 @@
 // mid-session never takes the application down.
 //
 // Two threads meet here. A jthread polls file mtimes and pushes changed paths
-// onto an MpscQueue — it touches no Vulkan, no Python, and never dereferences a
-// watched resource. The MAIN thread drains that queue (from the frame path and
-// the headless submit) and does all the real work: recompiling with the unlocked
+// onto a queue under mutex_ — it touches no Vulkan, no Python, and never
+// dereferences a watched resource. The MAIN thread drains that queue (from the
+// frame path and the headless submit) and does all the real work: recompiling with the unlocked
 // RecordingIncluder, and calling vkCreate* / the upload worker. Everything a
 // watcher registers is held weakly, so a dropped Pipeline/Image is simply pruned
 // on the next drain rather than kept alive.
@@ -82,18 +83,19 @@ public:
     // Main thread only. Apply everything that changed since the last call.
     void drain() override
     {
-        // Cheap in the steady state: an empty queue is a single atomic load.
-        std::set<std::string> changed;
-        while (std::optional<std::string> path = changed_.pop())
-        {
-            changed.insert(std::move(*path));
-        }
-        if (changed.empty())
+        // Cheap in the steady state: one uncontended lock — the poll thread only
+        // holds mutex_ for a 250ms-interval mtime scan.
+        std::lock_guard lock(mutex_);
+        if (changed_.empty())
         {
             return;
         }
-
-        std::lock_guard lock(mutex_);
+        std::set<std::string> changed;
+        for (std::string& path : changed_)
+        {
+            changed.insert(std::move(path));
+        }
+        changed_.clear();
 
         // 1. Recompile the shaders whose file (or one of their includes) changed.
         //    A failure logs (ErrorCode::Shader -> Source::Shader, path/line already
@@ -322,7 +324,7 @@ private:
                     {
                         entry.mtime = mtime;
                         entry.pending.reset();
-                        changed_.emplace(path);
+                        changed_.push_back(path);
                     }
                     else
                     {
@@ -347,7 +349,7 @@ private:
     std::vector<std::pair<std::string, std::weak_ptr<Image>>> images_;
     std::unordered_map<std::string, WatchEntry> table_;
 
-    MpscQueue<std::string> changed_;
+    std::deque<std::string> changed_; // guarded by mutex_, filled by the poll thread
 
     // Last member: the jthread joins before anything it touches is destroyed.
     std::jthread thread_;

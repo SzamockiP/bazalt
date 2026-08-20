@@ -32,6 +32,33 @@ void main()
 """
 
 
+@pytest.fixture(scope="session")
+def printf_compiles():
+    """Whether this driver's shader compiler implements debugPrintfEXT.
+
+    Nothing can be asked in advance. MoltenVK advertises
+    VK_KHR_shader_non_semantic_info, accepts the SPIR-V, and then fails inside
+    the Metal compiler with "use of undeclared identifier 'debugPrintfEXT'", so
+    the probe compiles one and looks.
+
+    On a Context of its own, never the `extra_context` factory: the failure IS a
+    validation error, and every Context that factory hands out is watched by the
+    referee that fails a test for exactly that.
+    """
+    try:
+        context = bz.Context(bz.Logger(), validation="on", shader_printf=True)
+    except bz.BazaltError:
+        return False
+    if not context.shader_printf:
+        return False
+    try:
+        shader = context.compile_shader(source=PRINTF_COMPUTE, stage=bz.ShaderStage.COMPUTE)
+        context.compute_pipeline().shader(shader).build()
+        return True
+    except bz.BazaltError:
+        return False
+
+
 def printf_messages(seen):
     return [m for m in seen if m.source == bz.Source.SHADER and "bazalt printf" in m.text]
 

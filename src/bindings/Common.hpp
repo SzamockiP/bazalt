@@ -1150,11 +1150,15 @@ inline std::optional<ShaderSource> parse_shader_source(const py::object& obj)
     return ShaderSource{py::cast<std::string>(obj)};
 }
 
-// A GPU timer handle. cmd.timer() records the opening timestamp and returns
-// one of these; it is stopped explicitly (stop) or by a `with` (__exit__), and
-// read back off itself (ms). The handle IS the identity — no name, no key.
-// Holds the command buffer alive so the query pool outlives the handle.
-struct Timer
+// A GPU query handle: cmd.timer() / cmd.occlusion_query() record the opening
+// write and return one; it is closed explicitly (stop) or by a `with`
+// (__exit__), and the result is read back off itself. The handle IS the
+// identity — no name, no key — and it holds the command buffer alive so the
+// query pool outlives it. One template, two Python types: the contract is
+// deliberately identical, and distinct StopFn arguments keep the pybind
+// registrations distinct.
+template <auto StopFn>
+struct QueryHandle
 {
     std::shared_ptr<CommandBuffer> cmd;
     std::size_t index = 0;
@@ -1165,11 +1169,14 @@ struct Timer
     {
         if (!stopped)
         {
-            cmd->stop_timer(index); // idempotent: a query written twice would be UB
+            ((*cmd).*StopFn)(index); // idempotent: a query written twice would be UB
             stopped = true;
         }
     }
 };
+
+using Timer = QueryHandle<&CommandBuffer::stop_timer>;
+using OcclusionQuery = QueryHandle<&CommandBuffer::stop_occlusion_query>;
 
 // The state behind `with cmd.label("shadow pass"):`. Same shape as
 // RenderingScope: a plain struct bound only for its dunders, over verbs that
@@ -1178,26 +1185,6 @@ struct LabelScope
 {
     std::shared_ptr<CommandBuffer> cmd;
     std::string name;
-};
-
-// An occlusion query handle. Same contract as Timer, deliberately: the handle IS
-// the identity, it is closed by stop() or by a `with`, and the result is read
-// off itself. Holds the command buffer alive so the query pool outlives it.
-struct OcclusionQuery
-{
-    std::shared_ptr<CommandBuffer> cmd;
-    std::size_t index = 0;
-    std::uint64_t generation = 0;
-    bool stopped = false;
-
-    void stop()
-    {
-        if (!stopped)
-        {
-            cmd->stop_occlusion_query(index); // idempotent: ending twice is UB
-            stopped = true;
-        }
-    }
 };
 
 // Readback shaped for numpy: (h, w, channels) — or (h, w) for single-channel

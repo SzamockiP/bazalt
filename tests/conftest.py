@@ -179,12 +179,11 @@ def messages(_session_context):
     _, logger, all_messages = _session_context
     start = len(all_messages)
 
-    class View:
-        def __call__(self):
-            logger.flush()
-            return all_messages[start:]
+    def view():
+        logger.flush()
+        return all_messages[start:]
 
-    return View()
+    return view
 
 
 @pytest.fixture
@@ -192,6 +191,12 @@ def triangle_shaders(ctx):
     vert = ctx.compile_shader(str(SHADER_DIR / "triangle.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "triangle.frag"), bz.ShaderStage.FRAGMENT)
     return vert, frag
+
+
+@pytest.fixture
+def fullscreen_vert(ctx):
+    """The no-vertex-buffer fullscreen triangle — was copy-pasted in six files."""
+    return ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
 
 
 @pytest.fixture
@@ -207,41 +212,3 @@ def triangle_buffers(ctx):
     ibuf = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC,
                              bz.DataType.UINT32)
     return vbuf, ibuf
-
-
-PRINTF_PROBE = """
-#version 450
-#extension GL_EXT_debug_printf : enable
-layout(local_size_x = 1) in;
-void main()
-{
-    debugPrintfEXT("bazalt probe %d", 1);
-}
-"""
-
-
-@pytest.fixture(scope="session")
-def printf_compiles():
-    """Whether this driver's shader compiler implements debugPrintfEXT.
-
-    Nothing can be asked in advance. MoltenVK advertises
-    VK_KHR_shader_non_semantic_info, accepts the SPIR-V, and then fails inside
-    the Metal compiler with "use of undeclared identifier 'debugPrintfEXT'", so
-    the probe compiles one and looks.
-
-    On a Context of its own, never the `extra_context` factory: the failure IS a
-    validation error, and every Context that factory hands out is watched by the
-    referee that fails a test for exactly that.
-    """
-    try:
-        context = bz.Context(bz.Logger(), validation="on", shader_printf=True)
-    except bz.BazaltError:
-        return False
-    if not context.shader_printf:
-        return False
-    try:
-        shader = context.compile_shader(source=PRINTF_PROBE, stage=bz.ShaderStage.COMPUTE)
-        context.compute_pipeline().shader(shader).build()
-        return True
-    except bz.BazaltError:
-        return False
