@@ -3813,9 +3813,27 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   minutes later.
 
 - **The full interpreter matrix runs where it gates something**, not on every push. A pull
-  request, a release and a manual run build cp310–cp313. A plain branch push builds only the
-  cp312 the lavapipe legs install. Nothing reaches master without the full matrix having
+  request, a release and a manual run build cp310–cp314. A plain branch push builds the
+  interpreters the test legs install. Nothing reaches master without the full matrix having
   passed on the pull request first, so the push-time saving costs no coverage.
+
+  **0.27 added cp314 to the push set, and the reason is a gap rather than a preference.** The
+  newest interpreter is where a wheel breaks first, and it was the one nothing built until a
+  pull request — so a 3.14 break waited for the gate instead of meeting the commit that
+  caused it. The cost is three more parallel jobs on a free runner.
+
+- **The third lavapipe leg varies the INTERPRETER, not the API version** (0.27). Every GPU
+  test this project had ever run ran on one Python. The wheel jobs prove that 3.14 compiles
+  and imports, and that is a different claim from "3.14 works": the numpy buffer protocol
+  carries every readback, every upload and every push-constant block, and a new interpreter
+  that breaks a library like this one breaks it there. So the matrix gained `api 1.3` on
+  cp314.
+
+  It pairs with 1.3 only, and the asymmetry is the point. The 1.2 leg exists because the
+  DEVICE offers a different path; the interpreter has nothing to do with that path, so a
+  fourth leg would buy a slower pipeline and no new coverage. When a matrix grows, ask which
+  axis the new dimension actually varies — two axes multiply, and most of the products are
+  the same test run twice.
 
 - **MSBuild stays the Windows generator.** Ninja is genuinely faster — 45s against 63s for
   one wheel, measured — but CMake's Ninja generator needs `cl.exe` on PATH, and neither the

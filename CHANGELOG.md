@@ -39,6 +39,10 @@ implementation each existed. Both are gone.
 - **The core is a set of header and source pairs.** This changes no API. It
   removes `UploadManagerBase` and `HotReloadBase`, which were interfaces with
   one implementation each, and it makes an incremental build faster.
+- **The test suite runs on Python 3.14.** Bazalt built a 3.14 wheel before this
+  release, but every GPU test ran on one interpreter, so "3.14 works" meant
+  "3.14 imports". A third CI leg now runs the whole suite on 3.14 against
+  lavapipe. It passes.
 
 ### Changed (breaking)
 - **The `KEY_*`, `MOUSE_BUTTON_*` and `CURSOR_*` module integers are gone.**
@@ -72,6 +76,13 @@ implementation each existed. Both are gone.
 - **A pipeline promised more than it could keep.** The move constructor said
   `noexcept` while it moved a map, which the standard does not promise. Nothing
   in the library moved a pipeline, so both move operations are gone.
+
+### Notes
+- **A test now watches for a resource that a binding forgets to release.** The
+  suite could not see that failure: a binding that keeps a reference it should
+  drop changes no behaviour, and the report arrives when the device goes, after
+  the tests stop watching. The new test churns the recording verbs and requires
+  the allocator to return to its starting size.
 
 ## [0.26.0] — 2026-08-05
 
