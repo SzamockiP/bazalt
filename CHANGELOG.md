@@ -30,16 +30,27 @@ translation unit. Nobody links bazalt as a C++ library, so header-only bought
 nothing, and it cost an include cycle. That cycle is why two interfaces with one
 implementation each existed. Both are gone.
 
-### Removed
-- **The `KEY_*`, `MOUSE_BUTTON_*` and `CURSOR_*` module integers.** BREAKING.
+### Changed
+- **`clang-tidy` gates the build.** The configuration is at `.clang-tidy`. Each
+  disabled check names its reason. Where a check and the code disagree, the code
+  changes.
+- **`ruff` checks the Python sources.** The rule set is explicit, because the
+  defaults of that tool move between versions.
+- **The core is a set of header and source pairs.** This changes no API. It
+  removes `UploadManagerBase` and `HotReloadBase`, which were interfaces with
+  one implementation each, and it makes an incremental build faster.
+
+### Changed (breaking)
+- **The `KEY_*`, `MOUSE_BUTTON_*` and `CURSOR_*` module integers are gone.**
   They are the pre-enum spelling of `Key`, `MouseButton` and `CursorMode`, which
   0.23 added. No example used them. Use the enum member, or a plain integer with
   the same value. Every query accepts both.
-- **`api_coverage.md`.** The gate that reads the census stays. The report it
-  wrote is gone, together with the part of the census that counted enum members
-  and exception classes. That part matched names with a regular expression over
-  the test sources, so a name in a comment counted as a use. `test_stubs.py`
-  asserts that those names exist, which is all a constant can be wrong about.
+- **`api_coverage.md` is gone.** The gate that reads the census stays. The report
+  it wrote is gone, together with the part of the census that counted enum
+  members and exception classes. That part matched names with a regular
+  expression over the test sources, so a name in a comment counted as a use.
+  `test_stubs.py` asserts that those names exist, which is all a constant can be
+  wrong about.
 
 ### Fixed
 - **The stub declared overload groups without `@overload`.** A type checker saw
@@ -61,16 +72,6 @@ implementation each existed. Both are gone.
 - **A pipeline promised more than it could keep.** The move constructor said
   `noexcept` while it moved a map, which the standard does not promise. Nothing
   in the library moved a pipeline, so both move operations are gone.
-
-### Changed
-- **`clang-tidy` gates the build.** The configuration is at `.clang-tidy`. Each
-  disabled check names its reason. Where a check and the code disagree, the code
-  changes.
-- **`ruff` checks the Python sources.** The rule set is explicit, because the
-  defaults of that tool move between versions.
-- **The core is a set of header and source pairs.** This changes no API. It
-  removes `UploadManagerBase` and `HotReloadBase`, which were interfaces with
-  one implementation each, and it makes an incremental build faster.
 
 ## [0.26.0] — 2026-08-05
 
