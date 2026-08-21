@@ -66,7 +66,7 @@ class StateError(BazaltError):
     """The call is legal, the moment is not.
 
     A double acquire(), a present() with no acquired image, a barrier inside a
-    rendering scope, a CommandBuffer submitted twice in one frame. Recoverable:
+    render pass, a Graph submitted twice in one frame. Recoverable:
     fix the order of calls.
     """
     ...
@@ -369,8 +369,8 @@ class StencilOp(IntEnum):
     DECREMENT_WRAP = 7
 
 class Access(IntEnum):
-    """What a command does to a buffer — the vocabulary of cmd.barrier()
-    in manual mode (auto_barriers=False)."""
+    """What a command does to a buffer — the vocabulary of p.barrier()
+    in a manual pass (auto_barriers=False)."""
     SHADER_READ = 0
     SHADER_WRITE = 1
     VERTEX_READ = 2
@@ -1363,23 +1363,429 @@ class ComputePipelineBuilder:
         """No target — compute has no attachments."""
         ...
 
-class CommandBuffer:
-    """Records commands once; they are replayed on every submit.
+class Queue(IntEnum):
+    """Which queue a pass runs on.
 
-    Every recording method returns the command buffer itself, so calls chain:
+    One member today. Async compute arrives as a new member, not as a new
+    parameter, and the choice always stays with you: after it arrives, a
+    compute pass on Queue.GRAPHICS stays legal.
+    """
 
-        cmd.begin_rendering(target).bind_pipeline(p).draw(3).end_rendering(target)
+    GRAPHICS = 0
+
+class Serial:
+    """The identity of one submit, returned by Context.submit().
+
+    Pass it to ctx.wait(serial) to block until that submit finished, or to
+    submit(after=...) to order one submit after another on the GPU. The handle
+    is opaque on purpose: it has no attributes and no ordering.
+    """
+
+class Pass:
+    """One node of a Graph, returned by Graph.add_pass().
+
+    A pass with a render target draws; a pass without one holds compute and
+    transfer work. Every recording method returns the pass itself, so calls
+    chain:
+
+        p.bind_pipeline(pipe).bind_vertex_buffer(vbuf).draw(3)
 
     The statement-per-line style works identically — the return value is the
     same object and ignoring it costs nothing.
+
+    The pass is a handle. A `with` block seals it at the end of the block; a
+    pass used without `with` seals itself when the graph first compiles. A
+    sealed pass refuses new commands — reset the graph and rebuild to record
+    again.
     """
 
-    def begin(self) -> CommandBuffer: ...
+    def __enter__(self) -> Pass: ...
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
 
-    def begin_rendering(self, target: RenderTargetBase,
-                        clear_color: Sequence[float] | Sequence[Sequence[float]] | None = (0.0, 0.0, 0.0, 1.0),
-                        clear_depth: float = 1.0, clear_stencil: int = 0) -> CommandBuffer:
-        """Start rendering into `target`.
+    @property
+    def name(self) -> str:
+        """The debug label the pass was created with. Never a key: passes are
+        handles, and dependencies come from what the passes use."""
+        ...
+
+    enabled: bool
+    """Set False to skip this pass. The graph recompiles as if the pass were
+    absent, so the barriers stay correct. What the pass wrote before is stale
+    for the passes after it — the same contract as a submit you skip."""
+
+    def set_viewport(self, x: float, y: float, width: float, height: float) -> Pass:
+        """Override the automatic full-target viewport (split-screen and similar)."""
+        ...
+
+    def set_scissor(self, x: int, y: int, width: int, height: int) -> Pass: ...
+
+    def bind_pipeline(self, pipeline: Pipeline) -> Pass: ...
+    def bind_vertex_buffer(self, buffer: Buffer, binding: int = 0) -> Pass:
+        """Bind a vertex buffer. binding=0 feeds vertex_format (per vertex),
+        binding=1 feeds instance_format (per instance)."""
+        ...
+    def bind_index_buffer(self, buffer: Buffer) -> Pass: ...
+    def draw(self, vertex_count: int, instances: int = 1) -> Pass: ...
+    def draw_indexed(self, index_count: int, first_index: int = 0,
+                     vertex_offset: int = 0, instances: int = 1) -> Pass:
+        """instances= replaces draw_indexed_instanced, which was a second name
+        for one extra argument."""
+        ...
+    def dispatch(self, group_count_x: int, group_count_y: int = 1,
+                 group_count_z: int = 1) -> Pass:
+        """Run a compute dispatch. Only in a pass without a target: a render
+        pass is one rendering scope, and Vulkan forbids a dispatch inside one.
+        """
+        ...
+
+    def draw_indirect(self, buffer: Buffer, offset: int = 0, count: int = 1,
+                      count_buffer: Optional[Buffer] = None,
+                      count_offset: int = 0, stride: int = 0) -> Pass:
+        """Draw with arguments read out of a buffer, so a compute pass decides what
+        gets drawn and the CPU never learns the answer (0.19).
+
+        `buffer` must be BufferType.STORAGE — the only type carrying the indirect
+        usage flag, and what a compute shader needs anyway. bazalt declares no
+        struct type: the layout is VkDrawIndirectCommand, four uint32s, and numpy
+        writes it directly.
+
+            args = ctx.create_buffer(
+                np.array([vertex_count, instances, 0, 0], dtype=np.uint32),
+                bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+            p.draw_indirect(args)
+
+        A std430 GLSL struct of four uints is byte-identical, so a compute shader
+        can zero it with p.fill_buffer and accumulate instanceCount atomically.
+        count>1 reads that many consecutive structs and needs
+        Feature.MULTI_DRAW_INDIRECT.
+
+        `count_buffer` moves the number of draws onto the GPU too (0.21): `count`
+        becomes the maximum, and the 4 bytes at `count_offset` say how many of
+        those commands to issue. It must also be a BufferType.STORAGE buffer, and
+        it needs Feature.DRAW_INDIRECT_COUNT. Without a count buffer the way to
+        draw nothing is to write 0 into instanceCount — count=0 is refused,
+        because only one of the two can be decided on the GPU.
+        """
+        ...
+    def draw_indexed_indirect(self, buffer: Buffer, offset: int = 0, count: int = 1,
+                              count_buffer: Optional[Buffer] = None,
+                              count_offset: int = 0, stride: int = 0) -> Pass:
+        """draw_indirect through the bound index buffer (0.19).
+
+        The struct is VkDrawIndexedIndirectCommand, five words: indexCount,
+        instanceCount, firstIndex, vertexOffset (SIGNED int32), firstInstance.
+        """
+        ...
+    def dispatch_indirect(self, buffer: Buffer, offset: int = 0) -> Pass:
+        """Dispatch with the group counts read out of a buffer (0.19).
+
+        The struct is VkDispatchIndirectCommand: three uint32s, x/y/z. There is no
+        count — the command takes exactly one. Unlike the draw verbs this needs no
+        feature bit.
+        """
+        ...
+
+    @overload
+    def barrier(self, buffer: Buffer, src: Access, dst: Access) -> Pass:
+        """Record a buffer barrier by hand. Required between dependent uses
+        in a pass with auto_barriers=False; legal (if redundant) in auto mode.
+        Only in a pass without a target — a render pass is one rendering
+        scope, and Vulkan forbids a barrier inside one."""
+        ...
+    @overload
+    def barrier(self, image: Image, src: Access, dst: Access) -> Pass:
+        """Transition an image between shader accesses by hand, across every mip
+        and layer. The layout follows the access: SHADER_WRITE = GENERAL (a
+        storage image), SHADER_READ = SHADER_READ_ONLY (a sampled image); other
+        accesses are buffer-only.
+
+        The one case the automatic tracker can't reach is cross-submit: a compute
+        shader bakes an image in one submit (GENERAL) and later frames sample it
+        (SHADER_READ_ONLY). Generate it once, then
+        `cmd.barrier(image, Access.SHADER_WRITE, Access.SHADER_READ)` after the
+        dispatch, and sample it every frame without regenerating. The graph
+        folds manual barriers in with the automatic ones, so mixing the two
+        stays safe. Only in a pass without a target."""
+        ...
+
+    def copy_image(self, src: Image, dst: Image, *,
+                   src_access: Access = Access.SHADER_READ) -> Pass:
+        """Copy one image into another of the same size, format and layer count.
+
+        The history buffer a temporal effect needs: keep the last frame's result
+        to blend against this one (motion blur, a feedback trail), or ping-pong
+        two storage images.
+
+        Every mip level the two images share is copied. Until 0.18 this was mip
+        0 only, which left levels 1..N holding the destination's old pixels —
+        a copy of the image's top level rather than of the image, and the
+        difference showed up the moment anything sampled with a mip bias.
+
+        src_access names where the SOURCE currently is: SHADER_READ for an image
+        that is sampled (the default), SHADER_WRITE for one a compute dispatch
+        just wrote. Both images end sampleable. Only in a pass without a target.
+        """
+        ...
+
+    def blit_image(self, src: Image, dst: Image, *,
+                   src_access: Access = Access.SHADER_READ,
+                   filter: Filter = Filter.LINEAR) -> Pass:
+        """Copy one image into another of a DIFFERENT size, scaling on the way.
+
+        copy_image needs the two to match; generate_mipmaps scales, but only
+        inside one image. Downsampling for bloom, upscaling a compute result and
+        making a thumbnail all sat in that gap, and each one used to be a full
+        graphics pass with a fullscreen shader.
+
+        Mip 0 of every shared layer. Call generate_mipmaps on the destination if
+        it needs a chain.
+
+        Raises UnsupportedError when this GPU cannot blit between the two formats —
+        BLIT_SRC/BLIT_DST are format features, not a given, and a linear filter
+        needs the source to be filterable on top.
+
+        src_access, and both images ending sampleable, work exactly as for
+        copy_image. Only in a pass without a target.
+        """
+        ...
+
+    def copy_buffer(self, src: Buffer, dst: Buffer, *,
+                    src_offset: int = 0, dst_offset: int = 0,
+                    size: int = 0) -> Pass:
+        """Copy bytes from one buffer into another, GPU-side.
+
+        size=0 means the rest of the source. A compute ping-pong and "keep last
+        frame's values" are both this one command; before it, moving buffer
+        contents meant a round trip through the host or a compute shader written
+        to do nothing but assign.
+
+        Only in a pass without a target.
+        """
+        ...
+
+    def fill_buffer(self, buffer: Buffer, value: int = 0, *,
+                    offset: int = 0, size: int = 0) -> Pass:
+        """Fill a buffer with a repeated 32-bit value, GPU-side.
+
+        Zeroing is the reason it exists: a counter an atomic increments has to
+        start each frame at a known value, and saying so used to take a dispatch
+        whose whole body was an assignment.
+
+        offset and size must be multiples of 4, and size=0 means the rest of the
+        buffer. 32-bit because the underlying command is: the value is one word
+        repeated. Only in a pass without a target.
+        """
+        ...
+
+    def clear_image(self, image: Image,
+                    color: Sequence[float] = (0.0, 0.0, 0.0, 1.0)) -> Pass:
+        """Fill a colour image with one value, with no pipeline and no pass.
+
+        Resets an accumulation or history buffer. A depth image is refused: its
+        clear belongs to the pass that renders into it (clear_depth=).
+        """
+        ...
+
+    def generate_mipmaps(self, image: Image, *,
+                         src: Access = Access.SHADER_READ) -> Pass:
+        """Fill mip levels 1..N of a mipped image by blitting mip 0 down the chain
+        (every array layer / cube face at once), leaving every level sampleable.
+
+        The pair to create_image(..., mip_levels=N): write mip 0 (upload, a
+        compute imageStore, or a render pass), then generate the rest here. `src`
+        names mip 0's current layout in p.barrier's vocabulary — SHADER_READ
+        (SHADER_READ_ONLY, an uploaded or already-baked image; the default) or
+        SHADER_WRITE (GENERAL, mip 0 fresh from compute).
+
+        Raises ResourceError if the image has a single level (create it with
+        mip_levels>1 or mipmaps=True), UnsupportedError if the format can't be
+        blitted/linearly filtered on this GPU, and StateError in a render
+        pass."""
+        ...
+
+    @overload
+    def push_constants(self, pipeline: Pipeline, offset: int, data: bytes) -> Pass:
+        """The Pipeline already knows which stages its range covers."""
+        ...
+    @overload
+    def push_constants(self, offset: int, data: bytes) -> Pass:
+        """The short form: the pipeline that is already bound (0.25).
+
+        Uses the last pipeline bound, whatever its bind point, because push
+        constants belong to a pipeline layout rather than to a bind point.
+        Raises StateError with none bound.
+        """
+        ...
+
+    @overload
+    def bind_descriptor_set(self, descriptor_set: DescriptorSet, pipeline: Pipeline,
+                            set: int = 0) -> Pass: ...
+    @overload
+    def bind_descriptor_set(self, descriptor_set: DescriptorSet) -> Pass:
+        """The short form (0.25): the set knows the index it was allocated for and
+        at which bind point, and bind_pipeline already recorded the pipeline.
+
+        The long form stays for a recording split across functions, where the
+        pipeline was bound somewhere this code cannot see, and for binding a set
+        against a different pipeline with a compatible layout. Raises StateError
+        with no pipeline bound at the set's bind point.
+        """
+        ...
+
+    def timer(self) -> Timer:
+        """Start a GPU timer and return its handle. Records a timestamp here;
+        stop it with a `with` block or Timer.stop(), read it back with Timer.ms:
+
+            with p.timer() as t:
+                p.bind_pipeline(blur).dispatch(gx, gy)
+            ...                     # or, without `with`:
+            t = p.timer()           #   t = p.timer()
+            ...                     #   p.dispatch(...)
+            ctx.submit(g)           #   t.stop()
+            print(t.ms)
+
+        The handle is the identity — no names, no keys — so several, nested and
+        overlapping timers all work. Unlike renderer.gpu_time_ms this needs no
+        window: t.ms is ready as soon as the submit you timed has finished. Self-gating: the query pool exists only once a timer is
+        used, so apps that don't time pay nothing."""
+        ...
+
+    def label(self, name: str) -> LabelScope:
+        """Name a scope so a capture reads as a frame instead of a list of draws:
+
+            with g.add_pass(shadow_target, name="shadow pass") as p:
+                ...
+
+        or, inside one pass:
+
+            with p.label("cascade 0"):
+                ...
+
+        Labels nest. A no-op without VK_EXT_debug_utils — which bazalt requests
+        only when validation is on — so a release run pays nothing and simply
+        shows no labels. Object names (name= on create_buffer / create_image /
+        the pipeline builders) answer "which object"; this answers "which pass"."""
+        ...
+
+    def begin_label(self, name: str) -> Pass:
+        """The explicit half of label(), for a recording split across functions
+        — a helper that opens the scope and a matching one that closes it, where
+        no `with` block spans both. Prefer `with p.label(...)` whenever one
+        block covers the scope: it cannot leave a label open."""
+        ...
+
+    def end_label(self) -> Pass:
+        """Close the innermost open label. An unbalanced call is ignored rather
+        than recorded: ending a label that was never begun is undefined
+        behaviour in Vulkan."""
+        ...
+
+    def occlusion_query(self) -> OcclusionQuery:
+        """Count the fragments of the draws inside the scope that passed the
+        depth and stencil tests:
+
+            with g.add_pass(target) as p:
+                with p.occlusion_query() as q:
+                    p.bind_pipeline(bounding_box).draw(36)
+            ctx.submit(g)
+            visible = q.samples > 0
+
+        The handle is the identity, exactly as for timer(). Only in a render
+        pass — Vulkan requires the query to begin and end within one render
+        pass — and raises StateError otherwise.
+
+        The count is not requested as precise, because precision needs the
+        occlusionQueryPrecise feature and without it the spec allows any non-zero
+        value. Treat `samples` as "how much, roughly", and `samples > 0` as the
+        reliable part."""
+        ...
+
+class LabelScope:
+    """Returned by Pass.label(); use it in a `with` statement."""
+
+    def __enter__(self) -> Pass: ...
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
+
+class OcclusionQuery:
+    """An occlusion query handle from Pass.occlusion_query(). Usable as
+    a context manager or stopped by hand (q.stop())."""
+
+    def stop(self) -> None:
+        """End the query. Idempotent; called for you on `with` exit."""
+        ...
+    @property
+    def samples(self) -> Optional[int]:
+        """Fragments that passed the depth and stencil tests.
+
+        None means one thing: the submit has not completed. Read it after the
+        submit you measured has finished — the default submit(wait=True) is
+        enough; submit(wait=False) needs a ctx.wait() first.
+
+        Raises StateError when the graph has been reset since, so this
+        handle's query slots now hold a different query's data. That used to
+        be another None (0.24), which made "wait longer" and "this answer is
+        gone" the same reply.
+        """
+        ...
+    def __enter__(self) -> OcclusionQuery: ...
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
+
+class Timer:
+    """A GPU timer handle from Pass.timer(). Usable as a context
+    manager (`with p.timer() as t:`) or stopped by hand (t.stop())."""
+
+    def stop(self) -> None:
+        """Record the closing timestamp. Idempotent; called for you on `with`
+        exit."""
+        ...
+    @property
+    def ms(self) -> Optional[float]:
+        """Measured GPU time in milliseconds.
+
+        None means one thing: the submit has not completed. Read it after the
+        submit you timed has finished — the default submit(wait=True) is enough;
+        submit(wait=False) needs a ctx.wait() first.
+
+        Raises UnsupportedError when the GPU reports no usable timestamps, and
+        StateError when the graph has been reset since. All three answers were
+        one None until 0.24, so a loop polling this could not tell "wait
+        longer" from "this device will never answer" — and spun forever on the
+        second.
+        """
+        ...
+    def __enter__(self) -> Timer: ...
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
+
+class Graph:
+    """Describes GPU work as passes, in the order you add them.
+
+    The graph compiles the barriers and the attachment layout changes for the
+    whole frame at once: each pass names what it reads and writes by recording
+    commands, and the graph places one merged barrier at each pass boundary.
+    Two passes that render into one target no longer round-trip the
+    attachment layout between them.
+
+    Build it one time and submit it every frame, or reset() and rebuild it
+    each frame when the work changes. Both replay closures; neither allocates
+    on the device.
+
+        g = ctx.graph()
+        with g.add_pass(renderer, clear_color=[0.1, 0.2, 0.3, 1]) as p:
+            p.bind_pipeline(pipe).bind_vertex_buffer(vbuf).draw(3)
+        while window.is_open():
+            bz.poll_events()
+            ctx.begin_frame()
+            if renderer.acquire():
+                renderer.present(g)
+    """
+
+    @overload
+    def add_pass(self, target: RenderTargetBase,
+                 clear_color: Sequence[float] | Sequence[Sequence[float]] | None = (0.0, 0.0, 0.0, 1.0),
+                 clear_depth: float = 1.0, clear_stencil: int = 0, *,
+                 name: str = "", queue: Queue = Queue.GRAPHICS,
+                 auto_barriers: Optional[bool] = None) -> Pass:
+        """Add a render pass: one rendering scope into `target`.
 
         clear_color is either a single [r, g, b, a] applied to every attachment
         (the common case) or, for MRT, a list of them ([[r,g,b,a], …]) clearing
@@ -1399,377 +1805,35 @@ class CommandBuffer:
         attachment, and does nothing without one. Depth and stencil load
         together: a pass cannot preserve one and clear the other.
 
-        Also emits a viewport and scissor covering the whole target, so the
+        The pass emits a viewport and scissor covering the whole target, so the
         common case needs no further calls.
+
+        name= is a debug label: the pass shows up under it in a capture. It is
+        never a key. auto_barriers=False makes THIS pass manual — its hazards
+        are yours to express with p.barrier(), and the graph still folds those
+        barriers in, so the automatic passes around it stay correct.
         """
-        ...
-
-    def end_rendering(self, target: RenderTargetBase) -> CommandBuffer: ...
-
-    def rendering(self, target: RenderTargetBase,
-                  clear_color: Sequence[float] | Sequence[Sequence[float]] | None = (0.0, 0.0, 0.0, 1.0),
-                  clear_depth: float = 1.0, clear_stencil: int = 0) -> RenderingScope:
-        """The begin/end pair as a context manager:
-
-            with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
-                c.bind_pipeline(p).draw(3)
-
-        end_rendering is recorded on exit, exceptions included. clear_color takes
-        the same single-or-per-attachment forms as begin_rendering, and None
-        preserves the attachment for a second pass.
-        """
-        ...
-
-    def set_viewport(self, x: float, y: float, width: float, height: float) -> CommandBuffer:
-        """Override the automatic full-target viewport (split-screen and similar)."""
-        ...
-
-    def set_scissor(self, x: int, y: int, width: int, height: int) -> CommandBuffer: ...
-
-    def bind_pipeline(self, pipeline: Pipeline) -> CommandBuffer: ...
-    def bind_vertex_buffer(self, buffer: Buffer, binding: int = 0) -> CommandBuffer:
-        """Bind a vertex buffer. binding=0 feeds vertex_format (per vertex),
-        binding=1 feeds instance_format (per instance)."""
-        ...
-    def bind_index_buffer(self, buffer: Buffer) -> CommandBuffer: ...
-    def draw(self, vertex_count: int, instances: int = 1) -> CommandBuffer: ...
-    def draw_indexed(self, index_count: int, first_index: int = 0,
-                     vertex_offset: int = 0, instances: int = 1) -> CommandBuffer:
-        """instances= replaces draw_indexed_instanced, which was a second name
-        for one extra argument."""
-        ...
-    def dispatch(self, group_count_x: int, group_count_y: int = 1,
-                 group_count_z: int = 1) -> CommandBuffer: ...
-
-    def draw_indirect(self, buffer: Buffer, offset: int = 0, count: int = 1,
-                      count_buffer: Optional[Buffer] = None,
-                      count_offset: int = 0, stride: int = 0) -> CommandBuffer:
-        """Draw with arguments read out of a buffer, so a compute pass decides what
-        gets drawn and the CPU never learns the answer (0.19).
-
-        `buffer` must be BufferType.STORAGE — the only type carrying the indirect
-        usage flag, and what a compute shader needs anyway. bazalt declares no
-        struct type: the layout is VkDrawIndirectCommand, four uint32s, and numpy
-        writes it directly.
-
-            args = ctx.create_buffer(
-                np.array([vertex_count, instances, 0, 0], dtype=np.uint32),
-                bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-            cmd.draw_indirect(args)
-
-        A std430 GLSL struct of four uints is byte-identical, so a compute shader
-        can zero it with cmd.fill_buffer and accumulate instanceCount atomically.
-        count>1 reads that many consecutive structs and needs
-        Feature.MULTI_DRAW_INDIRECT.
-
-        `count_buffer` moves the number of draws onto the GPU too (0.21): `count`
-        becomes the maximum, and the 4 bytes at `count_offset` say how many of
-        those commands to issue. It must also be a BufferType.STORAGE buffer, and
-        it needs Feature.DRAW_INDIRECT_COUNT. Without a count buffer the way to
-        draw nothing is to write 0 into instanceCount — count=0 is refused,
-        because only one of the two can be decided on the GPU.
-        """
-        ...
-    def draw_indexed_indirect(self, buffer: Buffer, offset: int = 0, count: int = 1,
-                              count_buffer: Optional[Buffer] = None,
-                              count_offset: int = 0, stride: int = 0) -> CommandBuffer:
-        """draw_indirect through the bound index buffer (0.19).
-
-        The struct is VkDrawIndexedIndirectCommand, five words: indexCount,
-        instanceCount, firstIndex, vertexOffset (SIGNED int32), firstInstance.
-        """
-        ...
-    def dispatch_indirect(self, buffer: Buffer, offset: int = 0) -> CommandBuffer:
-        """Dispatch with the group counts read out of a buffer (0.19).
-
-        The struct is VkDispatchIndirectCommand: three uint32s, x/y/z. There is no
-        count — the command takes exactly one. Unlike the draw verbs this needs no
-        feature bit.
-        """
-        ...
-
-    @overload
-    def barrier(self, buffer: Buffer, src: Access, dst: Access) -> CommandBuffer:
-        """Record a buffer barrier by hand. Required between dependent uses
-        when auto_barriers=False; legal (if redundant) in auto mode. Refused
-        inside a rendering scope — record it before begin_rendering."""
         ...
     @overload
-    def barrier(self, image: Image, src: Access, dst: Access) -> CommandBuffer:
-        """Transition an image between shader accesses by hand, across every mip
-        and layer. The layout follows the access: SHADER_WRITE = GENERAL (a
-        storage image), SHADER_READ = SHADER_READ_ONLY (a sampled image); other
-        accesses are buffer-only.
+    def add_pass(self, *, name: str = "", queue: Queue = Queue.GRAPHICS,
+                 auto_barriers: Optional[bool] = None) -> Pass:
+        """Add a pass without a target, for compute and transfer work.
 
-        The one case the automatic tracker can't reach is cross-submit: a compute
-        shader bakes an image in one submit (GENERAL) and later frames sample it
-        (SHADER_READ_ONLY). Generate it once, then
-        `cmd.barrier(image, Access.SHADER_WRITE, Access.SHADER_READ)` after the
-        dispatch, and sample it every frame without regenerating. In auto mode
-        this also updates the tracker, so mixing it with automatic uses of the
-        same image in one recording is safe. Refused inside a rendering scope."""
-        ...
-
-    def copy_image(self, src: Image, dst: Image, *,
-                   src_access: Access = Access.SHADER_READ) -> CommandBuffer:
-        """Copy one image into another of the same size, format and layer count.
-
-        The history buffer a temporal effect needs: keep the last frame's result
-        to blend against this one (motion blur, a feedback trail), or ping-pong
-        two storage images.
-
-        Every mip level the two images share is copied. Until 0.18 this was mip
-        0 only, which left levels 1..N holding the destination's old pixels —
-        a copy of the image's top level rather than of the image, and the
-        difference showed up the moment anything sampled with a mip bias.
-
-        src_access names where the SOURCE currently is: SHADER_READ for an image
-        that is sampled (the default), SHADER_WRITE for one a compute dispatch
-        just wrote. Both images end sampleable. Refused inside a rendering scope.
+        The clear arguments do not exist on this overload: they answer what
+        happens to the attachments, and there are none.
         """
         ...
 
-    def blit_image(self, src: Image, dst: Image, *,
-                   src_access: Access = Access.SHADER_READ,
-                   filter: Filter = Filter.LINEAR) -> CommandBuffer:
-        """Copy one image into another of a DIFFERENT size, scaling on the way.
-
-        copy_image needs the two to match; generate_mipmaps scales, but only
-        inside one image. Downsampling for bloom, upscaling a compute result and
-        making a thumbnail all sat in that gap, and each one used to be a full
-        graphics pass with a fullscreen shader.
-
-        Mip 0 of every shared layer. Call generate_mipmaps on the destination if
-        it needs a chain.
-
-        Raises UnsupportedError when this GPU cannot blit between the two formats —
-        BLIT_SRC/BLIT_DST are format features, not a given, and a linear filter
-        needs the source to be filterable on top.
-
-        src_access, and both images ending sampleable, work exactly as for
-        copy_image. Refused inside a rendering scope.
-        """
+    def remove(self, pass_: Pass, /) -> None:
+        """Remove one pass. The handle is dead afterwards: every verb on it
+        raises StateError. The graph recompiles on the next submit."""
         ...
 
-    def copy_buffer(self, src: Buffer, dst: Buffer, *,
-                    src_offset: int = 0, dst_offset: int = 0,
-                    size: int = 0) -> CommandBuffer:
-        """Copy bytes from one buffer into another, GPU-side.
-
-        size=0 means the rest of the source. A compute ping-pong and "keep last
-        frame's values" are both this one command; before it, moving buffer
-        contents meant a round trip through the host or a compute shader written
-        to do nothing but assign.
-
-        Refused inside a rendering scope.
-        """
+    def reset(self) -> None:
+        """Drop every pass and keep the GPU objects. The rebuild-per-frame
+        idiom: reset(), add the passes again, submit. Timer and occlusion
+        handles made before the reset report StateError."""
         ...
-
-    def fill_buffer(self, buffer: Buffer, value: int = 0, *,
-                    offset: int = 0, size: int = 0) -> CommandBuffer:
-        """Fill a buffer with a repeated 32-bit value, GPU-side.
-
-        Zeroing is the reason it exists: a counter an atomic increments has to
-        start each frame at a known value, and saying so used to take a dispatch
-        whose whole body was an assignment.
-
-        offset and size must be multiples of 4, and size=0 means the rest of the
-        buffer. 32-bit because the underlying command is: the value is one word
-        repeated. Refused inside a rendering scope.
-        """
-        ...
-
-    def clear_image(self, image: Image,
-                    color: Sequence[float] = (0.0, 0.0, 0.0, 1.0)) -> CommandBuffer:
-        """Fill a colour image with one value, with no pipeline and no pass.
-
-        Resets an accumulation or history buffer. A depth image is refused: its
-        clear belongs to the pass that renders into it (clear_depth=).
-        """
-        ...
-
-    def generate_mipmaps(self, image: Image, *,
-                         src: Access = Access.SHADER_READ) -> CommandBuffer:
-        """Fill mip levels 1..N of a mipped image by blitting mip 0 down the chain
-        (every array layer / cube face at once), leaving every level sampleable.
-
-        The pair to create_image(..., mip_levels=N): write mip 0 (upload, a
-        compute imageStore, or a render pass), then generate the rest here. `src`
-        names mip 0's current layout in cmd.barrier's vocabulary — SHADER_READ
-        (SHADER_READ_ONLY, an uploaded or already-baked image; the default) or
-        SHADER_WRITE (GENERAL, mip 0 fresh from compute).
-
-        Raises ResourceError if the image has a single level (create it with
-        mip_levels>1 or mipmaps=True), UnsupportedError if the format can't be
-        blitted/linearly filtered on this GPU, and StateError inside a rendering
-        scope."""
-        ...
-
-    @overload
-    def push_constants(self, pipeline: Pipeline, offset: int, data: bytes) -> CommandBuffer:
-        """The Pipeline already knows which stages its range covers."""
-        ...
-    @overload
-    def push_constants(self, offset: int, data: bytes) -> CommandBuffer:
-        """The short form: the pipeline that is already bound (0.25).
-
-        Uses the last pipeline bound, whatever its bind point, because push
-        constants belong to a pipeline layout rather than to a bind point.
-        Raises StateError with none bound.
-        """
-        ...
-
-    @overload
-    def bind_descriptor_set(self, descriptor_set: DescriptorSet, pipeline: Pipeline,
-                            set: int = 0) -> CommandBuffer: ...
-    @overload
-    def bind_descriptor_set(self, descriptor_set: DescriptorSet) -> CommandBuffer:
-        """The short form (0.25): the set knows the index it was allocated for and
-        at which bind point, and bind_pipeline already recorded the pipeline.
-
-        The long form stays for a recording split across functions, where the
-        pipeline was bound somewhere this code cannot see, and for binding a set
-        against a different pipeline with a compatible layout. Raises StateError
-        with no pipeline bound at the set's bind point.
-        """
-        ...
-
-    def timer(self) -> Timer:
-        """Start a GPU timer and return its handle. Records a timestamp here;
-        stop it with a `with` block or Timer.stop(), read it back with Timer.ms:
-
-            with cmd.timer() as t:
-                cmd.bind_pipeline(blur).dispatch(gx, gy)
-            ...                     # or, without `with`:
-            t = cmd.timer()         #   t = cmd.timer()
-            ...                     #   cmd.dispatch(...)
-            ctx.submit(cmd)         #   t.stop()
-            print(t.ms)
-
-        The handle is the identity — no names, no keys — so several, nested and
-        overlapping timers all work. Unlike renderer.gpu_time_ms this needs no
-        window: t.ms is ready as soon as the submit you timed has finished. Self-gating: the query pool exists only once a timer is
-        used, so apps that don't time pay nothing."""
-        ...
-
-    def label(self, name: str) -> LabelScope:
-        """Name a scope so a capture reads as a frame instead of a list of draws:
-
-            with cmd.label("shadow pass"):
-                with cmd.rendering(shadow_target):
-                    ...
-
-        Labels nest. A no-op without VK_EXT_debug_utils — which bazalt requests
-        only when validation is on — so a release run pays nothing and simply
-        shows no labels. Object names (name= on create_buffer / create_image /
-        the pipeline builders) answer "which object"; this answers "which pass"."""
-        ...
-
-    def begin_label(self, name: str) -> CommandBuffer:
-        """The explicit half of label(), for a recording split across functions
-        — a helper that opens the scope and a matching one that closes it, where
-        no `with` block spans both. Same escape hatch as begin_rendering /
-        end_rendering. Prefer `with cmd.label(...)` whenever one block covers
-        the scope: it cannot leave a label open."""
-        ...
-
-    def end_label(self) -> CommandBuffer:
-        """Close the innermost open label. An unbalanced call is ignored rather
-        than recorded: ending a label that was never begun is undefined
-        behaviour in Vulkan."""
-        ...
-
-    def occlusion_query(self) -> OcclusionQuery:
-        """Count the fragments of the draws inside the scope that passed the
-        depth and stencil tests:
-
-            with cmd.rendering(target):
-                with cmd.occlusion_query() as q:
-                    cmd.bind_pipeline(bounding_box).draw(36)
-            ctx.submit(cmd)
-            visible = q.samples > 0
-
-        The handle is the identity, exactly as for timer(). Must sit inside a
-        rendering scope — Vulkan requires the query to begin and end within one
-        render pass — and raises StateError otherwise.
-
-        The count is not requested as precise, because precision needs the
-        occlusionQueryPrecise feature and without it the spec allows any non-zero
-        value. Treat `samples` as "how much, roughly", and `samples > 0` as the
-        reliable part."""
-        ...
-
-class LabelScope:
-    """Returned by CommandBuffer.label(); use it in a `with` statement."""
-
-    def __enter__(self) -> CommandBuffer: ...
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
-
-class OcclusionQuery:
-    """An occlusion query handle from CommandBuffer.occlusion_query(). Usable as
-    a context manager or stopped by hand (q.stop())."""
-
-    def stop(self) -> None:
-        """End the query. Idempotent; called for you on `with` exit."""
-        ...
-    @property
-    def samples(self) -> Optional[int]:
-        """Fragments that passed the depth and stencil tests.
-
-        None means one thing: the submit has not completed. Read it after the
-        submit you measured has finished — the default submit(wait=True) is
-        enough; submit(wait=False) needs a ctx.wait() first.
-
-        Raises StateError when the command buffer has been re-recorded since, so
-        this handle's query slots now hold a different query's data. That used to
-        be another None (0.24), which made "wait longer" and "this answer is gone"
-        the same reply.
-        """
-        ...
-    def __enter__(self) -> OcclusionQuery: ...
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
-
-class RenderingScope:
-    """Returned by CommandBuffer.rendering(); use it in a `with` statement."""
-
-    def __enter__(self) -> CommandBuffer: ...
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
-
-class RecordScope:
-    """Returned by Context.record(); use it in a `with` statement (0.25).
-
-    Entering begins the recording. Leaving does NOT submit: who submits —
-    ctx.submit or renderer.present — stays your decision.
-    """
-
-    def __enter__(self) -> CommandBuffer: ...
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
-
-class Timer:
-    """A GPU timer handle from CommandBuffer.timer(). Usable as a context
-    manager (`with cmd.timer() as t:`) or stopped by hand (t.stop())."""
-
-    def stop(self) -> None:
-        """Record the closing timestamp. Idempotent; called for you on `with`
-        exit."""
-        ...
-    @property
-    def ms(self) -> Optional[float]:
-        """Measured GPU time in milliseconds.
-
-        None means one thing: the submit has not completed. Read it after the
-        submit you timed has finished — the default submit(wait=True) is enough;
-        submit(wait=False) needs a ctx.wait() first.
-
-        Raises UnsupportedError when the GPU reports no usable timestamps, and
-        StateError when the command buffer has been re-recorded since. All three
-        answers were one None until 0.24, so a loop polling this could not tell
-        "wait longer" from "this device will never answer" — and spun forever on
-        the second.
-        """
-        ...
-    def __enter__(self) -> Timer: ...
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: ...
 
 class Window:
     def __init__(self, width: int, height: int, title: str,
@@ -2359,7 +2423,7 @@ class Context:
     def begin_frame(self) -> None:
         """Open one logical frame — the frame verb of a windowed loop.
 
-        Advances the ring slot that CommandBuffer, a DYNAMIC buffer and the
+        Advances the ring slot that a Graph, a DYNAMIC buffer and the
         per-frame descriptor sets index, applies pending hot reloads, and
         reclaims deferred handles. All of that is Context-owned, so it happens
         once per frame no matter how many windows draw into it:
@@ -2746,59 +2810,50 @@ class Context:
         """
         ...
 
-    def create_command_buffer(self, auto_barriers: Optional[bool] = None) -> CommandBuffer:
-        """Command buffers are a device resource, so they come from the Context —
-        a headless Context has no renderer to ask.
+    def graph(self) -> Graph:
+        """A new, empty Graph — THE way to describe GPU work.
 
-        auto_barriers overrides the Context-wide mode for this one command
-        buffer; None inherits it."""
-        ...
-
-    def record(self, auto_barriers: Optional[bool] = None) -> RecordScope:
-        """`with ctx.record() as cmd:` — create a command buffer and begin it (0.25).
-
-            with ctx.record() as cmd:
-                with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
-                    cmd.bind_pipeline(pipe).draw(3)
-            ctx.submit(cmd)
-
-        cmd.begin() was named like half of a pair that had no other half. This is
-        the other half, and it brackets the RECORDING only — the block does not
-        submit, because who submits is not its business.
-
-        It CREATES a command buffer, so it fits a one-off recording and a frame
-        loop that builds one per frame anyway. A loop that keeps one command
-        buffer and re-records it every frame should keep calling cmd.begin(),
-        which is what re-recording means.
+        A graph is a device resource, so it comes from the Context: a headless
+        Context has no renderer to ask. graph(), not create_graph(): a graph
+        is a recording, and building one per frame is cheap.
         """
         ...
 
-    def submit(self, cmd: CommandBuffer, *, wait: bool = True) -> None:
-        """Execute a command buffer with no swapchain and no present.
+    def submit(self, graph: Graph, *, wait: bool = True,
+               after: Serial | Sequence[Serial] | None = None) -> Serial:
+        """Execute a graph with no swapchain and no present. Returns the
+        submit's Serial.
 
         Blocking by default, which is right when the next line reads the result.
 
         wait=False returns as soon as the work is queued. A compute prototype
         that submits in a loop wants this: with the wait, the GPU idles between
         iterations and the loop runs at the speed of the round trip rather than
-        of the work. Call ctx.wait() before reading anything back.
+        of the work. Call ctx.wait() — or ctx.wait(serial) — before reading
+        anything back.
 
-        Reusing one CommandBuffer asynchronously is safe: the ring paces it, so
-        a submit into a slot whose previous submit is still running waits for
-        that one first. frames_in_flight is therefore how many submits can be in
-        flight at once.
+        after= orders this submit on the GPU: it starts after the named
+        submits complete, and the CPU does not block. That is the manual
+        control between whole submits; inside one graph the passes order
+        themselves.
+
+        Reusing one Graph asynchronously is safe: the ring paces it, so a
+        submit into a slot whose previous submit is still running waits for
+        that one first. frames_in_flight is therefore how many submits can be
+        in flight at once.
         """
         ...
 
-    def wait(self) -> None:
-        """Block until everything this Context started has finished — every
-        upload and every submit.
+    def wait(self, serial: Optional[Serial] = None) -> None:
+        """Block until GPU work has finished.
 
-        The one wait verb, and the other half of submit(wait=False). This is
-        also where deferred destruction is reclaimed for that work. Waits on the
-        submission timeline rather than on the device, so the other Contexts
-        sharing the GPU are unaffected. Calling it with nothing outstanding does
-        nothing.
+        With no argument: everything this Context started — every upload and
+        every submit. With a Serial from submit(): that one submit alone.
+
+        The other half of submit(wait=False), and where deferred destruction
+        is reclaimed for the finished work. Waits on the submission timeline
+        rather than on the device, so the other Contexts sharing the GPU are
+        unaffected. Calling it with nothing outstanding does nothing.
 
         To wait for less, wait on the resource: buf.wait() / img.wait().
         """
@@ -2889,19 +2944,19 @@ class SwapchainRenderer(RenderTargetBase):
 
             ctx.begin_frame()
             if renderer.acquire():
-                renderer.present(cmd)
+                renderer.present(g)
 
         Acquiring twice on one frame raises StateError; in practice that
         means ctx.begin_frame() was not called.
         """
         ...
 
-    def present(self, cmd: CommandBuffer, *, capture: bool = False) -> None:
-        """Record the command buffer for this window, submit it and present.
+    def present(self, graph: Graph, *, capture: bool = False) -> None:
+        """Replay the graph for this window, submit it and present.
 
         ResourceError when there is no acquired image — acquire() was not
         called, returned False, or its image was already presented. Each window
-        needs its own CommandBuffer: one holds a single command buffer per frame
+        needs its own Graph: one holds a single command buffer per frame
         slot, so replaying it in two windows would overwrite work in flight.
 
         capture=True copies this frame's image into a staging buffer as part of

@@ -126,6 +126,7 @@ add_library(_core MODULE
     src/bindings/Resources.cpp
     src/bindings/Pipelines.cpp
     src/bindings/Commands.cpp
+    src/bindings/Graphs.cpp
     src/bindings/Windowing.cpp
     src/bindings/ContextBind.cpp
     src/bindings/Targets.cpp

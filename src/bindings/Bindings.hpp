@@ -8,6 +8,7 @@ void bind_enums(py::module_& m);
 void bind_resources(py::module_& m);
 void bind_pipelines(py::module_& m);
 void bind_commands(py::module_& m);
+void bind_graphs(py::module_& m);
 void bind_windowing(py::module_& m);
 void bind_context(py::module_& m);
 void bind_targets(py::module_& m);

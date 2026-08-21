@@ -19,7 +19,10 @@ PYBIND11_MODULE(_core, m)
 
     bind_resources(m);
     bind_pipelines(m);
+    // Pass before Graph: bind_graphs registers add_pass, whose return type is
+    // the Pass class bind_commands registers.
     bind_commands(m);
+    bind_graphs(m);
     bind_windowing(m);
     bind_context(m);
 

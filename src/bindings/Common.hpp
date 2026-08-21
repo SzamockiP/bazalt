@@ -36,6 +36,7 @@
 #include "ShaderCompiler.hpp"
 #include "Pipeline.hpp"
 #include "CommandBuffer.hpp"
+#include "Graph.hpp"
 #include "Format.hpp"
 #include "Image.hpp"
 #include "Sampler.hpp"
@@ -868,14 +869,14 @@ struct TimestampRange
 // vkEndCommandBuffer that returns DEVICE_LOST or an out-of-memory result would
 // have crashed the interpreter instead of raising bz.DeviceLostError.
 inline std::expected<VkCommandBuffer, Error> record_frame(
-    CommandBuffer& cmd,
+    Graph& graph,
     const Context& ctx,
     TimestampRange ts = {},
     SwapchainRenderer* capture_into = nullptr)
 {
     const VolkDeviceTable& vk = ctx.vk();
     const std::uint32_t frame_index = ctx.frame_index();
-    VkCommandBuffer vkCmd = cmd.get(frame_index);
+    VkCommandBuffer vkCmd = graph.get(frame_index);
     vk.vkResetCommandBuffer(vkCmd, 0);
 
     VkCommandBufferBeginInfo beginInfo{
@@ -897,7 +898,7 @@ inline std::expected<VkCommandBuffer, Error> record_frame(
         vk.vkCmdWriteTimestamp(vkCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, ts.pool, ts.first);
     }
 
-    cmd.execute(vkCmd, FrameContext{frame_index, &vk});
+    graph.execute(vkCmd, FrameContext{frame_index, &vk});
 
     // After the recording, so the copy sees the finished frame; before the
     // closing timestamp, so the capture's cost is visible in gpu_time_ms.
@@ -920,7 +921,7 @@ inline std::expected<VkCommandBuffer, Error> record_frame(
 }
 
 inline std::expected<void, Error> SwapchainRenderer::present(
-    std::shared_ptr<CommandBuffer> cmd,
+    std::shared_ptr<Graph> graph,
     std::uint64_t upload_wait_serial,
     bool capture)
 {
@@ -929,7 +930,7 @@ inline std::expected<void, Error> SwapchainRenderer::present(
     {
         ts = {timestamp_pool(), 2 * current_frame()};
     }
-    auto vkCmd = record_frame(*cmd, *context(), ts, capture ? this : nullptr);
+    auto vkCmd = record_frame(*graph, *context(), ts, capture ? this : nullptr);
     if (!vkCmd)
     {
         // Nothing was submitted, and acquire() already reset this slot's fence.
@@ -957,39 +958,45 @@ inline std::expected<void, Error> SwapchainRenderer::present(
 // own staging copy. A buffer has no decode, so it needs no CPU-side half: the
 // serial is known the moment create_buffer returns, and one timeline wait
 // covers both kinds of upload.
-inline std::expected<std::uint64_t, Error> require_uploads_resident(CommandBuffer& cmd)
+inline std::expected<std::uint64_t, Error> require_uploads_resident(Graph& graph)
 {
     std::uint64_t wait_serial = 0;
-    for (const auto& set : cmd.used_sets())
+    for (const auto& pass : graph.passes())
     {
-        for (const auto& bi : set->images())
+        if (!pass->enabled())
         {
-            auto serial = bi.image->require_resident();
-            if (!serial)
+            continue;
+        }
+        CommandBuffer& cmd = pass->recorder();
+        for (const auto& set : cmd.used_sets())
+        {
+            for (const auto& bi : set->images())
             {
-                return std::unexpected(serial.error());
+                auto serial = bi.image->require_resident();
+                if (!serial)
+                {
+                    return std::unexpected(serial.error());
+                }
+                wait_serial = (std::max)(wait_serial, *serial);
             }
-            wait_serial = (std::max)(wait_serial, *serial);
+            for (const auto& bb : set->buffers())
+            {
+                wait_serial = (std::max)(wait_serial, bb.buffer->upload_serial());
+            }
         }
-        for (const auto& bb : set->buffers())
+        // Vertex, index and transfer uses: bound directly rather than through
+        // a set.
+        for (const auto& buffer : cmd.used_buffers())
         {
-            wait_serial = (std::max)(wait_serial, bb.buffer->upload_serial());
+            wait_serial = (std::max)(wait_serial, buffer->upload_serial());
         }
-    }
-    // Vertex, index and transfer uses: bound directly rather than through a set.
-    for (const auto& buffer : cmd.used_buffers())
-    {
-        wait_serial = (std::max)(wait_serial, buffer->upload_serial());
     }
     return wait_serial;
 }
 
 // The Python-facing present(): everything acquire() promised must still hold,
-// and every image this recording samples has to be at least submitted.
-inline std::expected<void, Error> present_command_buffer(
-    SwapchainRenderer& renderer,
-    std::shared_ptr<CommandBuffer> cmd,
-    bool capture)
+// and every image the graph samples has to be at least submitted.
+inline std::expected<void, Error> present_graph(SwapchainRenderer& renderer, std::shared_ptr<Graph> graph, bool capture)
 {
     if (auto r = renderer.check_presentable(); !r)
     {
@@ -998,16 +1005,16 @@ inline std::expected<void, Error> present_command_buffer(
     // Claimed here rather than inside record_frame: both submit paths run with
     // the GIL released, so a diagnosis has to travel back as an Error and be
     // raised by the caller, never thrown from under the release.
-    if (auto r = cmd->claim_for_frame(renderer.context()->frame_serial()); !r)
+    if (auto r = graph->claim_for_frame(renderer.context()->frame_serial()); !r)
     {
         return std::unexpected(r.error());
     }
-    auto upload_wait_serial = require_uploads_resident(*cmd);
+    auto upload_wait_serial = require_uploads_resident(*graph);
     if (!upload_wait_serial)
     {
         return std::unexpected(upload_wait_serial.error());
     }
-    return renderer.present(std::move(cmd), *upload_wait_serial, capture);
+    return renderer.present(std::move(graph), *upload_wait_serial, capture);
 }
 
 // A specialization constant's four bytes, from whichever Python number was
@@ -1045,32 +1052,9 @@ inline std::uint32_t spec_constant_bytes(const py::object& value)
     return bytes;
 }
 
-// The state behind `with cmd.rendering(target, ...):` — carries what
-// __enter__/__exit__ need to record the begin/end pair. Deliberately a plain
-// struct bound only for its dunder methods; begin_rendering/end_rendering
-// stay public, this is sugar, not a replacement.
-// `with ctx.record() as cmd:` — begin() on the way in, nothing on the way out
-// (0.25, ergonomics #4). It exists because cmd.begin() was named like half of a
-// pair that has no other half: every other pair in the API is symmetric
-// (begin_rendering/end_rendering, begin_label/end_label) and this one means
-// "reset and start recording".
-//
-// __exit__ deliberately does NOT submit. Who submits — ctx.submit or
-// renderer.present — is the caller's decision, and a block that guessed would
-// make the wrong one half the time. The scope brackets the RECORDING.
-struct RecordScope
-{
-    std::shared_ptr<CommandBuffer> cmd;
-};
-
-struct RenderingScope
-{
-    std::shared_ptr<CommandBuffer> cmd;
-    std::shared_ptr<RenderTarget> target;
-    std::optional<std::vector<std::array<float, 4>>> clear_color;
-    float clear_depth = 1.0f;
-    std::uint32_t clear_stencil = 0;
-};
+// The state behind `with pass_.label("shadow pass"):` and the pass's own
+// `with` — plain structs bound only for their dunders, over verbs that stay
+// public. `Pass.__exit__` seals; who submits is still the caller's decision.
 
 // Normalise a Python clear_color into one RGBA per attachment. Accepts both the
 // single form [r,g,b,a] (applied to every attachment — the common case) and the
@@ -1178,12 +1162,11 @@ struct QueryHandle
 using Timer = QueryHandle<&CommandBuffer::stop_timer>;
 using OcclusionQuery = QueryHandle<&CommandBuffer::stop_occlusion_query>;
 
-// The state behind `with cmd.label("shadow pass"):`. Same shape as
-// RenderingScope: a plain struct bound only for its dunders, over verbs that
-// stay public.
+// The state behind `with pass_.label("shadow pass"):`: a plain struct bound
+// only for its dunders, over verbs that stay public.
 struct LabelScope
 {
-    std::shared_ptr<CommandBuffer> cmd;
+    std::shared_ptr<Pass> pass;
     std::string name;
 };
 
@@ -1309,7 +1292,15 @@ inline std::vector<std::byte> update_pixels_from_numpy(
     return out;
 }
 
-inline std::expected<void, Error> context_submit(Context& context, std::shared_ptr<CommandBuffer> cmd, bool wait)
+// after_value: the highest timeline value this submit must wait for GPU-side
+// (the merged `after=` serials), or 0 for none. Merged into one wait because a
+// timeline wait is ">=": on one timeline the max IS the whole list. Returns
+// the serial this submit signals — the Python-facing Serial handle.
+inline std::expected<std::uint64_t, Error> context_submit(
+    Context& context,
+    std::shared_ptr<Graph> graph,
+    bool wait,
+    std::uint64_t after_value = 0)
 {
     // The ring slot this submit is about to record into may still be busy with
     // an earlier asynchronous submit, whose command buffer is the SAME one.
@@ -1327,17 +1318,17 @@ inline std::expected<void, Error> context_submit(Context& context, std::shared_p
 
     // Same claim the windowed present makes. Sequential headless submits can
     // never collide (the ring advances after each one), but mixing a present
-    // and a ctx.submit of one CommandBuffer inside a frame can.
-    if (auto r = cmd->claim_for_frame(context.frame_serial()); !r)
+    // and a ctx.submit of one Graph inside a frame can.
+    if (auto r = graph->claim_for_frame(context.frame_serial()); !r)
     {
         return std::unexpected(r.error());
     }
-    auto upload_wait_serial = require_uploads_resident(*cmd);
+    auto upload_wait_serial = require_uploads_resident(*graph);
     if (!upload_wait_serial)
     {
         return std::unexpected(upload_wait_serial.error());
     }
-    auto recorded = record_frame(*cmd, context);
+    auto recorded = record_frame(*graph, context);
     if (!recorded)
     {
         return std::unexpected(recorded.error());
@@ -1347,6 +1338,7 @@ inline std::expected<void, Error> context_submit(Context& context, std::shared_p
     VkSemaphore timeline = context.submit_timeline();
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     std::uint64_t submitted_serial = 0;
+    const std::uint64_t wait_value = (std::max)(*upload_wait_serial, after_value);
 
     {
         std::lock_guard lock(context.queue_mutex());
@@ -1356,7 +1348,7 @@ inline std::expected<void, Error> context_submit(Context& context, std::shared_p
             .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
             .pNext = nullptr,
             .waitSemaphoreValueCount = 1,
-            .pWaitSemaphoreValues = &*upload_wait_serial,
+            .pWaitSemaphoreValues = &wait_value,
             .signalSemaphoreValueCount = 1,
             .pSignalSemaphoreValues = &serial};
         VkSubmitInfo submitInfo{
@@ -1414,7 +1406,28 @@ inline std::expected<void, Error> context_submit(Context& context, std::shared_p
     // forever). After, not before, submitting — an update() made before this
     // call must land in the slot this submit reads.
     context.advance_frame();
-    return {};
+    return submitted_serial;
+}
+
+// The merged GPU-side wait `after=` asks for: a Serial, a list of Serials, or
+// None. One value because every serial lives on the one graphics timeline
+// today; when 0.29 adds a queue, this grows into per-timeline maxima.
+inline std::uint64_t after_wait_value(const py::object& after)
+{
+    if (after.is_none())
+    {
+        return 0;
+    }
+    if (py::isinstance<Serial>(after))
+    {
+        return py::cast<const Serial&>(after).value;
+    }
+    std::uint64_t value = 0;
+    for (const auto& item : py::cast<py::sequence>(after))
+    {
+        value = (std::max)(value, py::cast<const Serial&>(item).value);
+    }
+    return value;
 }
 
 // Attach a debug name to a Vulkan handle (empty name -> no-op). Non-dispatchable

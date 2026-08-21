@@ -912,60 +912,70 @@ void bind_context(py::module_& m)
             py::arg("uniform_buffers") = py::none(),
             py::arg("storage_buffers") = py::none(),
             py::arg("storage_images") = py::none())
-        // Command buffers come from the Context, not a renderer: they are a device
-        // resource, and a headless Context has no renderer to ask.
+        // The graph comes from the Context, not a renderer: it is a device
+        // resource, and a headless Context has no renderer to ask. graph(),
+        // not create_graph(): a graph is a recording — the successor of the
+        // removed ctx.record() — and rebuilding one per frame must read as
+        // free, which the create_* family does not.
         .def(
-            "create_command_buffer",
-            [](Context& self, std::optional<bool> auto_barriers) -> py::object
+            "graph",
+            [](Context& self) -> py::object
             {
-                require_open(self, "create_command_buffer");
-                return py::cast(unwrap(CommandBuffer::create(self, auto_barriers), self.logger().get()));
-            },
-            py::arg("auto_barriers") = py::none())
-        // `with ctx.record() as cmd:` — the missing half of cmd.begin(). Creates
-        // the command buffer and begins it; the block ends the RECORDING, not the
-        // frame, so the caller still chooses ctx.submit or renderer.present.
-        .def(
-            "record",
-            [](Context& self, std::optional<bool> auto_barriers)
-            {
-                require_open(self, "record");
-                return RecordScope{unwrap(CommandBuffer::create(self, auto_barriers), self.logger().get())};
-            },
-            py::arg("auto_barriers") = py::none())
-        // The headless counterpart of renderer.present(): no swapchain, no present.
+                require_open(self, "graph");
+                return py::cast(unwrap(Graph::create(self), self.logger().get()));
+            })
+        // The headless counterpart of renderer.present(): no swapchain, no
+        // present. Returns the submit's Serial — the handle wait() and after=
+        // take. wait= keeps its old meaning (does the CPU block until the GPU
+        // finished); after= is the GPU-side dependency: this submit starts
+        // after those submits complete, and the CPU never blocks for it.
         .def(
             "submit",
-            [](Context& self, std::shared_ptr<CommandBuffer> cmd, bool wait)
+            [](Context& self, std::shared_ptr<Graph> graph, bool wait, const py::object& after)
             {
                 require_open(self, "submit");
-                std::expected<void, Error> r;
+                require_same_context(&self, graph->owner(), "submit");
+                const std::uint64_t after_value = after_wait_value(after);
+                std::expected<std::uint64_t, Error> r;
                 {
-                    // May block (wait-idle inside when wait=True, and the ring
-                    // slot wait either way) — release the GIL for the duration.
+                    // May block (the wait for this serial when wait=True, and
+                    // the ring slot wait either way) — release the GIL.
                     py::gil_scoped_release release;
-                    r = context_submit(self, std::move(cmd), wait);
+                    r = context_submit(self, std::move(graph), wait, after_value);
                 }
-                unwrap(std::move(r), self.logger().get());
+                return Serial{.queue_id = 0, .value = unwrap(std::move(r), self.logger().get())};
             },
-            py::arg("cmd"),
+            py::arg("graph"),
             py::kw_only(),
-            py::arg("wait") = true)
-        // The one wait verb: every upload and every submit this Context started,
-        // finished. The other half of submit(wait=False), and where deferred
-        // destruction is reclaimed for that work. Waits on the submission
-        // timeline rather than the device, so the other Contexts sharing the
-        // device are unaffected.
+            py::arg("wait") = true,
+            py::arg("after") = py::none())
+        // The wait verb. Bare, it waits for everything this Context started —
+        // every upload and every submit — and reclaims deferred destruction
+        // for that work. With a Serial it waits for that one submit alone.
+        // Waits on the submission timeline rather than the device, so the
+        // other Contexts sharing the device are unaffected.
         .def(
             "wait",
-            [](Context& self)
+            [](Context& self, const py::object& serial)
             {
                 require_open(self, "wait");
                 std::expected<void, Error> r;
+                if (serial.is_none())
                 {
                     py::gil_scoped_release release;
                     r = self.wait_for_submits();
                 }
+                else
+                {
+                    const std::uint64_t value = py::cast<const Serial&>(serial).value;
+                    py::gil_scoped_release release;
+                    r = self.wait_for_serial(value);
+                    if (r)
+                    {
+                        self.flush_deletion_queue();
+                    }
+                }
                 unwrap(std::move(r), self.logger().get());
-            });
+            },
+            py::arg("serial") = py::none());
 }

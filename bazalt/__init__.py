@@ -2,7 +2,7 @@
 
 from bazalt._core import *
 
-__version__ = "0.27.0"
+__version__ = "0.28.0"
 
 __all__ = [
     # Core
@@ -42,9 +42,10 @@ __all__ = [
     "ComputePipelineBuilder",
     "DescriptorPool",
     "DescriptorSet",
-    "CommandBuffer",
-    "RenderingScope",
-    "RecordScope",
+    "Graph",
+    "Pass",
+    "Queue",
+    "Serial",
     "Timer",
     "LabelScope",
     "OcclusionQuery",
