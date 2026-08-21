@@ -178,6 +178,148 @@ def test_draw_then_dispatch_is_write_after_read(ctx, double_pipeline):
     assert np.allclose(verts.read(np.float32), tri)  # rewrote the same values
 
 
+# ── what a render pass WRITES (0.28) ──────────────────────────────────────
+#
+# An attachment write is not a descriptor use, so no recorded verb reports it.
+# The graph reports it after folding a render pass, and these are the tests
+# that say why: without it, "render into a texture, then sample it" — a
+# G-buffer, a post-process chain, a shadow map — has no barrier at all.
+
+
+def run_render_then_sample_case(reader):
+    """Pass 1 draws into an offscreen target; pass 2 reads that target's colour.
+
+    `reader` picks which stage does the reading, and that is the point of the
+    parametrization: the pass's own exit transition names the fragment shader,
+    so a fragment reader must need nothing more, while a COMPUTE reader is
+    outside what the retire covered and must get a barrier from the fold.
+
+    Builds its own sync-validation Context, exactly as run_sync_case does and
+    for the same reason: core validation cannot see a MISSING barrier, so on
+    the session Context this would pass against the unfixed build — the 0.24
+    lesson about a test that passes before the fix being a test of something
+    else. Returns the hazards and the pixels, because both halves matter.
+    """
+    hazards = []
+    log = bz.Logger(min_severity=bz.Severity.INFO)
+
+    @log.on_message
+    def _(msg):
+        if msg.source == bz.Source.VALIDATION and "hazard" in msg.text.lower():
+            hazards.append(msg.text)
+
+    ctx = bz.Context(log, validation="sync")
+    vert = ctx.compile_shader(str(SHADER_DIR / "triangle.vert"), bz.ShaderStage.VERTEX)
+    frag = ctx.compile_shader(str(SHADER_DIR / "triangle.frag"), bz.ShaderStage.FRAGMENT)
+    tri = np.array([
+        [-0.9, 0.9, 0.2, 1.0, 0.0, 0.0],
+        [0.9, 0.9, 0.2, 0.0, 1.0, 0.0],
+        [0.0, -0.9, 0.2, 0.0, 0.0, 1.0],
+    ], dtype=np.float32)
+    vbuf = ctx.create_buffer(tri, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+    offscreen = ctx.create_render_target(32, 32)
+    drawn = (ctx.graphics_pipeline()
+             .vertex_shader(vert)
+             .fragment_shader(frag)
+             .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+             .build(offscreen))
+
+    g = ctx.graph()
+    with g.add_pass(offscreen, clear_color=[0, 0, 0, 1], name="draw") as p:
+        p.bind_pipeline(drawn).bind_vertex_buffer(vbuf).draw(3)
+
+    if reader == "fragment":
+        final = ctx.create_render_target(32, 32)
+        show = (ctx.graphics_pipeline()
+                .vertex_shader(ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"),
+                                                  bz.ShaderStage.VERTEX))
+                .fragment_shader(ctx.compile_shader(str(SHADER_DIR / "textured.frag"),
+                                                    bz.ShaderStage.FRAGMENT))
+                .texture(0, bz.ShaderStage.FRAGMENT, set=0)
+                .build(final))
+        dset = ctx.create_descriptor_pool(max_sets=1, textures=1).allocate_set(show, set=0)
+        dset.set_image(0, offscreen.color[0])
+        with g.add_pass(final, clear_color=[0, 0, 0, 1], name="sample") as p:
+            p.bind_pipeline(show).bind_descriptor_set(dset, show, set=0).draw(3)
+        ctx.submit(g)
+        pixels = final.color[0].read()
+        log.flush()
+        return hazards, pixels
+
+    out = ctx.create_image(32, 32, bz.Format.RGBA8)
+    copy = (ctx.compute_pipeline()
+            .shader(ctx.compile_shader(str(SHADER_DIR / "sample_texture.comp"),
+                                       bz.ShaderStage.COMPUTE))
+            .texture(0, set=0)
+            .storage_image(1, set=0)
+            .build())
+    pool = ctx.create_descriptor_pool(max_sets=1, textures=1, storage_images=1)
+    dset = pool.allocate_set(copy, set=0)
+    dset.set_image(0, offscreen.color[0], sampler=ctx.create_sampler())
+    dset.set_storage_image(1, out)
+    with g.add_pass(name="sample") as p:
+        p.bind_pipeline(copy).bind_descriptor_set(dset, copy, set=0).dispatch(4, 4)
+    ctx.submit(g)
+    pixels = out.read()
+    log.flush()
+    return hazards, pixels
+
+
+@pytest.mark.parametrize("reader", ["fragment", "compute"])
+def test_rendering_into_a_texture_then_sampling_it(ctx, reader):
+    """Sync validation is the referee, and the pixels are the second half: a
+    black result would mean the read happened before the draw landed.
+
+    Before the fix this reported READ_AFTER_WRITE at the reading command. An
+    attachment write is not a descriptor use, so nothing reported it to the
+    fold, and the compile saw no predecessor to order the read against. It is
+    the most ordinary thing a frame does — a G-buffer, a post-process chain —
+    and the suite reached it through two graphs every time, where the
+    cross-graph floor covered it."""
+    hazards, pixels = run_render_then_sample_case(reader)
+    assert hazards == []
+    assert pixels[16, 16, :3].sum() > 0, "the sampled image is empty"
+
+
+def test_a_preserving_pass_after_something_else_moved_the_attachment(ctx, triangle_shaders,
+                                                                     triangle_buffers):
+    """A render pass builds its entry transition from the RenderTarget, so
+    preserving means "come from final_layout()". Something between the two
+    passes can move the image — here a compute pass writes it as a storage
+    image — and then that transition names a layout the device is not in.
+
+    The look-ahead cannot cover this: it only fires for two CONSECUTIVE passes
+    on one target, and there is a pass in between. So the compile corrects the
+    difference first, and the fixture is what proves it: the uncorrected
+    version is VUID-VkImageMemoryBarrier-oldLayout-01197."""
+    vbuf, ibuf = triangle_buffers
+    image = ctx.create_image(32, 32, bz.Format.RGBA8)
+    target = ctx.create_render_target(color=[image])
+    drawn = (ctx.graphics_pipeline()
+             .vertex_shader(triangle_shaders[0])
+             .fragment_shader(triangle_shaders[1])
+             .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+             .build(target))
+    store = (ctx.compute_pipeline()
+             .shader(ctx.compile_shader(str(SHADER_DIR / "store_const.comp"),
+                                        bz.ShaderStage.COMPUTE))
+             .storage_image(0)
+             .build())
+    dset = ctx.create_descriptor_pool(max_sets=1, storage_images=1).allocate_set(store, set=0)
+    dset.set_storage_image(0, image)
+
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(drawn).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
+    with g.add_pass(name="overwrite") as p:
+        p.bind_pipeline(store).bind_descriptor_set(dset, store, set=0).dispatch(4, 4)
+    with g.add_pass(target, clear_color=None) as p:
+        p.bind_pipeline(drawn).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
+    ctx.submit(g)
+
+    assert image.read() is not None
+
+
 # ── manual mode ───────────────────────────────────────────────────────────
 
 

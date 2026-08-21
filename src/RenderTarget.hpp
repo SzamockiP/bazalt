@@ -175,6 +175,27 @@ public:
                                            : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     }
 
+    // The Image objects a pass rendering into this target WRITES, for the graph
+    // to fold (0.28). Without them the compile cannot know that a later pass
+    // sampling `target.color[0]` reads what an earlier pass drew — an
+    // attachment write is not a descriptor use, so nothing else reports it, and
+    // "render into a texture, then sample it" is the most ordinary thing a
+    // frame does.
+    //
+    // Empty by default and empty for a swapchain: its images belong to the
+    // driver, nothing can sample them, and the only ordering they need is the
+    // present semaphore. What comes back is the SAMPLEABLE image, which under
+    // MSAA is the resolve target rather than the multisampled one.
+    virtual std::vector<std::shared_ptr<Image>> written_color_images() const
+    {
+        return {};
+    }
+
+    virtual std::shared_ptr<Image> written_depth_image() const
+    {
+        return nullptr;
+    }
+
     // Called by CommandBuffer when the end-of-rendering barrier is recorded into
     // a real submit. An OffscreenTarget uses this to learn that its image has
     // left UNDEFINED — the submit paths never see the target (it lives inside the
@@ -353,6 +374,19 @@ public:
         return colors_;
     }
     const std::shared_ptr<Image>& depth() const
+    {
+        return depth_;
+    }
+
+    // What a pass rendering here writes, for the graph's fold. The sampleable
+    // images, which is exactly what colors()/depth() already are — under MSAA
+    // the resolve targets rather than the multisampled attachments.
+    std::vector<std::shared_ptr<Image>> written_color_images() const override
+    {
+        return colors_;
+    }
+
+    std::shared_ptr<Image> written_depth_image() const override
     {
         return depth_;
     }
@@ -612,6 +646,17 @@ public:
         return parent_->depth_final_layout();
     }
 
+    // The parent's images: rendering into one slice still writes that image, and
+    // a later pass sampling the whole thing has to be ordered against it.
+    std::vector<std::shared_ptr<Image>> written_color_images() const override
+    {
+        return parent_->written_color_images();
+    }
+    std::shared_ptr<Image> written_depth_image() const override
+    {
+        return parent_->written_depth_image();
+    }
+
     // For a 3D parent the view axis and the barrier axis diverge, on purpose —
     // the one exception to the 0.13 "view and barrier come from one (layer,
     // mip)" rule. The slice index feeds only the VIEW (baseArrayLayer selects
@@ -751,6 +796,17 @@ public:
     VkImageLayout depth_final_layout() const override
     {
         return parent_->depth_final_layout();
+    }
+
+    // The parent's images: rendering into one slice still writes that image, and
+    // a later pass sampling the whole thing has to be ordered against it.
+    std::vector<std::shared_ptr<Image>> written_color_images() const override
+    {
+        return parent_->written_color_images();
+    }
+    std::shared_ptr<Image> written_depth_image() const override
+    {
+        return parent_->written_depth_image();
     }
 
     // Multiview writes every layer in one pass, so its subresource already spans

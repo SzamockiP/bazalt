@@ -338,6 +338,19 @@ void record_render_pass_transitions_out(const VolkDeviceTable& vk, VkCommandBuff
         // layout, because that is the one that gets presented.
         VkImage final_image = target->color_resolve_image(i) != VK_NULL_HANDLE ? target->color_resolve_image(i)
                                                                                : target->color_image(i);
+        // The retire NAMES who reads next, and that is not decoration: a layout
+        // transition is itself a write, so a destination scope of
+        // (BOTTOM_OF_PIPE, 0) leaves the next reader unsynchronized against it.
+        // A pass that samples this attachment later in the same submit —
+        // render into a texture, then read it, which is what a G-buffer or a
+        // post-process chain is — then reports READ_AFTER_WRITE under sync
+        // validation. Depth has always named its reader (below); colour said
+        // nothing, and the asymmetry was the bug.
+        //
+        // A swapchain is the exception and keeps the empty scope: PRESENT_SRC
+        // is consumed by the presentation engine, which the present semaphore
+        // orders, and no shader may touch it at all.
+        const bool presented = target->final_layout() == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         record_image_transition(
             vk,
             cmd,
@@ -345,9 +358,9 @@ void record_render_pass_transitions_out(const VolkDeviceTable& vk, VkCommandBuff
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             target->final_layout(),
             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-            0,
+            presented ? 0 : VK_ACCESS_SHADER_READ_BIT,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            presented ? VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT,
             color_sr.base_mip,
             color_sr.mip_count,

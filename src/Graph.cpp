@@ -207,13 +207,51 @@ void Graph::compile_()
     ResourceTracker tracker;
     tracker.set_all_shader_stages(context_->all_shader_stages());
 
+    // The enabled passes, and the look-ahead over them — both decided BEFORE
+    // the fold, because the fold has to know whether a pass's exit transition
+    // is going to run. It is a structural question (which passes share a target
+    // and preserve it), so nothing here depends on what they recorded.
     for (auto& pass : passes_)
     {
-        if (!pass->enabled())
+        if (pass->enabled())
         {
-            continue;
+            compiled_.push_back(CompiledPass{.pass = pass.get()});
         }
-        CompiledPass cp{.pass = pass.get()};
+    }
+
+    // The priced "a preserved second pass re-transitions the attachment" entry
+    // being paid: when the immediately next enabled pass renders into the SAME
+    // target and preserves, the attachment stays in its attachment layout
+    // across the seam — no retire, no re-enter, one execution barrier.
+    // Consecutive only: a pass in between could move the image, and then the
+    // retire is what keeps the layouts honest.
+    for (std::size_t k = 0; k + 1 < compiled_.size(); ++k)
+    {
+        const Pass& a = *compiled_[k].pass;
+        const Pass& b = *compiled_[k + 1].pass;
+        if (a.is_render() && b.is_render() && a.target() == b.target() && b.preserve())
+        {
+            compiled_[k].elide_exit = true;
+            compiled_[k + 1].elide_entry = true;
+        }
+    }
+
+    for (CompiledPass& cp : compiled_)
+    {
+        Pass* pass = cp.pass;
+
+        // A render pass builds its entry transition from the RenderTarget, not
+        // from any state: preserving means "come from final_layout()". That is
+        // a lie whenever something else moved the image since — a compute pass
+        // that wrote it as a storage image, say — and the transition is then
+        // illegal from a layout the device is not in. The elided seam cannot
+        // hit it (nothing runs between the two passes), so this corrects the
+        // un-elided case, which is the only one where a predecessor exists.
+        if (pass->is_render() && pass->preserve() && !cp.elide_entry)
+        {
+            correct_preserve_entry_(cp, tracker);
+        }
+
         for (const UseEvent& e : pass->events())
         {
             switch (e.kind)
@@ -252,27 +290,80 @@ void Graph::compile_()
                     break;
             }
         }
-        compiled_.push_back(std::move(cp));
-    }
 
-    // The look-ahead, and the priced "a preserved second pass re-transitions
-    // the attachment" entry being paid: when the immediately next enabled
-    // pass renders into the SAME target and preserves, the attachment stays
-    // in its attachment layout across the seam — no retire, no re-enter, one
-    // execution barrier. Consecutive only: a pass in between could sample the
-    // attachment, which needs the retire.
-    for (std::size_t k = 0; k + 1 < compiled_.size(); ++k)
-    {
-        const Pass& a = *compiled_[k].pass;
-        const Pass& b = *compiled_[k + 1].pass;
-        if (a.is_render() && b.is_render() && a.target() == b.target() && b.preserve())
+        // What the pass just wrote as attachments. An attachment write is not a
+        // descriptor use, so no UseEvent reports it, and without this the fold
+        // would not know that the next pass sampling `target.color[0]` reads
+        // what this one drew — the most ordinary thing a frame does, and a
+        // READ_AFTER_WRITE hazard without a barrier.
+        //
+        // Skipped when the exit is elided, because then the image is still in
+        // its attachment layout and the pass that follows renders into it
+        // rather than reading it. The LAST pass of such a chain retires
+        // normally and reports here.
+        if (pass->is_render() && !cp.elide_exit)
         {
-            compiled_[k].elide_exit = true;
-            compiled_[k + 1].elide_entry = true;
+            note_attachment_writes_(*pass, tracker);
         }
     }
 
     dirty_ = false;
+}
+
+void Graph::correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker)
+{
+    RenderTarget& rt = *cp.pass->target();
+    const VkImageLayout wanted = rt.final_layout();
+    for (const auto& image : rt.written_color_images())
+    {
+        const auto known = tracker.layout_of(image.get());
+        if (!known || *known == wanted)
+        {
+            continue;
+        }
+        cp.entry.images.emplace_back(
+            image,
+            ResourceTracker::ImageBarrier{
+                .old_layout = *known,
+                .new_layout = wanted,
+                .src_stages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                .dst_stages = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .src_access = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .dst_access = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT});
+        // The pass's own entry transition now starts where it says it does.
+        tracker.note_image_layout(
+            image.get(), wanted, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT);
+    }
+}
+
+void Graph::note_attachment_writes_(const Pass& pass, ResourceTracker& tracker)
+{
+    RenderTarget& rt = *pass.target();
+    // What the pass's own exit transition already made available: it retires
+    // the attachments naming the fragment shader as the reader (see
+    // record_render_pass_transitions_out), so a fragment read needs nothing
+    // more and any other stage gets a barrier from the fold.
+    const VkPipelineStageFlags retired_to = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    for (const auto& image : rt.written_color_images())
+    {
+        tracker.note_image_write(
+            image.get(),
+            rt.final_layout(),
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            retired_to,
+            VK_ACCESS_SHADER_READ_BIT);
+    }
+    if (const auto& depth = rt.written_depth_image())
+    {
+        tracker.note_image_write(
+            depth.get(),
+            rt.depth_final_layout(),
+            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            retired_to,
+            VK_ACCESS_SHADER_READ_BIT);
+    }
 }
 
 void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame) const
@@ -304,8 +395,11 @@ void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame)
     {
         src |= b.src_stages;
         dst |= b.dst_stages;
-        // All mips and all layers, exactly as the inline recorder's image
-        // barrier: the tracker holds one layout per image.
+        // All mips and all layers: the fold holds one layout per image. The
+        // aspect comes from the FORMAT rather than being COLOR — a depth
+        // image reaches this path as soon as a pass samples the depth another
+        // pass rendered, and naming COLOR on it is a barrier the layers
+        // reject outright.
         imgs.push_back(
             {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
              .pNext = nullptr,
@@ -317,7 +411,7 @@ void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame)
              .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
              .image = image->vk_image(),
              .subresourceRange = {
-                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                 .aspectMask = image->aspect(),
                  .baseMipLevel = 0,
                  .levelCount = image->mip_levels(),
                  .baseArrayLayer = 0,

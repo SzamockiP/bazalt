@@ -250,6 +250,14 @@ private:
     // pass's entry batch, or a general pass's schedule at `position`.
     BarrierBatch& batch_at_(CompiledPass& cp, std::size_t position);
 
+    // Bring a preserving pass's attachments to the layout its own entry
+    // transition assumes, when something in this graph moved them since.
+    void correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker);
+
+    // Report a render pass's attachment writes to the fold, so a later pass
+    // that samples one is ordered against the drawing.
+    void note_attachment_writes_(const Pass& pass, ResourceTracker& tracker);
+
     std::shared_ptr<Context> context_;
     std::vector<std::shared_ptr<Pass>> passes_;
     std::vector<VkCommandBuffer> command_buffers_;
