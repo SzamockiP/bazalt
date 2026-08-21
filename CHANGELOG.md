@@ -5,7 +5,7 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
-## [0.27.0] — unreleased
+## [0.27.0] — 2026-08-21
 
 "The quality gates, and what they found". This release adds no feature. It adds
 the two checks that a codebase of this size needs, and it removes what an audit
