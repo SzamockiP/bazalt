@@ -5,7 +5,7 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
-## [0.28.0] — unreleased
+## [0.28.0] — 2026-08-22
 
 "The pass graph". You now describe a frame as passes on a graph. This replaces
 the command buffer, which is gone.
