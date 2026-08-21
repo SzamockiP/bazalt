@@ -121,10 +121,13 @@ the LunarG SDK — that is the platform's contract, not a CI detail.
 The layering exists so nothing below `Renderer.hpp` knows swapchains exist.
 
 - **`Context.hpp`** — owns the device and everything per-Context: the **device dispatch
-  table** (`ctx.vk()`), VMA allocator, command pool, the frame ring (a monotonic *serial*,
-  not a wrapping index), one **timeline semaphore counting every submit on the graphics
-  queue**, the serial-keyed deferred destruction queue, the sampler cache, and debug-name
-  plumbing. Both windowed and headless submits advance the same ring. Since 0.15 any
+  table** (`ctx.vk()`), VMA allocator, the frame ring (a monotonic *serial*, not a wrapping
+  index), the serial-keyed deferred destruction queue, the sampler cache, and debug-name
+  plumbing. Since 0.28 the queue itself is a **`QueueRuntime`** — handle, family, timeline
+  semaphore, serial counter, mutex and command pool in one struct, of which exactly one
+  (graphics) is constructed. That is the seam async compute needs: a second queue is a
+  second instance, and two timelines mean two queues never co-signal one semaphore. The
+  deletion-queue key goes through `retire_key()` for the same reason. Both windowed and headless submits advance the same ring. Since 0.15 any
   number of Contexts may be alive: **every device-level `vk*` call goes through
   `ctx.vk()`**, and `create_instance_` calls `volkLoadInstanceOnly`, so the device-level
   globals stay null and a call site that skipped the table crashes instead of silently
@@ -135,16 +138,27 @@ The layering exists so nothing below `Renderer.hpp` knows swapchains exist.
   depth attachment, extent, and the layout the result must end in. `OffscreenTarget`,
   `SubresourceTarget` (`target.layer(i, mip=)`), `MultiviewTarget`
   (`target.all_layers()`) and `SwapchainRenderer` all implement it, which is why the same
-  pipeline and command buffer work against a window, an offscreen image, or one cube face.
-  `begin_rendering` **infers** subresource/multiview/viewport from the target — no knobs on
-  the verb.
-- **`CommandBuffer.hpp`** — records *lambdas taking a `FrameContext`* and replays them on
-  every submit, so one recording serves any target and any frame slot.
-- **`ResourceTracker.hpp`** — record-time hazard tracking that inserts barriers
-  automatically (`Context(auto_barriers=False)` hands it all to `cmd.barrier()`). Attachment
-  layout transitions are the RenderTarget contract and stay automatic regardless. Known
-  ceiling: no SPIR-V reflection, so SSBO/`imageStore` writes from *graphics* shaders are
-  untracked (debt #3).
+  pipeline and pass work against a window, an offscreen image, or one cube face. A render
+  pass **infers** subresource/multiview/viewport from the target — no knobs on the verb.
+- **`Graph.hpp`** — THE way to describe work since 0.28. A `Graph` holds `Pass` objects in
+  add order (never reordered), owns one `VkCommandBuffer` per ring slot, and compiles the
+  barriers for the whole frame at the first submit after anything changed. `Graph::compile_`
+  folds every enabled pass's `UseEvent`s through ONE `ResourceTracker`: a use inside the
+  graph names its real predecessor and gets an exact edge, a render pass's barriers all go
+  into its entry batch (one merged `vkCmdPipelineBarrier`), and the **look-ahead** elides
+  the attachment retire/re-enter between two consecutive passes on one target when the
+  second preserves. `Graph::execute` replays it. A `Pass` is a handle: `with` seals it,
+  `p.enabled` and `g.remove(p)` recompile without re-recording.
+- **`CommandBuffer.hpp`** — the engine *behind* a Pass, and nothing else since 0.28: it
+  records *lambdas taking a `FrameContext`*, reports what they touch to the graph's event
+  sink, and owns the query pools. It computes no barrier — it cannot, because whatever
+  wrote what this pass reads was recorded by a different recorder.
+- **`ResourceTracker.hpp`** — the hazard state machine the graph's fold drives (it used to
+  run per recording). Its first-use floors now answer for writers OUTSIDE the graph —
+  another graph, or the previous frame — which is the 0.24 argument one level up.
+  `add_pass(auto_barriers=False)` hands one pass's hazards to `p.barrier()`, and those
+  barriers still feed the fold. Attachment layout transitions are the compile's job and
+  stay automatic regardless.
 - **`Features.hpp`** — optional GPU capabilities addressed by what they *do*, never by
   version or extension name. Vulkan 1.2 baseline; on 1.2 devices the dynamic-rendering
   entry points are loaded under KHR names and aliased onto the core symbols
@@ -160,10 +174,12 @@ The layering exists so nothing below `Renderer.hpp` knows swapchains exist.
   contract (`ShaderError` must be catchable alone or hot reload is pointless).
 
 Since 0.20 the binding layer is `src/bindings/`, one file per subject
-(`Enums`/`Resources`/`Pipelines`/`Commands`/`Windowing`/`ContextBind`/`Targets`), plus
-`Common.hpp` for what they share and `Pch.hpp` for the third-party headers. `main.cpp` is
-only the `PYBIND11_MODULE` and the seven calls, **in an order that is load-bearing** — the
-comments there say why. A new binding goes in the file that owns its subject; a new shared
+(`Enums`/`Resources`/`Pipelines`/`Commands`/`Graphs`/`Windowing`/`ContextBind`/`Targets`),
+plus `Common.hpp` for what they share and `Pch.hpp` for the third-party headers.
+`Commands.cpp` binds `Pass` (the verbs) and `Graphs.cpp` binds `Graph`/`Queue`/`Serial`.
+`main.cpp` is only the `PYBIND11_MODULE` and the eight calls, **in an order that is
+load-bearing** — the comments there say why, and `bind_commands` must precede
+`bind_graphs` because `add_pass` returns the class the first one registers. A new binding goes in the file that owns its subject; a new shared
 helper goes in `Common.hpp` and must be `inline`, never an anonymous namespace (each TU
 would get its own copy of the `exc_*` handles and `raise_error` would go through a null
 one — it links and crashes at runtime).
@@ -199,7 +215,8 @@ one — it links and crashes at runtime).
 - **API design rules** (from `DESIGN.md`, they settle most arguments): one obvious way per
   thing — a new resource variant differing by one parameter is a kwarg on the existing
   function, not a new name (`create_image(..., cube=True)`); never cap the ceiling (leave an
-  escape hatch like `cmd.barrier()` / `raw_extensions`); must run on >90% of machines
+  escape hatch like a manual pass with `p.barrier()`, `submit(after=)`, `raw_extensions`);
+  must run on >90% of machines
   (1.2 baseline + additive `Feature` negotiation); when a Vulkan primitive is an
   index/handle, return a handle and read results off it — no string keys.
 - Releases go on a `release/X.Y.Z` branch, one minor = one big feature + small related
