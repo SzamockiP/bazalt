@@ -1854,6 +1854,33 @@ pair and its `with` sugar — are gone, and a frame is a `Graph` of `Pass` objec
   the submit's whole GPU duration. Harmless enough to survive several releases with one
   queue; with two it would throttle the second one for no reason.
 
+- **An attachment write has to reach the fold, and for a while it did not** (0.28). The
+  three defects the release review found were one root: a render pass writes its
+  attachments, that write is not a descriptor use, and nothing reported it. So the fold did
+  not know a pass had written its target, a later pass sampling `target.color[0]` found no
+  predecessor, and render-into-a-texture-then-sample — a G-buffer, a post-process chain,
+  the most ordinary thing a frame does — ran with no barrier. Two more fell out of the same
+  hole: the colour retire named no destination scope (a layout transition is a write, so
+  the next reader was unsynchronized against the transition itself), and a preserving pass
+  built its entry transition from `final_layout()` even when something in between had moved
+  the image.
+
+  **What is worth keeping is how they survived, because the suite was green over all
+  three.** Every render-then-sample test in the suite reached that shape through TWO
+  graphs, where the cross-graph floor covers it — the floors are conservative, so the
+  uncovered case was exactly the one the graph was supposed to make BETTER. A test suite
+  that grew alongside a per-recording tracker tests per-recording shapes, and porting it
+  faithfully preserved that bias. They were found by attacking the compile on purpose,
+  with the code as the input rather than the tests.
+
+  **Two rules come out of it.** First: when a feature moves a boundary, the tests that
+  cross the old boundary are the ones to write, not the ones to port — the port is what
+  keeps the old bias. Second, on the referee: core validation cannot see a MISSING barrier,
+  so two of the three regression tests had to build a sync-validation Context of their own,
+  and each was proved to fail against the unfixed build before being kept. The 0.24 lesson
+  ("a test that passes against the unfixed build is a test of something else") applied
+  twice in one release.
+
 - **A timer measures ONE pass** (0.28). `cmd.timer()` could span several rendering scopes,
   because the recording was the unit; `p.timer()` belongs to the pass that made it, because
   the pass is. Found by porting `examples/34_showcase`, whose title bar reported one number

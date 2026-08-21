@@ -84,6 +84,19 @@ themselves.
   measure a group of passes, make one timer in each pass and add the results.
   `examples/34_showcase` does this for its nine post-processing passes.
 
+### Fixed
+- **A pass that samples what an earlier pass rendered now gets its barrier.**
+  A render pass writes its attachments, but that write is not a descriptor
+  use, so nothing told the graph about it. The graph then found no earlier
+  writer for the image, and put no barrier before the read. This is what a
+  G-buffer and a post-process chain do, so it is the common case. It also
+  covers the two other faults with the same cause: the retire of a colour
+  attachment named no reader, and a pass that keeps an attachment took its
+  layout from the render target even when another pass had moved the image.
+- **A barrier on a depth image names the depth aspect.** It named the colour
+  aspect, which the validation layers refuse. A pass that samples the depth
+  another pass rendered reaches this.
+
 ### Notes
 - **Two passes that render into one target no longer change the layout of the
   attachment back and forth.** `DESIGN.md` carried this as a cost with a price
