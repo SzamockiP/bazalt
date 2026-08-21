@@ -84,6 +84,18 @@ themselves.
   measure a group of passes, make one timer in each pass and add the results.
   `examples/34_showcase` does this for its nine post-processing passes.
 
+### Examples
+- **42_pass_toggles** builds the graph one time and never records again. Keys
+  switch two effect passes on and off, and one key takes a pass out of the
+  graph for good. The animation rides a DYNAMIC uniform buffer, which is what
+  lets an animated frame need no rebuild.
+- **43_manual_barriers** puts one `auto_barriers=False` pass between two
+  automatic ones and writes that pass's barriers by hand. It runs headless,
+  builds the same chain both ways, and checks that the numbers agree with
+  sync validation watching.
+- **44_submit_order** shows `Serial`, `after=` and `ctx.wait(serial)`. It runs
+  the same chain blocking and asynchronous, and prints what each costs.
+
 ### Fixed
 - **A pass that samples what an earlier pass rendered now gets its barrier.**
   A render pass writes its attachments, but that write is not a descriptor

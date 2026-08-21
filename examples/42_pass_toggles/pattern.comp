@@ -1,0 +1,18 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
+// A DYNAMIC uniform buffer rather than a push constant, because this example
+// builds the graph ONCE: buf.update() writes the next frame's slot and the
+// recorded pass reads whichever slot the frame is on, so an animated frame
+// needs no re-recording at all.
+layout(set = 0, binding = 1) uniform Frame { float time; } frame;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(img);
+    if (p.x >= sz.x || p.y >= sz.y) return;
+
+    vec2 uv = vec2(p) / vec2(sz);
+    float rings = 0.5 + 0.5 * sin(30.0 * length(uv - 0.5) - frame.time * 2.0);
+    imageStore(img, p, vec4(vec3(0.35, 0.6, 0.9) * rings, 1.0));
+}
