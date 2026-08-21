@@ -24,11 +24,6 @@ CLEAR = [0.1, 0.2, 0.3, 1.0]
 CLEAR_RGB = np.array([26, 51, 77])
 
 
-@pytest.fixture
-def fullscreen_vert(ctx):
-    return ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
-
-
 def submit_and_read(ctx, target, record):
     """Record commands via `record(cmd)`, submit, and read the target back."""
     cmd = ctx.create_command_buffer()

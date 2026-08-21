@@ -1,5 +1,25 @@
 #include "Bindings.hpp"
 
+namespace
+{
+    // The half of a QueryHandle binding the two instantiations share; the caller
+    // chains the reading property, which is the only difference between them.
+    template <typename Handle>
+    py::class_<Handle, std::shared_ptr<Handle>> bind_query_handle(py::module_& m, const char* name)
+    {
+        return py::class_<Handle, std::shared_ptr<Handle>>(m, name)
+            .def("stop", [](Handle& self) { self.stop(); })
+            .def("__enter__", [](std::shared_ptr<Handle> self) { return self; })
+            .def(
+                "__exit__",
+                [](Handle& self, const py::object&, const py::object&, const py::object&)
+                {
+                    self.stop();
+                    return false; // never swallow exceptions
+                });
+    }
+} // namespace
+
 void bind_commands(py::module_& m)
 {
     // Every recording method returns the command buffer itself, so the two
@@ -8,20 +28,20 @@ void bind_commands(py::module_& m)
     // and the statement-per-line style both work. The lambdas return the
     // shared_ptr self (not the C++ reference) so pybind hands back the SAME
     // Python object — `cmd.draw(3) is cmd`.
-    py::class_<CommandBuffer, std::shared_ptr<CommandBuffer>>(m, "CommandBuffer")
-        .def(
-            "begin",
-            [](std::shared_ptr<CommandBuffer> self)
-            {
-                self->begin();
-                return self;
-            })
+    auto cmd = py::class_<CommandBuffer, std::shared_ptr<CommandBuffer>>(m, "CommandBuffer");
+    cmd.def(
+           "begin",
+           [](std::shared_ptr<CommandBuffer> self)
+           {
+               self->begin();
+               return self;
+           })
         // The target is required. begin_rendering() silently meaning "the
         // swapchain" made presentation a special case disguised as the default.
         .def(
             "begin_rendering",
             [](std::shared_ptr<CommandBuffer> self,
-               std::shared_ptr<RenderTarget> target,
+               const std::shared_ptr<RenderTarget>& target,
                const py::object& clear_color,
                float clear_depth,
                std::uint32_t clear_stencil)
@@ -30,7 +50,7 @@ void bind_commands(py::module_& m)
                 require_sliced_when_3d(*target, "begin_rendering");
                 auto clears = parse_clear_colors(clear_color);
                 require_preservable(*target, !clears.has_value(), "begin_rendering");
-                self->begin_rendering(std::move(target), clears, clear_depth, clear_stencil);
+                self->begin_rendering(target, clears, clear_depth, clear_stencil);
                 return self;
             },
             py::arg("target"),
@@ -39,9 +59,9 @@ void bind_commands(py::module_& m)
             py::arg("clear_stencil") = 0)
         .def(
             "end_rendering",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<RenderTarget> target)
+            [](std::shared_ptr<CommandBuffer> self, const std::shared_ptr<RenderTarget>& target)
             {
-                self->end_rendering(std::move(target));
+                self->end_rendering(target);
                 return self;
             },
             py::arg("target"))
@@ -61,7 +81,11 @@ void bind_commands(py::module_& m)
                 auto clears = parse_clear_colors(clear_color);
                 require_preservable(*target, !clears.has_value(), "rendering");
                 return RenderingScope{
-                    std::move(self), std::move(target), std::move(clears), clear_depth, clear_stencil};
+                    .cmd = std::move(self),
+                    .target = std::move(target),
+                    .clear_color = std::move(clears),
+                    .clear_depth = clear_depth,
+                    .clear_stencil = clear_stencil};
             },
             py::arg("target"),
             py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f),
@@ -84,7 +108,7 @@ void bind_commands(py::module_& m)
         .def(
             "label",
             [](std::shared_ptr<CommandBuffer> self, std::string name)
-            { return LabelScope{std::move(self), std::move(name)}; },
+            { return LabelScope{.cmd = std::move(self), .name = std::move(name)}; },
             py::arg("name"))
         .def(
             "begin_label",
@@ -141,29 +165,29 @@ void bind_commands(py::module_& m)
             py::arg("height"))
         .def(
             "bind_pipeline",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Pipeline> pipeline)
+            [](std::shared_ptr<CommandBuffer> self, const std::shared_ptr<Pipeline>& pipeline)
             {
                 require_same_context(self->owner(), pipeline->owner(), "bind_pipeline");
-                self->bind_pipeline(std::move(pipeline));
+                self->bind_pipeline(pipeline);
                 return self;
             },
             py::arg("pipeline"))
         .def(
             "bind_vertex_buffer",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, std::uint32_t binding)
+            [](std::shared_ptr<CommandBuffer> self, const std::shared_ptr<Buffer>& buffer, std::uint32_t binding)
             {
                 require_same_context(self->owner(), buffer->owner(), "bind_vertex_buffer");
-                self->bind_vertex_buffer(std::move(buffer), binding);
+                self->bind_vertex_buffer(buffer, binding);
                 return self;
             },
             py::arg("buffer"),
             py::arg("binding") = 0)
         .def(
             "bind_index_buffer",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer)
+            [](std::shared_ptr<CommandBuffer> self, const std::shared_ptr<Buffer>& buffer)
             {
                 require_same_context(self->owner(), buffer->owner(), "bind_index_buffer");
-                self->bind_index_buffer(std::move(buffer));
+                self->bind_index_buffer(buffer);
                 return self;
             },
             py::arg("buffer"))
@@ -203,29 +227,38 @@ void bind_commands(py::module_& m)
             },
             py::arg("group_count_x"),
             py::arg("group_count_y") = 1,
-            py::arg("group_count_z") = 1)
-        // Indirect draw/dispatch: the arguments come out of a storage buffer the
-        // GPU can write, so a compute pass decides what gets drawn. Chaining is
-        // preserved (return self) even though these are fallible — unwrap raises,
-        // and a successful call keeps reading like every other recording verb.
-        .def(
-            "draw_indirect",
-            [](std::shared_ptr<CommandBuffer> self,
-               std::shared_ptr<Buffer> buffer,
-               VkDeviceSize offset,
-               std::uint32_t count,
-               std::shared_ptr<Buffer> count_buffer,
-               VkDeviceSize count_offset,
-               std::uint32_t stride)
+            py::arg("group_count_z") = 1);
+    // Indirect draw/dispatch: the arguments come out of a storage buffer the
+    // GPU can write, so a compute pass decides what gets drawn. Chaining is
+    // preserved (return self) even though these are fallible — unwrap raises,
+    // and a successful call keeps reading like every other recording verb.
+    //
+    // The two draw verbs are one loop: same signature, same guards, only the
+    // member called differs.
+    using IndirectDraw = std::expected<void, Error> (CommandBuffer::*)(
+        std::shared_ptr<Buffer>, VkDeviceSize, std::uint32_t, std::shared_ptr<Buffer>, VkDeviceSize, std::uint32_t);
+    for (auto [name, verb] : std::initializer_list<std::pair<const char*, IndirectDraw>>{
+             {"draw_indirect", &CommandBuffer::draw_indirect},
+             {"draw_indexed_indirect", &CommandBuffer::draw_indexed_indirect}})
+    {
+        cmd.def(
+            name,
+            [name, verb](
+                std::shared_ptr<CommandBuffer> self,
+                std::shared_ptr<Buffer> buffer,
+                VkDeviceSize offset,
+                std::uint32_t count,
+                std::shared_ptr<Buffer> count_buffer,
+                VkDeviceSize count_offset,
+                std::uint32_t stride)
             {
-                require_same_context(self->owner(), buffer->owner(), "draw_indirect");
+                require_same_context(self->owner(), buffer->owner(), name);
                 if (count_buffer)
                 {
-                    require_same_context(self->owner(), count_buffer->owner(), "draw_indirect");
+                    require_same_context(self->owner(), count_buffer->owner(), name);
                 }
                 unwrap(
-                    self->draw_indirect(
-                        std::move(buffer), offset, count, std::move(count_buffer), count_offset, stride),
+                    ((*self).*verb)(std::move(buffer), offset, count, std::move(count_buffer), count_offset, stride),
                     nullptr);
                 return self;
             },
@@ -234,44 +267,18 @@ void bind_commands(py::module_& m)
             py::arg("count") = 1,
             py::arg("count_buffer") = py::none(),
             py::arg("count_offset") = 0,
-            py::arg("stride") = 0)
-        .def(
-            "draw_indexed_indirect",
-            [](std::shared_ptr<CommandBuffer> self,
-               std::shared_ptr<Buffer> buffer,
-               VkDeviceSize offset,
-               std::uint32_t count,
-               std::shared_ptr<Buffer> count_buffer,
-               VkDeviceSize count_offset,
-               std::uint32_t stride)
-            {
-                require_same_context(self->owner(), buffer->owner(), "draw_indexed_indirect");
-                if (count_buffer)
-                {
-                    require_same_context(self->owner(), count_buffer->owner(), "draw_indexed_indirect");
-                }
-                unwrap(
-                    self->draw_indexed_indirect(
-                        std::move(buffer), offset, count, std::move(count_buffer), count_offset, stride),
-                    nullptr);
-                return self;
-            },
-            py::arg("buffer"),
-            py::arg("offset") = 0,
-            py::arg("count") = 1,
-            py::arg("count_buffer") = py::none(),
-            py::arg("count_offset") = 0,
-            py::arg("stride") = 0)
-        .def(
-            "dispatch_indirect",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, VkDeviceSize offset)
-            {
-                require_same_context(self->owner(), buffer->owner(), "dispatch_indirect");
-                unwrap(self->dispatch_indirect(std::move(buffer), offset), nullptr);
-                return self;
-            },
-            py::arg("buffer"),
-            py::arg("offset") = 0)
+            py::arg("stride") = 0);
+    }
+    cmd.def(
+           "dispatch_indirect",
+           [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, VkDeviceSize offset)
+           {
+               require_same_context(self->owner(), buffer->owner(), "dispatch_indirect");
+               unwrap(self->dispatch_indirect(std::move(buffer), offset), nullptr);
+               return self;
+           },
+           py::arg("buffer"),
+           py::arg("offset") = 0)
         .def(
             "barrier",
             [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, Access src, Access dst)
@@ -388,7 +395,7 @@ void bind_commands(py::module_& m)
             {
                 require_same_context(self->owner(), image->owner(), "clear_image");
                 std::array<float, 4> rgba{0.0f, 0.0f, 0.0f, 1.0f};
-                py::sequence seq = py::cast<py::sequence>(color);
+                auto seq = py::cast<py::sequence>(color);
                 for (std::size_t i = 0; i < 4 && i < py::len(seq); ++i)
                 {
                     rgba[i] = py::cast<float>(seq[i]);
@@ -403,12 +410,12 @@ void bind_commands(py::module_& m)
         .def(
             "push_constants",
             [](std::shared_ptr<CommandBuffer> self,
-               std::shared_ptr<Pipeline> pipeline,
+               const std::shared_ptr<Pipeline>& pipeline,
                uint32_t offset,
                std::string_view data)
             {
                 require_same_context(self->owner(), pipeline->owner(), "push_constants");
-                self->push_constants(std::move(pipeline), offset, static_cast<uint32_t>(data.size()), data.data());
+                self->push_constants(pipeline, offset, static_cast<uint32_t>(data.size()), data.data());
                 return self;
             },
             py::arg("pipeline"),
@@ -429,13 +436,13 @@ void bind_commands(py::module_& m)
         .def(
             "bind_descriptor_set",
             [](std::shared_ptr<CommandBuffer> self,
-               std::shared_ptr<DescriptorSet> descriptor_set,
-               std::shared_ptr<Pipeline> pipeline,
+               const std::shared_ptr<DescriptorSet>& descriptor_set,
+               const std::shared_ptr<Pipeline>& pipeline,
                uint32_t set)
             {
                 require_same_context(self->owner(), descriptor_set->owner(), "bind_descriptor_set");
                 require_same_context(self->owner(), pipeline->owner(), "bind_descriptor_set");
-                self->bind_descriptor_set(std::move(descriptor_set), std::move(pipeline), set);
+                self->bind_descriptor_set(descriptor_set, pipeline, set);
                 return self;
             },
             py::arg("descriptor_set"),
@@ -448,10 +455,10 @@ void bind_commands(py::module_& m)
         // cannot collide.
         .def(
             "bind_descriptor_set",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<DescriptorSet> descriptor_set)
+            [](std::shared_ptr<CommandBuffer> self, const std::shared_ptr<DescriptorSet>& descriptor_set)
             {
                 require_same_context(self->owner(), descriptor_set->owner(), "bind_descriptor_set");
-                unwrap(self->bind_descriptor_set(std::move(descriptor_set)), nullptr);
+                unwrap(self->bind_descriptor_set(descriptor_set), nullptr);
                 return self;
             },
             py::arg("descriptor_set"));
@@ -470,7 +477,7 @@ void bind_commands(py::module_& m)
             })
         .def(
             "__exit__",
-            [](RecordScope&, py::object, py::object, py::object)
+            [](RecordScope&, const py::object&, const py::object&, const py::object&)
             {
                 return false; // never swallow exceptions
             });
@@ -485,7 +492,7 @@ void bind_commands(py::module_& m)
             })
         .def(
             "__exit__",
-            [](RenderingScope& self, py::object, py::object, py::object)
+            [](RenderingScope& self, const py::object&, const py::object&, const py::object&)
             {
                 self.cmd->end_rendering(self.target);
                 return false; // never swallow exceptions
@@ -501,25 +508,21 @@ void bind_commands(py::module_& m)
             })
         .def(
             "__exit__",
-            [](LabelScope& self, py::object, py::object, py::object)
+            [](LabelScope& self, const py::object&, const py::object&, const py::object&)
             {
                 self.cmd->end_label();
                 return false; // never swallow exceptions
             });
 
-    py::class_<OcclusionQuery, std::shared_ptr<OcclusionQuery>>(m, "OcclusionQuery")
-        .def("stop", [](OcclusionQuery& self) { self.stop(); })
-        .def("__enter__", [](std::shared_ptr<OcclusionQuery> self) { return self; })
-        .def(
-            "__exit__",
-            [](OcclusionQuery& self, py::object, py::object, py::object)
-            {
-                self.stop();
-                return false; // never swallow exceptions
-            })
-        // None means one thing now: the submit has not finished. A stale handle
-        // raises instead — see the Timer below for the argument, which is the
-        // same one.
+    // The stop/__enter__/__exit__ trio is the shared QueryHandle contract; the
+    // reading property below each call is the only difference between the two.
+    //
+    // Three answers, three shapes, on both readers. UnsupportedError when the
+    // device cannot answer at all, StateError when the handle predates a
+    // begin(), and None only for "the submit is still running". They used to be
+    // one nullopt, and a caller could not tell "wait longer" from "this GPU
+    // cannot" — which are opposite reactions.
+    bind_query_handle<OcclusionQuery>(m, "OcclusionQuery")
         .def_property_readonly(
             "samples",
             [](const OcclusionQuery& self) -> py::object
@@ -533,21 +536,7 @@ void bind_commands(py::module_& m)
                 return py::cast(reading.samples);
             });
 
-    py::class_<Timer, std::shared_ptr<Timer>>(m, "Timer")
-        .def("stop", [](Timer& self) { self.stop(); })
-        .def("__enter__", [](std::shared_ptr<Timer> self) { return self; })
-        .def(
-            "__exit__",
-            [](Timer& self, py::object, py::object, py::object)
-            {
-                self.stop();
-                return false; // never swallow exceptions
-            })
-        // Three answers, three shapes. UnsupportedError when the device has no
-        // usable timestamps, StateError when the handle predates a begin(), and
-        // None only for "the submit is still running". They used to be one
-        // nullopt, and a caller could not tell "wait longer" from "this GPU
-        // cannot" — which are opposite reactions.
+    bind_query_handle<Timer>(m, "Timer")
         .def_property_readonly(
             "ms",
             [](const Timer& self) -> py::object

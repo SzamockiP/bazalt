@@ -4,10 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-**bazalt** — a Python library for rapid GPU/shader prototyping on Vulkan. A header-only
-C++23 core in `src/` compiled into a single pybind11 extension (`bazalt._core`), plus a
-thin Python package in `bazalt/` that only re-exports it. Built with scikit-build-core +
-CMake; glfw/volk/VMA/vk-bootstrap/stb come in via `FetchContent`.
+**bazalt** — a Python library for rapid GPU/shader prototyping on Vulkan. A C++23 core in
+`src/` compiled into a single pybind11 extension (`bazalt._core`), plus a thin Python
+package in `bazalt/` that only re-exports it. Built with scikit-build-core + CMake;
+glfw/volk/VMA/vk-bootstrap/stb come in via `FetchContent`.
+
+The core was header-only until 0.27 and is now `.hpp` + `.cpp` pairs — a header holds the
+class, the short accessors, the templates and the API comments; the `.cpp` holds the bodies
+and the comments that explain them. **A new `.cpp` in `src/` must be added to the
+`add_library(_core MODULE ...)` list in `CMakeLists.txt`**, or its symbols link-fail with no
+other warning. Small headers (`Format`, `Error`, `Device`, `Sampler`, `ScopeGuard`,
+`ResourceTracker`, `SpirvReflect`, `Logger`, `Features`, `ImmediateSubmit`, `HotReload`)
+stay header-only on purpose. See DESIGN.md for why the split happened at all.
 
 Note: the working directory is still named `lumapy` and `origin` still points at
 `lumapy.git` (redirects); the project and the GitHub repo are `SzamockiP/bazalt`.
@@ -48,9 +56,40 @@ before pushing — the same command the `format` job runs:
 clang-format --dry-run -Werror src/*.hpp src/*.cpp src/bindings/*.hpp src/bindings/*.cpp
 ```
 
-Which public symbols no test touches (0.22, the input to the 1.0 test push). Writes
-`api_coverage.md` and fails on an untouched symbol that is not in
-`tests/api_coverage_baseline.txt`, which is what catches a binding shipped without a test.
+Since 0.27 two more gates run in CI. **clang-tidy** (`.clang-tidy` at the root, pinned to
+20.1) analyses the first-party TUs; the house rule is that a check and the code disagreeing
+means **the code changes** (the `py::class_` registrations got names rather than a `NOLINT`),
+that a check which only PARTLY misfires gets narrowed rather than switched off, and that
+every disabled or narrowed entry in the config names its reason. Do not disable a check
+before you have seen it fire — the 0.27 plan wanted `modernize-make-shared` off and the check
+turned out to have nothing to say about a private constructor behind a factory.
+
+**Its `--fix` output is a suggestion, not a patch.** The 0.27 run produced an extra
+parenthesis in three `modernize-use-integer-sign-comparison` rewrites and a variable named
+`give_me_a_name` four times. Build and run the suite after every `--fix`, and read the diff.
+Running `--fix` twice over the same file also duplicates the includes it inserts.
+
+A local Windows run reports two findings CI does not: MSVC deprecates `getenv` (glibc does
+not), and the two call sites in `Context.cpp` are the negotiation knobs. `std::getenv` is
+the portable spelling and stays; `_dupenv_s` is a Microsoft extension.
+**ruff** checks the Python side with an explicit rule set (its defaults move between
+versions). Locally:
+
+```bash
+venv/Scripts/python.exe -m ruff check .
+```
+
+clang-tidy needs a compile database, which the normal scikit-build build does not leave on
+disk. The CI recipe is in `.github/workflows/build.yml` (`tidy` job); locally it needs a
+Ninja configure with `-DSKBUILD_PROJECT_NAME=bazalt` (the project is named from a
+scikit-build variable) and `-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON` (clang-tidy cannot read
+the MSVC/GCC PCH flags).
+
+Which public symbols no test touches (0.22, the input to the 1.0 test push). Fails on an
+untouched symbol that is not in `tests/api_coverage_baseline.txt`, which is what catches a
+binding shipped without a test. Since 0.27 it counts CALLABLES only — enum members and
+exception classes could only ever be matched by a name scan, which counted a mention in a
+comment as a use.
 It needs a run with **no skips** — a skipped test is a symbol nobody called on this machine,
 not a symbol nobody tested — so the gate is live on a developer GPU and silent in CI.
 Regenerate the baseline with `BAZALT_WRITE_API_BASELINE=1`:

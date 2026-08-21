@@ -1,9 +1,28 @@
 #include "Bindings.hpp"
 
+namespace
+{
+    py::tuple tuple_of(const auto& items)
+    {
+        py::tuple out(items.size());
+        for (size_t i = 0; i < items.size(); ++i)
+        {
+            out[i] = py::cast(items[i]);
+        }
+        return out;
+    }
+} // namespace
+
 void bind_targets(py::module_& m)
 {
     // ── RenderTarget ──
-    py::class_<RenderTarget, std::shared_ptr<RenderTarget>>(m, "RenderTargetBase");
+    //
+    // These three registrations are all a py::class_ CONSTRUCTOR does — the type
+    // appears in Python, and there is nothing to chain onto it. They are named
+    // rather than left as discarded temporaries because bugprone-unused-raii
+    // cannot tell this from `std::lock_guard(mutex);`, which is a real bug.
+    [[maybe_unused]] const py::class_<RenderTarget, std::shared_ptr<RenderTarget>> render_target_base(
+        m, "RenderTargetBase");
 
     // No py::init since 0.23: a target comes from ctx.create_render_target(),
     // like every other resource the Context owns. The class stays a type — it
@@ -14,17 +33,7 @@ void bind_targets(py::module_& m)
         .def_property_readonly("height", [](const OffscreenTarget& t) { return t.extent().height; })
         // The attachments are ordinary Images — this is the whole
         // render-to-texture API: target.color[0] / target.depth into set_image.
-        .def_property_readonly(
-            "color",
-            [](const OffscreenTarget& t)
-            {
-                py::tuple out(t.colors().size());
-                for (size_t i = 0; i < t.colors().size(); ++i)
-                {
-                    out[i] = py::cast(t.colors()[i]);
-                }
-                return out;
-            })
+        .def_property_readonly("color", [](const OffscreenTarget& t) { return tuple_of(t.colors()); })
         .def_property_readonly(
             "depth",
             [](const OffscreenTarget& t) -> py::object { return t.depth() ? py::cast(t.depth()) : py::none(); })
@@ -33,16 +42,7 @@ void bind_targets(py::module_& m)
         // unless samples > 1, and `color` / `depth` above stay the resolve — the
         // images almost everything wants.
         .def_property_readonly(
-            "multisampled_color",
-            [](const OffscreenTarget& t)
-            {
-                py::tuple out(t.multisampled_colors().size());
-                for (size_t i = 0; i < t.multisampled_colors().size(); ++i)
-                {
-                    out[i] = py::cast(t.multisampled_colors()[i]);
-                }
-                return out;
-            })
+            "multisampled_color", [](const OffscreenTarget& t) { return tuple_of(t.multisampled_colors()); })
         .def_property_readonly(
             "multisampled_depth",
             [](const OffscreenTarget& t) -> py::object
@@ -58,21 +58,25 @@ void bind_targets(py::module_& m)
         // spellings look like a coordinate.
         .def(
             "layer",
-            [](std::shared_ptr<OffscreenTarget> self, std::uint32_t index, std::uint32_t mip)
+            [](const std::shared_ptr<OffscreenTarget>& self, std::uint32_t index, std::uint32_t mip)
             { return unwrap(self->layer(index, mip), nullptr); },
             py::arg("index"),
             py::kw_only(),
             py::arg("mip") = 0)
         // Multiview: one pass into every layer (the shader uses gl_ViewIndex).
-        .def("all_layers", [](std::shared_ptr<OffscreenTarget> self) { return unwrap(self->all_layers(), nullptr); });
+        .def(
+            "all_layers",
+            [](const std::shared_ptr<OffscreenTarget>& self) { return unwrap(self->all_layers(), nullptr); });
 
     // Registered so pybind's automatic downcasting (the base is polymorphic)
     // returns a NAMED type from layer() / all_layers() above — until 0.23 both
     // came back as opaque RenderTargetBase, so nothing could be said about them
     // in the stub. No methods: each is a view that exists to be handed to
     // cmd.rendering(...), and the parent keeps every knob.
-    py::class_<SubresourceTarget, RenderTarget, std::shared_ptr<SubresourceTarget>>(m, "SubresourceTarget");
-    py::class_<MultiviewTarget, RenderTarget, std::shared_ptr<MultiviewTarget>>(m, "MultiviewTarget");
+    [[maybe_unused]] const py::class_<SubresourceTarget, RenderTarget, std::shared_ptr<SubresourceTarget>>
+        subresource_target(m, "SubresourceTarget");
+    [[maybe_unused]] const py::class_<MultiviewTarget, RenderTarget, std::shared_ptr<MultiviewTarget>> multiview_target(
+        m, "MultiviewTarget");
 
     // Also constructor-free since 0.23: ctx.create_renderer(window) makes one.
     py::class_<SwapchainRenderer, RenderTarget, std::shared_ptr<SwapchainRenderer>>(m, "SwapchainRenderer")

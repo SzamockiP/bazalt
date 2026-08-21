@@ -2,52 +2,42 @@
 
 `test_stubs.py` proves the stub and the module agree about what EXISTS. This
 answers the other question, the one "What 1.0 means" asks in DESIGN.md: which
-public symbols does no test ever use. Run it with `--api-coverage`, read
-`api_coverage.md`, and the untouched list is the test plan.
+public symbols does no test ever use. Run it with `--api-coverage`; the gate in
+conftest.py fails on an untouched symbol that is not in the baseline file.
 
-Two mechanisms, because the surface is two kinds of thing.
+The census counts what can be CALLED — methods, properties, module functions.
+Every one is replaced at session start with a wrapper that records the call and
+forwards. This is exact: it separates `Buffer.update` from `Image.update`,
+which is the distinction a text search cannot make. (The first attempt used
+`sys.setprofile`, which is wrong for pybind11: a bound pybind11 method is a
+plain `method` around a custom function record, not a `PyCFunction`, so the
+interpreter emits no `c_call` event for it.)
 
-Callables — methods, properties, constructors, module functions — are measured
-by RUNNING them. Every one is replaced at session start with a wrapper that
-records the call and forwards. This is exact: it separates `Buffer.update` from
-`Image.update`, which is the distinction a text search cannot make. The first
-attempt used `sys.setprofile`, which is wrong for pybind11: a bound pybind11
-method is a plain `method` around a custom function record, not a `PyCFunction`,
-so the interpreter emits no `c_call` event for it and only module-level
-functions would have been seen.
-
-Enum members are read, never called, so nothing can wrap them. They are matched
-by NAME against the identifiers in the test sources. `test_stubs.py` is excluded
-from that scan: it carries about 110 API names as string literals, and every one
-of them would count as a use.
-
-Two things are deliberately outside the count, both since 0.23 and both for the
-same reason — they made the number argue with itself. See `public_surface`.
+What is NOT counted, on purpose: enum members and exception classes. Neither
+can be called, so the only available evidence was a regex scan for their names
+in the test sources — a mention in a comment counted as a use, and 0.27 dropped
+that as measurement theater. `test_stubs.py` already asserts they exist, and an
+exception's real test is the behavior test that raises it. A class with no
+py::init keeps its raising `__init__` slot wrapper out of the census too:
+counting it asks for a test that constructs what cannot be constructed.
 """
 
 import functools
 import pathlib
-import re
 
 import bazalt as bz
-
-# The scan reads identifiers, so a name is "used" wherever it appears. Excluded
-# because it names most of the API in string literals rather than using it.
-_SCAN_EXCLUDES = {"test_stubs.py", "test_api_coverage.py", "api_coverage.py", "conftest.py"}
 
 # Everything else that starts with an underscore is implementation.
 _DUNDERS = ("__init__", "__enter__", "__exit__")
 
-_REPORT = "api_coverage.md"
 _BASELINE = pathlib.Path(__file__).parent / "api_coverage_baseline.txt"
 
 
 def public_surface():
-    """{"Owner.member": kind} for everything reachable from `bazalt.__all__`.
+    """{"Owner.member": kind} for every callable reachable from `bazalt.__all__`.
 
     Derived, never hand-written: a binding added to `src/bindings/` and to
-    `__all__` appears here on the next run with no edit (the same rule that
-    keeps `__init__.py`'s constant list a comprehension).
+    `__all__` appears here on the next run with no edit.
     """
     surface = {}
     for name in bz.__all__:
@@ -55,39 +45,19 @@ def public_surface():
             continue
         obj = getattr(bz, name)
 
-        # The 127 KEY_*, MOUSE_* and CURSOR_* integers are NOT counted (0.23).
-        # They are the pre-enum spelling of Key, MouseButton and CursorMode,
-        # which the census counts as enum members — so counting both reports
-        # the keyboard twice, and it is the biggest number in the file either
-        # way. `test_stubs.py` already asserts every name in `__all__` exists,
-        # which is the whole of what a read-only integer can be wrong about.
-        if isinstance(obj, int) and not isinstance(obj, type):
-            continue
-
         if not isinstance(obj, type):
             surface[name] = "function"
             continue
 
-        if issubclass(obj, BaseException):
-            surface[name] = "exception"
-            continue
-
-        # An enum contributes its members and nothing else. `vars()` on one also
-        # holds pybind11's own `name`, `value` and `__members__`, which are not
-        # bazalt's API and would add 44 symbols nobody can test.
-        members = getattr(obj, "__members__", None)
-        if members is not None:
-            for member in members:
-                surface[f"{name}.{member}"] = "enum member"
+        # Exceptions and enums contribute nothing — see the module docstring.
+        if issubclass(obj, BaseException) or hasattr(obj, "__members__"):
             continue
 
         for member, value in vars(obj).items():
             if member.startswith("_") and member not in _DUNDERS:
                 continue
             # A class with no py::init still has an `__init__` in its dict: the
-            # slot wrapper pybind installs to raise TypeError. Counting it asks
-            # for a test that constructs what cannot be constructed, and 23 of
-            # the 26 untouched methods were this before 0.23 measured it.
+            # slot wrapper pybind installs to raise TypeError.
             #
             # The discriminator is the slot wrapper, not pybind's own
             # `instancemethod`, because Recorder has usually replaced a real
@@ -140,73 +110,9 @@ class Recorder:
         return wrapper
 
 
-def names_in_tests(directory):
-    """Every identifier that appears in the test sources."""
-    identifier = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-    found = set()
-    for path in pathlib.Path(directory).rglob("*.py"):
-        if path.name in _SCAN_EXCLUDES:
-            continue
-        found.update(identifier.findall(path.read_text(encoding="utf-8", errors="replace")))
-    return found
-
-
-def untouched(surface, used, identifiers):
-    """The symbols no test called and no test named."""
-    missing = []
-    for key, kind in sorted(surface.items()):
-        if kind in ("method", "property", "function"):
-            if key not in used:
-                missing.append((key, kind))
-        else:
-            # Read, not called: a mention is the only evidence available.
-            if key.rpartition(".")[2] not in identifiers:
-                missing.append((key, kind))
-    return missing
-
-
-def write_report(path, surface, missing):
-    kinds = ["method", "property", "function", "enum member", "exception"]
-    lines = [
-        f"# API coverage — bazalt {bz.__version__}",
-        "",
-        "Written by `pytest --api-coverage`. A symbol counts as touched when a test",
-        "calls it (methods, properties, functions) or names it (enum members,",
-        "exception classes). See `tests/api_coverage.py` for why the two halves are",
-        "measured differently, and for the two things it does not count.",
-        "",
-        "| Kind | Symbols | Touched | Untouched |",
-        "| --- | ---: | ---: | ---: |",
-    ]
-    missing_by_kind = {}
-    for key, kind in missing:
-        missing_by_kind.setdefault(kind, []).append(key)
-
-    for kind in kinds:
-        total = sum(1 for k in surface.values() if k == kind)
-        if not total:
-            continue
-        gone = len(missing_by_kind.get(kind, ()))
-        lines.append(f"| {kind} | {total} | {total - gone} | {gone} |")
-    total = len(surface)
-    lines.append(f"| **all** | **{total}** | **{total - len(missing)}** | **{len(missing)}** |")
-
-    lines += ["", "## Untouched", ""]
-    if not missing:
-        lines.append("Nothing. Every public symbol is used by a test.")
-    else:
-        owners = {}
-        for key, kind in missing:
-            owner = key.rpartition(".")[0] or "module"
-            owners.setdefault(owner, []).append((key, kind))
-        for owner in sorted(owners):
-            lines.append(f"### {owner}")
-            lines.append("")
-            for key, kind in owners[owner]:
-                lines.append(f"- `{key}` ({kind})")
-            lines.append("")
-
-    pathlib.Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+def untouched(surface, used):
+    """The symbols no test called."""
+    return sorted(key for key in surface if key not in used)
 
 
 def read_baseline():
@@ -229,5 +135,4 @@ def write_baseline(missing):
         "# test. Shrinking it is 1.0's work. Regenerate with",
         "# BAZALT_WRITE_API_BASELINE=1 pytest --api-coverage.",
     ]
-    body = sorted(key for key, _ in missing)
-    _BASELINE.write_text("\n".join(header + body) + "\n", encoding="utf-8")
+    _BASELINE.write_text("\n".join(header + sorted(missing)) + "\n", encoding="utf-8")

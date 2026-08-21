@@ -22,11 +22,6 @@ from conftest import SHADER_DIR
 
 
 @pytest.fixture
-def fullscreen_vert(ctx):
-    return ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
-
-
-@pytest.fixture
 def double_pipeline(ctx):
     comp = ctx.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
     return ctx.compute_pipeline().shader(comp).storage_buffer(0).build()
@@ -193,11 +188,6 @@ def test_barrier_inside_rendering_scope_is_refused(ctx, triangle_shaders, triang
     vert, frag = triangle_shaders
     vbuf, ibuf = triangle_buffers
     target = ctx.create_render_target(16, 16)
-    pipeline = (ctx.graphics_pipeline()
-                .vertex_shader(vert)
-                .fragment_shader(frag)
-                .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
-                .build(target))
     sbuf = ctx.create_buffer(np.zeros(4, dtype=np.float32),
                              bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
 

@@ -47,6 +47,7 @@ struct FormatInfo
     std::uint32_t channels;
     const char* numpy_dtype; // as understood by py::dtype(...); empty = not readable
     bool depth;
+    const char* name; // the Python spelling, for error messages
 };
 
 // The aspect an image of this format is addressed through. Views, barriers,
@@ -83,68 +84,40 @@ constexpr FormatInfo format_info(Format f)
     switch (f)
     {
         case Format::RGBA8:
-            return {VK_FORMAT_R8G8B8A8_UNORM, 4, 4, "uint8", false};
+            return {VK_FORMAT_R8G8B8A8_UNORM, 4, 4, "uint8", false, "RGBA8"};
         case Format::RGBA8_SRGB:
-            return {VK_FORMAT_R8G8B8A8_SRGB, 4, 4, "uint8", false};
+            return {VK_FORMAT_R8G8B8A8_SRGB, 4, 4, "uint8", false, "RGBA8_SRGB"};
         case Format::BGRA8:
-            return {VK_FORMAT_B8G8R8A8_UNORM, 4, 4, "uint8", false};
+            return {VK_FORMAT_B8G8R8A8_UNORM, 4, 4, "uint8", false, "BGRA8"};
         case Format::R8:
-            return {VK_FORMAT_R8_UNORM, 1, 1, "uint8", false};
+            return {VK_FORMAT_R8_UNORM, 1, 1, "uint8", false, "R8"};
         case Format::RG8:
-            return {VK_FORMAT_R8G8_UNORM, 2, 2, "uint8", false};
+            return {VK_FORMAT_R8G8_UNORM, 2, 2, "uint8", false, "RG8"};
         case Format::R16F:
-            return {VK_FORMAT_R16_SFLOAT, 2, 1, "float16", false};
+            return {VK_FORMAT_R16_SFLOAT, 2, 1, "float16", false, "R16F"};
         case Format::RGBA16F:
-            return {VK_FORMAT_R16G16B16A16_SFLOAT, 8, 4, "float16", false};
+            return {VK_FORMAT_R16G16B16A16_SFLOAT, 8, 4, "float16", false, "RGBA16F"};
         case Format::R32F:
-            return {VK_FORMAT_R32_SFLOAT, 4, 1, "float32", false};
+            return {VK_FORMAT_R32_SFLOAT, 4, 1, "float32", false, "R32F"};
         case Format::RGBA32F:
-            return {VK_FORMAT_R32G32B32A32_SFLOAT, 16, 4, "float32", false};
+            return {VK_FORMAT_R32G32B32A32_SFLOAT, 16, 4, "float32", false, "RGBA32F"};
         case Format::D32F:
-            return {VK_FORMAT_D32_SFLOAT, 4, 1, "float32", true};
+            return {VK_FORMAT_D32_SFLOAT, 4, 1, "float32", true, "D32F"};
         case Format::R32_UINT:
-            return {VK_FORMAT_R32_UINT, 4, 1, "uint32", false};
+            return {VK_FORMAT_R32_UINT, 4, 1, "uint32", false, "R32_UINT"};
         case Format::R11G11B10F:
             // Packed: three channels in one 32-bit word, so there is no numpy
             // dtype that describes a pixel. Render into it, sample it, and read
             // it back only after a shader has unpacked it into something else.
-            return {VK_FORMAT_B10G11R11_UFLOAT_PACK32, 4, 3, "", false};
+            return {VK_FORMAT_B10G11R11_UFLOAT_PACK32, 4, 3, "", false, "R11G11B10F"};
         case Format::DEPTH_STENCIL:
-            return {VK_FORMAT_UNDEFINED, 4, 1, "", true};
+            return {VK_FORMAT_UNDEFINED, 4, 1, "", true, "DEPTH_STENCIL"};
     }
-    return {VK_FORMAT_R8G8B8A8_UNORM, 4, 4, "uint8", false};
+    return {VK_FORMAT_R8G8B8A8_UNORM, 4, 4, "uint8", false, "RGBA8"};
 }
 
+// The same pattern as feature_name(): the table is the one source.
 constexpr const char* format_name(Format f)
 {
-    switch (f)
-    {
-        case Format::RGBA8:
-            return "RGBA8";
-        case Format::RGBA8_SRGB:
-            return "RGBA8_SRGB";
-        case Format::BGRA8:
-            return "BGRA8";
-        case Format::R8:
-            return "R8";
-        case Format::RG8:
-            return "RG8";
-        case Format::R16F:
-            return "R16F";
-        case Format::RGBA16F:
-            return "RGBA16F";
-        case Format::R32F:
-            return "R32F";
-        case Format::RGBA32F:
-            return "RGBA32F";
-        case Format::D32F:
-            return "D32F";
-        case Format::R32_UINT:
-            return "R32_UINT";
-        case Format::R11G11B10F:
-            return "R11G11B10F";
-        case Format::DEPTH_STENCIL:
-            return "DEPTH_STENCIL";
-    }
-    return "RGBA8";
+    return format_info(f).name;
 }

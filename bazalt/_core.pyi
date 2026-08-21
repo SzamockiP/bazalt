@@ -156,48 +156,48 @@ class Feature(IntEnum):
     #: The same for the pre-rasterization stages — vertex, tessellation, geometry
     #: (vertexPipelineStoresAndAtomics).
     VERTEX_STAGE_STORES = 11
-    #: One pass into every layer of a layered target (RenderTarget.all_layers()).
-    #: Enabled by itself wherever the device has it, so this is a question, not a
-    #: request.
-    MULTIVIEW = 12
-    #: Descriptor arrays: count= on a binding declarator, index= on set_image and
-    #: friends. Also covers indexing the array from a value that differs per
-    #: invocation (nonuniformEXT), and rewriting a descriptor while an earlier
-    #: frame still reads the set.
-    BINDLESS = 13
-    #: A draw count the GPU decides: count_buffer= on draw_indirect and
-    #: draw_indexed_indirect.
-    DRAW_INDIRECT_COUNT = 14
-    #: create_sampler(compare=), which GLSL reads as sampler2DShadow. True on every
-    #: full Vulkan driver. A Vulkan portability subset may answer False: Metal has
-    #: no mutable comparison samplers, so MoltenVK can refuse them.
-    COMPARISON_SAMPLER = 15
-    #: create_sampler(mip_lod_bias=). True on every full Vulkan driver, and a
-    #: portability subset may answer False. Where it does, bias the level in the
-    #: shader with textureLod().
-    SAMPLER_MIP_LOD_BIAS = 16
-    #: A multisampled image with layers > 1. True on every full Vulkan driver, and
-    #: a portability subset may answer False, because Metal has no multisampled
-    #: texture array.
-    MULTISAMPLE_ARRAYS = 17
-    #: Rendering into one Z slice of a 3D image (target.layer(z)). True on every
-    #: full Vulkan driver; MoltenVK answers False. Where it is False, fill the
-    #: volume with a compute shader through a storage image instead.
-    IMAGE_VIEW_2D_ON_3D = 18
     #: An occlusion query counts SAMPLES rather than answering "something
     #: passed". Without it the spec allows any non-zero value, so
     #: OcclusionQuery.samples means two different things depending on the driver
     #: — which is what this row exists to say (0.25).
-    PRECISE_OCCLUSION = 19
+    PRECISE_OCCLUSION = 12
+    #: One pass into every layer of a layered target (RenderTarget.all_layers()).
+    #: Enabled by itself wherever the device has it, so this is a question, not a
+    #: request.
+    MULTIVIEW = 13
+    #: Descriptor arrays: count= on a binding declarator, index= on set_image and
+    #: friends. Also covers indexing the array from a value that differs per
+    #: invocation (nonuniformEXT), and rewriting a descriptor while an earlier
+    #: frame still reads the set.
+    BINDLESS = 14
+    #: A draw count the GPU decides: count_buffer= on draw_indirect and
+    #: draw_indexed_indirect.
+    DRAW_INDIRECT_COUNT = 15
+    #: create_sampler(compare=), which GLSL reads as sampler2DShadow. True on every
+    #: full Vulkan driver. A Vulkan portability subset may answer False: Metal has
+    #: no mutable comparison samplers, so MoltenVK can refuse them.
+    COMPARISON_SAMPLER = 16
+    #: create_sampler(mip_lod_bias=). True on every full Vulkan driver, and a
+    #: portability subset may answer False. Where it does, bias the level in the
+    #: shader with textureLod().
+    SAMPLER_MIP_LOD_BIAS = 17
+    #: A multisampled image with layers > 1. True on every full Vulkan driver, and
+    #: a portability subset may answer False, because Metal has no multisampled
+    #: texture array.
+    MULTISAMPLE_ARRAYS = 18
+    #: Rendering into one Z slice of a 3D image (target.layer(z)). True on every
+    #: full Vulkan driver; MoltenVK answers False. Where it is False, fill the
+    #: volume with a compute shader through a storage image instead.
+    IMAGE_VIEW_2D_ON_3D = 19
+    #: Topology.TRIANGLE_FAN. True on every full Vulkan driver; MoltenVK answers
+    #: False, because Metal has no triangle fan at all. Where it is False, emit
+    #: the same shape as an indexed TRIANGLE_LIST (0.25).
+    TRIANGLE_FANS = 20
     #: Taking the display outright instead of drawing through the compositor
     #: (SwapchainRenderer.set_fullscreen_exclusive). The first Feature backed by
     #: an extension rather than a device feature bit, and Win32-only in
     #: practice, so it answers False elsewhere (0.25).
-    EXCLUSIVE_FULLSCREEN = 20
-    #: Topology.TRIANGLE_FAN. True on every full Vulkan driver; MoltenVK answers
-    #: False, because Metal has no triangle fan at all. Where it is False, emit
-    #: the same shape as an indexed TRIANGLE_LIST (0.25).
-    TRIANGLE_FANS = 21
+    EXCLUSIVE_FULLSCREEN = 21
     #: `buffer.address`, and with it a shader that reads a buffer through a
     #: `buffer_reference` pointer instead of a descriptor (0.26). What it buys is
     #: reach: a descriptor sees at most `ctx.limits.max_storage_buffer` (4 GiB on
@@ -299,7 +299,7 @@ class Topology(IntEnum):
     #: The input to a tessellation control shader: a run of patch_control_points
     #: vertices with no implied topology. Only valid with tessellation shaders,
     #: and they are only valid with this — the pipeline build checks both ways.
-    PATCH_LIST = 5
+    PATCH_LIST = 6
 
 class BlendMode(IntEnum):
     """How a fragment combines with what the attachment already holds.
@@ -552,10 +552,10 @@ class GamepadAxis(IntEnum):
 class Key(IntEnum):
     """The keyboard, the gamepad's way (0.23): the values are GLFW's own.
 
-    The bare KEY_* module ints stay valid — every query takes either. D0..D9
+    Every query takes the member or a plain int with the same value. D0..D9
     are the top-row digits (a name cannot start with one); the keypad is
-    KP_*. There is no LAST member: that is GLFW's array-size sentinel, and
-    the KEY_LAST int remains for anyone who wants it.
+    KP_*. There is no LAST member: that is GLFW's array-size sentinel, not
+    a key.
     """
     SPACE = 32
     APOSTROPHE = 39
@@ -679,7 +679,7 @@ class Key(IntEnum):
     MENU = 348
 
 class MouseButton(IntEnum):
-    """Mouse buttons by name; the MOUSE_BUTTON_* ints stay valid (0.23)."""
+    """Mouse buttons by name; every query also takes a plain int (0.23)."""
     LEFT = 0
     RIGHT = 1
     MIDDLE = 2
@@ -720,7 +720,9 @@ class Cursor(IntEnum):
 # ── Resources ──────────────────────────────────────────────────────────
 
 class Buffer:
+    @overload
     def update(self, data: bytes, *, offset: int = 0) -> None: ...
+    @overload
     def update(self, array: Any, *, offset: int = 0) -> None:
         """Upload from any C-contiguous buffer-protocol object.
 
@@ -733,6 +735,7 @@ class Buffer:
         `numpy.ascontiguousarray(arr)` to be explicit.
         """
         ...
+    @overload
     def update(self, data: list, data_type: Optional[DataType] = None, *,
                offset: int = 0) -> None: ...
 
@@ -1485,11 +1488,13 @@ class CommandBuffer:
         """
         ...
 
+    @overload
     def barrier(self, buffer: Buffer, src: Access, dst: Access) -> CommandBuffer:
         """Record a buffer barrier by hand. Required between dependent uses
         when auto_barriers=False; legal (if redundant) in auto mode. Refused
         inside a rendering scope — record it before begin_rendering."""
         ...
+    @overload
     def barrier(self, image: Image, src: Access, dst: Access) -> CommandBuffer:
         """Transition an image between shader accesses by hand, across every mip
         and layer. The layout follows the access: SHADER_WRITE = GENERAL (a
@@ -1600,9 +1605,11 @@ class CommandBuffer:
         scope."""
         ...
 
+    @overload
     def push_constants(self, pipeline: Pipeline, offset: int, data: bytes) -> CommandBuffer:
         """The Pipeline already knows which stages its range covers."""
         ...
+    @overload
     def push_constants(self, offset: int, data: bytes) -> CommandBuffer:
         """The short form: the pipeline that is already bound (0.25).
 
@@ -1612,8 +1619,10 @@ class CommandBuffer:
         """
         ...
 
+    @overload
     def bind_descriptor_set(self, descriptor_set: DescriptorSet, pipeline: Pipeline,
                             set: int = 0) -> CommandBuffer: ...
+    @overload
     def bind_descriptor_set(self, descriptor_set: DescriptorSet) -> CommandBuffer:
         """The short form (0.25): the set knows the index it was allocated for and
         at which bind point, and bind_pipeline already recorded the pipeline.
@@ -1961,7 +1970,7 @@ def poll_events() -> None:
     reads one window's own state, which this dispatch is what updates:
 
         bz.poll_events()
-        if window_a.is_key_pressed(bz.KEY_W):   # only while A has focus
+        if window_a.is_key_pressed(bz.Key.W):   # only while A has focus
             ...
         if renderer_b.acquire():                # False while B is minimized
             renderer_b.present(cmd_b)
@@ -2382,10 +2391,13 @@ class Context:
         samples=) and SwapchainRenderer(..., samples=)."""
         ...
 
+    @overload
     def create_buffer(self, data: list, type: BufferType, usage: MemoryUsage,
                       data_type: Optional[DataType] = None, *, name: str = "") -> Buffer: ...
+    @overload
     def create_buffer(self, data: Any, type: BufferType, usage: MemoryUsage,
                       *, name: str = "") -> Buffer: ...
+    @overload
     def create_buffer(self, data: int, type: BufferType,
                       usage: MemoryUsage, *, name: str = "") -> Buffer:
         """A GPU buffer from a list, any C-contiguous array, or a size in bytes.
@@ -2404,6 +2416,7 @@ class Context:
 
     def graphics_pipeline(self) -> GraphicsPipelineBuilder: ...
     def compute_pipeline(self) -> ComputePipelineBuilder: ...
+    @overload
     def compile_shader(self, path: str, stage: ShaderStage, *,
                        language: Optional[ShaderLanguage] = None,
                        include_dirs: Sequence[str] = (),
@@ -2444,6 +2457,7 @@ class Context:
         """
         ...
 
+    @overload
     def compile_shader(self, *, source: str | bytes, stage: ShaderStage,
                        language: Optional[ShaderLanguage] = None,
                        name: str = "",
@@ -2468,6 +2482,7 @@ class Context:
         """
         ...
 
+    @overload
     def load_image(self, data: bytes, *, mipmaps: bool = True, name: str = "") -> Image:
         """Decode encoded image BYTES rather than a file: a PNG off the network,
         out of a zip, or straight from PIL, none of which has a path on disk.
@@ -2480,6 +2495,7 @@ class Context:
         """
         ...
 
+    @overload
     def load_image(self, path: str, *, mipmaps: bool = True, name: str = "") -> Image:
         """Decode an image file into an sRGB GPU image, with a full mip chain by
         default (`mipmaps=False` for a single level — e.g. a UI sprite sampled
@@ -2500,6 +2516,7 @@ class Context:
         """
         ...
 
+    @overload
     def load_image(self, paths: Sequence[str], *, cube: bool = False,
                    mipmaps: bool = True, name: str = "") -> Image:
         """From a list of image files → a layered image (async, sRGB, mipped by
@@ -2528,6 +2545,7 @@ class Context:
         one-shot copies of create_buffer and create_image(array), which have
         nothing to decode and join the batch already submitted."""
         ...
+    @overload
     def create_render_target(self, width: int, height: int,
                              color: Optional[Format | Sequence[Format]] = Format.RGBA8,
                              depth: Optional[Format] = None, samples: int = 1, *,
@@ -2561,6 +2579,7 @@ class Context:
         memory — so it is off by default.
         """
         ...
+    @overload
     def create_render_target(self, *, color: Optional[Image | Sequence[Image]] = None,
                              depth: Optional[Image] = None, samples: int = 1,
                              name: str = "", keep_samples: bool = False) -> RenderTarget:
@@ -2585,6 +2604,7 @@ class Context:
         """
         ...
 
+    @overload
     def create_renderer(self, window: Window, *,
                         present_mode: PresentMode = PresentMode.MAILBOX,
                         samples: int = 1, stencil: bool = False) -> SwapchainRenderer:
@@ -2604,6 +2624,7 @@ class Context:
         with depth=Format.DEPTH_STENCIL.
         """
         ...
+    @overload
     def create_renderer(self, *, win32_hwnd: int,
                         present_mode: PresentMode = PresentMode.MAILBOX,
                         samples: int = 1, stencil: bool = False) -> SwapchainRenderer:
@@ -2611,6 +2632,7 @@ class Context:
         anything with an HWND. Windows only; elsewhere it raises WindowError.
         See examples/08_pyqt_integration."""
         ...
+    @overload
     def create_image(self, width: int, height: int,
                      format: Format = Format.RGBA8, *, depth: int = 1,
                      layers: int = 1, cube: bool = False, mip_levels: int = 1,
@@ -2628,6 +2650,7 @@ class Context:
         `cmd.generate_mipmaps(img)` to fill the rest. Depth counts toward the
         chain: a 1x1x64 volume has 7 levels."""
         ...
+    @overload
     def create_image(self, array: Any, *, mipmaps: bool = False,
                      cube: bool = False, name: str = "") -> Image:
         """From one numpy array; shape + dtype pick the format (UNORM — arrays
@@ -2645,6 +2668,7 @@ class Context:
         — a submit that samples the image waits for it GPU-side, and read()
         waits CPU-side."""
         ...
+    @overload
     def create_image(self, images: Sequence[Any], *, mipmaps: bool = False,
                      cube: bool = False, name: str = "") -> Image:
         """From a list of numpy arrays → a layered image: a texture array, or a
@@ -2652,6 +2676,7 @@ class Context:
         +X,-X,+Y,-Y,+Z,-Z). Every layer must share shape and dtype. `mipmaps=True`
         generates the full chain across every layer."""
         ...
+    @overload
     def create_image(self, source: Image, *, name: str = "") -> Image:
         """From an Image on another Context (or this one — that is a clone).
 
@@ -2923,139 +2948,3 @@ class SwapchainRenderer(RenderTargetBase):
     def width(self) -> int: ...
     @property
     def height(self) -> int: ...
-
-# ── Keyboard Constants ─────────────────────────────────────────────────
-
-KEY_SPACE: int
-KEY_APOSTROPHE: int
-KEY_COMMA: int
-KEY_MINUS: int
-KEY_PERIOD: int
-KEY_SLASH: int
-KEY_0: int
-KEY_1: int
-KEY_2: int
-KEY_3: int
-KEY_4: int
-KEY_5: int
-KEY_6: int
-KEY_7: int
-KEY_8: int
-KEY_9: int
-KEY_SEMICOLON: int
-KEY_EQUAL: int
-KEY_A: int
-KEY_B: int
-KEY_C: int
-KEY_D: int
-KEY_E: int
-KEY_F: int
-KEY_G: int
-KEY_H: int
-KEY_I: int
-KEY_J: int
-KEY_K: int
-KEY_L: int
-KEY_M: int
-KEY_N: int
-KEY_O: int
-KEY_P: int
-KEY_Q: int
-KEY_R: int
-KEY_S: int
-KEY_T: int
-KEY_U: int
-KEY_V: int
-KEY_W: int
-KEY_X: int
-KEY_Y: int
-KEY_Z: int
-KEY_LEFT_BRACKET: int
-KEY_BACKSLASH: int
-KEY_RIGHT_BRACKET: int
-KEY_GRAVE_ACCENT: int
-KEY_WORLD_1: int
-KEY_WORLD_2: int
-KEY_ESCAPE: int
-KEY_ENTER: int
-KEY_TAB: int
-KEY_BACKSPACE: int
-KEY_INSERT: int
-KEY_DELETE: int
-KEY_RIGHT: int
-KEY_LEFT: int
-KEY_DOWN: int
-KEY_UP: int
-KEY_PAGE_UP: int
-KEY_PAGE_DOWN: int
-KEY_HOME: int
-KEY_END: int
-KEY_CAPS_LOCK: int
-KEY_SCROLL_LOCK: int
-KEY_NUM_LOCK: int
-KEY_PRINT_SCREEN: int
-KEY_PAUSE: int
-KEY_F1: int
-KEY_F2: int
-KEY_F3: int
-KEY_F4: int
-KEY_F5: int
-KEY_F6: int
-KEY_F7: int
-KEY_F8: int
-KEY_F9: int
-KEY_F10: int
-KEY_F11: int
-KEY_F12: int
-KEY_F13: int
-KEY_F14: int
-KEY_F15: int
-KEY_F16: int
-KEY_F17: int
-KEY_F18: int
-KEY_F19: int
-KEY_F20: int
-KEY_F21: int
-KEY_F22: int
-KEY_F23: int
-KEY_F24: int
-KEY_F25: int
-KEY_KP_0: int
-KEY_KP_1: int
-KEY_KP_2: int
-KEY_KP_3: int
-KEY_KP_4: int
-KEY_KP_5: int
-KEY_KP_6: int
-KEY_KP_7: int
-KEY_KP_8: int
-KEY_KP_9: int
-KEY_KP_DECIMAL: int
-KEY_KP_DIVIDE: int
-KEY_KP_MULTIPLY: int
-KEY_KP_SUBTRACT: int
-KEY_KP_ADD: int
-KEY_KP_ENTER: int
-KEY_KP_EQUAL: int
-KEY_LEFT_SHIFT: int
-KEY_LEFT_CONTROL: int
-KEY_LEFT_ALT: int
-KEY_LEFT_SUPER: int
-KEY_RIGHT_SHIFT: int
-KEY_RIGHT_CONTROL: int
-KEY_RIGHT_ALT: int
-KEY_RIGHT_SUPER: int
-KEY_MENU: int
-KEY_LAST: int
-
-# ── Mouse Constants ────────────────────────────────────────────────────
-
-MOUSE_BUTTON_LEFT: int
-MOUSE_BUTTON_RIGHT: int
-MOUSE_BUTTON_MIDDLE: int
-
-# ── Cursor Mode Constants ──────────────────────────────────────────────
-
-CURSOR_NORMAL: int
-CURSOR_DISABLED: int
-CURSOR_HIDDEN: int

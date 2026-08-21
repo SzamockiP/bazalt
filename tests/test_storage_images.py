@@ -15,11 +15,6 @@ import bazalt as bz
 from conftest import SHADER_DIR
 
 
-@pytest.fixture
-def fullscreen_vert(ctx):
-    return ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
-
-
 def _fill_pipeline(ctx):
     comp = ctx.compile_shader(str(SHADER_DIR / "store_const.comp"), bz.ShaderStage.COMPUTE)
     return ctx.compute_pipeline().shader(comp).storage_image(0).build()

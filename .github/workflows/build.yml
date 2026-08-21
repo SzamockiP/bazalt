@@ -11,14 +11,19 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a publish in flight: a re-triggered release event groups on the
+  # same ref, and a cancelled half-upload to PyPI is not retryable (the file
+  # names are taken).
+  cancel-in-progress: ${{ github.event_name != 'release' }}
 
 env:
   # One place, three jobs and every cache key. A bump here re-downloads the SDK
   # on all platforms and invalidates nothing else.
   VULKAN_SDK_VERSION: "1.4.309.0"
 
-  CIBW_SKIP: "*-musllinux* *-win32 *-manylinux_i686"
+  # Only musllinux needs skipping. win32 and i686 are already unreachable:
+  # CIBW_ARCHS_WINDOWS is AMD64 and CIBW_ARCHS_LINUX is x86_64.
+  CIBW_SKIP: "*-musllinux*"
 
   # Smoke test on every built wheel: the module imports and the .pyi stub
   # matches __all__. A wheel is built where nothing can render — no driver in
@@ -44,11 +49,87 @@ jobs:
 
       - run: pipx install "clang-format==20.1.*"
 
-      - name: Report the formatter version
-        run: clang-format --version
-
       - name: Check src/ against .clang-format
         run: clang-format --dry-run -Werror src/*.hpp src/*.cpp src/bindings/*.hpp src/bindings/*.cpp
+
+      # The Python surface is small (re-exports, stub, tests, examples), so ruff
+      # rides in this job instead of owning one. Pinned like the formatter.
+      - run: pipx install "ruff==0.12.*"
+
+      - name: Check the Python sources with ruff
+        run: ruff check .
+
+  # ── C++ static analysis ───────────────────────────────────────
+  # clang-tidy over the eight first-party TUs, with the config at .clang-tidy.
+  # Same delivery and pinning policy as clang-format above. Configure only, no
+  # build: the compile database is all clang-tidy needs, and the SDK tarball is
+  # the same cached download the Linux wheels use.
+  #
+  # -DSKBUILD_PROJECT_NAME because CMakeLists.txt is written for scikit-build;
+  # without it CMake silently names the project "LANGUAGES" and never enables
+  # C++. -DCMAKE_DISABLE_PRECOMPILE_HEADERS because the PCH flags GCC emits are
+  # not consumable by clang-tidy's own parser.
+  tidy:
+    name: Lint · clang-tidy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Cache the Vulkan SDK download
+        uses: actions/cache@v4
+        with:
+          path: .vulkan-sdk
+          key: vulkan-sdk-linux-${{ env.VULKAN_SDK_VERSION }}
+
+      - name: Download and unpack the Vulkan SDK
+        env:
+          TARBALL: vulkansdk-linux-x86_64-${{ env.VULKAN_SDK_VERSION }}.tar.xz
+        run: |
+          mkdir -p .vulkan-sdk
+          test -f ".vulkan-sdk/$TARBALL" || \
+            wget -q "https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/linux/$TARBALL" \
+              -O ".vulkan-sdk/$TARBALL"
+          mkdir -p "$HOME/vulkan-sdk"
+          tar xf ".vulkan-sdk/$TARBALL" -C "$HOME/vulkan-sdk" --strip-components=1
+          echo "VULKAN_SDK=$HOME/vulkan-sdk/x86_64" >> "$GITHUB_ENV"
+
+      # The apt spelling of the yum list the manylinux container installs, plus
+      # ninja for the configure. glfw checks for these at configure time.
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libwayland-dev wayland-protocols libxkbcommon-dev
+          pip install pybind11
+          pipx install "clang-tidy==20.1.*"
+
+      - name: Configure for the compile database
+        run: |
+          cmake -S . -B build-tidy -G Ninja \
+            -DSKBUILD_PROJECT_NAME=bazalt \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
+            -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
+            -DCMAKE_PREFIX_PATH="$VULKAN_SDK" \
+            -Dpybind11_DIR="$(python -m pybind11 --cmakedir)"
+
+      # vma_impl.cpp and stb_impl.cpp are third-party implementations and are
+      # not listed. Header diagnostics follow .clang-tidy's filters.
+      #
+      # -Wno-unknown-warning-option because the compile database is written by
+      # GCC and carries -Wno-interference-size, which clang does not know. With
+      # --warnings-as-errors='*' that unknown flag is itself an error, so the
+      # job would fail on a flag rather than on a finding.
+      - name: Run clang-tidy
+        run: |
+          ls src/main.cpp src/*.cpp src/bindings/*.cpp | grep -v -e vma_impl -e stb_impl | sort -u | \
+            xargs -P "$(nproc)" -n1 clang-tidy -p build-tidy --quiet \
+              --warnings-as-errors='*' --extra-arg=-Wno-unknown-warning-option
 
   # ── Source distribution ───────────────────────────────────────
   # Published beside the wheels, so `pip install bazalt` on a platform with no
@@ -80,21 +161,23 @@ jobs:
   # too, which finishes about four minutes later and has nothing they use.
   #
   # One job per interpreter, not one job building four wheels in a row. The
-  # extension is a single large translation unit and takes about the same time
-  # for every interpreter, so four in sequence is four times the wall clock for
-  # no reason. In parallel the pipeline costs what one wheel costs. The runners
-  # are free on a public repo, so this only spends minutes, not money.
+  # extension takes about the same time for every interpreter, so four in
+  # sequence is four times the wall clock for no reason. In parallel the
+  # pipeline costs what one wheel costs. The runners are free on a public repo,
+  # so this only spends minutes, not money.
   #
-  # A branch push builds the one interpreter the lavapipe legs install. Every
-  # event that gates something — a pull request before merge, a release before
-  # publish, a manual run — builds all five.
+  # A branch push builds the two interpreters the test legs install: cp312, and
+  # since 0.27 cp314 as well — the newest one is where a wheel breaks first, and
+  # it had never been built on a branch push, so a break waited for the pull
+  # request. Every event that gates something — a pull request before merge, a
+  # release before publish, a manual run — builds all five.
   wheels_linux:
     name: Wheels · linux ${{ matrix.python }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
+        python: ${{ github.event_name == 'push' && fromJSON('["cp312", "cp314"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -154,7 +237,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
+        python: ${{ github.event_name == 'push' && fromJSON('["cp312", "cp314"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -166,28 +249,6 @@ jobs:
         with:
           path: .vulkan-sdk
           key: vulkan-sdk-windows-${{ env.VULKAN_SDK_VERSION }}
-
-      # `build-dir = "build/{wheel_tag}"` in pyproject.toml already makes a local
-      # rebuild incremental; caching that tree extends it across runs. What it
-      # saves is the dependencies, not bazalt: actions/checkout stamps every
-      # source file with the current time, so the eight binding TUs recompile
-      # regardless, while _deps (glfw, volk, vma, vk-bootstrap, stb) arrives with
-      # its cached timestamps and neither re-clones nor rebuilds.
-      #
-      # Only on the runners that build natively. The Linux wheels are built in a
-      # container that cibuildwheel copies the project INTO and copies only the
-      # wheels back out of, so nothing written to build/ there ever reaches the
-      # host to be saved.
-      #
-      # The key carries CMakeLists.txt, so any dependency pin bump busts it, and
-      # a v-prefix to bust it by hand.
-      - name: Cache the CMake build tree
-        uses: actions/cache@v4
-        with:
-          path: build
-          key: build-v1-windows-${{ matrix.python }}-${{ hashFiles('CMakeLists.txt', 'pyproject.toml') }}
-          restore-keys: |
-            build-v1-windows-${{ matrix.python }}-
 
       - name: Install Vulkan SDK
         shell: pwsh
@@ -236,7 +297,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ${{ github.event_name == 'push' && fromJSON('["cp312"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
+        python: ${{ github.event_name == 'push' && fromJSON('["cp312", "cp314"]') || fromJSON('["cp310", "cp311", "cp312", "cp313", "cp314"]') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -254,14 +315,6 @@ jobs:
 
       # The SDK archive is cached inside the composite action, which both macOS
       # jobs share.
-      - name: Cache the CMake build tree
-        uses: actions/cache@v4
-        with:
-          path: build
-          key: build-v1-macos-${{ matrix.python }}-${{ hashFiles('CMakeLists.txt', 'pyproject.toml') }}
-          restore-keys: |
-            build-v1-macos-${{ matrix.python }}-
-
       - name: Install the Vulkan SDK (MoltenVK, layers, shaderc)
         uses: ./.github/actions/install-vulkan-sdk-macos
         with:
@@ -296,17 +349,25 @@ jobs:
 
           # Same rule as the Windows job: bazalt must not ship a Vulkan loader.
           # volk opens the one the user installed, and a bundled copy would
-          # shadow it. The otool step below reports what the extension really
-          # links, so this stays a fact rather than an assumption.
+          # shadow it. The assert step below FAILS if a loader ever appears, so
+          # this stays a fact rather than an assumption.
           CIBW_REPAIR_WHEEL_COMMAND_MACOS: ""
 
-      - name: Report what the extension links
+      - name: Assert the extension bundles no Vulkan loader
         run: |
           set -e
           WHEEL=$(ls wheelhouse/*.whl | head -1)
           rm -rf /tmp/wheel-check && mkdir -p /tmp/wheel-check
           unzip -q "$WHEEL" -d /tmp/wheel-check
-          otool -L /tmp/wheel-check/bazalt/_core*.so
+          # Spelled out rather than `otool … | (! grep …)`: that pipeline failed
+          # the step while its own output proved the assertion held, and a check
+          # that reports the opposite of what it measured is worse than no check.
+          LINKS=$(otool -L /tmp/wheel-check/bazalt/_core*.so)
+          echo "$LINKS"
+          if echo "$LINKS" | grep -qi libvulkan; then
+            echo "::error::the macOS wheel links a Vulkan loader; it must load the user's own"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v7
         with:
@@ -322,25 +383,43 @@ jobs:
   # the core names. That second path had no coverage anywhere from 0.5 to 0.15
   # (both CI and the dev GPU report 1.3+), which is what made every touch of
   # version negotiation a leap of faith.
+  # A third leg since 0.27, and it varies the INTERPRETER rather than the API
+  # version: every GPU test the project has ever run ran on one Python. The
+  # wheels prove that 3.14 builds and imports, which is not the same claim — the
+  # numpy buffer protocol carries every readback and every upload, and that is
+  # where a new interpreter breaks a library like this one if it breaks it.
+  #
+  # 3.14 pairs with api 1.3 only. The 1.2 path is about what the DEVICE offers
+  # and has nothing to do with the interpreter, so a fourth leg would buy a
+  # slower pipeline and no new path.
   test_lavapipe:
-    name: Tests · lavapipe (api ${{ matrix.api }})
+    name: Tests · lavapipe (api ${{ matrix.api }}, ${{ matrix.python }})
     needs: wheels_linux
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        api: ["1.3", "1.2"]
+        include:
+          - api: "1.3"
+            python: cp312
+            python-version: "3.12"
+          - api: "1.2"
+            python: cp312
+            python-version: "3.12"
+          - api: "1.3"
+            python: cp314
+            python-version: "3.14"
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "${{ matrix.python-version }}"
 
-      # cp312 is built on every event, so this name always exists.
+      # Both tags are built on every event — see the wheels_linux matrix.
       - uses: actions/download-artifact@v8
         with:
-          name: wheels-linux-cp312
+          name: wheels-linux-${{ matrix.python }}
           path: wheelhouse
 
       # libvulkan1 is the Vulkan LOADER — mesa-vulkan-drivers ships only the
@@ -383,8 +462,11 @@ jobs:
       - name: Report the Vulkan device CI actually sees
         run: vulkaninfo --summary
 
+      # [test] so pyproject.toml stays the one list of test dependencies.
       - name: Install wheel + test deps
-        run: pip install wheelhouse/bazalt-*-cp312-*manylinux*.whl pytest numpy pillow
+        run: |
+          WHEEL=$(ls wheelhouse/bazalt-*-${{ matrix.python }}-*manylinux*.whl)
+          pip install "${WHEEL}[test]"
 
       # cwd is OUTSIDE the repo on purpose: the source tree's bazalt/ package
       # has no _core and would shadow the installed wheel on sys.path.
@@ -407,23 +489,16 @@ jobs:
       # headless-INSTANCE path — the one a display-less server takes, and the one
       # that had no coverage at all — is exercised inside the ordinary run.
       #
-      # --api-coverage on one leg only: it patches every public callable to
-      # record the call, and one measurement of the same suite is enough. It
-      # reports here and gates nowhere — the gate needs a run with no skips, and
-      # lavapipe has no display and not every feature (see conftest.py).
+      # No --api-coverage here: the gate needs a run with no skips, and
+      # lavapipe has no display and not every feature. It runs on a developer
+      # GPU (see conftest.py); 0.27 dropped the markdown report it used to
+      # upload from this leg.
       - name: Run test suite
         working-directory: ${{ runner.temp }}
         env:
           BAZALT_FORCE_VULKAN_1_2: ${{ matrix.api == '1.2' && '1' || '0' }}
           # BAZALT_SYNCVAL_UNSUPPORTED is inherited from GITHUB_ENV.
-        run: python -m pytest ${{ github.workspace }}/tests -q -rs ${{ matrix.api == '1.3' && '--api-coverage' || '' }}
-
-      - name: Upload the API coverage report
-        if: matrix.api == '1.3'
-        uses: actions/upload-artifact@v7
-        with:
-          name: api-coverage
-          path: ${{ runner.temp }}/api_coverage.md
+        run: python -m pytest ${{ github.workspace }}/tests -q -rs
 
   # ── Full GPU suite on MoltenVK (Metal, real hardware) ─────────
   # The acceptance test for 0.22: the release claims bazalt runs on macOS, and
@@ -472,8 +547,11 @@ jobs:
       - name: Report the Vulkan device CI actually sees
         run: "$VULKAN_SDK/bin/vulkaninfo --summary"
 
+      # [test] for the reason the lavapipe job gives.
       - name: Install wheel + test deps
-        run: pip install wheelhouse/bazalt-*-cp312-*macosx*.whl pytest numpy pillow
+        run: |
+          WHEEL=$(ls wheelhouse/bazalt-*-cp312-*macosx*.whl)
+          pip install "${WHEEL}[test]"
 
       # Computed from the SDK version, not written down: the shader-access sync
       # hazards the negative test needs are reported from layer 1.4.350, and the
@@ -504,13 +582,15 @@ jobs:
   # ── Publish to PyPI on release ────────────────────────────────
   publish:
     needs: [wheels_linux, wheels_windows, wheels_macos, sdist]
-    runs-on: ubuntu-latest
+    # Pinned like every other job. The one job that ships to PyPI is the last
+    # place to float the runner image.
+    runs-on: ubuntu-24.04
     if: github.event_name == 'release'
     permissions:
       id-token: write
     steps:
-      # By pattern, not everything: the run also carries api_coverage.md, and a
-      # markdown file in dist/ is a file the upload has no idea what to do with.
+      # By pattern, not everything: a stray non-wheel artifact in dist/ is a
+      # file the upload has no idea what to do with.
       - uses: actions/download-artifact@v8
         with:
           pattern: wheels-*

@@ -1,10 +1,6 @@
-"""The coverage report is only worth reading if its two decisions are right:
+"""The coverage gate is only worth trusting if its two decisions are right:
 what counts as a public symbol, and what counts as untouched. Both are pure
-functions, so they are tested here rather than by reading the report.
-
-This file is excluded from the identifier scan (see api_coverage._SCAN_EXCLUDES)
-because it names API symbols in string literals, and every one of them would
-otherwise count as a use.
+functions, so they are tested here rather than by reading the gate's output.
 """
 
 import api_coverage
@@ -16,24 +12,20 @@ def test_the_surface_classifies_each_kind():
     assert surface["Context.create_buffer"] == "method"
     assert surface["Context.__init__"] == "method"
     assert surface["Image.width"] == "property"
-    assert surface["Format.RGBA8"] == "enum member"
-    assert surface["ShaderError"] == "exception"
     assert surface["poll_events"] == "function"
 
 
-def test_the_surface_counts_the_keyboard_once():
-    """0.23 dropped the KEY_*/MOUSE_*/CURSOR_* integers from the count. They are
-    the pre-enum spelling of three enums the census already counts, so keeping
-    both reported the keyboard twice — 116 untouched constants beside 99
-    untouched Key members, one fact, the largest number in the report.
-
-    `Key.SPACE` staying in is the point: the aliases were dropped, not the
-    keyboard."""
+def test_the_surface_counts_only_callables():
+    """Enum members and exception classes are read, never called, so the only
+    evidence a census could collect was a regex scan of the test sources —
+    dropped in 0.27 as measurement theater. `test_stubs.py` asserts they exist,
+    which is everything a constant can be wrong about."""
     surface = api_coverage.public_surface()
 
-    assert "KEY_SPACE" not in surface
-    assert "MOUSE_BUTTON_LEFT" not in surface
-    assert surface["Key.SPACE"] == "enum member"
+    assert "Format.RGBA8" not in surface
+    assert "Key.SPACE" not in surface
+    assert "ShaderError" not in surface
+    assert all(kind in ("method", "property", "function") for kind in surface.values())
 
 
 def test_the_surface_skips_an_init_that_only_raises():
@@ -49,27 +41,7 @@ def test_the_surface_skips_an_init_that_only_raises():
     assert surface["Window.__init__"] == "method"
 
 
-def test_the_surface_holds_no_pybind_boilerplate():
-    """An enum contributes its members only. pybind11 also puts `name`, `value`
-    and `__members__` on every one of them, and they are not bazalt's API."""
-    surface = api_coverage.public_surface()
+def test_untouched_is_what_no_test_called():
+    surface = {"Thing.called": "method", "Thing.never_called": "method"}
 
-    assert "Format.name" not in surface
-    assert "Format.value" not in surface
-    assert not [key for key in surface if "__members__" in key]
-    assert not [key for key in surface if key.rpartition(".")[2].startswith("_pybind11")]
-
-
-def test_untouched_asks_the_right_question_per_kind():
-    """A callable has to be CALLED, a constant only named: nothing can wrap a
-    value that is read rather than invoked."""
-    surface = {
-        "Thing.called": "method",
-        "Thing.never_called": "method",
-        "Enum.NAMED": "enum member",
-        "Enum.UNNAMED": "enum member",
-    }
-
-    missing = api_coverage.untouched(surface, {"Thing.called"}, {"NAMED"})
-
-    assert missing == [("Enum.UNNAMED", "enum member"), ("Thing.never_called", "method")]
+    assert api_coverage.untouched(surface, {"Thing.called"}) == ["Thing.never_called"]

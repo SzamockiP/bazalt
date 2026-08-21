@@ -196,7 +196,7 @@ void bind_context(py::module_& m)
         .def(
             "create_buffer",
             [](Context& self,
-               py::list list,
+               const py::list& list,
                BufferType type,
                MemoryUsage usage,
                std::optional<DataType> dataType,
@@ -232,7 +232,8 @@ void bind_context(py::module_& m)
             py::arg("name") = "")
         .def(
             "create_buffer",
-            [](Context& self, py::buffer b, BufferType type, MemoryUsage usage, const std::string& name) -> py::object
+            [](Context& self, const py::buffer& b, BufferType type, MemoryUsage usage, const std::string& name)
+                -> py::object
             {
                 require_open(self, "create_buffer");
                 py::buffer_info info = b.request();
@@ -377,7 +378,7 @@ void bind_context(py::module_& m)
             [](Context& self, const py::bytes& blob, bool mipmaps, const std::string& name) -> py::object
             {
                 require_open(self, "load_image");
-                auto* manager = static_cast<UploadManager*>(self.upload_manager());
+                auto* manager = self.upload_manager();
                 const std::string_view view = blob;
                 std::vector<std::byte> bytes(view.size());
                 std::memcpy(bytes.data(), view.data(), view.size());
@@ -405,11 +406,13 @@ void bind_context(py::module_& m)
                 // image is usable for recording at once; residency is enforced at
                 // submit. img.ready / img.wait() / ctx.wait() are the
                 // explicit-control verbs.
-                auto* manager = static_cast<UploadManager*>(self.upload_manager());
+                auto* manager = self.upload_manager();
                 auto image = unwrap(manager->load(path, mipmaps), self.logger().get());
                 name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
                 if (auto* hr = self.hot_reload())
+                {
                     hr->watch_image(image, path);
+                }
                 return py::cast(image);
             },
             py::arg("path"),
@@ -427,7 +430,7 @@ void bind_context(py::module_& m)
                 -> py::object
             {
                 require_open(self, "load_image");
-                auto* manager = static_cast<UploadManager*>(self.upload_manager());
+                auto* manager = self.upload_manager();
                 auto image = unwrap(manager->load_layered(paths, cube, mipmaps), self.logger().get());
                 name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
                 return py::cast(image);
@@ -534,7 +537,7 @@ void bind_context(py::module_& m)
         // better than no argument that produces forty lines.
         .def(
             "create_image",
-            [](Context& self, py::buffer b, bool mipmaps, bool cube, const std::string& name) -> py::object
+            [](Context& self, const py::buffer& b, bool mipmaps, bool cube, const std::string& name) -> py::object
             {
                 require_open(self, "create_image");
                 if (cube)
@@ -564,7 +567,7 @@ void bind_context(py::module_& m)
         // Every layer must share shape and dtype.
         .def(
             "create_image",
-            [](Context& self, py::list images, bool mipmaps, bool cube, const std::string& name) -> py::object
+            [](Context& self, const py::list& images, bool mipmaps, bool cube, const std::string& name) -> py::object
             {
                 require_open(self, "create_image");
                 const size_t layers = images.size();
@@ -619,7 +622,7 @@ void bind_context(py::module_& m)
                 std::vector<std::byte> pixels(layer_bytes * layers);
                 for (size_t i = 0; i < layers; ++i)
                 {
-                    std::memcpy(pixels.data() + i * layer_bytes, infos[i].ptr, layer_bytes);
+                    std::memcpy(pixels.data() + (i * layer_bytes), infos[i].ptr, layer_bytes);
                 }
 
                 auto image = unwrap(
@@ -653,7 +656,7 @@ void bind_context(py::module_& m)
         // the cube-ness across, because a numpy array has nowhere to put them.
         .def(
             "create_image",
-            [](Context& self, std::shared_ptr<Image> source, std::string name) -> py::object
+            [](Context& self, const std::shared_ptr<Image>& source, const std::string& name) -> py::object
             {
                 require_open(self, "create_image");
                 const bool mipmaps = source->mip_levels() > 1;
@@ -705,7 +708,7 @@ void bind_context(py::module_& m)
                 const std::uint32_t shared_mips = (std::ranges::min)(source->mip_levels(), image->mip_levels());
                 if (shared_mips > 1)
                 {
-                    auto* manager = static_cast<UploadManager*>(self.upload_manager());
+                    auto* manager = self.upload_manager();
                     for (std::uint32_t mip = 1; mip < shared_mips; ++mip)
                     {
                         const std::uint32_t w = mip_extent(source->width(), mip);
@@ -748,8 +751,8 @@ void bind_context(py::module_& m)
             [](Context& self,
                std::uint32_t width,
                std::uint32_t height,
-               py::object color,
-               py::object depth,
+               const py::object& color,
+               const py::object& depth,
                std::uint32_t samples,
                std::uint32_t layers,
                bool cube,
@@ -775,8 +778,8 @@ void bind_context(py::module_& m)
         .def(
             "create_render_target",
             [](Context& self,
-               py::object color,
-               py::object depth,
+               const py::object& color,
+               const py::object& depth,
                std::uint32_t samples,
                const std::string& name,
                bool keep_samples)
@@ -847,7 +850,14 @@ void bind_context(py::module_& m)
                 // Sampler::add_debug_name.
                 return py::cast(unwrap(
                     self.get_sampler(
-                        SamplerDesc{filter, address_mode, anisotropy, compare, border_color, mip_lod_bias}, name),
+                        SamplerDesc{
+                            .filter = filter,
+                            .address_mode = address_mode,
+                            .anisotropy = anisotropy,
+                            .compare = compare,
+                            .border_color = border_color,
+                            .mip_lod_bias = mip_lod_bias},
+                        name),
                     self.logger().get()));
             },
             py::arg("filter") = Filter::LINEAR,

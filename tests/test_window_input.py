@@ -274,9 +274,9 @@ def test_a_per_cycle_query_is_repeatable(ctx):
         first = window.get_mouse_state()
         second = window.get_mouse_state()
         assert (first.dx, first.dy) == (second.dx, second.dy)
-        assert window.was_key_pressed(bz.KEY_F11) == window.was_key_pressed(bz.KEY_F11)
-        assert window.was_mouse_button_pressed(bz.MOUSE_BUTTON_LEFT) == \
-            window.was_mouse_button_pressed(bz.MOUSE_BUTTON_LEFT)
+        assert window.was_key_pressed(bz.Key.F11) == window.was_key_pressed(bz.Key.F11)
+        assert window.was_mouse_button_pressed(bz.MouseButton.LEFT) == \
+            window.was_mouse_button_pressed(bz.MouseButton.LEFT)
     finally:
         window = None
 
@@ -290,40 +290,35 @@ def test_an_untouched_key_is_not_an_edge(ctx):
     try:
         for _ in range(3):
             bz.poll_events()
-            assert not window.was_key_pressed(bz.KEY_F11)
-            assert not window.was_mouse_button_pressed(bz.MOUSE_BUTTON_RIGHT)
+            assert not window.was_key_pressed(bz.Key.F11)
+            assert not window.was_mouse_button_pressed(bz.MouseButton.RIGHT)
     finally:
         window = None
 
 
-def test_the_input_enums_agree_with_the_bare_ints():
-    """0.23: Key, MouseButton and CursorMode are renames of the GLFW values,
-    exactly as GamepadButton is, so each member equals its old module int.
-    Needs no window — the values are the whole claim."""
-    assert int(bz.Key.W) == bz.KEY_W == 87
-    assert int(bz.Key.ESCAPE) == bz.KEY_ESCAPE
-    assert int(bz.Key.D0) == bz.KEY_0
-    assert int(bz.Key.KP_0) == bz.KEY_KP_0
-    assert int(bz.MouseButton.LEFT) == bz.MOUSE_BUTTON_LEFT
-    assert int(bz.MouseButton.MIDDLE) == bz.MOUSE_BUTTON_MIDDLE
-    assert int(bz.CursorMode.NORMAL) == bz.CURSOR_NORMAL
-    assert int(bz.CursorMode.HIDDEN) == bz.CURSOR_HIDDEN
-    assert int(bz.CursorMode.DISABLED) == bz.CURSOR_DISABLED
+def test_the_input_enums_carry_the_glfw_values():
+    """Key, MouseButton and CursorMode are renames of the GLFW values, exactly
+    as GamepadButton is (0.23). The queries keep their int signatures and the
+    enum converts through its value, so the values ARE the contract. Needs no
+    window. (The KEY_*/MOUSE_BUTTON_*/CURSOR_* module ints that duplicated this
+    spelling were removed in 0.27.)"""
+    assert int(bz.Key.W) == 87
+    assert int(bz.Key.SPACE) == 32
+    assert int(bz.MouseButton.LEFT) == 0
+    assert int(bz.CursorMode.NORMAL) == 0x00034001
 
 
-def test_an_enum_key_queries_like_its_int(ctx):
-    """The queries keep their int signatures and the enum converts through its
-    value, so both spellings must answer the same — this is the conversion
-    smoke test the 0.23 design named."""
+def test_an_enum_key_converts_in_the_queries(ctx):
+    """The queries take ints and the enum converts through its value — this is
+    the conversion smoke test the 0.23 design named."""
     if ctx.headless:
         pytest.skip("no swapchain support (headless Context)")
     window = a_window()
     try:
         bz.poll_events()
-        assert window.is_key_pressed(bz.Key.W) == window.is_key_pressed(bz.KEY_W)
-        assert window.was_key_pressed(bz.Key.F11) == window.was_key_pressed(bz.KEY_F11)
-        assert (window.is_mouse_button_pressed(bz.MouseButton.LEFT)
-                == window.is_mouse_button_pressed(bz.MOUSE_BUTTON_LEFT))
+        assert window.is_key_pressed(bz.Key.W) in (True, False)
+        assert window.was_key_pressed(bz.Key.F11) in (True, False)
+        assert window.is_mouse_button_pressed(bz.MouseButton.LEFT) in (True, False)
         window.set_cursor_mode(bz.CursorMode.HIDDEN)
         window.set_cursor_mode(bz.CursorMode.NORMAL)
     finally:
@@ -569,7 +564,7 @@ def test_the_clipboard_round_trips(ctx):
         bz.set_clipboard("")
         assert bz.get_clipboard() == ""
     finally:
-        window = None
+        del window
 
 
 def test_a_fresh_window_is_open_and_retitles(ctx):
@@ -634,7 +629,7 @@ def test_wait_events_rotates_the_per_cycle_state(ctx):
 
 
 def test_wait_events_rejects_a_negative_timeout(ctx):
-    window = a_window()
+    _window = a_window()  # wait_events needs a live window to get past its guard
     with pytest.raises(ValueError, match="negative"):
         bz.wait_events(timeout=-1.0)
 

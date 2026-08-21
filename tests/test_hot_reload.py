@@ -15,8 +15,6 @@ import os
 import pathlib
 import time
 
-import numpy as np
-import pytest
 
 import bazalt as bz
 from test_bindings import write_png  # stdlib-only PNG writer

@@ -34,7 +34,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--api-coverage",
         action="store_true",
-        help="report which public symbols the suite touches, into api_coverage.md")
+        help="record which public symbols the suite touches, and gate on the baseline")
 
 
 def pytest_configure(config):
@@ -48,26 +48,22 @@ def pytest_configure(config):
 
 
 def pytest_sessionfinish(session, exitstatus):
-    """Write the report, and fail on a symbol that is untouched and unexpected.
+    """Fail on a symbol that is untouched and unexpected.
 
     The measurement is only meaningful for a whole, passing run: a failed test
     stops calling things, `-k` never reaches most of the API, and a SKIPPED test
     is a symbol nobody called on this machine rather than a symbol nobody
-    tested. All three write the report and skip the gate, so the number is never
-    read as a regression when it is really a partial run.
+    tested. All three skip the gate, so the number is never read as a
+    regression when it is really a partial run.
 
-    The skip rule is what lets CI ask for the report at all: lavapipe has no
-    display and not every feature, so it always skips something, while a
-    developer GPU runs the suite with no skips and gets the gate.
+    That rule is why the gate lives on a developer GPU: lavapipe has no display
+    and not every feature, so CI always skips something.
     """
     if _recorder is None:
         return
     import api_coverage
 
-    surface = api_coverage.public_surface()
-    missing = api_coverage.untouched(
-        surface, _recorder.used, api_coverage.names_in_tests(pathlib.Path(__file__).parent))
-    api_coverage.write_report(api_coverage._REPORT, surface, missing)
+    missing = api_coverage.untouched(api_coverage.public_surface(), _recorder.used)
 
     if os.environ.get("BAZALT_WRITE_API_BASELINE") == "1":
         api_coverage.write_baseline(missing)
@@ -84,7 +80,7 @@ def pytest_sessionfinish(session, exitstatus):
             or session.config.option.keyword or session.config.option.markexpr):
         return
 
-    new = sorted(key for key, _ in missing if key not in api_coverage.read_baseline())
+    new = sorted(key for key in missing if key not in api_coverage.read_baseline())
     if new:
         session.exitstatus = 1
         print("\nAPI coverage: these public symbols are untouched by any test and are not in")
@@ -183,12 +179,11 @@ def messages(_session_context):
     _, logger, all_messages = _session_context
     start = len(all_messages)
 
-    class View:
-        def __call__(self):
-            logger.flush()
-            return all_messages[start:]
+    def view():
+        logger.flush()
+        return all_messages[start:]
 
-    return View()
+    return view
 
 
 @pytest.fixture
@@ -196,6 +191,12 @@ def triangle_shaders(ctx):
     vert = ctx.compile_shader(str(SHADER_DIR / "triangle.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "triangle.frag"), bz.ShaderStage.FRAGMENT)
     return vert, frag
+
+
+@pytest.fixture
+def fullscreen_vert(ctx):
+    """The no-vertex-buffer fullscreen triangle — was copy-pasted in six files."""
+    return ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
 
 
 @pytest.fixture
@@ -211,41 +212,3 @@ def triangle_buffers(ctx):
     ibuf = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC,
                              bz.DataType.UINT32)
     return vbuf, ibuf
-
-
-PRINTF_PROBE = """
-#version 450
-#extension GL_EXT_debug_printf : enable
-layout(local_size_x = 1) in;
-void main()
-{
-    debugPrintfEXT("bazalt probe %d", 1);
-}
-"""
-
-
-@pytest.fixture(scope="session")
-def printf_compiles():
-    """Whether this driver's shader compiler implements debugPrintfEXT.
-
-    Nothing can be asked in advance. MoltenVK advertises
-    VK_KHR_shader_non_semantic_info, accepts the SPIR-V, and then fails inside
-    the Metal compiler with "use of undeclared identifier 'debugPrintfEXT'", so
-    the probe compiles one and looks.
-
-    On a Context of its own, never the `extra_context` factory: the failure IS a
-    validation error, and every Context that factory hands out is watched by the
-    referee that fails a test for exactly that.
-    """
-    try:
-        context = bz.Context(bz.Logger(), validation="on", shader_printf=True)
-    except bz.BazaltError:
-        return False
-    if not context.shader_printf:
-        return False
-    try:
-        shader = context.compile_shader(source=PRINTF_PROBE, stage=bz.ShaderStage.COMPUTE)
-        context.compute_pipeline().shader(shader).build()
-        return True
-    except bz.BazaltError:
-        return False

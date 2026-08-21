@@ -1,0 +1,104 @@
+# clang-tidy 20 — the version CI pins, same policy as clang-format (build.yml).
+#
+# Checks are broad on purpose: modernize/readability/performance/bugprone plus the
+# cppcoreguidelines entries that carry weight here. Every disable below names its
+# reason. The rule of the house: when a check flags a deliberate idiom, first look
+# for a compliant rewrite (0.27 replaced shared_ptr(new T) with the passkey idiom
+# instead of disabling modernize-make-shared); a disable is for checks that are
+# wrong about this codebase, not inconvenient for it.
+#
+# Disables:
+#   modernize-use-trailing-return-type   — pure style churn, no defect class.
+#   readability-identifier-length        — Vulkan/math code names things x, y, vk,
+#                                          it. Length is not clarity here.
+#   readability-magic-numbers,
+#   cppcoreguidelines-avoid-magic-numbers — GPU code is offsets, format sizes and
+#                                          bit positions; naming each constant
+#                                          would bury the shape it documents.
+#   readability-implicit-bool-conversion — VkBool32 and C APIs make this fire on
+#                                          idiomatic Vulkan on every use.
+#   bugprone-easily-swappable-parameters — (width, height), (src, dst): the API
+#                                          shape is the domain's, renaming or
+#                                          wrapping would be worse.
+#   readability-function-cognitive-complexity — the pipeline builders and
+#                                          begin_rendering are long because Vulkan
+#                                          setup is long; splitting them would
+#                                          scatter one decision across helpers.
+#   clang-analyzer-optin.*               — the opt-in group is off by default in
+#                                          the analyzer itself, and the one entry
+#                                          that fires here reports inside MSVC's
+#                                          own <filesystem> header, which nobody
+#                                          in this repo can fix.
+#   clang-analyzer-core.NullDereference  — the analyzer cannot see through
+#                                          std::expected. Every `auto [a, b] =
+#                                          *result;` after a checked `if (!result)`
+#                                          reads to it as an undefined value, and
+#                                          every fallible call in bazalt returns
+#                                          std::expected. The "fix" would be
+#                                          redundant null checks on values the
+#                                          code has already proven present.
+#   bugprone-exception-escape            — SWITCHED OFF DELIBERATELY, and it
+#                                          earned its keep first: it found
+#                                          ~OffscreenTarget allocating in a
+#                                          destructor and Pipeline's move
+#                                          constructor promising noexcept while
+#                                          member-wise moving an unordered_map.
+#                                          Both are fixed for good (the move
+#                                          constructor was dead code and is
+#                                          deleted). What remains is three
+#                                          recorded lambdas flagged for holding a
+#                                          capture that allocates when COPIED —
+#                                          which std::function requires — and one
+#                                          of the three has a body that cannot
+#                                          throw at all. The check has no option
+#                                          to separate those from the real cases,
+#                                          so this is on/off, not narrowable. Run
+#                                          it by hand after touching a destructor
+#                                          or adding a noexcept:
+#                                            clang-tidy -p build-tidy \
+#                                              --checks='-*,bugprone-exception-escape' src/*.cpp
+Checks: >
+  modernize-*,
+  readability-*,
+  performance-*,
+  bugprone-*,
+  cppcoreguidelines-owning-memory,
+  cppcoreguidelines-slicing,
+  cppcoreguidelines-virtual-class-destructor,
+  cppcoreguidelines-init-variables,
+  cppcoreguidelines-prefer-member-initializer,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -readability-implicit-bool-conversion,
+  -bugprone-easily-swappable-parameters,
+  -readability-function-cognitive-complexity,
+  -clang-analyzer-optin.*,
+  -clang-analyzer-core.NullDereference,
+  -bugprone-exception-escape
+
+# Two checks are narrowed rather than switched off. Narrowing keeps the defect
+# class the check exists for and drops the part that does not apply here, which
+# is a smaller claim than "this check is wrong about this codebase".
+CheckOptions:
+  # Only the long-family suffixes. The reason this check exists is that a
+  # lowercase `l` is hard to tell from a `1`, and `1.0f` has no such problem —
+  # rewriting every float literal to `1.0F` would be 63 edits for no defect.
+  - key: readability-uppercase-literal-suffix.NewSuffixes
+    value: 'L;UL;LL;ULL'
+  # `static_cast<void>(f())` is how C++ says "I am ignoring this on purpose",
+  # and both sites that do it carry a comment explaining what they ignore and
+  # where the failure surfaces instead. Without this the check cannot tell a
+  # deliberate discard from a forgotten one, which is the whole distinction.
+  - key: bugprone-unused-return-value.AllowCastToVoid
+    value: 'true'
+
+# Diagnose the repo's own headers, never the FetchContent trees (volk, glfw,
+# vk-bootstrap all have src/ in their paths, so the include filter alone is not
+# enough).
+HeaderFilterRegex: '.*[/\\]src[/\\].*'
+ExcludeHeaderFilterRegex: '.*[/\\]_deps[/\\].*'
+
+# Fixes follow .clang-format, so a -fix run does not fight the format gate.
+FormatStyle: file

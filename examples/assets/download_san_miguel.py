@@ -61,7 +61,7 @@ def main():
             os.remove(ZIP_FILE)
             print("Cleaned up temporary zip file.")
             
-    print(f"\nDone! You can now run the 07_model_loading example.")
+    print("\nDone! You can now run the 07_model_loading example.")
 
 if __name__ == "__main__":
     main()

@@ -75,7 +75,7 @@ def test_poll_events_works_while_a_window_is_open(ctx):
     try:
         bz.poll_events()
     finally:
-        window = None
+        del window
 
 
 # ── windowed: two swapchains, one Context ─────────────────────────────────────

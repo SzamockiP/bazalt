@@ -390,6 +390,33 @@ entry. The release is a label, not the organizing axis.
   later, if anyone ever wants to pay for it. **The reason to keep the split is the structure,
   and the release note says so rather than claiming a speed-up it does not have.**
 
+- **The core stopped being header-only** (0.27), which retires the second paragraph of the
+  entry above. The 0.20 reasoning was "they are templated and `inline`, so splitting them
+  would be a rewrite", and that was true of the cost and wrong about the benefit — it priced
+  only build time, which the same entry had just shown the split cannot buy.
+
+  Three things paid for it instead, and none of them is a stopwatch. **The first is that
+  header-only had exactly one consumer.** Nobody links bazalt as a C++ library; the core is
+  compiled into `bazalt._core` and nowhere else, so every `inline` in it was a keyword
+  serving a use case that does not exist. **The second is the include cycle**, which was not
+  free: `UploadManager.hpp` and `HotReload.hpp` include `Context.hpp`, so `Context` could not
+  name the two classes it owns, and the way out was `UploadManagerBase` and `HotReloadBase` —
+  two pure-virtual interfaces with one implementation each, i.e. the exact shape rule 1
+  rejects everywhere else. A `Context.cpp` deletes both, because a translation unit may
+  include what a header may not. **The third is that the owner asked for readable code**, and
+  a 1,950-line header where every declaration is buried in its own body is not that.
+
+  What the split does NOT claim: a faster full build. The 0.20 measurement still holds — a
+  full build parses everything once whatever the file count — and the gain is on the
+  incremental edit, where a change to `Context.cpp` no longer recompiles eight binding
+  translation units.
+
+  The rule for what stays in a header after the split: the class definition, an accessor
+  short enough to be worth inlining, anything templated or `constexpr`, and the comments that
+  describe the API. The bodies and the comments that describe THEM move. A header is a table
+  of contents, and if a reader has to scroll past an implementation to find the next
+  declaration, the split did not happen.
+
 - **`bindings/Common.hpp` is `inline`, not an anonymous namespace** (0.20), and this is the
   one part of the split that fails silently rather than loudly. The shared helpers were an
   anonymous namespace in `main.cpp`, which is correct for one translation unit and wrong for
@@ -436,6 +463,52 @@ entry. The release is a label, not the organizing axis.
   the ceiling on what the split could ever be worth. Had the baseline not been taken first,
   the release would have credited the split with a 66→26s improvement that was mostly a
   configuration default.
+
+### The checks that gate a release
+
+- **A check that does not gate is a check that drifts** (0.22 for the formatter, 0.27 for the
+  rest). 0.22 learned it once: `.clang-format` existed from the start and was enforced by
+  remembering, so every release ended with a "style(0.N)" commit. The 0.27 audit found the
+  same shape three more times — no C++ static analysis at all, no Python linter at all, and a
+  hand-written stub that nothing compared against the module. All three now run in CI.
+
+- **When a check and the code disagree, the code changes** (0.27, and this one is the owner's
+  ruling rather than a derivation). The plan proposed pre-emptively disabling
+  `modernize-make-shared` and `cppcoreguidelines-owning-memory`, because bazalt writes
+  `shared_ptr<T>(new T(...))` eight times to construct a class whose constructor is private.
+  The owner refused the shortcut and asked the obvious question: if the rule exists, why are
+  we the exception?
+
+  **The first run answered it: neither check fires on those eight sites.**
+  `modernize-make-shared` verifies that the constructor is reachable before it suggests
+  anything, and a private constructor behind a factory is not. So the disable would have
+  silenced a check that had nothing to say, which is worse than useless — it would also have
+  silenced the sites where the check IS right. The lesson is narrower than the ruling and
+  worth keeping on its own: **do not disable a check before you have seen it fire.**
+
+  Where a check and the code really did disagree, the code changed. `bugprone-unused-raii`
+  flagged four `py::class_<T>(m, "Name");` registrations — pybind11 does its work in the
+  CONSTRUCTOR, so a discarded temporary is the idiom, and the check cannot tell it from
+  `std::lock_guard(mutex);`, which is a genuine bug. The fix is a named
+  `[[maybe_unused]] const` variable at each site: the check is satisfied, the registration
+  now says what it is, and no `NOLINT` claims the tool is wrong forever. (The check's own
+  automatic fix, for the record, invented a variable called `give_me_a_name` three times in
+  one scope, which does not compile. An auto-fix is a suggestion, not a patch.)
+
+  The general form, and the reason this is a decision rather than a preference: **a disabled
+  check is a permanent claim that the tool is wrong about this codebase.** That claim is
+  sometimes true — `readability-identifier-length` on a Vulkan file full of `x`, `y` and `vk`
+  is noise, and `.clang-tidy` says so with the reason beside it. Where only PART of a check
+  misfires, narrow it instead of switching it off: `readability-uppercase-literal-suffix` is
+  restricted to the long-family suffixes, because a lowercase `l` really does read as a `1`
+  and a lowercase `f` does not, and `bugprone-unused-return-value` is told that an explicit
+  `static_cast<void>` is a deliberate discard. Both are smaller claims than "off", and both
+  say why in the file.
+
+- **Every gate is pinned to one version.** The formatter, the analyzer and the linter all come
+  from PyPI with an exact version, because each of them changes its output between releases.
+  An unpinned tool turns somebody else's release day into a red build here, which is debt #4's
+  lesson applied to the tools instead of to the drivers.
 
 ### Dispatch and volk
 
@@ -3740,9 +3813,27 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   minutes later.
 
 - **The full interpreter matrix runs where it gates something**, not on every push. A pull
-  request, a release and a manual run build cp310–cp313. A plain branch push builds only the
-  cp312 the lavapipe legs install. Nothing reaches master without the full matrix having
+  request, a release and a manual run build cp310–cp314. A plain branch push builds the
+  interpreters the test legs install. Nothing reaches master without the full matrix having
   passed on the pull request first, so the push-time saving costs no coverage.
+
+  **0.27 added cp314 to the push set, and the reason is a gap rather than a preference.** The
+  newest interpreter is where a wheel breaks first, and it was the one nothing built until a
+  pull request — so a 3.14 break waited for the gate instead of meeting the commit that
+  caused it. The cost is three more parallel jobs on a free runner.
+
+- **The third lavapipe leg varies the INTERPRETER, not the API version** (0.27). Every GPU
+  test this project had ever run ran on one Python. The wheel jobs prove that 3.14 compiles
+  and imports, and that is a different claim from "3.14 works": the numpy buffer protocol
+  carries every readback, every upload and every push-constant block, and a new interpreter
+  that breaks a library like this one breaks it there. So the matrix gained `api 1.3` on
+  cp314.
+
+  It pairs with 1.3 only, and the asymmetry is the point. The 1.2 leg exists because the
+  DEVICE offers a different path; the interpreter has nothing to do with that path, so a
+  fourth leg would buy a slower pipeline and no new coverage. When a matrix grows, ask which
+  axis the new dimension actually varies — two axes multiply, and most of the products are
+  the same test run twice.
 
 - **MSBuild stays the Windows generator.** Ninja is genuinely faster — 45s against 63s for
   one wheel, measured — but CMake's Ninja generator needs `cl.exe` on PATH, and neither the

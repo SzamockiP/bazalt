@@ -3,8 +3,8 @@
 #include <pybind11/functional.h>
 
 #include <atomic>
+#include <deque>
 #include <mutex>
-#include <optional>
 #include <semaphore>
 #include <string>
 #include <thread>
@@ -12,7 +12,6 @@
 #include <vector>
 
 #include "Error.hpp"
-#include "MpscQueue.hpp"
 
 namespace py = pybind11;
 
@@ -165,7 +164,10 @@ public:
             return;
 
         pending_.fetch_add(1);
-        messages_.push(LogMessage{severity, source, std::move(text)});
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            messages_.push_back(LogMessage{severity, source, std::move(text)});
+        }
         message_semaphore_.release();
     }
 
@@ -178,7 +180,10 @@ public:
     void log_always(Severity severity, Source source, std::string text)
     {
         pending_.fetch_add(1);
-        messages_.push(LogMessage{severity, source, std::move(text)});
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            messages_.push_back(LogMessage{severity, source, std::move(text)});
+        }
         message_semaphore_.release();
     }
 
@@ -191,9 +196,9 @@ public:
     void flush()
     {
         py::gil_scoped_release release;
-        while (pending_.load() > 0)
+        while (int n = pending_.load())
         {
-            std::this_thread::yield();
+            pending_.wait(n);
         }
     }
 
@@ -208,20 +213,30 @@ private:
     void drain_messages()
     {
         py::gil_scoped_acquire gil;
+        // Take the pending messages out under queue_mutex_ ALONE, then invoke the
+        // callbacks without it: a callback that logs (a validation message from a
+        // bazalt call it makes) re-enters log(), and log() takes queue_mutex_.
+        std::deque<LogMessage> batch;
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            batch.swap(messages_);
+        }
         std::lock_guard<std::mutex> lock(callbacks_mutex_);
-        while (std::optional<LogMessage> msg = messages_.pop())
+        for (const LogMessage& msg : batch)
         {
             for (const auto& callback : callbacks_)
             {
-                callback(*msg);
+                callback(msg);
             }
             // Decremented only after the callbacks have run, so flush() really does
             // mean "delivered", not "dequeued".
             pending_.fetch_sub(1);
+            pending_.notify_all();
         }
     }
 
-    MpscQueue<LogMessage> messages_{};
+    std::mutex queue_mutex_;
+    std::deque<LogMessage> messages_;
     std::counting_semaphore<> message_semaphore_{0};
     std::atomic<int> pending_{0};
 

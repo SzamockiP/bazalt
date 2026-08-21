@@ -27,11 +27,6 @@ import bazalt as bz
 from conftest import SHADER_DIR
 
 
-@pytest.fixture
-def fullscreen_vert(ctx):
-    return ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
-
-
 def textured_pipeline(ctx, target, fullscreen_vert):
     """A fullscreen pass that samples binding 0 and writes it out."""
     frag = ctx.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
