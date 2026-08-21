@@ -103,6 +103,8 @@ lod = 1.0
 height_scale = 1.2
 paused = False
 
+g = ctx.graph()
+
 proj = glm.perspectiveRH_ZO(glm.radians(55.0), 1024.0 / 720.0, 0.1, 200.0)
 proj[1][1] *= -1
 start = time.time()
@@ -147,17 +149,17 @@ while window.is_open():
     active = wireframe if show_wireframe else solid
     push = struct.pack("4f4f", eye.x, eye.y, eye.z, lod, height_scale, animation, 0.0, 0.0)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(renderer, clear_color=[0.05, 0.07, 0.10, 1.0]) as c:
-        c.bind_pipeline(active)
-        c.bind_descriptor_set(desc_set, active)
-        c.push_constants(active, 0, push)
-        c.bind_vertex_buffer(vbuf)
+    # The keys change the pipeline and the push constants, so rebuild the graph.
+    g.reset()
+    with g.add_pass(renderer, clear_color=[0.05, 0.07, 0.10, 1.0]) as p:
+        p.bind_pipeline(active)
+        p.bind_descriptor_set(desc_set, active)
+        p.push_constants(active, 0, push)
+        p.bind_vertex_buffer(vbuf)
         # One draw for the whole terrain. The triangle count it turns into is the
         # tessellator's decision, not this line's.
-        c.draw(patch_vertices)
-    renderer.present(cmd)
+        p.draw(patch_vertices)
+    renderer.present(g)
 
     frames += 1
     if time.time() - fps_timer >= 1.0:

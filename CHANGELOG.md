@@ -75,6 +75,10 @@ between whole submits; inside one graph the passes order themselves.
   neither the call nor the reason.
 - **Timer and occlusion handles come from a pass.** A handle from before a
   `graph.reset()` reports `StateError`, as one from before a `cmd.begin()` did.
+- **A timer measures one pass.** A command buffer could hold a timer around
+  several rendering scopes; a timer now belongs to the pass that made it. To
+  measure a group of passes, make one timer in each and add the results.
+  `examples/34_showcase` does this for its nine post-processing passes.
 
 ### Notes
 - **Two passes that render into one target no longer change the layout of the
@@ -86,6 +90,11 @@ between whole submits; inside one graph the passes order themselves.
 - **The manual escape hatch is a pass, not a second API.** A pass with
   `auto_barriers=False` computes nothing for itself, and the graph still reads
   the barriers you write there, so the automatic passes around it stay correct.
+- **A graph you keep holds the barriers its passes computed when you recorded
+  them.** A hot reload that changes which resources a shader writes does not
+  make the graph compute them again. Call `graph.reset()` and build the passes
+  again to pick the change up. A kept recording worked the same way before this
+  release.
 
 ## [0.27.0] — 2026-08-21
 

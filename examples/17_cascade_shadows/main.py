@@ -8,7 +8,7 @@ shadow.depth as a sampler2DArrayShadow, choosing the cascade per fragment.
 
 The new API is exactly:
   * shadow = ctx.create_render_target(S, S, color=None, depth=D32F, layers=3)
-  * cmd.rendering(shadow.layer(c))  → render this cascade's depth
+  * g.add_pass(shadow.layer(c))  → render this cascade's depth
 
 Each cascade tints the surface (red / green / blue near→far) so the split lines
 are visible.
@@ -174,27 +174,27 @@ ibuf = ctx.create_buffer(np.array(idx, np.uint32), bz.BufferType.INDEX, bz.Memor
 index_count = len(idx)
 
 
-def record(cmd, camera_vp):
-    cmd.begin()
+def record(g, camera_vp):
+    g.reset()
     # Three depth-only cascade passes, each into its own shadow layer.
     for c in range(3):
-        with cmd.rendering(shadow.layer(c)) as sc:
-            (sc.bind_pipeline(depth_pipe)
-               .push_constants(depth_pipe, 0, bytes(glm.transpose(LIGHT_VP[c])))
-               .bind_vertex_buffer(vbuf)
-               .bind_index_buffer(ibuf)
-               .draw_indexed(index_count))
+        with g.add_pass(shadow.layer(c), name=f"cascade {c}") as p:
+            (p.bind_pipeline(depth_pipe)
+              .push_constants(depth_pipe, 0, bytes(glm.transpose(LIGHT_VP[c])))
+              .bind_vertex_buffer(vbuf)
+              .bind_index_buffer(ibuf)
+              .draw_indexed(index_count))
     # Scene pass: sample the cascade array.
-    with cmd.rendering(renderer, clear_color=[0.05, 0.07, 0.1, 1.0]) as sc:
-        (sc.bind_pipeline(scene_pipe)
-           .bind_descriptor_set(scene_set, scene_pipe)
-           .push_constants(scene_pipe, 0, bytes(glm.transpose(camera_vp)))
-           .bind_vertex_buffer(vbuf)
-           .bind_index_buffer(ibuf)
-           .draw_indexed(index_count))
+    with g.add_pass(renderer, clear_color=[0.05, 0.07, 0.1, 1.0], name="scene") as p:
+        (p.bind_pipeline(scene_pipe)
+          .bind_descriptor_set(scene_set, scene_pipe)
+          .push_constants(scene_pipe, 0, bytes(glm.transpose(camera_vp)))
+          .bind_vertex_buffer(vbuf)
+          .bind_index_buffer(ibuf)
+          .draw_indexed(index_count))
 
 
-cmd = ctx.create_command_buffer()
+g = ctx.graph()
 camera = Camera(pos=(0.0, 9.0, 16.0), yaw=-math.pi / 2, pitch=-0.45, speed=10.0)
 
 TITLE = "Bazalt Demo - Cascade Shadow Maps (render-to-layer)"
@@ -222,5 +222,5 @@ while window.is_open():
     camera.update_mouse(mouse.dx, mouse.dy)
     camera.process_keyboard(window, dt)
 
-    record(cmd, camera.view_proj(W / H))
-    renderer.present(cmd)
+    record(g, camera.view_proj(W / H))
+    renderer.present(g)

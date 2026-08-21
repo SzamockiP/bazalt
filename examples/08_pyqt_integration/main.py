@@ -60,11 +60,11 @@ class VulkanWidget(QWidget):
         
         self.ibuf = self.ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
         
-        # Record commands
-        self.cmd = self.ctx.create_command_buffer()
-        self.cmd.begin()
-        with self.cmd.rendering(self.renderer, clear_color=[0.15, 0.15, 0.2, 1.0]) as c:
-            (c.bind_pipeline(self.pipeline)
+        # Build the graph. The triangle never changes, so the same graph
+        # goes to every tick.
+        self.graph = self.ctx.graph()
+        with self.graph.add_pass(self.renderer, clear_color=[0.15, 0.15, 0.2, 1.0]) as p:
+            (p.bind_pipeline(self.pipeline)
               .bind_vertex_buffer(self.vbuf)
               .bind_index_buffer(self.ibuf)
               .draw_indexed(3))
@@ -84,7 +84,7 @@ class VulkanWidget(QWidget):
                     f"Bazalt PyQt6 Integration Demo | {1000.0 / fps:.2f} ms/frame | {fps:.1f} FPS")
                 self._frame_count = 0
                 self._fps_timer = 0.0
-            self.renderer.present(self.cmd)
+            self.renderer.present(self.graph)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

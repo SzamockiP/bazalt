@@ -12,12 +12,12 @@ Three things are on show:
     GPU-side. Two updates of one image land in the order they were called.
   * `img.update(patch, region=(x, y, w, h))` rewrites a rectangle and leaves
     the rest alone — click and drag to paint a white square into the stream.
-  * `with cmd.label(...)` names the pass, so a RenderDoc capture reads as a
-    frame rather than a list of draws, and `ctx.memory_stats()` says whether
+  * `g.add_pass(..., name=...)` names the pass, so a RenderDoc capture reads as
+    a frame rather than a list of draws, and `ctx.memory_stats()` says whether
     streaming is leaking.
 
 Press S to save a screenshot of the window with
-`renderer.present(cmd, capture=True)` + `renderer.read_pixels()`. It takes two
+`renderer.present(g, capture=True)` + `renderer.read_pixels()`. It takes two
 calls because a presentable image may only be touched between acquire and
 present, so the copy has to ride the frame's own submit.
 
@@ -87,13 +87,12 @@ dset = pool.allocate_set(present)
 # ever rewritten — that is the difference from creating a new image per frame.
 dset.set_image(0, stream, sampler=ctx.create_sampler(filter=bz.Filter.LINEAR))
 
-cmd = ctx.create_command_buffer()
-cmd.begin()
-with cmd.label("present streamed texture"):
-    with cmd.rendering(renderer, clear_color=[0, 0, 0, 1]):
-        cmd.bind_pipeline(present)
-        cmd.bind_descriptor_set(dset, present, 0)
-        cmd.draw(3)
+g = ctx.graph()
+with g.add_pass(renderer, clear_color=[0, 0, 0, 1],
+                name="present streamed texture") as p:
+    p.bind_pipeline(present)
+    p.bind_descriptor_set(dset, present, 0)
+    p.draw(3)
 
 print("drag with the left mouse button to paint; S saves a screenshot; Esc quits")
 
@@ -131,7 +130,7 @@ while window.is_open():
     ctx.begin_frame()
     if not renderer.acquire():
         continue
-    renderer.present(cmd, capture=capture_next)
+    renderer.present(g, capture=capture_next)
 
     if capture_next:
         shot = renderer.read_pixels()

@@ -108,6 +108,7 @@ print(__doc__)
 
 two_sided = True
 start = time.perf_counter()
+g = ctx.graph()
 
 while window.is_open():
     bz.poll_events()
@@ -128,38 +129,40 @@ while window.is_open():
     proj[1][1] *= -1
     view_proj = bytes(glm.transpose(proj * glm.lookAt(eye, glm.vec3(0), glm.vec3(0, 1, 0))))
 
-    with ctx.record() as cmd:
-        # Pass 1 clears colour, depth AND stencil, then draws the cube so there
-        # is something to look at from outside.
-        with cmd.rendering(renderer, clear_color=[0.05, 0.06, 0.09, 1.0], clear_stencil=0):
-            cmd.bind_pipeline(reference)
-            cmd.push_constants(0, view_proj)
-            cmd.bind_vertex_buffer(vbuf)
-            cmd.bind_index_buffer(ibuf)
-            cmd.draw_indexed(len(indices))
+    g.reset()
 
-        # Pass 2 preserves all of it and only counts. clear_color=None is what
-        # makes a second pass a second pass rather than a second frame.
-        with cmd.rendering(renderer, clear_color=None):
-            cmd.bind_pipeline(counting if two_sided else broken)
-            cmd.push_constants(0, view_proj)
-            cmd.bind_vertex_buffer(vbuf)
-            cmd.bind_index_buffer(ibuf)
-            cmd.draw_indexed(len(indices))
+    # Pass 1 clears colour, depth AND stencil, then draws the cube so there
+    # is something to look at from outside.
+    with g.add_pass(renderer, clear_color=[0.05, 0.06, 0.09, 1.0], clear_stencil=0,
+                    name="cube") as p:
+        p.bind_pipeline(reference)
+        p.push_constants(0, view_proj)
+        p.bind_vertex_buffer(vbuf)
+        p.bind_index_buffer(ibuf)
+        p.draw_indexed(len(indices))
 
-        # Pass 3 asks the counter the question.
-        with cmd.rendering(renderer, clear_color=None):
-            cmd.bind_pipeline(fill)
-            cmd.draw(3)
+    # Pass 2 preserves all of it and only counts. clear_color=None is what
+    # makes a second pass a second pass rather than a second frame.
+    with g.add_pass(renderer, clear_color=None, name="count") as p:
+        p.bind_pipeline(counting if two_sided else broken)
+        p.push_constants(0, view_proj)
+        p.bind_vertex_buffer(vbuf)
+        p.bind_index_buffer(ibuf)
+        p.draw_indexed(len(indices))
+
+    # Pass 3 asks the counter the question.
+    with g.add_pass(renderer, clear_color=None, name="inside") as p:
+        p.bind_pipeline(fill)
+        p.draw(3)
 
     ctx.begin_frame()
     if renderer.acquire():
-        renderer.present(cmd)
+        renderer.present(g)
 
     window.set_title(
         f"Bazalt Demo - Two-sided stencil | {'two-sided' if two_sided else 'one-sided (broken)'} "
         f"| distance {distance:.2f}")
 
-cmd = None
+g = None
 renderer = None
 window = None

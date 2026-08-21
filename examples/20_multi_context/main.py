@@ -24,7 +24,7 @@ room) the only portable route between two devices is host memory, so the call
 reads back on the baker and uploads here — done once, before the loop.
 
 Resources do not otherwise cross: hand a Context's image, pipeline or target to
-the other Context's command buffer and you get a ResourceError naming the
+a pass on the other Context's graph and you get a ResourceError naming the
 mistake, instead of a driver crash. The bottom of this file demonstrates that.
 
 On a single-GPU machine both Contexts land on the same card. That is not a
@@ -67,13 +67,13 @@ bake_pool = baker.create_descriptor_pool()
 bake_set = bake_pool.allocate_set(bake_pipeline)
 bake_set.set_storage_image(0, baked)
 
-cmd = baker.create_command_buffer()
-cmd.begin()
-(cmd.bind_pipeline(bake_pipeline)
+bake_graph = baker.graph()
+(bake_graph.add_pass()
+    .bind_pipeline(bake_pipeline)
     .bind_descriptor_set(bake_set, bake_pipeline)
     .push_constants(bake_pipeline, 0, np.float32(1.7).tobytes())
     .dispatch(SIZE // 8, SIZE // 8))
-baker.submit(cmd)
+baker.submit(bake_graph)
 
 # ── The crossing ──────────────────────────────────────────────────────────────
 
@@ -108,22 +108,19 @@ pool = viewer.create_descriptor_pool()
 dset = pool.allocate_set(pipeline)
 dset.set_image(0, texture)
 
-draw = viewer.create_command_buffer()
-draw.begin()
-with draw.rendering(renderer, clear_color=[0.02, 0.02, 0.05, 1.0]) as c:
-    (c.bind_pipeline(pipeline)
+draw = viewer.graph()
+with draw.add_pass(renderer, clear_color=[0.02, 0.02, 0.05, 1.0]) as p:
+    (p.bind_pipeline(pipeline)
       .bind_descriptor_set(dset, pipeline)
       .bind_vertex_buffer(vbuf)
       .bind_index_buffer(ibuf)
       .draw_indexed(6))
 
 # The guard, in the one line it takes to trip: `baked` lives on the baker, and
-# the viewer's command buffer says so rather than handing a foreign VkImage to
-# the driver.
+# the viewer's pass says so rather than handing a foreign VkImage to the driver.
 try:
-    probe = viewer.create_command_buffer()
-    probe.begin()
-    probe.barrier(baked, bz.Access.SHADER_READ, bz.Access.SHADER_READ)
+    probe = viewer.graph()
+    probe.add_pass().barrier(baked, bz.Access.SHADER_READ, bz.Access.SHADER_READ)
 except bz.ResourceError as error:
     print(f"as expected: {error}")
 

@@ -6,7 +6,7 @@ The 0.23 headline, end to end:
     kwarg on the function that already made 2D images, arrays and cubemaps;
   * a compute shader fills it with fBm noise through an image3D storage
     binding, which works on every driver (no render-to-slice needed);
-  * cmd.generate_mipmaps() builds the volume's mip chain — depth halves along
+  * p.generate_mipmaps() builds the volume's mip chain — depth halves along
     with width and height, so a 128^3 field gets a full LOD pyramid;
   * a fullscreen fragment shader raymarches it as a sampler3D: one filtered
     lookup anywhere in the field is the thing a stack of 2D slices cannot do.
@@ -61,16 +61,16 @@ march_set = pool.allocate_set(march)
 march_set.set_image(0, volume)
 
 # Fill once at startup: dispatch over the whole volume, then build the mip
-# chain. The GENERAL -> TRANSFER -> SHADER_READ_ONLY transitions are recorded
-# for you; the timer says what a 128^3 noise field costs.
+# chain. The GENERAL -> TRANSFER -> SHADER_READ_ONLY transitions come from the
+# graph; the timer says what a 128^3 noise field costs.
 groups = VOLUME_SIZE // 4
-setup = ctx.create_command_buffer()
-setup.begin()
-with setup.timer() as t:
-    (setup.bind_pipeline(fill)
-          .bind_descriptor_set(fill_set, fill)
-          .dispatch(groups, groups, groups))
-    setup.generate_mipmaps(volume, src=bz.Access.SHADER_WRITE)
+setup = ctx.graph()
+fill_pass = setup.add_pass(name="fill volume")
+with fill_pass.timer() as t:
+    (fill_pass.bind_pipeline(fill)
+              .bind_descriptor_set(fill_set, fill)
+              .dispatch(groups, groups, groups))
+    fill_pass.generate_mipmaps(volume, src=bz.Access.SHADER_WRITE)
 ctx.submit(setup)
 # Since 0.24 a device that can never measure says so with UnsupportedError.
 # The submit above was blocking, so t.ms is never None here.
@@ -79,7 +79,7 @@ try:
 except bz.UnsupportedError:
     print("fill + mips: timestamps unsupported on this device")
 
-cmd = ctx.create_command_buffer()
+g = ctx.graph()
 start = time.time()
 last_time = start
 frame_count = 0
@@ -100,9 +100,9 @@ while window.is_open():
         frame_count = 0
         fps_timer = 0.0
 
-    cmd.begin()
-    with cmd.rendering(renderer) as c:
-        c.bind_pipeline(march).bind_descriptor_set(march_set, march)
-        c.push_constants(march, 0, struct.pack("<f", now - start))
-        c.draw(3)
-    renderer.present(cmd)
+    g.reset()
+    with g.add_pass(renderer) as p:
+        p.bind_pipeline(march).bind_descriptor_set(march_set, march)
+        p.push_constants(march, 0, struct.pack("<f", now - start))
+        p.draw(3)
+    renderer.present(g)

@@ -1,6 +1,6 @@
 """Occlusion queries — asking the GPU how much of something was drawn.
 
-A blue square slides left and right behind a grey wall. `cmd.occlusion_query()`
+A blue square slides left and right behind a grey wall. `p.occlusion_query()`
 wraps its draw, and `query.samples` is how many of its fragments survived the
 depth test. Watch the title bar: the number falls to zero while the square is
 hidden and climbs back as it comes out.
@@ -74,6 +74,7 @@ elapsed = 0.0
 last = time.perf_counter()
 samples = None
 report_timer = 0.0
+g = ctx.graph()
 
 while window.is_open():
     bz.poll_events()
@@ -90,23 +91,23 @@ while window.is_open():
 
     x = math.sin(elapsed * 0.9) * 0.75
 
-    with ctx.record() as cmd:
-        with cmd.rendering(renderer, clear_color=[0.06, 0.06, 0.09, 1.0]):
-            cmd.bind_pipeline(pipeline)
-            # The wall first, and nearer (a smaller depth is nearer).
-            # Wider than the square, so "fully hidden" lasts long enough to read.
-            cmd.push_constants(0, quad(0.0, 0.30, 0.9, (0.55, 0.55, 0.6), 0.2))
-            cmd.draw(4)
-            # The square, further away, wrapped in the query. Everything drawn
-            # inside the block is counted, so it is exactly one object here.
-            with cmd.occlusion_query() as query:
-                cmd.push_constants(0, quad(x, SQUARE_HALF, SQUARE_HALF, (0.25, 0.6, 0.95), 0.6))
-                cmd.draw(4)
+    g.reset()
+    with g.add_pass(renderer, clear_color=[0.06, 0.06, 0.09, 1.0]) as p:
+        p.bind_pipeline(pipeline)
+        # The wall first, and nearer (a smaller depth is nearer).
+        # Wider than the square, so "fully hidden" lasts long enough to read.
+        p.push_constants(0, quad(0.0, 0.30, 0.9, (0.55, 0.55, 0.6), 0.2))
+        p.draw(4)
+        # The square, further away, wrapped in the query. Everything drawn
+        # inside the block is counted, so it is exactly one object here.
+        with p.occlusion_query() as query:
+            p.push_constants(0, quad(x, SQUARE_HALF, SQUARE_HALF, (0.25, 0.6, 0.95), 0.6))
+            p.draw(4)
 
     ctx.begin_frame()
     if not renderer.acquire():
         continue
-    renderer.present(cmd)
+    renderer.present(g)
 
     # None until the submit that recorded it has finished — the same handle rule
     # Timer.ms follows. Reading it every frame gives the previous frame's answer,
@@ -121,6 +122,6 @@ while window.is_open():
         hidden = "  HIDDEN" if samples == 0 else ""
         window.set_title(f"Bazalt Demo - Occlusion query | {samples} {kind}{hidden}")
 
-cmd = None
+g = None
 renderer = None
 window = None

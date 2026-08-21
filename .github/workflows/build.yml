@@ -60,7 +60,10 @@ jobs:
         run: ruff check .
 
   # ── C++ static analysis ───────────────────────────────────────
-  # clang-tidy over the eight first-party TUs, with the config at .clang-tidy.
+  # clang-tidy over every first-party TU, with the config at .clang-tidy. The
+  # list is a glob rather than a list, so a new source file (Graph.cpp and
+  # bindings/Graphs.cpp in 0.28) is analysed without anyone remembering to add
+  # it here.
   # Same delivery and pinning policy as clang-format above. Configure only, no
   # build: the compile database is all clang-tidy needs, and the SDK tarball is
   # the same cached download the Linux wheels use.

@@ -90,7 +90,7 @@ class DemoApp:
         self.setup_pipeline(script_dir)
         self.load_scene(os.path.join(self.assets_dir, "San_Miguel", "san-miguel.obj"))
         self.setup_descriptors()
-        self.record_commands()
+        self.build_graph()
 
     def on_message(self, msg):
         print(f"[{msg.severity}] {msg.text}")
@@ -210,17 +210,17 @@ class DemoApp:
         default_tex_set.set_image(0, self.default_texture)
         self.texture_sets[self.default_texture] = default_tex_set
 
-    def record_commands(self):
-        # Create and record a command buffer
-        self.cmd = self.ctx.create_command_buffer()
-        self.cmd.begin()
-        with self.cmd.rendering(self.renderer, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
-            (c.bind_pipeline(self.pipeline)
+    def build_graph(self):
+        # Build the graph: one render pass holds every submesh, and the
+        # same graph serves every frame.
+        self.graph = self.ctx.graph()
+        with self.graph.add_pass(self.renderer, clear_color=[0.1, 0.2, 0.3, 1.0]) as p:
+            (p.bind_pipeline(self.pipeline)
               .bind_descriptor_set(self.frame_set, self.pipeline, set=0)
               .bind_vertex_buffer(self.vbuf)
               .bind_index_buffer(self.ibuf))
             for dc in self.draw_calls:
-                (c.bind_descriptor_set(self.texture_sets[dc['texture']], self.pipeline, set=1)
+                (p.bind_descriptor_set(self.texture_sets[dc['texture']], self.pipeline, set=1)
                   .draw_indexed(dc['index_count'], first_index=dc['first_index'], vertex_offset=dc['vertex_offset']))
 
     def run(self):
@@ -253,7 +253,7 @@ class DemoApp:
                     self.renderer.width / self.renderer.height)
                 self.ubuf.update(view.to_bytes() + proj.to_bytes() + model.to_bytes())
                 
-                self.renderer.present(self.cmd)
+                self.renderer.present(self.graph)
 
 if __name__ == "__main__":
     app = DemoApp()

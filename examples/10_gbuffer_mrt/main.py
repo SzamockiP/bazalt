@@ -3,7 +3,7 @@
 Pass 1 renders a spinning cube into a RenderTarget with TWO colour
 attachments of different formats (RGBA16F normals + RGBA8 albedo) and depth.
 Pass 2 samples both attachments — they are ordinary bz.Image objects — and
-lights the result into the window. One command buffer, recorded once.
+lights the result into the window. One graph, built one time.
 """
 
 import time
@@ -81,19 +81,18 @@ comp_set = pool.allocate_set(comp_pipe)
 comp_set.set_image(0, gbuffer.color[0])  # normals
 comp_set.set_image(1, gbuffer.color[1])  # albedo
 
-# Record once: g-buffer pass, then composite pass.
-cmd = ctx.create_command_buffer()
-cmd.begin()
+# Build the graph one time: g-buffer pass, then composite pass.
+g = ctx.graph()
 
-with cmd.rendering(gbuffer, clear_color=[0.0, 0.0, 0.0, 0.0]) as c:
-    (c.bind_pipeline(gbuf_pipe)
+with g.add_pass(gbuffer, clear_color=[0.0, 0.0, 0.0, 0.0], name="gbuffer") as p:
+    (p.bind_pipeline(gbuf_pipe)
       .bind_descriptor_set(gbuf_set, gbuf_pipe)
       .bind_vertex_buffer(vbuf)
       .bind_index_buffer(ibuf)
       .draw_indexed(len(idx)))
 
-with cmd.rendering(renderer, clear_color=[0.05, 0.07, 0.1, 1.0]) as c:
-    (c.bind_pipeline(comp_pipe)
+with g.add_pass(renderer, clear_color=[0.05, 0.07, 0.1, 1.0], name="composite") as p:
+    (p.bind_pipeline(comp_pipe)
       .bind_descriptor_set(comp_set, comp_pipe)
       .draw(3))
 
@@ -126,4 +125,4 @@ while window.is_open():
         mvp = proj * view * model
 
         ubuf.update(bytes(glm.transpose(mvp)) + bytes(glm.transpose(model)))
-        renderer.present(cmd)
+        renderer.present(g)

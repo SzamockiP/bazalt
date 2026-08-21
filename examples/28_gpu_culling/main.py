@@ -22,12 +22,12 @@ still produces a plausible-looking number.
 
 Each frame:
 
-  1. `cmd.fill_buffer(args, 0)` zeroes the draw arguments — the prerequisite that
+  1. `p.fill_buffer(args, 0)` zeroes the draw arguments — the prerequisite that
      landed in 0.18 for exactly this, because a counter an atomic increments has to
      start each frame at a known value.
   2. A compute pass tests every cube against the culling camera's frustum planes,
      atomically increments `instanceCount`, and compacts the survivors.
-  3. `cmd.draw_indexed_indirect(args)` draws whatever that came to — in BOTH
+  3. `p.draw_indexed_indirect(args)` draws whatever that came to — in BOTH
      windows, from one argument buffer.
 
 The CPU never learns the count. That is what makes it different from culling on the
@@ -200,10 +200,10 @@ draw_set.set_buffer(0, visible)
 no_cull_set = pool.allocate_set(culled_pipeline)
 no_cull_set.set_buffer(0, all_visible)
 
-# Each window needs its own CommandBuffer: one holds a single command buffer per
-# frame slot, so two windows recording into one would overwrite each other.
-culled_cmd = ctx.create_command_buffer()
-observer_cmd = ctx.create_command_buffer()
+# Each window needs its own Graph: one holds a single command buffer per frame
+# slot, so two windows replaying one would overwrite work still in flight.
+culled_graph = ctx.graph()
+observer_graph = ctx.graph()
 
 culling = True
 paused = False
@@ -329,45 +329,48 @@ while culled_window.is_open() and observer_window.is_open():
 
     # ── window 1: the camera the culling is done for ──────────────────────
     if culled_renderer.acquire():
-        culled_cmd.begin()
+        culled_graph.reset()
         if culling:
-            culled_cmd.fill_buffer(args, 0)
-            culled_cmd.bind_pipeline(cull)
-            culled_cmd.bind_descriptor_set(cull_set, cull)
-            culled_cmd.push_constants(cull, 0, cull_vp_bytes + struct.pack("II", COUNT, INDEX_COUNT))
-            culled_cmd.dispatch((COUNT + 63) // 64)
-        with culled_cmd.rendering(culled_renderer, clear_color=[0.03, 0.04, 0.07, 1.0]) as c:
-            c.bind_pipeline(culled_pipeline)
-            c.bind_descriptor_set(source_set, culled_pipeline)
-            c.push_constants(culled_pipeline, 0, cull_vp_bytes)
-            c.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf)
-            c.draw_indexed_indirect(source_args)
-        culled_renderer.present(culled_cmd)
+            cull_pass = culled_graph.add_pass(name="cull")
+            cull_pass.fill_buffer(args, 0)
+            cull_pass.bind_pipeline(cull)
+            cull_pass.bind_descriptor_set(cull_set, cull)
+            cull_pass.push_constants(cull, 0, cull_vp_bytes + struct.pack("II", COUNT, INDEX_COUNT))
+            cull_pass.dispatch((COUNT + 63) // 64)
+        with culled_graph.add_pass(culled_renderer, clear_color=[0.03, 0.04, 0.07, 1.0],
+                                   name="culled view") as p:
+            p.bind_pipeline(culled_pipeline)
+            p.bind_descriptor_set(source_set, culled_pipeline)
+            p.push_constants(culled_pipeline, 0, cull_vp_bytes)
+            p.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf)
+            p.draw_indexed_indirect(source_args)
+        culled_renderer.present(culled_graph)
 
     # ── window 2: the observer, outside the frustum ───────────────────────
     if observer_renderer.acquire():
         obs_vp = bytes(glm.transpose(
             observer_view_proj(observer_window.width / max(observer_window.height, 1))))
-        observer_cmd.begin()
+        observer_graph.reset()
         # The compute pass that fills `args` and `visible` runs in the OTHER
-        # window's recording, and this one only reads them. Until 0.24 that needed
-        # two manual barriers here, because the tracker's state is per recording
-        # and this recording writes nothing it can see. It is automatic now: the
-        # first READ of a buffer in a recording waits for whatever wrote it last,
-        # wherever that was. cmd.barrier() is still there for the cases the
+        # window's graph, and this one only reads them. Until 0.24 that needed
+        # two manual barriers here, because the tracker only knew about one
+        # recording and this one writes nothing it can see. It is automatic now:
+        # the first READ of a buffer in a graph waits for whatever wrote it last,
+        # wherever that was. p.barrier() is still there for the cases the
         # tracker cannot reach.
-        with observer_cmd.rendering(observer_renderer, clear_color=[0.05, 0.05, 0.09, 1.0]) as c:
-            c.bind_pipeline(observer_pipeline)
-            c.bind_descriptor_set(source_set, observer_pipeline)
-            c.push_constants(observer_pipeline, 0, obs_vp)
-            c.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf)
-            c.draw_indexed_indirect(source_args)
+        with observer_graph.add_pass(observer_renderer, clear_color=[0.05, 0.05, 0.09, 1.0],
+                                     name="observer") as p:
+            p.bind_pipeline(observer_pipeline)
+            p.bind_descriptor_set(source_set, observer_pipeline)
+            p.push_constants(observer_pipeline, 0, obs_vp)
+            p.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf)
+            p.draw_indexed_indirect(source_args)
             # The frustum the culling was done with, so the empty space has a shape.
-            c.bind_pipeline(observer_lines)
-            c.push_constants(observer_lines, 0, obs_vp)
-            c.bind_vertex_buffer(frustum_lines)
-            c.draw(len(FRUSTUM_EDGES) * 2)
-        observer_renderer.present(observer_cmd, capture=measure)
+            p.bind_pipeline(observer_lines)
+            p.push_constants(observer_lines, 0, obs_vp)
+            p.bind_vertex_buffer(frustum_lines)
+            p.draw(len(FRUSTUM_EDGES) * 2)
+        observer_renderer.present(observer_graph, capture=measure)
         if measure:
             # The readback stalls the frame, which is why this sits on a key
             # rather than in the loop.

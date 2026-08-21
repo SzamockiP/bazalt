@@ -113,6 +113,7 @@ width = 0.06
 
 proj = glm.perspectiveRH_ZO(glm.radians(45.0), 1024.0 / 720.0, 0.1, 100.0)
 proj[1][1] *= -1
+g = ctx.graph()
 start = time.time()
 frames = 0
 fps_timer = time.time()
@@ -135,10 +136,9 @@ while window.is_open():
     view = glm.lookAt(glm.vec3(0, 1.6, 5.5), glm.vec3(0, 0, 0), glm.vec3(0, 1, 0))
     view_proj = proj * view
 
-    # One recording per frame: the model matrix rides in the uniform buffer, so
+    # One graph per frame: the model matrix rides in the uniform buffer, so
     # each object needs its own pass over the mesh anyway.
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g.reset()
     for index, (position, color) in enumerate(OBJECTS):
         model = glm.translate(glm.mat4(1.0), position)
         model = glm.rotate(model, t * (0.6 + 0.2 * index), glm.vec3(0.3, 1.0, 0.15))
@@ -148,21 +148,21 @@ while window.is_open():
         # The first pass of the frame clears; the rest preserve, or each object
         # would wipe the ones before it.
         clear = [0.03, 0.03, 0.06, 1.0] if first else None
-        with cmd.rendering(renderer, clear_color=clear, clear_stencil=0) as c:
+        with g.add_pass(renderer, clear_color=clear, clear_stencil=0, name=f"object {index}") as p:
             body = mark if index == selected else plain
-            c.bind_pipeline(body)
-            c.bind_descriptor_set(desc_set, body)
-            c.push_constants(body, 0, struct.pack("4ff", *color, 0.0))
-            c.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(36)
+            p.bind_pipeline(body)
+            p.bind_descriptor_set(desc_set, body)
+            p.push_constants(body, 0, struct.pack("4ff", *color, 0.0))
+            p.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(36)
 
         if index == selected and width > 0.0:
-            with cmd.rendering(renderer, clear_color=None) as c:
-                c.bind_pipeline(outline)
-                c.bind_descriptor_set(desc_set, outline)
-                c.push_constants(outline, 0, struct.pack("4ff", *OUTLINE_COLOR, width))
-                c.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(36)
+            with g.add_pass(renderer, clear_color=None, name="outline") as p:
+                p.bind_pipeline(outline)
+                p.bind_descriptor_set(desc_set, outline)
+                p.push_constants(outline, 0, struct.pack("4ff", *OUTLINE_COLOR, width))
+                p.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(36)
 
-    renderer.present(cmd)
+    renderer.present(g)
 
     frames += 1
     if time.time() - fps_timer >= 1.0:

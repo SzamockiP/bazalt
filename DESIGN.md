@@ -1733,6 +1733,156 @@ escape if it covers the same ground.
   `GLFWwindow*`, which `py::keep_alive` currently makes impossible to outlive. `close()`
   would open exactly that hole. It comes back if somebody asks.
 
+### The pass graph (0.28)
+
+The release that replaced the recording API. `CommandBuffer` and everything around it —
+`ctx.create_command_buffer`, `ctx.record`, `begin()`, the `begin_rendering`/`end_rendering`
+pair and its `with` sugar — are gone, and a frame is a `Graph` of `Pass` objects.
+
+- **The feature is the barriers, not the syntax.** This is worth stating first, because a
+  graph API is easy to mistake for an ergonomics change. Until 0.28 every barrier was
+  computed while ONE recording was being recorded, and record-time state is per recording
+  by construction — so a recording could not see what another recording did, and the first
+  use of a resource had to assume the worst (the two first-use floors), while a second pass
+  on one target had to retire the attachment and bring it back (the priced entry below).
+  The graph sees every pass before it emits anything, so a use INSIDE the graph names the
+  pass that wrote it and gets an exact edge. The floors survive at graph scope, for the
+  writers that really are outside: another graph, or the previous frame. The 0.24 argument
+  is unchanged; only the meaning of "outside" moved one level up.
+
+- **The graph never reorders the passes.** Execution order is add order. A topological sort
+  over one queue can produce only the order the caller wrote or a surprise, and a surprise
+  is worse than a missed overlap in a library for prototyping: an effect that renders wrong
+  because the graph moved a pass is a bug the user cannot see the cause of. It also keeps
+  0.29 honest, because cross-queue edges come from the same fold without any reordering.
+
+- **A pass with a target draws, a pass without one does not** (rule 1). `add_pass(target)`
+  and `add_pass()` are one verb whose variant differs by one parameter, which is the same
+  test `create_image(..., cube=True)` passed. Two verbs (`render_pass()` / `compute_pass()`)
+  were rejected: they are two names for one operation, and a third would appear the day
+  somebody wants a transfer-only pass — which is just a pass with no target and no
+  dispatch.
+
+- **The pass kind is what refuses a verb, and it is why the refusal can be good.** A draw
+  in a pass with no target, and a dispatch or a transfer in a render pass, are `StateError`
+  at record time with a message naming the fix. Before 0.28 the same mistakes were a
+  validation error at submit that named neither the call nor the reason — the `in_rendering_`
+  flag could refuse the transfers, but nothing could refuse a draw with no attachments.
+  A kind is a stronger thing to know than a flag.
+
+- **A pass is a HANDLE, and `with` only seals it.** `add_pass` returns the pass, and the
+  block's `__exit__` marks it sealed — the point after which the compile may trust its use
+  list. A pass recorded without a block seals itself at the first compile. This is the
+  "return a handle and read the results off it" rule the 0.9 timers established, and it is
+  what makes `p.enabled` and `g.remove(p)` possible at all: a scope-only API has nothing to
+  hand back.
+
+  **There is no `begin_pass`/`end_pass` pair, and the 0.18 rule is what decides it.** A pair
+  earns its place only when it reaches somewhere the block cannot, and the one such place is
+  a function boundary. The pass object crosses function boundaries by itself —
+  `draw_scene(p)` — so a pair would be a pure second path. Contrast `begin_label`/`end_label`,
+  which stay: a label has no object to pass around.
+
+  This is also not the rejected `with cmd.compute()`. That context manager had nothing to
+  tear down, which is what made it a false symmetry. This one has the seal, and for a render
+  pass the block really is the rendering scope.
+
+- **`p.enabled` and `g.remove(p)` recompile; they do not re-record.** Turning an effect off
+  is the most common thing a prototype does to a frame, and before this it meant rebuilding
+  the recording around an `if`. A disabled pass is absent from the fold, so the barriers are
+  computed for the passes that actually run. What it wrote before is stale for the passes
+  after it — the same contract as a submit the caller chose to skip, and stating it is
+  cheaper than pretending the library can know better.
+
+- **`ctx.graph()`, not `ctx.create_graph()`.** The `create_*` family makes device resources
+  you keep. A graph is a recording — the successor of `ctx.record()` — and one of the two
+  supported idioms rebuilds it every frame, so the name must not suggest a cost. `reset()`
+  is the rebuild verb precisely so that the cheap thing has a name; a fresh `ctx.graph()`
+  per frame also works and churns allocations.
+
+- **`Queue` ships with one member, and `COMPUTE` is ABSENT rather than accepted** (0.28,
+  and the shape of 0.29). Every pass names its queue now, so async compute arrives as a new
+  enum VALUE, never as a new parameter — the additive route rule 3 demands. The alternative
+  was to accept `Queue.COMPUTE` today and run it on the graphics queue, and it is worse in
+  a way worth recording: 0.29 would then change the SCHEDULING of programs nobody edited,
+  which is a behaviour break wearing a no-op's clothes. An enum member no code path can
+  reach is also untestable surface, which the api-coverage census would report as exactly
+  what it is.
+
+  **The queue stays the caller's choice permanently.** After 0.29 a compute pass on
+  `Queue.GRAPHICS` is still legal and still the default. Bazalt does not move work between
+  queues on its own: which queue a pass belongs on is a decision about the shape of the
+  frame, and the library cannot see the frame the user has in mind.
+
+- **The escape hatch is a pass, not a second API.** Rule 2 asks for a way out, and the first
+  design had one: a raw recorder beside the graph with the old verbs. It was rejected during
+  the release, and the reasons generalize. It could not interleave with the graph, so
+  "manual for this part" meant "manual for the whole frame". It duplicated some thirty verbs
+  as a second public path (rule 1). And it needed the `begin_rendering`/`end_rendering` pair
+  the graph had just removed, so the ceiling it protected was the old API rather than the
+  user's reach. What replaced it composes instead: `add_pass(auto_barriers=False)` makes ONE
+  pass manual, its `p.barrier()` calls feed the fold, and the automatic passes around it
+  order against what the manual pass said it did. Between whole submits, `after=` is the
+  manual ordering.
+
+- **`Serial` is opaque, and the return value IS the signal.** Every submit already signals
+  the Context timeline at its own serial, so a `signal=` parameter would name something that
+  already exists; the handle comes back instead. It carries `{queue_id, value}` and exposes
+  neither, because a bare integer invites exactly the assumption that stops being true when
+  0.29 adds a second timeline: that serials from different submits are comparable. The cost
+  of hiding it is zero today and the cost of exposing it would be a break later.
+
+- **`wait=` kept its meaning and `after=` is the new one.** They answer different questions —
+  whether the CPU blocks, and what the GPU waits for — so they are two parameters rather
+  than one renamed. The plan proposed renaming `wait=` to `block=` to free the word; the
+  owner's version is better and it is the one that shipped, because it breaks nothing and
+  the two words were never in conflict.
+
+- **The seams for 0.29 were cut in 0.28** and are listed here so the next release can find
+  them: `Context::QueueRuntime` bundles the queue, its family, its timeline, its serial
+  counter, its mutex and its command pool, and a second queue is a second instance;
+  `Serial` is already queue-tagged; the deletion queue reads and writes its key through
+  `retire_key()` so the multi-timeline key shape changes in one place; a submit's waits are
+  a list rather than a fixed pair; and the fold already groups same-queue runs of passes
+  into batches, of which there is exactly one today. The recommendation for the sharing
+  mode is `VK_SHARING_MODE_CONCURRENT` over both families, because it deletes the whole
+  queue-family ownership-transfer protocol at a bandwidth cost that is noise for
+  prototyping — with `EXCLUSIVE` plus release/acquire barriers priced but not bought.
+
+- **A blocking headless submit no longer waits inside the queue mutex** (0.28, fixed in
+  passing). It used to, which serialized the upload worker behind every blocking submit for
+  the submit's whole GPU duration. Harmless enough to survive several releases with one
+  queue; with two it would throttle the second one for no reason.
+
+- **A timer measures ONE pass** (0.28). `cmd.timer()` could span several rendering scopes,
+  because the recording was the unit; `p.timer()` belongs to the pass that made it, because
+  the pass is. Found by porting `examples/34_showcase`, whose title bar reported one number
+  for nine post-processing scopes — it now keeps a list of timers per label and sums them,
+  which is four lines and reads better than the old single scope did.
+
+  The alternative — a timer owned by the GRAPH, spanning passes — was not taken, and the
+  reason is the handle rule again: a graph-level timer would need a name or a key to say
+  which span it measures, since a graph has no natural single scope. Per-pass timers keep
+  the handle as the identity and let arithmetic do the grouping, which is what the caller
+  wanted anyway when the group is not contiguous. It also makes each number narrower: a
+  pass's timer measures the draws, not the attachment transitions the compile put around
+  them, so the numbers moved slightly and got more honest.
+
+- **A retained graph's barriers are a snapshot of what its passes knew when they recorded,
+  and a hot reload does not recompile it.** ACCEPTED CEILING, inherited rather than
+  introduced: a recording that was kept and replayed had exactly the same property before
+  0.28, because record-time state is a snapshot by definition. What changed is how often it
+  is touched — the graph makes "build once, present every frame" the shape the README
+  teaches, so a reload that flips a binding from read to write (the reflection really does
+  update, `test_a_reload_replaces_the_shader_reflection` proves it) leaves a graph built
+  before the edit computing the old barrier. `g.reset()` and rebuild is the fix, which is
+  what the reload-heavy examples do anyway because their push constants change per frame.
+  **Price of closing it:** a reload generation on the Context that the graph compares
+  against and recompiles on mismatch — perhaps 40 lines, and it was in the 0.28 plan. It
+  was left out because nothing has hit it: closing it would be speculation about a shape
+  (a retained graph whose shaders change their writes under it) that no example and no test
+  produces. The entry exists so the next person meets a decision instead of a surprise.
+
 ### Asynchronous submits
 
 - **`submit(wait=False)` is paced by the ring, not by a fence per submit** (0.18). The
@@ -2297,15 +2447,31 @@ its price stops belonging here and becomes backlog.
   platform spellings, a split in the build, and both sides of the handle. It is also the item
   with four other customers waiting on it (see raw-handle interop), so it is the one whose
   cost is worth paying least often and covering most.
-- **A preserved second pass re-transitions the attachment** (0.16). Pass 1 retires the image
-  to `final_layout()` and pass 2 brings it back, so N passes cost N round trips instead of
-  staying in `COLOR_ATTACHMENT_OPTIMAL`. **Price:** a recording-wide look-ahead — the same
-  machinery a depth store-op wants — against the current design where each pass is decided in
-  isolation. **Paid by:** any multi-pass recording on one target, per frame.
-  **Estimate: ~500 lines, and the spread is design risk rather than typing.** Every other
-  entry here adds machinery beside what exists; this one changes an invariant — that a pass
-  decides its own transitions with no knowledge of the next — which is the assumption the
-  RenderTarget contract is written on.
+- ✅ **A preserved second pass re-transitions the attachment** (0.16) — PAID in 0.28, by the
+  pass graph, and the way it was paid is the reusable part.
+
+  The entry priced a "recording-wide look-ahead" at ~500 lines and warned that the spread
+  was design risk rather than typing, because it changes an invariant — that a pass decides
+  its own transitions with no knowledge of the next — which the RenderTarget contract is
+  written on. Both halves were right, and neither was ever bought on its own. What happened
+  instead is that **async compute needed the frame-wide view for a different reason**, and
+  once the graph folds every pass through one tracker before emitting anything, the
+  look-ahead is a dozen lines on top: if the next enabled pass renders into the same target
+  and preserves, skip the retire and the re-enter and emit one in-place execution barrier at
+  the seam. N passes on one target cost one round trip.
+
+  The invariant did change, and the shape of the change is the lesson: it did not move, it
+  got an owner. A pass no longer decides its own transitions — the compile does, with the
+  whole frame in view. Nothing "decides in isolation" any more, so the assumption did not
+  have to be weakened for a special case; it was replaced by a stronger one.
+
+  **The general form: a price that looks unpayable alone can be free beside the feature that
+  needs the same machinery.** This entry sat unbought for twelve releases because 500 lines
+  for one round trip of layout bandwidth is a bad trade, and it was a bad trade — right up
+  until something else paid for the machinery. Rule 5 says a debt gets paid by the feature
+  that really needs it; this says the same about a COST entry, and suggests the useful
+  question when pricing one: what else would want this machinery, and what would it be
+  called?
 - **A `DEPTH_STENCIL` attachment cannot be sampled or read back** (0.17). Its view carries
   both aspects, and Vulkan forbids sampling through such a view — that half is HARD. The
   conclusion is not: **price** is a second, depth-only view beside the attachment one, plus
@@ -2325,6 +2491,24 @@ its price stops belonging here and becomes backlog.
   **Price:** a single readback of every level needs a staging layout the host side does not
   describe today. **Paid by:** setup time on a mipped cross-GPU transfer.
   **Estimate: ~250 lines.**
+- **One graph presents to one window** (0.28, inherited from the per-CommandBuffer rule of
+  0.14). A Graph owns one `VkCommandBuffer` per ring slot, so replaying it twice inside one
+  logical frame would overwrite work still in flight — the message names the fix, which is a
+  graph per window. **Price:** a multi-swapchain present join — N binary semaphore pairs,
+  one submit, one `vkQueuePresentKHR` over two swapchains — plus deciding what a pass means
+  when the target is "whichever window is presenting". **Paid by:** anyone driving two
+  windows who wants them in ONE submit rather than two; today two graphs cost two submits
+  and work correctly. **Estimate: ~300 lines**, and the second half of the price is the
+  design question rather than the typing.
+- **Ownership transfer for async compute stays unpaid, and 0.29 should buy CONCURRENT
+  instead** (0.28). With a second queue family, `VK_SHARING_MODE_EXCLUSIVE` requires a
+  release barrier on one queue and an acquire on the other for contents to survive.
+  **Price of doing it properly:** the queue-family ownership protocol in the fold, which is
+  roughly triple the cross-queue logic and a new class of barrier the tracker has no field
+  for. **Price of avoiding it:** `CONCURRENT` over both families, which costs some bandwidth
+  on some hardware and nothing to write. **Paid by:** a tiler, in theory; nobody has
+  measured it here. For a prototyping library rule 4 decides this one, and the escape hatch
+  stays `raw_extensions` plus the handles.
 - **The record-time descriptor walk is per descriptor, not per binding** (0.21). A draw asks
   the tracker about every bound descriptor, so a 500-texture array is 500 hash lookups — at
   RECORD time only, since replay costs nothing, and a sampled image the tracker never saw
@@ -2617,6 +2801,11 @@ Ordered by how often the friction shows up, not by effort.
    start recording" while being named like half of a pair. Add `with ctx.record() as cmd:`;
    `begin()` stays. **~120 lines**, and the pattern is already written twice — `Timer` and
    `OcclusionQuery` are both usable as context managers.
+
+   **Both spellings are gone since 0.28**, and the entry's decision outlived them: a `Pass`
+   is a handle whose `with` block sets the seal and deliberately does not submit, for the
+   reason recorded here. The asymmetric-pair complaint died with the pair — a graph is empty
+   when you make one, so nothing has to be told to start.
 5. ✅ **The keyboard is bare ints while the gamepad is an enum.** DONE in 0.23, in the
    backward-compatible shape this entry predicted. See the decision beside the gamepad's. `bz.KEY_W: int`,
    `set_cursor_mode(mode: int)` and `is_mouse_button_pressed(button: int)` sit next to
@@ -3172,7 +3361,33 @@ ceiling to raise, so there is nothing for the five verdicts to grade.
   single-valued. `clear_color=None` says it with the parameter that already owns the
   question.
 - **`with cmd.compute()`** — a compute dispatch has no teardown, so a context manager would
-  be a false symmetry. Chaining covers the aesthetics.
+  be a false symmetry. Chaining covers the aesthetics. (0.28's compute PASS is a different
+  thing and says so under "The pass graph": a pass has a real seal, and the block is
+  optional sugar over a handle rather than the only way in.)
+- **A raw recorder beside the graph** (0.28). The first design of the escape hatch: the old
+  `CommandBuffer` kept as `ctx.raw_commands()`, with its own submit. Three reasons it lost,
+  and the first is the one that generalizes — **an escape hatch that cannot interleave with
+  the thing it escapes is not a hatch, it is a fork.** Going manual for one pass would have
+  meant going manual for the frame. It also duplicated some thirty verbs as a second public
+  path (rule 1), and it needed the `begin_rendering`/`end_rendering` pair the graph had just
+  removed, so what it kept open was the old API rather than the user's reach. A manual PASS
+  composes: its barriers feed the same fold, and its neighbours order against them.
+- **`signal=` on submit** (0.28). Every submit already signals the timeline at its own
+  serial, so the parameter would have named a thing that exists and let the caller name a
+  different one. The return value is the signal.
+- **Reordering the passes of a graph** (0.28). See the entry above: on one queue a sort can
+  only produce the order the caller wrote or a surprise, and 0.29's cross-queue edges come
+  from resource uses rather than from moving passes.
+- **A `Queue.COMPUTE` member that runs on the graphics queue until 0.29** (0.28). It would
+  make 0.29 change the scheduling of programs nobody edited — a behaviour break dressed as a
+  no-op — and an enum member no path can reach is untestable surface. The parameter ships
+  now, the value ships with the queue.
+- **Naming the pass verb `pass_`** (0.28). PEP 8's escape spelling for a keyword collision,
+  and it puts the wart at every call site while reading as the statement in review.
+  `add_pass` says what it does — it appends to an ordered list — and the class keeps the
+  term of art, `Pass`. `task`, `node` and `stage` were also rejected: they rename the
+  concept away from what every graphics text calls it, and `stage` collides twice over
+  (`ShaderStage`, pipeline stages).
 - **String keys anywhere the Vulkan primitive is an index or a handle** — return a handle
   and read the result off it (the 0.9 timers).
 - **A separate "debt release"** — rule 5. A debt gets paid by the feature that really needs
@@ -3271,6 +3486,16 @@ ceiling to raise, so there is nothing for the five verdicts to grade.
   `target.layer(index, mip)` was the same positional-extra trap as `set_image` (backlog
   entry 4 says why one entry produced two rounds of work). Nothing breaking remains on the
   backlog, so 1.0 no longer waits on any signature.
+
+  **0.28 broke the API anyway, and it is the last planned break before the freeze.** Every
+  entry above is a SIGNATURE, and this one is a model: the command buffer is gone and a
+  frame is a graph of passes. It is not on this list because nobody had proposed it — the
+  request was async compute, and the graph is what that needs first (see the multi-submit
+  entry below). Rule 6 is what shaped it: the whole break is one release, the old spelling
+  fails on its first line rather than deprecating quietly, and 0.29 is additive on top. If
+  a later release wants to quote 0.28 as precedent for breaking after the pre-1.0 batch was
+  called closed, the test is the one this release met: is the break forced by a feature
+  that cannot be built additively, and does it buy the NEXT release its additivity?
 - **Every public symbol from `_core.pyi` is touched by a test.** An unexercised binding is
   an unimplemented binding. 0.22 made this measurable rather than aspirational:
   `pytest --api-coverage` writes `api_coverage.md`, and the answer on the day it was
@@ -3323,8 +3548,17 @@ ceiling to raise, so there is nothing for the five verdicts to grade.
 - Performance: a pipeline cache on disk. Descriptor indexing shipped in 0.21.
 - ✅ Indirect draw / GPU-driven work: **ship them, or defer them with an explicit
   note.** Shipped — the verbs in 0.19 and the GPU-decided count in 0.21. Multi-submit
-  is the half still open, and it is a question rather than a plan: nothing has asked
-  for a second queue.
+  was the half left open, with the note "it is a question rather than a plan: nothing
+  has asked for a second queue".
+
+  **0.28 is the ask arriving, and the answer came one release before the queue.** The
+  request was async compute; what it needs first is something that can see a whole frame
+  at once, because a second queue is worth nothing without cross-queue dependencies and
+  those come from knowing which pass produces what another consumes. So 0.28 shipped the
+  pass graph, with `queue=` on every pass and one member in the enum, and 0.29 adds the
+  queue behind it as a purely additive change. The sequencing is the point: the breaking
+  half and the feature half were deliberately put in different releases so the feature
+  breaks nothing.
 - Close debt #4, or write it down as an accepted ceiling. Debt #3 was paid in 0.19
   and debt #5 in 0.21, so #4 is the only entry left, and it waits on someone else's
   package.
@@ -3598,8 +3832,11 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   that cost belongs in the decision, not in a bug report six months later.
 
 - **`vkCmdPipelineBarrier` is illegal inside dynamic rendering** — an auto-barrier
-  discovered inside the scope must be HOISTED before the `begin_rendering` lambda
-  (`commands_.insert()`, and deferred recording makes this cheap).
+  discovered inside the scope must be emitted BEFORE the scope opens. Until 0.28 that was a
+  hoist inside one recording (`commands_.insert()` at the remembered position, which
+  deferred recording made cheap); since 0.28 it is structural, because a render pass IS the
+  scope and every barrier it needs goes into its entry batch by construction. The rule
+  outlived the mechanism, which is why it is stated as the rule.
 - **A manual image barrier MUST update the tracker** (`note_image_layout`). Otherwise an
   auto-sample of the same image in one recording transitions from a stale `oldLayout`, which
   is a validation error plus a useless barrier. Buffers do not need this: they have no

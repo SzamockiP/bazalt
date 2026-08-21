@@ -10,7 +10,7 @@ The whole feature is the two new bits of API:
   * env = ctx.create_render_target(ENV, ENV, color=..., depth=..., cube=True)
       → a cube colour target (target.color[0] samples as a cubemap) with a
         matching 6-layer depth buffer;
-  * cmd.rendering(env.layer(i)) → a pass that rasterizes into cube face i.
+  * g.add_pass(env.layer(i)) → a pass that rasterizes into cube face i.
 
 Cube face order is Vulkan's +X, -X, +Y, -Y, +Z, -Z (face i == layer i).
 
@@ -190,26 +190,26 @@ for d, u in zip(FACE_DIRS, FACE_UPS):
     FACE_VP.append(bytes(glm.transpose(capture_proj * view)))
 
 
-def record(cmd, eye, camera_vp):
-    cmd.begin()
+def record(g, eye, camera_vp):
+    g.reset()
 
     # Capture: rasterize the room into all six cube faces this frame.
     for i in range(6):
-        with cmd.rendering(env.layer(i), clear_color=[0, 0, 0, 1]) as c:
-            (c.bind_pipeline(capture_pipe)
+        with g.add_pass(env.layer(i), clear_color=[0, 0, 0, 1], name=f"face {i}") as p:
+            (p.bind_pipeline(capture_pipe)
               .push_constants(capture_pipe, 0, FACE_VP[i])
               .bind_vertex_buffer(room_vbuf)
               .bind_index_buffer(room_ibuf)
               .draw_indexed(room_count))
 
     # Window: the room, then the mirror cube reflecting the freshly captured env.
-    with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.03, 1.0]) as c:
-        (c.bind_pipeline(room_pipe)
+    with g.add_pass(renderer, clear_color=[0.02, 0.02, 0.03, 1.0], name="scene") as p:
+        (p.bind_pipeline(room_pipe)
           .push_constants(room_pipe, 0, bytes(glm.transpose(camera_vp)))
           .bind_vertex_buffer(room_vbuf)
           .bind_index_buffer(room_ibuf)
           .draw_indexed(room_count))
-        (c.bind_pipeline(reflect_pipe)
+        (p.bind_pipeline(reflect_pipe)
           .bind_descriptor_set(reflect_set, reflect_pipe)
           .push_constants(reflect_pipe, 0,
                           bytes(glm.transpose(camera_vp)) + struct.pack("4f", eye.x, eye.y, eye.z, 0.0))
@@ -218,7 +218,7 @@ def record(cmd, eye, camera_vp):
           .draw_indexed(cube_count))
 
 
-cmd = ctx.create_command_buffer()
+g = ctx.graph()
 camera = Camera(pos=(0.0, 2.5, 5.0), yaw=-math.pi / 2, pitch=-0.45)
 
 TITLE = "Bazalt Demo - Environment Capture (render-to-layer)"
@@ -246,5 +246,5 @@ while window.is_open():
     camera.update_mouse(mouse.dx, mouse.dy)
     camera.process_keyboard(window, dt)
 
-    record(cmd, camera.pos, camera.view_proj(W / H))
-    renderer.present(cmd)
+    record(g, camera.pos, camera.view_proj(W / H))
+    renderer.present(g)
