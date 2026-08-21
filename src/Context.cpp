@@ -274,7 +274,7 @@ std::expected<std::uint64_t, Error> Context::submit_one_shot(VkCommandBuffer cmd
     return serial;
 }
 
-std::expected<void, Error> Context::wait_for_serial(std::uint64_t serial)
+std::expected<void, Error> Context::wait_for_serial(std::uint64_t serial) const
 {
     if (serial == 0)
     {

@@ -248,15 +248,15 @@ private:
     void compile_();
     // Route one computed barrier to where the executor must emit it: a render
     // pass's entry batch, or a general pass's schedule at `position`.
-    BarrierBatch& batch_at_(CompiledPass& cp, std::size_t position);
+    static BarrierBatch& batch_at_(CompiledPass& cp, std::size_t position);
 
     // Bring a preserving pass's attachments to the layout its own entry
     // transition assumes, when something in this graph moved them since.
-    void correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker);
+    static void correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker);
 
     // Report a render pass's attachment writes to the fold, so a later pass
     // that samples one is ordered against the drawing.
-    void note_attachment_writes_(const Pass& pass, ResourceTracker& tracker);
+    static void note_attachment_writes_(const Pass& pass, ResourceTracker& tracker);
 
     std::shared_ptr<Context> context_;
     std::vector<std::shared_ptr<Pass>> passes_;

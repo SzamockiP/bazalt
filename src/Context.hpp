@@ -490,7 +490,7 @@ public:
     // The one place that blocks on the submission timeline. Everything that
     // waits for GPU work — a frame's ring slot, an image upload, a readback —
     // comes through here, so a wait is never wider than the work it waits for.
-    std::expected<void, Error> wait_for_serial(std::uint64_t serial);
+    std::expected<void, Error> wait_for_serial(std::uint64_t serial) const;
 
     // ── Deferred destruction ──────────────────────────────────────────────────
     //

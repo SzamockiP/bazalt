@@ -21,7 +21,7 @@ void bind_graphs(py::module_& m)
         // compute pass does not have).
         .def(
             "add_pass",
-            [](std::shared_ptr<Graph> self,
+            [](const std::shared_ptr<Graph>& self,
                std::shared_ptr<RenderTarget> target,
                const py::object& clear_color,
                float clear_depth,
@@ -55,7 +55,7 @@ void bind_graphs(py::module_& m)
         // passing one is a TypeError, which is the refusal the plan asks for.
         .def(
             "add_pass",
-            [](std::shared_ptr<Graph> self, std::string name, QueueKind queue, std::optional<bool> auto_barriers)
+            [](const std::shared_ptr<Graph>& self, std::string name, QueueKind queue, std::optional<bool> auto_barriers)
             { return self->add_pass(nullptr, std::nullopt, 1.0f, 0, std::move(name), queue, auto_barriers); },
             py::kw_only(),
             py::arg("name") = std::string{},

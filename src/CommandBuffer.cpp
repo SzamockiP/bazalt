@@ -771,7 +771,7 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Image> image, 
     return {};
 }
 
-std::expected<void, Error> CommandBuffer::generate_mipmaps(std::shared_ptr<Image> image, Access src)
+std::expected<void, Error> CommandBuffer::generate_mipmaps(const std::shared_ptr<Image>& image, Access src)
 {
     if (!image)
     {
@@ -807,8 +807,8 @@ std::expected<void, Error> CommandBuffer::generate_mipmaps(std::shared_ptr<Image
 }
 
 std::expected<void, Error> CommandBuffer::copy_image(
-    std::shared_ptr<Image> src,
-    std::shared_ptr<Image> dst,
+    const std::shared_ptr<Image>& src,
+    const std::shared_ptr<Image>& dst,
     Access src_access)
 {
     if (!src || !dst)
@@ -855,8 +855,8 @@ std::expected<void, Error> CommandBuffer::copy_image(
 }
 
 std::expected<void, Error> CommandBuffer::blit_image(
-    std::shared_ptr<Image> src,
-    std::shared_ptr<Image> dst,
+    const std::shared_ptr<Image>& src,
+    const std::shared_ptr<Image>& dst,
     Access src_access,
     VkFilter filter)
 {
@@ -995,7 +995,7 @@ std::expected<void, Error> CommandBuffer::fill_buffer(
     return {};
 }
 
-std::expected<void, Error> CommandBuffer::clear_image(std::shared_ptr<Image> image, std::array<float, 4> color)
+std::expected<void, Error> CommandBuffer::clear_image(const std::shared_ptr<Image>& image, std::array<float, 4> color)
 {
     if (!image)
     {

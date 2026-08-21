@@ -222,7 +222,7 @@ public:
     // image, the default) or SHADER_WRITE (GENERAL — mip 0 fresh from a compute
     // imageStore). Its scope doubles as the barrier waiting on that producer.
     // Refused inside a rendering scope (blits and barriers are illegal there).
-    std::expected<void, Error> generate_mipmaps(std::shared_ptr<Image> image, Access src = Access::SHADER_READ);
+    std::expected<void, Error> generate_mipmaps(const std::shared_ptr<Image>& image, Access src = Access::SHADER_READ);
 
     // Copy one image into another of the same size and format. The history
     // buffer every temporal effect needs: keep last frame's result to blend
@@ -238,8 +238,8 @@ public:
     //
     // Refused inside a rendering scope, like every other transfer verb.
     std::expected<void, Error> copy_image(
-        std::shared_ptr<Image> src,
-        std::shared_ptr<Image> dst,
+        const std::shared_ptr<Image>& src,
+        const std::shared_ptr<Image>& dst,
         Access src_access = Access::SHADER_READ);
 
     // A copy that RESIZES: the two images need not share an extent, and `filter`
@@ -255,8 +255,8 @@ public:
     // tracker treats an image's layout at the start of a replay as UNDEFINED, so
     // the caller names where the source actually is.
     std::expected<void, Error> blit_image(
-        std::shared_ptr<Image> src,
-        std::shared_ptr<Image> dst,
+        const std::shared_ptr<Image>& src,
+        const std::shared_ptr<Image>& dst,
         Access src_access = Access::SHADER_READ,
         VkFilter filter = VK_FILTER_LINEAR);
 
@@ -292,7 +292,7 @@ public:
     // accumulation or history buffer, or clearing a storage image a compute
     // shader only writes part of. A depth image is refused: clearing depth is
     // what a rendering pass does, and it needs the depth clear value.
-    std::expected<void, Error> clear_image(std::shared_ptr<Image> image, std::array<float, 4> color);
+    std::expected<void, Error> clear_image(const std::shared_ptr<Image>& image, std::array<float, 4> color);
 
     // ── GPU timers ──────────────────────────────────────────────────────────
     //

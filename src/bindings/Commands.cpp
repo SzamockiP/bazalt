@@ -158,7 +158,7 @@ void bind_commands(py::module_& m)
         // Stop it with t.stop() or a `with` block; read it back with t.ms.
         .def(
             "timer",
-            [](std::shared_ptr<Pass> self)
+            [](const std::shared_ptr<Pass>& self)
             {
                 guard(*self, Pass::VerbScope::Any, "timer");
                 CommandBuffer& rec = self->recorder();
@@ -201,7 +201,7 @@ void bind_commands(py::module_& m)
         // end within one render pass, which the pass kind now says up front.
         .def(
             "occlusion_query",
-            [](std::shared_ptr<Pass> self)
+            [](const std::shared_ptr<Pass>& self)
             {
                 guard(*self, Pass::VerbScope::Render, "occlusion_query");
                 CommandBuffer& rec = self->recorder();
