@@ -7,7 +7,7 @@ patch versions never do).
 
 ## [0.27.0] — 2026-08-21
 
-"The quality gates, and what they found". This release adds no feature. It adds
+"clang-tidy, ruff, and the header/cpp split". This release adds no feature. It adds
 the two checks that a codebase of this size needs, and it removes what an audit
 found when nothing was checking.
 
