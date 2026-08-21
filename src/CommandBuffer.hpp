@@ -194,10 +194,11 @@ public:
     // is not either — one rule for both.
     std::expected<void, Error> dispatch_indirect(std::shared_ptr<Buffer> buffer, VkDeviceSize offset = 0);
 
-    // Manual-mode barrier (also legal, if redundant, in auto mode). Refused
-    // inside a rendering scope: vkCmdPipelineBarrier is invalid there, and in
-    // manual mode nothing is hoisted by magic — that would be a second,
-    // implicit way of doing the explicit thing.
+    // Manual-mode barrier (also legal, if redundant, in auto mode). Only in a
+    // pass without a target, which the binding checks: vkCmdPipelineBarrier is
+    // invalid inside a rendering scope, and a render pass IS one. Nothing is
+    // moved out of the way by magic — that would be a second, implicit way of
+    // doing the explicit thing.
     std::expected<void, Error> barrier(std::shared_ptr<Buffer> buffer, Access src, Access dst);
 
     // The image counterpart: transition an image between shader accesses by
@@ -521,9 +522,9 @@ private:
         const char* what);
 
     // The command processor reads the arguments at DRAW_INDIRECT, which is earlier
-    // than any shader stage — so a compute pass that wrote them in this recording
-    // needs the barrier this produces, and hoist_or_push_ lifts it out of a
-    // rendering scope on its own.
+    // than any shader stage — so a pass that wrote them needs the barrier this
+    // reports, and the graph puts it in this pass's entry batch, before the
+    // rendering scope opens.
     void track_indirect_(const std::shared_ptr<Buffer>& buffer);
 
     void track_use_(

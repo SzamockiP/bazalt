@@ -297,11 +297,11 @@ void bind_commands(py::module_& m)
         // image) or SHADER_WRITE (mip 0 fresh from compute imageStore).
         .def(
             "generate_mipmaps",
-            [](std::shared_ptr<Pass> self, std::shared_ptr<Image> image, Access src)
+            [](const std::shared_ptr<Pass>& self, const std::shared_ptr<Image>& image, Access src)
             {
                 guard(*self, Pass::VerbScope::General, "generate_mipmaps");
                 require_same_context(self->recorder().owner(), image->owner(), "generate_mipmaps");
-                unwrap(self->recorder().generate_mipmaps(std::move(image), src), nullptr);
+                unwrap(self->recorder().generate_mipmaps(image, src), nullptr);
                 return self;
             },
             py::arg("image"),
@@ -309,12 +309,15 @@ void bind_commands(py::module_& m)
             py::arg("src") = Access::SHADER_READ)
         .def(
             "copy_image",
-            [](std::shared_ptr<Pass> self, std::shared_ptr<Image> src, std::shared_ptr<Image> dst, Access src_access)
+            [](const std::shared_ptr<Pass>& self,
+               const std::shared_ptr<Image>& src,
+               const std::shared_ptr<Image>& dst,
+               Access src_access)
             {
                 guard(*self, Pass::VerbScope::General, "copy_image");
                 require_same_context(self->recorder().owner(), src->owner(), "copy_image");
                 require_same_context(self->recorder().owner(), dst->owner(), "copy_image");
-                unwrap(self->recorder().copy_image(std::move(src), std::move(dst), src_access), nullptr);
+                unwrap(self->recorder().copy_image(src, dst, src_access), nullptr);
                 return self;
             },
             py::arg("src"),
@@ -326,18 +329,16 @@ void bind_commands(py::module_& m)
         // the sizes differ" has one answer in this library, not two enums.
         .def(
             "blit_image",
-            [](std::shared_ptr<Pass> self,
-               std::shared_ptr<Image> src,
-               std::shared_ptr<Image> dst,
+            [](const std::shared_ptr<Pass>& self,
+               const std::shared_ptr<Image>& src,
+               const std::shared_ptr<Image>& dst,
                Access src_access,
                Filter filter)
             {
                 guard(*self, Pass::VerbScope::General, "blit_image");
                 require_same_context(self->recorder().owner(), src->owner(), "blit_image");
                 require_same_context(self->recorder().owner(), dst->owner(), "blit_image");
-                unwrap(
-                    self->recorder().blit_image(std::move(src), std::move(dst), src_access, to_vk_filter(filter)),
-                    nullptr);
+                unwrap(self->recorder().blit_image(src, dst, src_access, to_vk_filter(filter)), nullptr);
                 return self;
             },
             py::arg("src"),
@@ -388,7 +389,7 @@ void bind_commands(py::module_& m)
             py::arg("size") = 0)
         .def(
             "clear_image",
-            [](std::shared_ptr<Pass> self, std::shared_ptr<Image> image, const py::object& color)
+            [](const std::shared_ptr<Pass>& self, const std::shared_ptr<Image>& image, const py::object& color)
             {
                 guard(*self, Pass::VerbScope::General, "clear_image");
                 require_same_context(self->recorder().owner(), image->owner(), "clear_image");
@@ -398,7 +399,7 @@ void bind_commands(py::module_& m)
                 {
                     rgba[i] = py::cast<float>(seq[i]);
                 }
-                unwrap(self->recorder().clear_image(std::move(image), rgba), nullptr);
+                unwrap(self->recorder().clear_image(image, rgba), nullptr);
                 return self;
             },
             py::arg("image"),
