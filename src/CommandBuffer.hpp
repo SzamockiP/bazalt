@@ -15,6 +15,51 @@
 #include "DescriptorSet.hpp"
 #include "ResourceTracker.hpp"
 
+// One resource touch, as the graph compiler consumes it (0.28). In pass mode
+// the recorder appends these instead of computing barriers inline: the graph
+// folds every pass's events through one ResourceTracker at compile time, which
+// is what turns the per-recording floors into precise cross-pass edges. A Note
+// is a manual barrier (or a transfer verb's aftermath) seeding the fold, the
+// same contract note_buffer_access/note_image_layout carry inline.
+struct UseEvent
+{
+    enum class Kind
+    {
+        BufferUse,
+        ImageUse,
+        BufferNote,
+        ImageNote
+    };
+    Kind kind;
+    std::shared_ptr<Buffer> buffer;
+    std::shared_ptr<Image> image;
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkPipelineStageFlags stages = 0;
+    VkAccessFlags access = 0;
+    bool writes = false;
+    bool shader_writable = false;
+    // Index into commands_ this use precedes — where a computed barrier must
+    // land in a pass without a target. A render pass hoists everything to its
+    // entry batch instead, so there the position only orders the fold.
+    std::size_t position = 0;
+};
+
+// The two halves of a rendering scope, shared by the inline recorder (the
+// begin_rendering/end_rendering lambdas call both halves, in today's order)
+// and the graph executor (which owns the transitions itself — the compile
+// decides them with the whole frame in view, so it wants only the begin/end
+// halves here).
+void record_render_pass_transitions_in(const VolkDeviceTable& vk, VkCommandBuffer cmd, RenderTarget& rt, bool preserve);
+void record_render_pass_begin(
+    const VolkDeviceTable& vk,
+    VkCommandBuffer cmd,
+    RenderTarget& rt,
+    const std::optional<std::vector<std::array<float, 4>>>& clear_colors,
+    float clear_depth,
+    std::uint32_t clear_stencil);
+void record_render_pass_end(const VolkDeviceTable& vk, VkCommandBuffer cmd);
+void record_render_pass_transitions_out(const VolkDeviceTable& vk, VkCommandBuffer cmd, RenderTarget& rt);
+
 // Records commands once and replays them every submit.
 //
 // The recorded lambdas take a FrameContext rather than a SwapchainRenderer&.
@@ -27,9 +72,22 @@ public:
     // Takes a Context, not a renderer: command buffers are a device resource and
     // have nothing to do with presentation. This is what lets a headless Context
     // with no renderer at all record commands.
+    // allocate_buffers=false is the pass mode (0.28): the recorder then owns no
+    // VkCommandBuffers at all, because the Graph replays every pass into its
+    // own per-slot buffer. get() and claim_for_frame are meaningless there.
     static std::expected<std::shared_ptr<CommandBuffer>, Error> create(
         Context& context,
-        std::optional<bool> auto_barriers = std::nullopt);
+        std::optional<bool> auto_barriers = std::nullopt,
+        bool allocate_buffers = true);
+
+    // Switches the recorder into pass mode: resource uses append to `sink`
+    // instead of computing barriers inline, and manual barriers append their
+    // Note beside the recorded command. The sink outlives the recorder (the
+    // Pass owns both). Null switches back — never done in practice.
+    void set_event_sink(std::vector<UseEvent>* sink)
+    {
+        event_sink_ = sink;
+    }
 
     // Deferred: a per-frame VkCommandBuffer may still be executing when the
     // Python object is dropped.
@@ -401,6 +459,28 @@ public:
 
     void execute(VkCommandBuffer vkCmd, const FrameContext& frame);
 
+    // ── Pass-mode replay surface (0.28) ─────────────────────────────────────
+    //
+    // The graph executor replays a pass's commands itself, interleaving the
+    // barriers its compile scheduled — so it needs the pieces of execute()
+    // rather than the whole: the query-pool resets (illegal inside a render
+    // pass, so they run before the pass opens), and a range replay.
+
+    void reset_query_pools(VkCommandBuffer vkCmd, const FrameContext& frame);
+
+    void replay_range(VkCommandBuffer vkCmd, const FrameContext& frame, std::size_t from, std::size_t to) const
+    {
+        for (std::size_t i = from; i < to; ++i)
+        {
+            commands_[i](vkCmd, frame);
+        }
+    }
+
+    std::size_t command_count() const
+    {
+        return commands_.size();
+    }
+
 private:
     CommandBuffer(std::shared_ptr<Context> context)
         : context_(context)
@@ -411,7 +491,23 @@ private:
     // destination: the transfer leaves the source sampleable too, and an Image
     // (or a tracker) that still believed it was in GENERAL would hand a stale
     // oldLayout to the next use — a validation error with no obvious author.
-    void finish_image_transfer_(Image* src, Image* dst);
+    void finish_image_transfer_(const std::shared_ptr<Image>& src, const std::shared_ptr<Image>& dst);
+
+    // The one spelling of "this recording just put the resource into this
+    // state, visible to (stages, access)". Inline mode seeds tracker_ (auto
+    // mode only, as always); pass mode appends the Note to the event sink
+    // regardless of auto_barriers_, because a manual pass's barriers are
+    // exactly what the graph's fold needs to order its neighbours.
+    void note_buffer_state_(
+        const std::shared_ptr<Buffer>& buffer,
+        VkPipelineStageFlags dst_stages,
+        VkAccessFlags dst_access);
+
+    void note_image_state_(
+        const std::shared_ptr<Image>& image,
+        VkImageLayout layout,
+        VkPipelineStageFlags dst_stages,
+        VkAccessFlags dst_access);
 
     // Records a buffer-barrier lambda. Inside a rendering scope it is hoisted
     // to just before the begin_rendering lambda (vkCmdPipelineBarrier is
@@ -549,6 +645,11 @@ private:
     // rather than 0, because the headless ctx.submit legitimately runs its first
     // submit at serial 0 (it advances the ring after submitting, not before).
     std::uint64_t recorded_serial_ = UINT64_MAX;
+
+    // Pass mode (0.28): non-null makes track_use_/track_image_use_ append
+    // events here instead of consulting tracker_, and the manual-barrier verbs
+    // append their Note. Owned by the Pass that owns this recorder.
+    std::vector<UseEvent>* event_sink_ = nullptr;
 
     // ── record-time state (reset by begin(), never touched at execute) ──
     bool auto_barriers_ = true;

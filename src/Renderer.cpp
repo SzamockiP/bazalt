@@ -528,11 +528,15 @@ void SwapchainRenderer::end_frame(VkCommandBuffer cmd, std::uint64_t upload_wait
     // against semaphores this one already signalled.
     image_acquired_ = false;
 
-    const std::array<VkSemaphore, 2> waitSemaphores = {
+    // Vectors, not arrays (0.28): a submit's wait set is a LIST from here on.
+    // The 0.29 rule slots straight in — the final graphics batch waits every
+    // earlier compute batch's timeline value as more entries here, and
+    // timeline semaphores wait across queues natively.
+    const std::vector<VkSemaphore> waitSemaphores = {
         image_available_semaphores_[current_frame()], context_->submit_timeline()};
-    const std::array<VkPipelineStageFlags, 2> waitStages = {
+    const std::vector<VkPipelineStageFlags> waitStages = {
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
-    const std::array<std::uint64_t, 2> waitValues = {0, upload_wait_serial}; // binary sem value ignored
+    const std::vector<std::uint64_t> waitValues = {0, upload_wait_serial}; // binary sem value ignored
 
     const std::array<VkSemaphore, 2> signalSemaphores = {
         render_finished_semaphores_[image_index_], context_->submit_timeline()};
@@ -562,7 +566,7 @@ void SwapchainRenderer::end_frame(VkCommandBuffer cmd, std::uint64_t upload_wait
         VkTimelineSemaphoreSubmitInfo timelineInfo{
             .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
             .pNext = nullptr,
-            .waitSemaphoreValueCount = 2,
+            .waitSemaphoreValueCount = static_cast<uint32_t>(waitValues.size()),
             .pWaitSemaphoreValues = waitValues.data(),
             .signalSemaphoreValueCount = 2,
             .pSignalSemaphoreValues = signalValues.data()};
@@ -570,7 +574,7 @@ void SwapchainRenderer::end_frame(VkCommandBuffer cmd, std::uint64_t upload_wait
         VkSubmitInfo submitInfo{
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .pNext = &timelineInfo,
-            .waitSemaphoreCount = 2,
+            .waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size()),
             .pWaitSemaphores = waitSemaphores.data(),
             .pWaitDstStageMask = waitStages.data(),
             .commandBufferCount = 1,

@@ -114,6 +114,7 @@ add_library(_core MODULE
     src/CommandBuffer.cpp
     src/Context.cpp
     src/DescriptorSet.cpp
+    src/Graph.cpp
     src/Image.cpp
     src/Pipeline.cpp
     src/RenderTarget.cpp

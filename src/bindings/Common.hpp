@@ -1346,6 +1346,7 @@ inline std::expected<void, Error> context_submit(Context& context, std::shared_p
 
     VkSemaphore timeline = context.submit_timeline();
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    std::uint64_t submitted_serial = 0;
 
     {
         std::lock_guard lock(context.queue_mutex());
@@ -1379,30 +1380,32 @@ inline std::expected<void, Error> context_submit(Context& context, std::shared_p
         }
 
         context.note_slot_submit(serial);
-
-        // wait=True is the default and the old behaviour: the next line reads
-        // the result, so the round trip is the point. wait=False hands the loop
-        // back at once and leaves the pacing to the ring — which is what a
-        // compute prototype submitting in a loop wants, because otherwise the
-        // GPU idles between iterations and the loop runs at the speed of the
-        // round trip rather than of the work.
-        // Waits for this submit and nothing else. A vkQueueWaitIdle here would
-        // also stall on whatever the upload worker has in flight, which this
-        // submit already waited for GPU-side where it mattered.
-        if (wait)
-        {
-            if (auto r = context.wait_for_serial(serial); !r)
-            {
-                return std::unexpected(r.error());
-            }
-        }
+        submitted_serial = serial;
     }
 
-    // Only meaningful after a wait: the wait above proves everything through
-    // this serial is done. An async submit reclaims on the next ctx.wait()
-    // instead.
+    // wait=True is the default and the old behaviour: the next line reads
+    // the result, so the round trip is the point. wait=False hands the loop
+    // back at once and leaves the pacing to the ring — which is what a
+    // compute prototype submitting in a loop wants, because otherwise the
+    // GPU idles between iterations and the loop runs at the speed of the
+    // round trip rather than of the work.
+    // Waits for this submit and nothing else. A vkQueueWaitIdle here would
+    // also stall on whatever the upload worker has in flight, which this
+    // submit already waited for GPU-side where it mattered.
+    //
+    // OUTSIDE the queue mutex since 0.28. The wait used to sit inside the
+    // lock, which serialized the upload worker behind every blocking submit
+    // for the submit's whole GPU duration — and would have throttled a second
+    // queue the same way.
     if (wait)
     {
+        if (auto r = context.wait_for_serial(submitted_serial); !r)
+        {
+            return std::unexpected(r.error());
+        }
+        // Only meaningful after a wait: the wait above proves everything
+        // through this serial is done. An async submit reclaims on the next
+        // ctx.wait() instead.
         context.flush_deletion_queue();
     }
 
