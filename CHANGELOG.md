@@ -16,25 +16,28 @@ in the order they must run, and each pass records the same verbs the command
 buffer took.
 
 The graph is what the barriers come from. Before this release, bazalt computed
-each barrier while you recorded it, and a recording could not see what another
-recording did — so the first use of a resource had to assume the worst, and two
-passes on one render target changed the layout of the attachment back and forth
-between them. The graph sees every pass before it emits anything: a use inside
-the graph names the pass that wrote it and gets an exact barrier, the barriers
-of one pass boundary go into a single command, and an attachment that the next
-pass keeps stays in its layout. Only the first touch of a resource still uses
-the safe assumption, because the writer can be another graph or the frame
+each barrier while you recorded it. One recording could not see what another
+recording did. So the first use of a resource had to assume the worst, and two
+passes on one render target changed the layout of the attachment back and
+forth.
+
+The graph sees every pass before it writes any command. A use inside the graph
+names the pass that wrote the resource, and gets an exact barrier. All the
+barriers at one pass boundary go into a single command. An attachment that the
+next pass keeps stays in its layout. Only the first touch of a resource still
+uses the safe assumption, because the writer can be another graph or the frame
 before.
 
 Each pass names the queue it runs on. `bz.Queue` has one member today. Async
-compute is the next release, and it adds a member to that enum — not a
-parameter, and not a change to the default. A compute pass on the graphics
-queue stays legal after it.
+compute is the next release. It adds a member to that enum, not a parameter,
+and it does not change the default. A compute pass on the graphics queue stays
+legal after it.
 
 Every submit returns a `bz.Serial`. `ctx.wait(serial)` waits for that one
-submit. `ctx.submit(graph, after=serial)` starts a submit after another one
-finishes, on the GPU, with no wait on the CPU. That is the manual control
-between whole submits; inside one graph the passes order themselves.
+submit. `ctx.submit(graph, after=serial)` starts a submit after another submit
+finishes. That wait happens on the GPU, so the CPU does not stop. This is the
+manual control between whole submits. Inside one graph the passes order
+themselves.
 
 ### Added
 - **`ctx.graph()`** returns a `Graph`. It replaces `ctx.create_command_buffer()`
@@ -68,16 +71,17 @@ between whole submits; inside one graph the passes order themselves.
   gone.** The render target moves to `add_pass`, and the pass boundary is the
   rendering scope.
 - **A verb that does not belong to the kind of pass is refused when you record
-  it**, with a message that names the fix. A draw needs a render pass. A
-  dispatch, a copy, a blit, a fill, a clear and a barrier need a pass without a
-  target. Vulkan forbids all of those inside a rendering scope, and before this
-  release the report came from the validation layer at submit, which named
-  neither the call nor the reason.
+  it.** The message names the fix. A draw needs a render pass. A dispatch, a
+  copy, a blit, a fill, a clear and a barrier need a pass without a target.
+  Vulkan forbids all of those inside a rendering scope. Before this release the
+  report came from the validation layer at submit, and it named neither the
+  call nor the reason.
 - **Timer and occlusion handles come from a pass.** A handle from before a
-  `graph.reset()` reports `StateError`, as one from before a `cmd.begin()` did.
+  `graph.reset()` reports `StateError`. A handle from before a `cmd.begin()`
+  did the same.
 - **A timer measures one pass.** A command buffer could hold a timer around
-  several rendering scopes; a timer now belongs to the pass that made it. To
-  measure a group of passes, make one timer in each and add the results.
+  several rendering scopes. A timer now belongs to the pass that made it. To
+  measure a group of passes, make one timer in each pass and add the results.
   `examples/34_showcase` does this for its nine post-processing passes.
 
 ### Notes
@@ -88,7 +92,7 @@ between whole submits; inside one graph the passes order themselves.
 - **Every barrier of one pass boundary is one command.** The old recorder
   emitted one command for each resource.
 - **The manual escape hatch is a pass, not a second API.** A pass with
-  `auto_barriers=False` computes nothing for itself, and the graph still reads
+  `auto_barriers=False` computes no barrier for itself. The graph still reads
   the barriers you write there, so the automatic passes around it stay correct.
 - **A graph you keep holds the barriers its passes computed when you recorded
   them.** A hot reload that changes which resources a shader writes does not

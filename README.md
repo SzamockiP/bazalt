@@ -294,8 +294,8 @@ GPU as a calculator.
   through `p.barrier()`, for that pass alone.
 - **Compute beside graphics.** One graph holds a compute pass and a render pass. A
   dispatch writes the vertices and the draw reads them. Results come back as NumPy arrays.
-  Each pass names the queue it runs on, so a later release can move a pass to a second
-  queue without a change to this API.
+  Each pass names the queue it runs on. A later release adds a second queue, and that
+  needs no change to this API: you get a new value to pass, and the choice stays yours.
 - **Images in every shape.** 2D textures, texture arrays, cubemaps and 3D volumes come from
   one function: `create_image(w, h, cube=True)` or `create_image(w, h, depth=n)`. A volume
   is a `sampler3D` in the shader — colour-grading LUTs, volumetric noise, raymarched
