@@ -87,15 +87,13 @@ def test_tessellation_level_changes_what_is_drawn(extra_context):
                 .build(target))
 
     def draw(level):
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0])
-        cmd.bind_pipeline(pipeline)
-        cmd.push_constants(pipeline, 0, struct.pack("f", level))
-        cmd.bind_vertex_buffer(vbuf)
-        cmd.draw(3)
-        cmd.end_rendering(target)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+            p.bind_pipeline(pipeline)
+            p.push_constants(pipeline, 0, struct.pack("f", level))
+            p.bind_vertex_buffer(vbuf)
+            p.draw(3)
+        ctx.submit(g)
         return painted(target)
 
     flat = draw(1.0)
@@ -258,14 +256,12 @@ def test_geometry_shader_turns_points_into_surfaces(extra_context):
             builder = builder.geometry_shader(geom)
         pipeline = builder.build(target)
 
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0])
-        cmd.bind_pipeline(pipeline)
-        cmd.bind_vertex_buffer(vbuf)
-        cmd.draw(1)
-        cmd.end_rendering(target)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+            p.bind_pipeline(pipeline)
+            p.bind_vertex_buffer(vbuf)
+            p.draw(1)
+        ctx.submit(g)
         return painted(target)
 
     bare = draw(False)
@@ -327,27 +323,26 @@ def test_a_barrier_is_legal_on_a_tessellating_context(extra_context):
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, buf)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    # The manual half: cmd.barrier() spells SHADER_READ/WRITE with the Context's
+    g = ctx.graph()
+    fill = g.add_pass()
+    # The manual half: p.barrier() spells SHADER_READ/WRITE with the Context's
     # mask, which now names the tessellation and geometry stages.
-    cmd.barrier(buf, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
+    fill.barrier(buf, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
     # The automatic half, and the one that matters more. fill_buffer is a transfer
-    # write; the draw below reads the same buffer in a shader, so track_draw_ emits
-    # a RAW barrier whose destination mask is all_shader_stages(). A mask carrying
-    # a stage whose feature is off fails here.
+    # write; the draw in the next pass reads the same buffer in a shader, so the
+    # graph emits a RAW barrier whose destination mask is all_shader_stages(). A
+    # mask carrying a stage whose feature is off fails here.
     # 0x3F800000 is 1.0f, so every component becomes 1.0 and the draw paints
     # white. Filling with 0 would leave the shader reading black and the pixel
     # assertion below could not tell "drew nothing" from "drew the fill".
-    cmd.fill_buffer(buf, 0x3F800000)
-    cmd.begin_rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0])
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_descriptor_set(dset, pipeline, set=0)
-    cmd.push_constants(pipeline, 0, struct.pack("f", 8.0))
-    cmd.bind_vertex_buffer(vbuf)
-    cmd.draw(3)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    fill.fill_buffer(buf, 0x3F800000)
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(pipeline)
+        p.bind_descriptor_set(dset, pipeline, set=0)
+        p.push_constants(pipeline, 0, struct.pack("f", 8.0))
+        p.bind_vertex_buffer(vbuf)
+        p.draw(3)
+    ctx.submit(g)
     ctx.wait()
 
     # It really drew, so the barriers were around real work and not a no-op.
@@ -384,14 +379,12 @@ def test_tessellation_stages_reach_a_specialization_constant(extra_context):
                     .constant(0, level, bz.ShaderStage.TESS_CONTROL)
                     .cull_mode(bz.CullMode.NONE, bz.FrontFace.COUNTER_CLOCKWISE)
                     .build(target))
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0])
-        cmd.bind_pipeline(pipeline)
-        cmd.bind_vertex_buffer(vbuf)
-        cmd.draw(3)
-        cmd.end_rendering(target)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+            p.bind_pipeline(pipeline)
+            p.bind_vertex_buffer(vbuf)
+            p.draw(3)
+        ctx.submit(g)
         return painted(target)
 
     assert draw(16) > draw(1) * 1.5

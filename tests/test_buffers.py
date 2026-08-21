@@ -147,11 +147,10 @@ def test_a_vertex_buffer_binds_in_either_memory_usage(ctx, memory):
             .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
             .build(target))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
-        c.bind_pipeline(pipe).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipe).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
+    ctx.submit(g)
 
     painted = int(np.count_nonzero(target.color[0].read()[:, :, :3].any(axis=2)))
     assert painted > 100, f"{memory} vertex buffer drew {painted} pixels"

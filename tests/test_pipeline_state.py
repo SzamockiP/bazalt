@@ -48,14 +48,12 @@ def fullscreen_push(ctx):
 
 def draw_over(ctx, target, pipeline, clear, rgba):
     """Clear, draw one fullscreen quad of `rgba`, submit, read the centre pixel."""
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=clear)
-    cmd.bind_pipeline(pipeline)
-    cmd.push_constants(pipeline, 0, struct.pack("4f", *rgba))
-    cmd.draw(3)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=clear) as p:
+        p.bind_pipeline(pipeline)
+        p.push_constants(pipeline, 0, struct.pack("4f", *rgba))
+        p.draw(3)
+    ctx.submit(g)
     return target.color[0].read()[32, 32]
 
 
@@ -239,17 +237,15 @@ def test_depth_write_false_leaves_the_buffer_alone(ctx, fullscreen_push):
     def render(write):
         near = fullscreen_push(target, depth={"write": write})
         far = fullscreen_push(target, far=True, depth={})
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0])
-        cmd.bind_pipeline(near)
-        cmd.push_constants(near, 0, struct.pack("4f", 0.0, 1.0, 0.0, 1.0))
-        cmd.draw(3)
-        cmd.bind_pipeline(far)
-        cmd.push_constants(far, 0, struct.pack("4f", 0.0, 0.0, 1.0, 1.0))
-        cmd.draw(3)
-        cmd.end_rendering(target)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+            p.bind_pipeline(near)
+            p.push_constants(near, 0, struct.pack("4f", 0.0, 1.0, 0.0, 1.0))
+            p.draw(3)
+            p.bind_pipeline(far)
+            p.push_constants(far, 0, struct.pack("4f", 0.0, 0.0, 1.0, 1.0))
+            p.draw(3)
+        ctx.submit(g)
         return target.color[0].read()[32, 32]
 
     assert np.allclose(render(False)[:3], [0, 0, 255], atol=2), \
@@ -284,14 +280,12 @@ def test_reversed_depth_needs_both_the_compare_and_the_clear(ctx, fullscreen_pus
     greater = fullscreen_push(target, far=True, depth={"compare": bz.CompareOp.GREATER})
 
     def render(clear_depth):
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(target, clear_color=red, clear_depth=clear_depth)
-        cmd.bind_pipeline(greater)
-        cmd.push_constants(greater, 0, struct.pack("4f", *green))
-        cmd.draw(3)
-        cmd.end_rendering(target)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=red, clear_depth=clear_depth) as p:
+            p.bind_pipeline(greater)
+            p.push_constants(greater, 0, struct.pack("4f", *green))
+            p.draw(3)
+        ctx.submit(g)
         return target.color[0].read()[32, 32]
 
     # 0.9 > 1.0 is false: the default clear rejects every fragment.
@@ -307,22 +301,19 @@ def test_clear_depth_is_ignored_when_the_pass_preserves(ctx, fullscreen_push):
     near = fullscreen_push(target, depth={})
     far = fullscreen_push(target, far=True, depth={})
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
     # Pass 1 writes depth 0.0 over the whole target.
-    cmd.begin_rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0])
-    cmd.bind_pipeline(near)
-    cmd.push_constants(near, 0, struct.pack("4f", 0.0, 1.0, 0.0, 1.0))
-    cmd.draw(3)
-    cmd.end_rendering(target)
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(near)
+        p.push_constants(near, 0, struct.pack("4f", 0.0, 1.0, 0.0, 1.0))
+        p.draw(3)
     # Pass 2 preserves. A clear_depth of 0.0 would change nothing either way,
     # so ask for 1.0: if it were honoured, the far draw would pass and win.
-    cmd.begin_rendering(target, clear_color=None, clear_depth=1.0)
-    cmd.bind_pipeline(far)
-    cmd.push_constants(far, 0, struct.pack("4f", 0.0, 0.0, 1.0, 1.0))
-    cmd.draw(3)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    with g.add_pass(target, clear_color=None, clear_depth=1.0) as p:
+        p.bind_pipeline(far)
+        p.push_constants(far, 0, struct.pack("4f", 0.0, 0.0, 1.0, 1.0))
+        p.draw(3)
+    ctx.submit(g)
 
     assert np.allclose(target.color[0].read()[32, 32, :3], [0, 255, 0], atol=2)
 
@@ -358,17 +349,15 @@ def test_depth_bias_pushes_the_written_depth(ctx, fullscreen_push):
     def render(bias):
         first = build(bias)
         second = build(None)
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0])
-        cmd.bind_pipeline(first)
-        cmd.push_constants(first, 0, struct.pack("4f", 0.0, 1.0, 0.0, 1.0))
-        cmd.draw(3)
-        cmd.bind_pipeline(second)
-        cmd.push_constants(second, 0, struct.pack("4f", 0.0, 0.0, 1.0, 1.0))
-        cmd.draw(3)
-        cmd.end_rendering(target)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+            p.bind_pipeline(first)
+            p.push_constants(first, 0, struct.pack("4f", 0.0, 1.0, 0.0, 1.0))
+            p.draw(3)
+            p.bind_pipeline(second)
+            p.push_constants(second, 0, struct.pack("4f", 0.0, 0.0, 1.0, 1.0))
+            p.draw(3)
+        ctx.submit(g)
         return target.color[0].read()[32, 32]
 
     # No bias: both are at 0.9, LESS_OR_EQUAL lets the second one through.
@@ -428,15 +417,13 @@ def test_wide_lines_thicken_the_wireframe(extra_context):
                     .polygon_mode(bz.PolygonMode.LINE)
                     .line_width(width)
                     .build(target))
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0])
-        cmd.bind_pipeline(pipeline)
-        cmd.bind_vertex_buffer(vbuf)
-        cmd.bind_index_buffer(ibuf)
-        cmd.draw_indexed(3)
-        cmd.end_rendering(target)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+            p.bind_pipeline(pipeline)
+            p.bind_vertex_buffer(vbuf)
+            p.bind_index_buffer(ibuf)
+            p.draw_indexed(3)
+        ctx.submit(g)
         px = target.color[0].read()
         return int(np.count_nonzero(px[:, :, :3].any(axis=2)))
 
@@ -462,17 +449,15 @@ def test_depth_test_off_still_writes_nothing(ctx, fullscreen_push):
     near = plain("fullscreen.vert")
     far = plain("fullscreen_far.vert")
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0])
-    cmd.bind_pipeline(near)
-    cmd.push_constants(near, 0, struct.pack("4f", 0.0, 1.0, 0.0, 1.0))
-    cmd.draw(3)
-    cmd.bind_pipeline(far)
-    cmd.push_constants(far, 0, struct.pack("4f", 0.0, 0.0, 1.0, 1.0))
-    cmd.draw(3)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(near)
+        p.push_constants(near, 0, struct.pack("4f", 0.0, 1.0, 0.0, 1.0))
+        p.draw(3)
+        p.bind_pipeline(far)
+        p.push_constants(far, 0, struct.pack("4f", 0.0, 0.0, 1.0, 1.0))
+        p.draw(3)
+    ctx.submit(g)
 
     assert np.allclose(target.color[0].read()[32, 32, :3], [0, 0, 255], atol=2)
 
@@ -527,15 +512,13 @@ def test_line_mode_draws_edges_and_leaves_the_interior(extra_context):
                     .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                     .polygon_mode(mode)
                     .build(target))
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0])
-        cmd.bind_pipeline(pipeline)
-        cmd.bind_vertex_buffer(vbuf)
-        cmd.bind_index_buffer(ibuf)
-        cmd.draw_indexed(3)
-        cmd.end_rendering(target)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+            p.bind_pipeline(pipeline)
+            p.bind_vertex_buffer(vbuf)
+            p.bind_index_buffer(ibuf)
+            p.draw_indexed(3)
+        ctx.submit(g)
         return target.color[0].read().copy()
 
     filled = render(bz.PolygonMode.FILL)
@@ -633,13 +616,12 @@ def test_a_triangle_fan_draws_from_one_vertex(ctx, triangle_shaders):
                 .topology(topology)
                 .cull_mode(bz.CullMode.NONE)
                 .build(target))
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
-            cmd.bind_pipeline(pipe)
-            cmd.bind_vertex_buffer(vbuf)
-            cmd.draw(4)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+            p.bind_pipeline(pipe)
+            p.bind_vertex_buffer(vbuf)
+            p.draw(4)
+        ctx.submit(g)
         return int(np.count_nonzero(target.color[0].read()[:, :, 0] > 128))
 
     fan = render(bz.Topology.TRIANGLE_FAN)

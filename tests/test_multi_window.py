@@ -94,25 +94,23 @@ def test_two_windows_share_one_context(ctx):
         renderer_b = ctx.create_renderer(window_b)
         pipeline = _solid_pipeline(ctx, renderer_a)
 
-        # One CommandBuffer per window: they own one command buffer per ring
+        # One Graph per window: a graph owns one command buffer per ring
         # slot, and both windows render on the same slot now.
-        cmds = []
+        graphs = []
         for renderer in (renderer_a, renderer_b):
-            cmd = ctx.create_command_buffer()
-            cmd.begin()
-            cmd.begin_rendering(renderer, clear_color=[0, 0, 0, 1])
-            cmd.bind_pipeline(pipeline)
-            cmd.draw(3)
-            cmd.end_rendering(renderer)
-            cmds.append(cmd)
+            g = ctx.graph()
+            with g.add_pass(renderer, clear_color=[0, 0, 0, 1]) as p:
+                p.bind_pipeline(pipeline)
+                p.draw(3)
+            graphs.append(g)
 
         presented = 0
         for _ in range(ctx.frames_in_flight + 4):
             bz.poll_events()
             ctx.begin_frame()
-            for renderer, cmd in zip((renderer_a, renderer_b), cmds):
+            for renderer, g in zip((renderer_a, renderer_b), graphs):
                 if renderer.acquire():
-                    renderer.present(cmd)
+                    renderer.present(g)
                     presented += 1
 
         assert presented > 0, "neither window ever acquired an image"
@@ -143,8 +141,8 @@ def test_both_windows_render_on_the_same_ring_slot(ctx):
         window_a = window_b = None
 
 
-def test_one_command_buffer_cannot_serve_two_windows(ctx):
-    """A CommandBuffer holds one VkCommandBuffer per ring slot, so replaying it
+def test_one_graph_cannot_serve_two_windows(ctx):
+    """A Graph holds one VkCommandBuffer per ring slot, so replaying it
     in a second window would reset a buffer the first still has in flight.
     Validation would report a pending-state VUID; this says it in a sentence,
     and says it in builds with no validation layers at all."""
@@ -157,21 +155,19 @@ def test_one_command_buffer_cannot_serve_two_windows(ctx):
         renderer_b = ctx.create_renderer(window_b)
         pipeline = _solid_pipeline(ctx, renderer_a)
 
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(renderer_a, clear_color=[0, 0, 0, 1])
-        cmd.bind_pipeline(pipeline)
-        cmd.draw(3)
-        cmd.end_rendering(renderer_a)
+        g = ctx.graph()
+        with g.add_pass(renderer_a, clear_color=[0, 0, 0, 1]) as p:
+            p.bind_pipeline(pipeline)
+            p.draw(3)
 
         bz.poll_events()
         ctx.begin_frame()
         if not (renderer_a.acquire() and renderer_b.acquire()):
             pytest.skip("windows did not both acquire (minimized?)")
 
-        renderer_a.present(cmd)
-        with pytest.raises(bz.StateError):
-            renderer_b.present(cmd)
+        renderer_a.present(g)
+        with pytest.raises(bz.StateError, match="its own Graph"):
+            renderer_b.present(g)
     finally:
         renderer_a = renderer_b = None
         window_a = window_b = None
@@ -210,16 +206,14 @@ def test_present_without_an_acquired_image_is_an_error(ctx):
     try:
         renderer = ctx.create_renderer(window)
         pipeline = _solid_pipeline(ctx, renderer)
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(renderer, clear_color=[0, 0, 0, 1])
-        cmd.bind_pipeline(pipeline)
-        cmd.draw(3)
-        cmd.end_rendering(renderer)
+        g = ctx.graph()
+        with g.add_pass(renderer, clear_color=[0, 0, 0, 1]) as p:
+            p.bind_pipeline(pipeline)
+            p.draw(3)
 
         ctx.begin_frame()
         with pytest.raises(bz.StateError):
-            renderer.present(cmd)
+            renderer.present(g)
     finally:
         renderer = None
         window = None

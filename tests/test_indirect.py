@@ -51,11 +51,11 @@ def args_buffer(ctx, size=DRAW_ARGS_BYTES):
 # ── the feature ───────────────────────────────────────────────────────────────
 
 def test_compute_decides_how_many_instances_are_drawn(ctx):
-    """The whole chain in one recording: fill_buffer zeroes the arguments, a
+    """The whole chain in one graph: fill_buffer zeroes the arguments, a
     compute pass accumulates instanceCount atomically, and draw_indirect draws
     exactly that many stripes.
 
-    No cmd.barrier() anywhere. The compute write and the command processor's read
+    No p.barrier() anywhere. The compute write and the command processor's read
     are ordered by the automatic tracker, and DRAW_INDIRECT is earlier than any
     shader stage — so getting that barrier wrong is a wrong picture, not a slow one.
     """
@@ -89,22 +89,21 @@ def test_compute_decides_how_many_instances_are_drawn(ctx):
     dset.set_buffer(0, args)
     dset.set_buffer(1, candidates)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    # The prerequisite that landed in 0.18 for exactly this: the counter has to
-    # start each frame at a known value, and saying so used to need a dispatch
-    # whose whole body was an assignment.
-    cmd.fill_buffer(args, 0)
-    cmd.bind_pipeline(cull)
-    cmd.bind_descriptor_set(dset, cull, set=0)
-    cmd.push_constants(cull, 0, struct.pack("If", len(scores), threshold))
-    cmd.dispatch(1)
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
-        c.bind_pipeline(draw)
-        c.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
-        c.draw_indirect(args)
-    ctx.submit(cmd)
-    ctx.wait()
+    g = ctx.graph()
+    with g.add_pass() as p:
+        # The prerequisite that landed in 0.18 for exactly this: the counter has to
+        # start each frame at a known value, and saying so used to need a dispatch
+        # whose whole body was an assignment.
+        p.fill_buffer(args, 0)
+        p.bind_pipeline(cull)
+        p.bind_descriptor_set(dset, cull, set=0)
+        p.push_constants(cull, 0, struct.pack("If", len(scores), threshold))
+        p.dispatch(1)
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(draw)
+        p.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
+        p.draw_indirect(args)
+    ctx.submit(g)
 
     assert painted(target) == expected * STRIPE_PIXELS
 
@@ -138,19 +137,18 @@ def test_a_zero_instance_count_draws_nothing(ctx):
     dset.set_buffer(0, args)
     dset.set_buffer(1, candidates)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.fill_buffer(args, 0)
-    cmd.bind_pipeline(cull)
-    cmd.bind_descriptor_set(dset, cull, set=0)
-    cmd.push_constants(cull, 0, struct.pack("If", len(scores), 0.5))
-    cmd.dispatch(1)
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
-        c.bind_pipeline(draw)
-        c.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
-        c.draw_indirect(args)
-    ctx.submit(cmd)
-    ctx.wait()
+    g = ctx.graph()
+    with g.add_pass() as p:
+        p.fill_buffer(args, 0)
+        p.bind_pipeline(cull)
+        p.bind_descriptor_set(dset, cull, set=0)
+        p.push_constants(cull, 0, struct.pack("If", len(scores), 0.5))
+        p.dispatch(1)
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(draw)
+        p.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
+        p.draw_indirect(args)
+    ctx.submit(g)
 
     assert painted(target) == 0
 
@@ -171,14 +169,12 @@ def test_cpu_written_arguments_work_too(ctx):
     draw = (ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
             .push_constant(4, bz.ShaderStage.VERTEX).build(target))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
-        c.bind_pipeline(draw)
-        c.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
-        c.draw_indirect(args)
-    ctx.submit(cmd)
-    ctx.wait()
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(draw)
+        p.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
+        p.draw_indirect(args)
+    ctx.submit(g)
 
     assert painted(target) == instances * STRIPE_PIXELS
 
@@ -203,18 +199,17 @@ def test_dispatch_indirect_takes_its_group_count_from_the_gpu(ctx):
     bump_set = pool.allocate_set(bump, set=0)
     bump_set.set_buffer(0, counter)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.fill_buffer(counter, 0)
-    cmd.bind_pipeline(writer)
-    cmd.bind_descriptor_set(writer_set, writer, set=0)
-    cmd.push_constants(writer, 0, struct.pack("I", want))
-    cmd.dispatch(1)
-    cmd.bind_pipeline(bump)
-    cmd.bind_descriptor_set(bump_set, bump, set=0)
-    cmd.dispatch_indirect(groups)
-    ctx.submit(cmd)
-    ctx.wait()
+    g = ctx.graph()
+    p = g.add_pass()
+    p.fill_buffer(counter, 0)
+    p.bind_pipeline(writer)
+    p.bind_descriptor_set(writer_set, writer, set=0)
+    p.push_constants(writer, 0, struct.pack("I", want))
+    p.dispatch(1)
+    p.bind_pipeline(bump)
+    p.bind_descriptor_set(bump_set, bump, set=0)
+    p.dispatch_indirect(groups)
+    ctx.submit(g)
 
     assert int(counter.read(np.uint32)[0]) == want
 
@@ -238,15 +233,13 @@ def test_draw_indexed_indirect_uses_the_index_buffer(ctx):
     draw = (ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
             .push_constant(4, bz.ShaderStage.VERTEX).build(target))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
-        c.bind_pipeline(draw)
-        c.bind_index_buffer(indices)
-        c.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
-        c.draw_indexed_indirect(args)
-    ctx.submit(cmd)
-    ctx.wait()
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(draw)
+        p.bind_index_buffer(indices)
+        p.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
+        p.draw_indexed_indirect(args)
+    ctx.submit(g)
 
     assert painted(target) == instances * STRIPE_PIXELS
 
@@ -258,24 +251,26 @@ def test_only_a_storage_buffer_can_hold_the_arguments(ctx):
     refusal names the fix instead of leaving the layers to report a usage flag. A
     compute shader writing the arguments needs a storage buffer anyway."""
     uniform = ctx.create_buffer(64, bz.BufferType.UNIFORM, bz.MemoryUsage.STATIC)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass()
     with pytest.raises(bz.ResourceError, match="BufferType.STORAGE"):
-        cmd.dispatch_indirect(uniform)
+        p.dispatch_indirect(uniform)
 
 
 def test_the_offset_must_be_aligned_and_in_range(ctx):
     args = args_buffer(ctx)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-
+    g = ctx.graph()
+    p = g.add_pass()
     with pytest.raises(bz.ResourceError, match="multiple of 4"):
-        cmd.dispatch_indirect(args, offset=2)
+        p.dispatch_indirect(args, offset=2)
+
+    # The draw verbs need a render pass.
+    r = g.add_pass(ctx.create_render_target(8, 8))
     # 16-byte buffer, one 16-byte struct: offset 4 leaves only 12 bytes.
     with pytest.raises(bz.ResourceError, match="buffer is 16"):
-        cmd.draw_indirect(args, offset=4)
+        r.draw_indirect(args, offset=4)
     with pytest.raises(bz.ResourceError, match="at least 1"):
-        cmd.draw_indirect(args, count=0)
+        r.draw_indirect(args, count=0)
 
 
 def test_multi_draw_needs_its_feature(ctx, extra_context):
@@ -287,12 +282,12 @@ def test_multi_draw_needs_its_feature(ctx, extra_context):
     """
     # Room for two argument structs, so the failure is the feature and not the size.
     args = args_buffer(ctx, size=DRAW_ARGS_BYTES * 2)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass(ctx.create_render_target(8, 8))
     if ctx.supports(bz.Feature.MULTI_DRAW_INDIRECT):
         pytest.skip("the session Context has MULTI_DRAW_INDIRECT, so it cannot refuse")
     with pytest.raises(bz.UnsupportedError, match="MULTI_DRAW_INDIRECT"):
-        cmd.draw_indirect(args, count=2)
+        p.draw_indirect(args, count=2)
 
 
 def test_multi_draw_works_with_the_feature(ctx, extra_context):
@@ -314,14 +309,12 @@ def test_multi_draw_works_with_the_feature(ctx, extra_context):
     draw = (multi.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
             .push_constant(4, bz.ShaderStage.VERTEX).build(target))
 
-    cmd = multi.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
-        c.bind_pipeline(draw)
-        c.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
-        c.draw_indirect(args, count=2)
-    multi.submit(cmd)
-    multi.wait()
+    g = multi.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(draw)
+        p.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
+        p.draw_indirect(args, count=2)
+    multi.submit(g)
 
     # Both commands draw instances starting at 0, so the second's 2 stripes overlap
     # the first's 1: the union is stripes 0 and 1.
@@ -331,26 +324,25 @@ def test_multi_draw_works_with_the_feature(ctx, extra_context):
 def test_a_buffer_from_another_context_is_refused(ctx, extra_context):
     other = extra_context()
     foreign = other.create_buffer(16, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass()
     with pytest.raises(bz.ResourceError, match="different Context"):
-        cmd.dispatch_indirect(foreign)
+        p.dispatch_indirect(foreign)
 
 
 def test_indirect_read_is_a_manual_barrier_access(ctx):
     """Access.INDIRECT_READ exists so manual mode can express the same hazard the
-    tracker handles: it is a buffer access, so cmd.barrier(image, INDIRECT_READ)
+    tracker handles: it is a buffer access, so p.barrier(image, INDIRECT_READ)
     gets the existing buffer-only message rather than a layout nobody asked for."""
     args = args_buffer(ctx)
     img = ctx.create_image(16, 16, bz.Format.RGBA8)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.barrier(args, bz.Access.SHADER_WRITE, bz.Access.INDIRECT_READ)
+    g = ctx.graph()
+    p = g.add_pass()
+    p.barrier(args, bz.Access.SHADER_WRITE, bz.Access.INDIRECT_READ)
     with pytest.raises(bz.ResourceError, match="apply to buffers only"):
-        cmd.barrier(img, bz.Access.SHADER_WRITE, bz.Access.INDIRECT_READ)
-    ctx.submit(cmd)
-    ctx.wait()
+        p.barrier(img, bz.Access.SHADER_WRITE, bz.Access.INDIRECT_READ)
+    ctx.submit(g)
 
 
 # ── a GPU-decided draw COUNT (0.21) ───────────────────────────────────────────
@@ -404,14 +396,12 @@ def test_the_count_buffer_decides_how_many_commands_run(extra_context, issued):
     args = one_stripe_each(ctx, 4)
     counts = count_buffer(ctx, issued)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
-        c.bind_pipeline(draw)
-        c.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
-        c.draw_indirect(args, count=4, count_buffer=counts)
-    ctx.submit(cmd)
-    ctx.wait()
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(draw)
+        p.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
+        p.draw_indirect(args, count=4, count_buffer=counts)
+    ctx.submit(g)
 
     assert painted(target) == issued * STRIPE_PIXELS
 
@@ -427,14 +417,12 @@ def test_the_count_is_clamped_to_the_maximum(extra_context):
     args = one_stripe_each(ctx, 4)
     counts = count_buffer(ctx, 4)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
-        c.bind_pipeline(draw)
-        c.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
-        c.draw_indirect(args, count=2, count_buffer=counts)
-    ctx.submit(cmd)
-    ctx.wait()
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(draw)
+        p.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
+        p.draw_indirect(args, count=2, count_buffer=counts)
+    ctx.submit(g)
 
     assert painted(target) == 2 * STRIPE_PIXELS
 
@@ -444,7 +432,7 @@ def test_compute_writes_the_count(extra_context):
     The same cull_args.comp accumulates a counter, and this time the counter IS
     the draw count rather than an instance count.
 
-    No cmd.barrier(): the compute write and the command processor's read of the
+    No p.barrier(): the compute write and the command processor's read of the
     COUNT buffer are ordered by the tracker, which had to learn that the count
     buffer is read at DRAW_INDIRECT like the arguments are."""
     scores = np.array([0.9, 0.1, 0.8, 0.7, 0.05, 0.95, 0.2, 0.6], dtype=np.float32)
@@ -468,21 +456,20 @@ def test_compute_writes_the_count(extra_context):
     draw = stripe_pipeline(ctx, target)
     args = one_stripe_each(ctx, TOTAL_STRIPES)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.fill_buffer(counts, 0)
-    cmd.bind_pipeline(cull)
-    cmd.bind_descriptor_set(dset, cull, set=0)
-    cmd.push_constants(cull, 0, struct.pack("If", len(scores), threshold))
-    cmd.dispatch(1)
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
-        c.bind_pipeline(draw)
-        c.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
+    g = ctx.graph()
+    with g.add_pass() as p:
+        p.fill_buffer(counts, 0)
+        p.bind_pipeline(cull)
+        p.bind_descriptor_set(dset, cull, set=0)
+        p.push_constants(cull, 0, struct.pack("If", len(scores), threshold))
+        p.dispatch(1)
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(draw)
+        p.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
         # cull_args.comp accumulates into word 1 (instanceCount), so the count the
         # draw reads sits 4 bytes in.
-        c.draw_indirect(args, count=TOTAL_STRIPES, count_buffer=counts, count_offset=4)
-    ctx.submit(cmd)
-    ctx.wait()
+        p.draw_indirect(args, count=TOTAL_STRIPES, count_buffer=counts, count_offset=4)
+    ctx.submit(g)
 
     assert painted(target) == expected * STRIPE_PIXELS
 
@@ -495,36 +482,36 @@ def test_a_count_buffer_needs_its_feature(ctx):
         pytest.skip("the session Context has DRAW_INDIRECT_COUNT, so it cannot refuse")
     args = args_buffer(ctx)
     counts = args_buffer(ctx)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass(ctx.create_render_target(8, 8))
     with pytest.raises(bz.UnsupportedError, match="DRAW_INDIRECT_COUNT"):
-        cmd.draw_indirect(args, count_buffer=counts)
+        p.draw_indirect(args, count_buffer=counts)
 
 
 def test_a_count_buffer_must_be_a_storage_buffer(extra_context):
     ctx = count_context(extra_context)
     args = ctx.create_buffer(DRAW_ARGS_BYTES, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
     wrong = ctx.create_buffer(16, bz.BufferType.UNIFORM, bz.MemoryUsage.STATIC)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass(ctx.create_render_target(8, 8))
     with pytest.raises(bz.ResourceError, match="STORAGE"):
-        cmd.draw_indirect(args, count_buffer=wrong)
+        p.draw_indirect(args, count_buffer=wrong)
 
 
 def test_a_count_offset_must_be_aligned_and_inside_the_buffer(extra_context):
     ctx = count_context(extra_context)
     args = ctx.create_buffer(DRAW_ARGS_BYTES, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
     counts = ctx.create_buffer(8, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass(ctx.create_render_target(8, 8))
     with pytest.raises(bz.ResourceError, match="multiple of 4"):
-        cmd.draw_indirect(args, count_buffer=counts, count_offset=2)
+        p.draw_indirect(args, count_buffer=counts, count_offset=2)
     # 4 bytes at offset 8 need 12, and the buffer is 8. The near-maximum offset
     # is the one that catches an unsigned overflow rather than an off-by-one.
     with pytest.raises(bz.ResourceError, match="count buffer is 8"):
-        cmd.draw_indirect(args, count_buffer=counts, count_offset=8)
+        p.draw_indirect(args, count_buffer=counts, count_offset=8)
     with pytest.raises(bz.ResourceError, match="count buffer is 8"):
-        cmd.draw_indirect(args, count_buffer=counts, count_offset=2**64 - 4)
+        p.draw_indirect(args, count_buffer=counts, count_offset=2**64 - 4)
 
 
 # ── stride= (0.25) ───────────────────────────────────────────────────────
@@ -553,14 +540,12 @@ def test_indirect_stride_steps_over_per_draw_data(extra_context):
     draw = (multi.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
             .push_constant(4, bz.ShaderStage.VERTEX).build(target))
 
-    cmd = multi.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
-        c.bind_pipeline(draw)
-        c.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
-        c.draw_indirect(args, count=2, stride=32)
-    multi.submit(cmd)
-    multi.wait()
+    g = multi.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(draw)
+        p.push_constants(draw, 0, struct.pack("I", TOTAL_STRIPES))
+        p.draw_indirect(args, count=2, stride=32)
+    multi.submit(g)
 
     # The same picture the packed version above produces: both commands start at
     # instance 0, so the union is stripes 0 and 1. A stride the driver read
@@ -572,12 +557,12 @@ def test_a_stride_smaller_than_the_struct_is_refused(ctx):
     """stride= exists to leave room BETWEEN the argument structs, so it can only
     be larger. Smaller would make consecutive commands overlap."""
     buffer = ctx.create_buffer(256, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass(ctx.create_render_target(8, 8))
     with pytest.raises(bz.ResourceError, match="stride"):
-        cmd.draw_indirect(buffer, count=2, stride=8)
+        p.draw_indirect(buffer, count=2, stride=8)
     with pytest.raises(bz.ResourceError, match="multiple of 4"):
-        cmd.draw_indirect(buffer, count=2, stride=17)
+        p.draw_indirect(buffer, count=2, stride=17)
 
 
 def test_the_last_command_needs_only_its_own_struct(extra_context):
@@ -588,6 +573,6 @@ def test_the_last_command_needs_only_its_own_struct(extra_context):
         pytest.skip("GPU reports no multiDrawIndirect")
     # Two 16-byte commands at a stride of 32 need 32 + 16 = 48 bytes, not 64.
     buffer = multi.create_buffer(48, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-    cmd = multi.create_command_buffer()
-    cmd.begin()
-    cmd.draw_indirect(buffer, count=2, stride=32)
+    g = multi.graph()
+    p = g.add_pass(multi.create_render_target(8, 8))
+    p.draw_indirect(buffer, count=2, stride=32)

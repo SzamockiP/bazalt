@@ -1,4 +1,4 @@
-"""0.17: cmd.copy_image, cmd.clear_image, ctx.wait and the sampler border.
+"""0.17: the image copy, the image clear, ctx.wait and the sampler border.
 
 An image could be created, uploaded to, rendered into and read back, but never
 copied to another one — which is what a history buffer (motion blur, a feedback
@@ -28,10 +28,9 @@ def test_a_copy_reproduces_the_source(ctx):
     src = ctx.create_image(checkerboard())
     dst = ctx.create_image(16, 16, bz.Format.RGBA8)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.copy_image(src, dst)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass().copy_image(src, dst)
+    ctx.submit(g)
 
     assert np.array_equal(dst.read(), src.read())
 
@@ -48,13 +47,13 @@ def test_a_copy_of_a_compute_result_names_where_the_source_is(ctx):
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_storage_image(0, baked)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_descriptor_set(dset, pipeline, set=0)
-    cmd.dispatch(16, 16)
-    cmd.copy_image(baked, copy, src_access=bz.Access.SHADER_WRITE)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    p = g.add_pass()
+    p.bind_pipeline(pipeline)
+    p.bind_descriptor_set(dset, pipeline, set=0)
+    p.dispatch(16, 16)
+    p.copy_image(baked, copy, src_access=bz.Access.SHADER_WRITE)
+    ctx.submit(g)
 
     assert np.array_equal(copy.read(), baked.read())
     assert copy.read().any(), "the compute shader wrote nothing, so the copy proves nothing"
@@ -65,12 +64,12 @@ def test_a_copy_refuses_a_mismatch(ctx):
     smaller = ctx.create_image(8, 8, bz.Format.RGBA8)
     other_format = ctx.create_image(16, 16, bz.Format.R8)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass()
     with pytest.raises(bz.ResourceError, match="size, format and layer"):
-        cmd.copy_image(src, smaller)
+        p.copy_image(src, smaller)
     with pytest.raises(bz.ResourceError, match="size, format and layer"):
-        cmd.copy_image(src, other_format)
+        p.copy_image(src, other_format)
 
 
 def test_a_copy_is_refused_inside_a_rendering_scope(ctx):
@@ -78,23 +77,20 @@ def test_a_copy_is_refused_inside_a_rendering_scope(ctx):
     src = ctx.create_image(checkerboard())
     dst = ctx.create_image(16, 16, bz.Format.RGBA8)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target)
+    g = ctx.graph()
+    p = g.add_pass(target)
     with pytest.raises(bz.StateError, match="rendering scope"):
-        cmd.copy_image(src, dst)
+        p.copy_image(src, dst)
     with pytest.raises(bz.StateError, match="rendering scope"):
-        cmd.clear_image(dst, [1.0, 0.0, 0.0, 1.0])
-    cmd.end_rendering(target)
+        p.clear_image(dst, [1.0, 0.0, 0.0, 1.0])
 
 
 def test_clear_image_fills_every_texel(ctx):
     image = ctx.create_image(checkerboard())
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.clear_image(image, [0.0, 1.0, 0.0, 1.0])
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass().clear_image(image, [0.0, 1.0, 0.0, 1.0])
+    ctx.submit(g)
 
     pixels = image.read()
     assert np.all(pixels[..., 1] == 255) and np.all(pixels[..., 0] == 0)
@@ -103,10 +99,10 @@ def test_clear_image_fills_every_texel(ctx):
 def test_clear_image_refuses_depth(ctx):
     """The depth clear belongs to the pass that renders into it."""
     depth = ctx.create_image(16, 16, bz.Format.D32F)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass()
     with pytest.raises(bz.ResourceError, match="clear_depth"):
-        cmd.clear_image(depth, [1.0, 1.0, 1.0, 1.0])
+        p.clear_image(depth, [1.0, 1.0, 1.0, 1.0])
 
 
 def test_wait_returns_after_the_work(ctx):
@@ -114,10 +110,9 @@ def test_wait_returns_after_the_work(ctx):
     submit already waits. It exists for the cases outside a frame."""
     image = ctx.create_image(checkerboard())
     dst = ctx.create_image(16, 16, bz.Format.RGBA8)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.copy_image(image, dst)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass().copy_image(image, dst)
+    ctx.submit(g)
     ctx.wait()
     assert np.array_equal(dst.read(), image.read())
 
@@ -157,11 +152,10 @@ def test_the_border_colour_is_what_a_sample_outside_the_image_reads(ctx):
         pool = ctx.create_descriptor_pool(max_sets=1, textures=1)
         dset = pool.allocate_set(pipeline, set=0)
         dset.set_image(0, texture, sampler)
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
             c.bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).draw(3)
-        ctx.submit(cmd)
+        ctx.submit(g)
         return int(target.color[0].read()[16, 16][0])
 
     clamped = ctx.create_sampler(address_mode=bz.AddressMode.CLAMP)

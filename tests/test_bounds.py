@@ -56,24 +56,24 @@ def test_copy_buffer_refuses_a_wrapping_offset(ctx):
                             bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
     dst = ctx.create_buffer([0.0] * 16, bz.BufferType.STORAGE,
                             bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass()
 
     with pytest.raises(bz.ResourceError):
-        cmd.copy_buffer(src, dst, src_offset=U64_MAX - 9, size=16)
+        p.copy_buffer(src, dst, src_offset=U64_MAX - 9, size=16)
     with pytest.raises(bz.ResourceError):
-        cmd.copy_buffer(src, dst, dst_offset=U64_MAX - 9, size=16)
+        p.copy_buffer(src, dst, dst_offset=U64_MAX - 9, size=16)
 
 
 def test_fill_buffer_refuses_a_wrapping_offset(ctx):
     buf = ctx.create_buffer([0.0] * 16, bz.BufferType.STORAGE,
                             bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass()
 
     # Multiple of 4, so it gets past the alignment check and reaches the size one.
     with pytest.raises(bz.ResourceError):
-        cmd.fill_buffer(buf, 0, offset=U64_MAX - 15, size=16)
+        p.fill_buffer(buf, 0, offset=U64_MAX - 15, size=16)
 
 
 def test_draw_indirect_refuses_a_wrapping_offset(ctx, triangle_shaders):
@@ -87,14 +87,13 @@ def test_draw_indirect_refuses_a_wrapping_offset(ctx, triangle_shaders):
     args = ctx.create_buffer([3, 1, 0, 0], bz.BufferType.STORAGE,
                              bz.MemoryUsage.STATIC, bz.DataType.UINT32)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=[0, 0, 0, 1])
-    cmd.bind_pipeline(pipeline)
+    g = ctx.graph()
+    p = g.add_pass(target, clear_color=[0, 0, 0, 1])
+    p.bind_pipeline(pipeline)
 
     # One VkDrawIndirectCommand is 16 bytes, so offset + 16 wraps to 0.
     with pytest.raises(bz.ResourceError):
-        cmd.draw_indirect(args, offset=U64_MAX - 15, count=1)
+        p.draw_indirect(args, offset=U64_MAX - 15, count=1)
 
 
 def test_the_ordinary_offsets_still_work(ctx):

@@ -26,11 +26,10 @@ def solid_pipeline(ctx, target):
 
 def render_into(ctx, target, view):
     pipeline = solid_pipeline(ctx, view)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(view, clear_color=[1, 0, 0, 1]):
-        cmd.bind_pipeline(pipeline).draw(3)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(view, clear_color=[1, 0, 0, 1]) as p:
+        p.bind_pipeline(pipeline).draw(3)
+    ctx.submit(g)
 
 
 def test_read_after_rendering_one_layer(ctx):
@@ -58,7 +57,7 @@ def test_sampling_a_partially_rendered_layered_target(ctx):
     """The headline: draw into ONE layer, then sample the array.
 
     The sampler sees one view over every layer, so the layers nobody drew into
-    have to reach the final layout as well. That is what end_rendering's
+    have to reach the final layout as well. That is what the render pass's
     even-out barrier is for, and without it this is a validation error at the
     sample — a long way from the pass that caused it.
     """
@@ -80,14 +79,13 @@ def test_sampling_a_partially_rendered_layered_target(ctx):
     dset.set_image(0, target.color[0], sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
     def sample(layer):
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        with cmd.rendering(screen, clear_color=[0, 0, 0, 1]):
-            cmd.bind_pipeline(pipe)
-            cmd.bind_descriptor_set(dset, pipe, 0)
-            cmd.push_constants(pipe, 0, struct.pack("i", layer))
-            cmd.draw(3)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(screen, clear_color=[0, 0, 0, 1]) as p:
+            p.bind_pipeline(pipe)
+            p.bind_descriptor_set(dset, pipe, 0)
+            p.push_constants(pipe, 0, struct.pack("i", layer))
+            p.draw(3)
+        ctx.submit(g)
         return screen.color[0].read()
 
     # The layer that was drawn is red; the ones that were not are legal to
@@ -131,14 +129,13 @@ def test_render_one_mip_then_read_it_back_through_a_sample(ctx):
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, target.color[0], sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(screen, clear_color=[0, 0, 0, 1]):
-        cmd.bind_pipeline(pipe)
-        cmd.bind_descriptor_set(dset, pipe, 0)
-        cmd.push_constants(pipe, 0, struct.pack("f", 1.0))
-        cmd.draw(3)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(screen, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipe)
+        p.bind_descriptor_set(dset, pipe, 0)
+        p.push_constants(pipe, 0, struct.pack("f", 1.0))
+        p.draw(3)
+    ctx.submit(g)
 
     assert screen.color[0].read()[4, 4, 0] > 200
 

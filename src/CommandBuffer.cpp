@@ -1196,12 +1196,11 @@ CommandBuffer& CommandBuffer::end_label()
 
 std::expected<std::size_t, Error> CommandBuffer::start_occlusion_query()
 {
-    if (!in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.occlusion_query() must be used inside a rendering scope: Vulkan requires an occlusion "
-            "query to begin and end within one render pass. Move it inside `with cmd.rendering(target):`."));
-    }
+    // "Inside a rendering scope" is now the PASS KIND, and the binding checks
+    // it before this runs (VerbScope::Render). The recorder cannot check it
+    // any more and must not try: a pass never sets in_rendering_, because the
+    // graph opens the rendering scope in its executor rather than into the
+    // pass's own command list — so the old guard refused every legal query.
     const std::size_t index = occlusion_count_++;
     commands_.emplace_back(
         [this, index](VkCommandBuffer cmd, const FrameContext& frame)
@@ -1810,7 +1809,8 @@ void CommandBuffer::track_image_use_(
     VkImageLayout layout,
     VkPipelineStageFlags stages,
     VkAccessFlags access,
-    bool writes)
+    bool writes,
+    bool only_if_tracked)
 {
     if (!auto_barriers_)
     {
@@ -1829,7 +1829,12 @@ void CommandBuffer::track_image_use_(
              .stages = stages,
              .access = access,
              .writes = writes,
+             .only_if_tracked = only_if_tracked,
              .position = commands_.size()});
+        return;
+    }
+    if (only_if_tracked && !tracker_.tracks(image.get()))
+    {
         return;
     }
     if (auto b = tracker_.use_image(image.get(), layout, stages, access, writes))
@@ -1896,15 +1901,26 @@ void CommandBuffer::track_descriptor_uses_(
                     writes ? (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT) : VK_ACCESS_SHADER_READ_BIT,
                     writes);
             }
-            else if (bi.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && tracker_.tracks(bi.image.get()))
+            else if (bi.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
             {
-                // A sampled image only needs a barrier if the tracker has
-                // already seen it — i.e. something wrote it earlier in this
-                // recording and it is still in GENERAL. An uploaded texture the
+                // A sampled image only needs a barrier if something wrote it
+                // earlier and it is still in GENERAL. An uploaded texture the
                 // tracker never saw rests in SHADER_READ_ONLY and is left
-                // untouched, so ordinary texturing pays nothing.
+                // untouched, so ordinary texturing pays nothing — and a
+                // transition of it would DISCARD it, since the tracker's
+                // starting layout is UNDEFINED.
+                //
+                // Who answers "was it written" differs by mode, which is what
+                // the flag carries: inline mode asks its own tracker right
+                // here, while in a pass the writer is a DIFFERENT pass, so the
+                // question can only be settled when the graph folds them.
                 track_image_use_(
-                    bi.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, stages, VK_ACCESS_SHADER_READ_BIT, false);
+                    bi.image,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    stages,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    false,
+                    /*only_if_tracked=*/true);
             }
         }
     }

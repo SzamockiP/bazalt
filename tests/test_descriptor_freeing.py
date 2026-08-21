@@ -30,9 +30,7 @@ def test_dropped_sets_return_to_the_pool(ctx, triangle_shaders):
         gc.collect()
         # The freed handle is reclaimed once the GPU provably passed the frame
         # that could have used it; an idle submit provides that proof point.
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        ctx.submit(cmd)
+        ctx.submit(ctx.graph())
 
 
 def test_pool_dropped_before_its_sets_is_safe(ctx, triangle_shaders):
@@ -62,6 +60,4 @@ def test_pool_dropped_before_its_sets_is_safe(ctx, triangle_shaders):
 
     del dset
     gc.collect()
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    ctx.submit(cmd)
+    ctx.submit(ctx.graph())

@@ -57,15 +57,13 @@ def instanced(ctx):
 
 
 def render(ctx, target, pipeline, vbuf, ibuf, instances, vertex_count=4):
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0])
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_vertex_buffer(vbuf)
-    cmd.bind_vertex_buffer(ibuf, binding=1)
-    cmd.draw(vertex_count, instances=instances)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(pipeline)
+        p.bind_vertex_buffer(vbuf)
+        p.bind_vertex_buffer(ibuf, binding=1)
+        p.draw(vertex_count, instances=instances)
+    ctx.submit(g)
     return target.color[0].read()
 
 
@@ -143,15 +141,14 @@ def test_draw_indexed_takes_an_instance_count(ctx, instanced):
     indices = ctx.create_buffer([0, 1, 2, 1, 3, 2], bz.BufferType.INDEX,
                                 bz.MemoryUsage.STATIC, bz.DataType.UINT32)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
-        (c.bind_pipeline(pipeline)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        (p.bind_pipeline(pipeline)
           .bind_vertex_buffer(vbuf)
           .bind_vertex_buffer(ibuf, binding=1)
           .bind_index_buffer(indices)
           .draw_indexed(6, instances=4))
-    ctx.submit(cmd)
+    ctx.submit(g)
 
     pixels = target.color[0].read()
     for (row, col), inst in zip(CENTRES, INSTANCES):
@@ -161,5 +158,6 @@ def test_draw_indexed_takes_an_instance_count(ctx, instanced):
 
 def test_draw_indexed_instanced_is_gone(ctx):
     """The old spelling is removed, not deprecated — pre-1.0 breaks are batched."""
-    cmd = ctx.create_command_buffer()
-    assert not hasattr(cmd, "draw_indexed_instanced")
+    g = ctx.graph()
+    p = g.add_pass()
+    assert not hasattr(p, "draw_indexed_instanced")

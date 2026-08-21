@@ -38,10 +38,10 @@ def solid(ctx):
     return make
 
 
-def draw(cmd, pipeline, rgba):
-    cmd.bind_pipeline(pipeline)
-    cmd.push_constants(pipeline, 0, struct.pack("4f", *rgba))
-    cmd.draw(3)
+def draw(p, pipeline, rgba):
+    p.bind_pipeline(pipeline)
+    p.push_constants(pipeline, 0, struct.pack("4f", *rgba))
+    p.draw(3)
 
 
 def test_depth_stencil_target_builds_and_renders(ctx):
@@ -58,11 +58,10 @@ def test_depth_stencil_target_builds_and_renders(ctx):
                 .depth_test(True)
                 .build(target))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0], clear_stencil=0) as c:
-        draw(c, pipeline, [0.0, 1.0, 0.0, 1.0])
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0], clear_stencil=0) as p:
+        draw(p, pipeline, [0.0, 1.0, 0.0, 1.0])
+    ctx.submit(g)
 
     assert np.allclose(target.color[0].read()[16, 16][:3], [0, 255, 0], atol=2)
 
@@ -81,14 +80,13 @@ def test_a_mask_written_by_one_pass_gates_the_next(ctx, solid):
     inside = solid(target, compare=bz.CompareOp.EQUAL, ref=1)
 
     def run(second):
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0], clear_stencil=0) as c:
-            draw(c, mark, [1.0, 0.0, 0.0, 1.0])
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0], clear_stencil=0) as p:
+            draw(p, mark, [1.0, 0.0, 0.0, 1.0])
         # The second pass preserves, so it draws over what the first one left.
-        with cmd.rendering(target, clear_color=None) as c:
-            draw(c, second, [0.0, 0.0, 1.0, 1.0])
-        ctx.submit(cmd)
+        with g.add_pass(target, clear_color=None) as p:
+            draw(p, second, [0.0, 0.0, 1.0, 1.0])
+        ctx.submit(g)
         return target.color[0].read()[16, 16][:3]
 
     assert np.allclose(run(outside), [255, 0, 0], atol=2), "NOT_EQUAL painted a marked pixel"
@@ -103,13 +101,12 @@ def test_write_mask_zero_writes_nothing(ctx, solid):
                  pass_op=bz.StencilOp.REPLACE, write_mask=0)
     outside = solid(target, compare=bz.CompareOp.NOT_EQUAL, ref=1)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0], clear_stencil=0) as c:
-        draw(c, mark, [1.0, 0.0, 0.0, 1.0])
-    with cmd.rendering(target, clear_color=None) as c:
-        draw(c, outside, [0.0, 0.0, 1.0, 1.0])
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0], clear_stencil=0) as p:
+        draw(p, mark, [1.0, 0.0, 0.0, 1.0])
+    with g.add_pass(target, clear_color=None) as p:
+        draw(p, outside, [0.0, 0.0, 1.0, 1.0])
+    ctx.submit(g)
 
     assert np.allclose(target.color[0].read()[16, 16][:3], [0, 0, 255], atol=2)
 
@@ -120,12 +117,11 @@ def test_clear_stencil_sets_the_starting_value(ctx, solid):
     equal_one = solid(target, compare=bz.CompareOp.EQUAL, ref=1)
 
     def run(clear_stencil):
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0],
-                           clear_stencil=clear_stencil) as c:
-            draw(c, equal_one, [0.0, 1.0, 0.0, 1.0])
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0],
+                        clear_stencil=clear_stencil) as p:
+            draw(p, equal_one, [0.0, 1.0, 0.0, 1.0])
+        ctx.submit(g)
         return target.color[0].read()[16, 16][:3]
 
     assert np.allclose(run(1), [0, 255, 0], atol=2)
@@ -167,15 +163,14 @@ def test_a_window_can_carry_a_stencil(ctx):
                                   pass_op=bz.StencilOp.REPLACE)
                     .build(renderer))
 
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        with cmd.rendering(renderer, clear_color=[0.0, 0.0, 0.0, 1.0], clear_stencil=0) as c:
-            c.bind_pipeline(pipeline).draw(3)
+        g = ctx.graph()
+        with g.add_pass(renderer, clear_color=[0.0, 0.0, 0.0, 1.0], clear_stencil=0) as p:
+            p.bind_pipeline(pipeline).draw(3)
 
         bz.poll_events()
         ctx.begin_frame()
         if renderer.acquire():
-            renderer.present(cmd)
+            renderer.present(g)
         ctx.wait()
     finally:
         del renderer
@@ -185,11 +180,10 @@ def test_a_window_can_carry_a_stencil(ctx):
 def test_a_combined_format_is_not_readable(ctx):
     """One texel is depth AND stencil, so there is no array shape for it."""
     target = ctx.create_render_target(32, 32, color=bz.Format.RGBA8, depth=bz.Format.DEPTH_STENCIL)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]):
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]):
         pass
-    ctx.submit(cmd)
+    ctx.submit(g)
 
     with pytest.raises(bz.ResourceError, match="DEPTH_STENCIL"):
         target.depth.read()

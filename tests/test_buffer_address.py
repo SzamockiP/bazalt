@@ -65,12 +65,12 @@ def test_shader_reads_through_the_address(address_ctx):
     dst = address_ctx.create_buffer(
         np.zeros(n, dtype=np.uint32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
 
-    cmd = address_ctx.create_command_buffer()
-    cmd.begin()
-    (cmd.bind_pipeline(pipeline)
+    g = address_ctx.graph()
+    p = g.add_pass()
+    (p.bind_pipeline(pipeline)
         .push_constants(pipeline, 0, struct.pack("<QQ", src.address, dst.address))
         .dispatch(n // 64))
-    address_ctx.submit(cmd)
+    address_ctx.submit(g)
 
     assert np.array_equal(dst.read(np.uint32), np.arange(n, dtype=np.uint32) * 2 + 1)
 
@@ -110,13 +110,13 @@ def test_a_shader_may_use_64_bit_integers(extra_context):
     bound.set_buffer(0, out)
 
     value = (12345 << 32) | 67890
-    cmd = context.create_command_buffer()
-    cmd.begin()
-    (cmd.bind_pipeline(pipeline)
+    g = context.graph()
+    p = g.add_pass()
+    (p.bind_pipeline(pipeline)
         .bind_descriptor_set(bound, pipeline)
         .push_constants(pipeline, 0, struct.pack("<Q", value))
         .dispatch(1))
-    context.submit(cmd)
+    context.submit(g)
 
     got = out.read(np.uint32)
     assert (int(got[0]), int(got[1])) == (12345, 67890)

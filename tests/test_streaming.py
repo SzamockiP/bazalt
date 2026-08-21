@@ -188,11 +188,10 @@ def test_an_updated_image_is_still_sampleable(ctx):
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, img, sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(screen, clear_color=[0, 0, 0, 1]):
-        cmd.bind_pipeline(pipe).bind_descriptor_set(dset, pipe, 0).draw(3)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(screen, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipe).bind_descriptor_set(dset, pipe, 0).draw(3)
+    ctx.submit(g)
 
     assert screen.color[0].read()[4, 4, 0] > 200
 

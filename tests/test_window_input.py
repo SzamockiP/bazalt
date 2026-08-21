@@ -42,14 +42,14 @@ def solid_pipeline(ctx, target):
     return ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag).build(target)
 
 
-def pump(ctx, renderer, cmd, frames=3):
+def pump(ctx, renderer, g, frames=3):
     """Run a few frames, returning how many actually presented."""
     presented = 0
     for _ in range(frames):
         bz.poll_events()
         ctx.begin_frame()
         if renderer.acquire():
-            renderer.present(cmd)
+            renderer.present(g)
             presented += 1
     return presented
 
@@ -120,17 +120,14 @@ def test_the_swapchain_follows_a_mode_change(ctx):
     try:
         renderer = ctx.create_renderer(window)
         pipeline = solid_pipeline(ctx, renderer)
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(renderer, clear_color=[0, 0, 0, 1])
-        cmd.bind_pipeline(pipeline)
-        cmd.draw(3)
-        cmd.end_rendering(renderer)
+        g = ctx.graph()
+        with g.add_pass(renderer, clear_color=[0, 0, 0, 1]) as p:
+            p.bind_pipeline(pipeline).draw(3)
 
-        presented = pump(ctx, renderer, cmd)
+        presented = pump(ctx, renderer, g)
         for mode in ALL_MODES:
             window.set_mode(mode)
-            presented += pump(ctx, renderer, cmd)
+            presented += pump(ctx, renderer, g)
 
         assert presented > 0, "the window never acquired an image in any mode"
     finally:
@@ -196,18 +193,15 @@ def test_present_mode_switches_at_runtime(ctx):
     try:
         renderer = ctx.create_renderer(window, present_mode=bz.PresentMode.FIFO)
         pipeline = solid_pipeline(ctx, renderer)
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(renderer, clear_color=[0, 0, 0, 1])
-        cmd.bind_pipeline(pipeline)
-        cmd.draw(3)
-        cmd.end_rendering(renderer)
+        g = ctx.graph()
+        with g.add_pass(renderer, clear_color=[0, 0, 0, 1]) as p:
+            p.bind_pipeline(pipeline).draw(3)
 
-        pump(ctx, renderer, cmd)
+        pump(ctx, renderer, g)
         renderer.set_present_mode(bz.PresentMode.IMMEDIATE)
-        pump(ctx, renderer, cmd)
+        pump(ctx, renderer, g)
         renderer.set_present_mode(bz.PresentMode.FIFO)
-        pump(ctx, renderer, cmd)
+        pump(ctx, renderer, g)
 
         assert renderer.present_mode == bz.PresentMode.FIFO
     finally:
@@ -224,12 +218,9 @@ def test_present_mode_cannot_change_mid_frame(ctx):
     try:
         renderer = ctx.create_renderer(window, present_mode=bz.PresentMode.FIFO)
         pipeline = solid_pipeline(ctx, renderer)
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(renderer, clear_color=[0, 0, 0, 1])
-        cmd.bind_pipeline(pipeline)
-        cmd.draw(3)
-        cmd.end_rendering(renderer)
+        g = ctx.graph()
+        with g.add_pass(renderer, clear_color=[0, 0, 0, 1]) as p:
+            p.bind_pipeline(pipeline).draw(3)
 
         bz.poll_events()
         ctx.begin_frame()
@@ -237,7 +228,7 @@ def test_present_mode_cannot_change_mid_frame(ctx):
             pytest.skip("the window never acquired an image")
         with pytest.raises(bz.StateError, match="acquire"):
             renderer.set_present_mode(bz.PresentMode.IMMEDIATE)
-        renderer.present(cmd)
+        renderer.present(g)
     finally:
         renderer = None
         window = None

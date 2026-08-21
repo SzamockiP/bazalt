@@ -15,8 +15,8 @@ its attachments — not a variation on one shape:
 
 The automatic barriers are the interesting part of all three, and the
 validation-as-assert fixture is what checks them: a borrowed image goes into the
-tracker exactly like an allocated one, so `end_rendering` leaves it in
-SHADER_READ_ONLY and the sample that follows needs no `cmd.barrier()`.
+tracker exactly like an allocated one, so the render pass leaves it in
+SHADER_READ_ONLY and the sample that follows needs no `p.barrier()`.
 """
 
 import numpy as np
@@ -48,10 +48,10 @@ def solid_pipeline(ctx, target, fullscreen_vert):
 # ── the shapes that were unreachable ──────────────────────────────────────────
 
 def test_a_pass_samples_what_the_previous_pass_drew(ctx, fullscreen_vert):
-    """The graphics ping-pong. Two owned images, two targets, one recording: the
+    """The graphics ping-pong. Two owned images, two targets, one graph: the
     first pass paints image A, the second samples A while drawing into B.
 
-    Nothing here calls cmd.barrier(). The transition from colour attachment to
+    Nothing here calls p.barrier(). The transition from colour attachment to
     sampled texture is the RenderTarget contract, and a borrowed image is tracked
     the same way an allocated one is — which is the whole claim of the feature.
     """
@@ -68,16 +68,15 @@ def test_a_pass_samples_what_the_previous_pass_drew(ctx, fullscreen_vert):
     dset = pool.allocate_set(copy, set=0)
     dset.set_image(0, a, sampler)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target_a, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
+    g = ctx.graph()
+    with g.add_pass(target_a, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
         c.bind_pipeline(paint)
         c.draw(3)
-    with cmd.rendering(target_b, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
+    with g.add_pass(target_b, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
         c.bind_pipeline(copy)
         c.bind_descriptor_set(dset, copy, set=0)
         c.draw(3)
-    ctx.submit(cmd)
+    ctx.submit(g)
     ctx.wait()
 
     # solid_red.frag paints (255, 0, 0); B holds what it sampled out of A.
@@ -106,12 +105,12 @@ def test_drawing_over_a_compute_baked_texture(ctx, fullscreen_vert):
     dset = pool.allocate_set(bake, set=0)
     dset.set_storage_image(0, img)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.bind_pipeline(bake)
-    cmd.bind_descriptor_set(dset, bake, set=0)
-    cmd.dispatch(8, 8)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    p = g.add_pass()
+    p.bind_pipeline(bake)
+    p.bind_descriptor_set(dset, bake, set=0)
+    p.dispatch(8, 8)
+    ctx.submit(g)
     ctx.wait()
 
     # store_const.comp writes (0.25, 0.5, 0.75, 1.0).
@@ -120,12 +119,11 @@ def test_drawing_over_a_compute_baked_texture(ctx, fullscreen_vert):
 
     target = ctx.create_render_target(color=[img])
     paint = solid_pipeline(ctx, target, fullscreen_vert)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
         c.bind_pipeline(paint)
         c.draw(3)
-    ctx.submit(cmd)
+    ctx.submit(g)
     ctx.wait()
 
     over = img.read()
@@ -147,12 +145,11 @@ def test_drawing_into_an_image_from_another_context(ctx, extra_context, fullscre
     target = ctx.create_render_target(color=[carried])
     paint = solid_pipeline(ctx, target, fullscreen_vert)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
         c.bind_pipeline(paint)
         c.draw(3)
-    ctx.submit(cmd)
+    ctx.submit(g)
     ctx.wait()
 
     px = carried.read()
@@ -201,12 +198,11 @@ def test_the_target_holds_the_images_it_borrows(ctx, fullscreen_vert):
 
     del img
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
         c.bind_pipeline(paint)
         c.draw(3)
-    ctx.submit(cmd)
+    ctx.submit(g)
     ctx.wait()
 
     assert target.color[0].read()[32, 32, 0] == 255
@@ -272,12 +268,11 @@ def test_a_depth_attachment_from_an_owned_image_works(ctx, fullscreen_vert):
                 .depth_test(True)
                 .build(target))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
         c.bind_pipeline(pipeline)
         c.draw(3)
-    ctx.submit(cmd)
+    ctx.submit(g)
     ctx.wait()
 
     assert colour.read()[32, 32, 0] == 255
@@ -313,11 +308,10 @@ def _borrowed_triangle(ctx, samples):
             .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
             .build(target))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as c:
         c.bind_pipeline(pipe).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
-    ctx.submit(cmd)
+    ctx.submit(g)
     # The image the caller passed in, not something the target owns.
     return mine.read()
 
@@ -369,11 +363,10 @@ def test_a_borrowed_msaa_target_resolves_depth_too(ctx):
             .depth_test(True)
             .build(target))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as c:
         c.bind_pipeline(pipe).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
-    ctx.submit(cmd)
+    ctx.submit(g)
 
     assert _grey_edge_pixels(color.read()) > 0
     # The depth resolve wrote the triangle's depth where the triangle is and left

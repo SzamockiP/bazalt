@@ -61,15 +61,14 @@ def array_pipeline(ctx, target, frag_name, push_bytes=0, count=4):
 
 
 def draw_with(ctx, target, pipeline, dset, push=None):
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as c:
         c.bind_pipeline(pipeline)
         c.bind_descriptor_set(dset, pipeline, set=0)
         if push is not None:
             c.push_constants(pipeline, 0, push)
         c.draw(3)
-    ctx.submit(cmd)
+    ctx.submit(g)
     return target.color[0].read()
 
 
@@ -148,8 +147,8 @@ def test_a_partially_written_array_is_legal(extra_context):
 
 def test_a_slot_can_be_rewritten_while_a_draw_is_in_flight(extra_context):
     """Update-after-bind, and the submit has to be asynchronous for the test to
-    mean anything: rewriting a descriptor of a set that a PENDING command buffer
-    binds is what VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT makes legal
+    mean anything: rewriting a descriptor of a set that a PENDING submit binds
+    is what VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT makes legal
     (VUID-vkUpdateDescriptorSets-None-03047), and a blocking submit has already
     finished by the time the next line runs. Swapping a texture at run time is
     the prototyping case, so it has to be legal rather than usually working.
@@ -164,12 +163,11 @@ def test_a_slot_can_be_rewritten_while_a_draw_is_in_flight(extra_context):
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_image(0, solid(ctx, SLOT_COLORS[0]), index=0)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as c:
         c.bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0)
         c.push_constants(pipeline, 0, struct.pack("i", 0)).draw(3)
-    ctx.submit(cmd, wait=False)
+    ctx.submit(g, wait=False)
 
     dset.set_image(0, solid(ctx, SLOT_COLORS[1]), index=0)
     ctx.wait()

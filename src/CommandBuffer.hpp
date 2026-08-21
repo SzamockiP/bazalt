@@ -38,6 +38,13 @@ struct UseEvent
     VkAccessFlags access = 0;
     bool writes = false;
     bool shader_writable = false;
+    // "Only if something already wrote this image" — the sampled-image rule.
+    // An uploaded texture the tracker never saw rests in SHADER_READ_ONLY
+    // already, and transitioning it from a tracker's UNDEFINED would DISCARD
+    // it. Inline mode answers this at record time against its own tracker; a
+    // pass cannot, because the writer is another pass, so the flag travels and
+    // the graph's fold decides.
+    bool only_if_tracked = false;
     // Index into commands_ this use precedes — where a computed barrier must
     // land in a pass without a target. A render pass hoists everything to its
     // entry batch instead, so there the position only orders the fold.
@@ -588,7 +595,8 @@ private:
         VkImageLayout layout,
         VkPipelineStageFlags stages,
         VkAccessFlags access,
-        bool writes);
+        bool writes,
+        bool only_if_tracked = false);
 
     // Does the pipeline bound at this bind point write (set, binding)?
     //

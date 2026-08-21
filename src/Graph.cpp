@@ -229,6 +229,14 @@ void Graph::compile_()
                 }
                 case UseEvent::Kind::ImageUse:
                 {
+                    // The sampled-image rule: leave an image no pass in this
+                    // graph has written alone. It rests in SHADER_READ_ONLY
+                    // already, and the fold's starting layout is UNDEFINED, so
+                    // a transition here would discard an uploaded texture.
+                    if (e.only_if_tracked && !tracker.tracks(e.image.get()))
+                    {
+                        break;
+                    }
                     tracked_writes_ |= e.writes;
                     if (auto b = tracker.use_image(e.image.get(), e.layout, e.stages, e.access, e.writes))
                     {

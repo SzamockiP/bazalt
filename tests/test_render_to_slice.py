@@ -31,13 +31,11 @@ def test_each_slice_gets_its_own_clear(ctx):
     vol = ctx.create_image(4, 4, bz.Format.RGBA8, depth=depth)
     target = ctx.create_render_target(color=[vol])
 
+    g = ctx.graph()
     for z in range(depth):
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        slice_target = target.layer(z)
-        cmd.begin_rendering(slice_target, clear_color=[z * 30 / 255.0, 0, 0, 1])
-        cmd.end_rendering(slice_target)
-        ctx.submit(cmd)
+        g.reset()
+        g.add_pass(target.layer(z), clear_color=[z * 30 / 255.0, 0, 0, 1])
+        ctx.submit(g)
 
     out = vol.read()
     for z in range(depth):
@@ -50,13 +48,11 @@ def test_partial_slice_render_then_read_is_clean(ctx):
     layout granularity."""
     vol = ctx.create_image(4, 4, bz.Format.RGBA8, depth=8)
     target = ctx.create_render_target(color=[vol])
+    g = ctx.graph()
     for z in range(3):
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        st = target.layer(z)
-        cmd.begin_rendering(st, clear_color=[1, 1, 1, 1])
-        cmd.end_rendering(st)
-        ctx.submit(cmd)
+        g.reset()
+        g.add_pass(target.layer(z), clear_color=[1, 1, 1, 1])
+        ctx.submit(g)
     out = vol.read()
     assert np.all(out[:3, :, :, 0] == 255)
 
@@ -65,12 +61,9 @@ def test_slice_of_a_mip_scales_the_bound(ctx):
     """Level 1 of a depth-4 volume has 2 slices; slice 3 exists only at mip 0."""
     vol = ctx.create_image(8, 8, bz.Format.RGBA8, depth=4, mip_levels=2)
     target = ctx.create_render_target(color=[vol])
-    st = target.layer(1, mip=1)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(st, clear_color=[0, 1, 0, 1])
-    cmd.end_rendering(st)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass(target.layer(1, mip=1), clear_color=[0, 1, 0, 1])
+    ctx.submit(g)
     with pytest.raises(bz.ResourceError, match="out of range"):
         target.layer(3, mip=1)
 
@@ -78,10 +71,9 @@ def test_slice_of_a_mip_scales_the_bound(ctx):
 def test_whole_3d_target_is_refused_with_the_fix(ctx):
     vol = ctx.create_image(4, 4, bz.Format.RGBA8, depth=4)
     target = ctx.create_render_target(color=[vol])
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
     with pytest.raises(bz.ResourceError, match=r"layer\(z\)"):
-        cmd.begin_rendering(target, clear_color=[0, 0, 0, 1])
+        g.add_pass(target, clear_color=[0, 0, 0, 1])
 
 
 def test_all_layers_on_a_3d_target_is_refused(ctx):

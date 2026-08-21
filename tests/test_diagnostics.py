@@ -29,13 +29,11 @@ def test_debug_names_are_accepted_and_render_cleanly(ctx):
                 .name("solid_red_pipeline")
                 .build(target))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=[0, 0, 0, 1])
-    cmd.bind_pipeline(pipeline)
-    cmd.draw(3)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipeline)
+        p.draw(3)
+    ctx.submit(g)
 
     assert target.color[0].read().shape == (8, 8, 4)
     assert buf is not None and img is not None
@@ -103,15 +101,15 @@ def test_timer_handle_reports_positive_time_headless(ctx):
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, sbuf)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    whole = cmd.timer()  # explicit stop, spans everything
-    with cmd.timer() as inner:  # with-form, nested
-        cmd.bind_pipeline(pipeline)
-        cmd.bind_descriptor_set(dset, pipeline, set=0)
-        cmd.dispatch(64)
+    g = ctx.graph()
+    p = g.add_pass()
+    whole = p.timer()  # explicit stop, spans everything
+    with p.timer() as inner:  # with-form, nested
+        p.bind_pipeline(pipeline)
+        p.bind_descriptor_set(dset, pipeline, set=0)
+        p.dispatch(64)
     whole.stop()
-    ctx.submit(cmd)
+    ctx.submit(g)
 
     for t in (whole.ms, inner.ms):
         if t is not None:  # None only without timestamp support
@@ -122,7 +120,7 @@ def test_timer_handle_reports_positive_time_headless(ctx):
 
 def test_stale_timer_handle_raises_state_error(ctx):
     """A handle from a superseded recording raises instead of reporting a stale
-    number: begin() bumps the recording generation.
+    number: graph.reset() bumps the recording generation.
 
     It reported None until 0.24, which made it indistinguishable from "the
     submit has not finished" — and those want opposite reactions, so a polling
@@ -135,16 +133,17 @@ def test_stale_timer_handle_raises_state_error(ctx):
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, sbuf)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.timer() as old:
-        cmd.bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    p = g.add_pass()
+    with p.timer() as old:
+        p.bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1)
+    ctx.submit(g)
 
-    cmd.begin()  # re-record: `old` now belongs to a superseded recording
-    with cmd.timer():
-        cmd.bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1)
-    ctx.submit(cmd)
+    g.reset()  # re-record: `old` now belongs to a superseded recording
+    p = g.add_pass()
+    with p.timer():
+        p.bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1)
+    ctx.submit(g)
 
     with pytest.raises(bz.StateError, match="superseded|replaced"):
         old.ms
@@ -170,6 +169,12 @@ def test_gpu_time_ms_is_reported_after_the_ring_cycles(ctx):
                     .fragment_shader(frag)
                     .build(renderer))
 
+        # One graph, presented every frame: the work does not change per frame.
+        g = ctx.graph()
+        with g.add_pass(renderer, clear_color=[0, 0, 0, 1]) as p:
+            p.bind_pipeline(pipeline)
+            p.draw(3)
+
         times = []
         for _ in range(ctx.frames_in_flight + 5):
             bz.poll_events()
@@ -177,13 +182,7 @@ def test_gpu_time_ms_is_reported_after_the_ring_cycles(ctx):
             if not renderer.acquire():
                 continue
             times.append(renderer.gpu_time_ms)
-            cmd = ctx.create_command_buffer()
-            cmd.begin()
-            cmd.begin_rendering(renderer, clear_color=[0, 0, 0, 1])
-            cmd.bind_pipeline(pipeline)
-            cmd.draw(3)
-            cmd.end_rendering(renderer)
-            renderer.present(cmd)
+            renderer.present(g)
 
         assert times, "expected at least one acquired frame"
         assert times[0] is None, "the first frame has no prior submission to time"
@@ -224,24 +223,23 @@ def test_debug_labels_render_cleanly(ctx):
     target = ctx.create_render_target(8, 8)
     pipeline = solid_pipeline(ctx, target)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.label("outer"):
-        with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
-            with cmd.label("inner"):
-                cmd.bind_pipeline(pipeline).draw(3)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        with p.label("outer"):
+            with p.label("inner"):
+                p.bind_pipeline(pipeline).draw(3)
+    ctx.submit(g)
 
     assert target.color[0].read()[0, 0, 0] > 200
 
 
 def test_labels_nest(ctx):
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.label("outer"):
-        with cmd.label("inner"):
+    g = ctx.graph()
+    p = g.add_pass()
+    with p.label("outer"):
+        with p.label("inner"):
             pass
-    ctx.submit(cmd)
+    ctx.submit(g)
 
 
 def test_end_label_without_a_begin_is_ignored(ctx):
@@ -249,11 +247,11 @@ def test_end_label_without_a_begin_is_ignored(ctx):
     verb drops it. The `with` form cannot produce one; this covers the explicit
     pair, which is there for a recording split across functions and which
     someone will eventually mismatch."""
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.end_label()
-    cmd.begin_label("one").end_label().end_label()
-    ctx.submit(cmd)
+    g = ctx.graph()
+    p = g.add_pass()
+    p.end_label()
+    p.begin_label("one").end_label().end_label()
+    ctx.submit(g)
 
 
 def test_occlusion_query_counts_fragments(ctx):
@@ -264,12 +262,11 @@ def test_occlusion_query_counts_fragments(ctx):
     target = ctx.create_render_target(8, 8)
     pipeline = solid_pipeline(ctx, target)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
-        with cmd.occlusion_query() as q:
-            cmd.bind_pipeline(pipeline).draw(3)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        with p.occlusion_query() as q:
+            p.bind_pipeline(pipeline).draw(3)
+    ctx.submit(g)
 
     assert q.samples is not None
     assert q.samples > 0
@@ -281,12 +278,11 @@ def test_occlusion_query_reports_zero_when_nothing_is_drawn(ctx):
     target = ctx.create_render_target(8, 8)
     solid_pipeline(ctx, target)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
-        with cmd.occlusion_query() as q:
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        with p.occlusion_query() as q:
             pass
-    ctx.submit(cmd)
+    ctx.submit(g)
 
     if q.samples:
         # occlusionQueryPrecise is a feature bit, and without it the spec allows
@@ -306,13 +302,12 @@ def test_occlusion_query_stops_explicitly(ctx):
     target = ctx.create_render_target(8, 8)
     pipeline = solid_pipeline(ctx, target)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
-        q = cmd.occlusion_query()
-        cmd.bind_pipeline(pipeline).draw(3)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        q = p.occlusion_query()
+        p.bind_pipeline(pipeline).draw(3)
         q.stop()
-    ctx.submit(cmd)
+    ctx.submit(g)
 
     assert q.samples is not None
     assert q.samples > 0
@@ -321,28 +316,31 @@ def test_occlusion_query_stops_explicitly(ctx):
 def test_occlusion_query_outside_a_rendering_scope_raises(ctx):
     """Vulkan requires the query to begin and end in one render pass. Refusing
     at the call site beats a validation message at submit that names neither."""
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass()  # no target, so no rendering scope to span
     with pytest.raises(bz.StateError):
-        cmd.occlusion_query()
+        p.occlusion_query()
 
 
 def test_stale_occlusion_handle_raises_state_error(ctx):
-    """Same stale-handle contract as a Timer: re-recording gives the slots to a
+    """Same stale-handle contract as a Timer: graph.reset() gives the slots to a
     different query, so the old handle raises rather than answering wrongly."""
     target = ctx.create_render_target(8, 8)
     pipeline = solid_pipeline(ctx, target)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
-        with cmd.occlusion_query() as q:
-            cmd.bind_pipeline(pipeline).draw(3)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        with p.occlusion_query() as q:
+            p.bind_pipeline(pipeline).draw(3)
+    ctx.submit(g)
     assert q.samples is not None
 
-    cmd.begin()
-    ctx.submit(cmd)
+    g.reset()  # re-record: `q` now belongs to a superseded recording
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        with p.occlusion_query():
+            p.bind_pipeline(pipeline).draw(3)
+    ctx.submit(g)
+
     with pytest.raises(bz.StateError, match="superseded|replaced"):
         q.samples
 
@@ -409,18 +407,17 @@ def test_the_recording_verbs_release_what_they_borrow(ctx, triangle_shaders, tri
                     .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                     .build(target))
         layered = ctx.create_render_target(16, 16, bz.Format.RGBA8, layers=2)
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        with cmd.rendering(target):
-            cmd.bind_pipeline(pipeline)
-            cmd.bind_vertex_buffer(vbuf)
-            cmd.bind_index_buffer(ibuf)
-            cmd.draw_indexed(3)
-        with cmd.rendering(layered.layer(0)):
-            cmd.bind_pipeline(pipeline)
-            cmd.bind_vertex_buffer(vbuf)
-            cmd.draw(3)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target) as p:
+            p.bind_pipeline(pipeline)
+            p.bind_vertex_buffer(vbuf)
+            p.bind_index_buffer(ibuf)
+            p.draw_indexed(3)
+        with g.add_pass(layered.layer(0)) as p:
+            p.bind_pipeline(pipeline)
+            p.bind_vertex_buffer(vbuf)
+            p.draw(3)
+        ctx.submit(g)
 
     # A warm-up round first: the descriptor pools, the command pool and the
     # pipeline cache all allocate on first use and keep what they take, and
@@ -480,17 +477,17 @@ def test_renderer_read_pixels_captures_the_frame(ctx):
         with pytest.raises(bz.StateError):
             renderer.read_pixels()
 
+        g = ctx.graph()
+        with g.add_pass(renderer, clear_color=[0, 0, 0, 1]) as p:
+            p.bind_pipeline(pipeline).draw(3)
+
         drawn = False
         for _ in range(3):
             bz.poll_events()
             ctx.begin_frame()
             if not renderer.acquire():
                 continue
-            cmd = ctx.create_command_buffer()
-            cmd.begin()
-            with cmd.rendering(renderer, clear_color=[0, 0, 0, 1]):
-                cmd.bind_pipeline(pipeline).draw(3)
-            renderer.present(cmd, capture=True)
+            renderer.present(g, capture=True)
             drawn = True
 
         if not drawn:
@@ -554,11 +551,10 @@ def test_a_precise_occlusion_query_counts_samples(ctx, extra_context):
     target = precise.create_render_target(8, 8)
     pipeline = solid_pipeline(precise, target)
 
-    cmd = precise.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0, 0, 0, 1]):
-        with cmd.occlusion_query() as q:
-            cmd.bind_pipeline(pipeline).draw(3)
-    precise.submit(cmd)
+    g = precise.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        with p.occlusion_query() as q:
+            p.bind_pipeline(pipeline).draw(3)
+    precise.submit(g)
 
     assert q.samples >= 64, "a precise query counts every covered sample"

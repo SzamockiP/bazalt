@@ -36,11 +36,10 @@ def spec_pipeline(ctx):
 
 
 def draw(ctx, target, pipeline):
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
-        c.bind_pipeline(pipeline).draw(3)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(pipeline).draw(3)
+    ctx.submit(g)
     return target.color[0].read()[16, 16]
 
 
@@ -94,12 +93,12 @@ def test_compute_takes_constants_without_a_stage(ctx):
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, buf)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_descriptor_set(dset, pipeline, set=0)
-    cmd.dispatch(1)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    p = g.add_pass()
+    p.bind_pipeline(pipeline)
+    p.bind_descriptor_set(dset, pipeline, set=0)
+    p.dispatch(1)
+    ctx.submit(g)
 
     assert np.array_equal(buf.read(np.int32), np.full(8, 5, dtype=np.int32))
 
@@ -151,13 +150,12 @@ def test_blend_can_differ_per_attachment(extra_context):
                 .blend(True, mode=bz.BlendMode.ADDITIVE, attachment=0)
                 .build(target))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
-        c.bind_pipeline(pipeline).draw(3)
-    with cmd.rendering(target, clear_color=None) as c:
-        c.bind_pipeline(pipeline).draw(3)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(pipeline).draw(3)
+    with g.add_pass(target, clear_color=None) as p:
+        p.bind_pipeline(pipeline).draw(3)
+    ctx.submit(g)
 
     # mrt.frag writes (0.25, 0.5, 0.75) into attachment 0 every pass: additive
     # doubles it, and the unblended attachment 1 keeps one pass worth.
@@ -193,11 +191,10 @@ def test_color_mask_drops_a_channel(ctx, mrt_pipeline):
     masked = mrt_pipeline(target, lambda b: b.color_mask(True, False, True, True))
 
     def run(pipeline):
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
-            c.bind_pipeline(pipeline).draw(3)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+            p.bind_pipeline(pipeline).draw(3)
+        ctx.submit(g)
         return target.color[0].read()[16, 16].astype(int)
 
     full = run(unmasked)
@@ -245,14 +242,13 @@ def test_depth_clamp_keeps_geometry_behind_the_near_plane(extra_context):
                     .depth_test(True)
                     .depth_clamp(clamp)
                     .build(target))
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
             import struct
-            c.bind_pipeline(pipeline)
-            c.push_constants(pipeline, 0, struct.pack("4f", 1.0, 0.0, 0.0, 1.0))
-            c.draw(3)
-        ctx.submit(cmd)
+            p.bind_pipeline(pipeline)
+            p.push_constants(pipeline, 0, struct.pack("4f", 1.0, 0.0, 0.0, 1.0))
+            p.draw(3)
+        ctx.submit(g)
         return int(np.count_nonzero(target.color[0].read()[..., 0]))
 
     assert run(False) == 0, "the geometry was in front of the near plane after all"
@@ -275,14 +271,13 @@ def test_alpha_to_coverage_softens_an_msaa_edge(ctx):
                     .push_constant(16, bz.ShaderStage.FRAGMENT)
                     .alpha_to_coverage(enable)
                     .build(target))
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
             import struct
-            c.bind_pipeline(pipeline)
-            c.push_constants(pipeline, 0, struct.pack("4f", 1.0, 1.0, 1.0, 0.5))
-            c.draw(3)
-        ctx.submit(cmd)
+            p.bind_pipeline(pipeline)
+            p.push_constants(pipeline, 0, struct.pack("4f", 1.0, 1.0, 1.0, 0.5))
+            p.draw(3)
+        ctx.submit(g)
         return int(target.color[0].read()[16, 16][0])
 
     assert run(False) == 255, "alpha changed the colour without coverage"
@@ -335,13 +330,11 @@ def test_uint4_attribute_arrives_unconverted(ctx):
     data["joints"] = (10, 20, 30, 255)
     vbuf = ctx.create_buffer(data, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=[0, 0, 0, 0])
-    cmd.bind_pipeline(pipe)
-    cmd.bind_vertex_buffer(vbuf)
-    cmd.draw(3)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 0]) as p:
+        p.bind_pipeline(pipe)
+        p.bind_vertex_buffer(vbuf)
+        p.draw(3)
+    ctx.submit(g)
 
     assert np.allclose(target.color[0].read()[8, 8], [10, 20, 30, 255], atol=1)

@@ -148,14 +148,12 @@ def test_sampling_with_an_explicit_nearest_sampler(ctx, tmp_path):
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_image(0, tex, sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=[0, 0, 0, 1])
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_descriptor_set(dset, pipeline, set=0)
-    cmd.draw(3)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipeline)
+        p.bind_descriptor_set(dset, pipeline, set=0)
+        p.draw(3)
+    ctx.submit(g)
 
     pixels = target.color[0].read()
     assert np.allclose(pixels[15, 15, :3], red[:3], atol=2)

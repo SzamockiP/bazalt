@@ -32,13 +32,13 @@ def test_the_three_recoverable_kinds_are_siblings(ctx):
 
 def test_a_sequencing_error_is_a_state_error(ctx):
     """The same mistake spelled two ways gets the same type: a barrier inside
-    a rendering scope is 'right call, wrong moment', not a resource fault."""
+    a render pass is 'right call, wrong moment', not a resource fault."""
     buf = ctx.create_buffer(1024, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
     target = ctx.create_render_target(8, 8)
-    cmd = ctx.create_command_buffer()
-    cmd.begin().begin_rendering(target, clear_color=[0, 0, 0, 1])
+    g = ctx.graph()
+    p = g.add_pass(target, clear_color=[0, 0, 0, 1])
     with pytest.raises(bz.StateError):
-        cmd.barrier(buf, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
+        p.barrier(buf, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
 
 
 def test_index_is_keyword_only_on_the_set_verbs(ctx):

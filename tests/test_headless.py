@@ -27,15 +27,13 @@ def draw_triangle(ctx, target, shaders, buffers, clear=CLEAR):
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                 .build(target))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=clear)
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_vertex_buffer(vbuf)
-    cmd.bind_index_buffer(ibuf)
-    cmd.draw_indexed(3)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=clear) as p:
+        p.bind_pipeline(pipeline)
+        p.bind_vertex_buffer(vbuf)
+        p.bind_index_buffer(ibuf)
+        p.draw_indexed(3)
+    ctx.submit(g)
     return target.color[0].read()
 
 
@@ -48,11 +46,9 @@ def test_read_pixels_shape_and_dtype(ctx):
     target = ctx.create_render_target(32, 16)
     # A clear-only pass counts as rendering; reading a never-rendered target
     # is an error (see test_read_pixels_before_any_render_is_an_error).
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=CLEAR)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass(target, clear_color=CLEAR)
+    ctx.submit(g)
 
     pixels = target.color[0].read()
     assert pixels.shape == (16, 32, 4)
@@ -73,11 +69,9 @@ def test_read_pixels_before_any_render_is_an_error(ctx):
 def test_recorded_but_unsubmitted_commands_do_not_count_as_rendering(ctx):
     """Only a submit flips the rendered flag; recording alone must not."""
     target = ctx.create_render_target(32, 32)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=CLEAR)
-    cmd.end_rendering(target)
-    # No ctx.submit(cmd).
+    g = ctx.graph()
+    g.add_pass(target, clear_color=CLEAR)
+    # No ctx.submit(g).
     with pytest.raises(bz.ResourceError):
         target.color[0].read()
 

@@ -81,10 +81,10 @@ def test_a_workgroup_size_the_pipeline_picks(extra_context):
         bound = context.create_descriptor_pool().allocate_set(pipeline)
         bound.set_buffer(0, out)
 
-        cmd = context.create_command_buffer()
-        cmd.begin()
-        cmd.bind_pipeline(pipeline).bind_descriptor_set(bound, pipeline).dispatch(1)
-        context.submit(cmd)
+        g = context.graph()
+        p = g.add_pass()
+        p.bind_pipeline(pipeline).bind_descriptor_set(bound, pipeline).dispatch(1)
+        context.submit(g)
 
         assert out.read(np.uint32)[0] == size
 
