@@ -122,9 +122,9 @@ std::shared_ptr<Pass> Graph::add_pass(
     pass->clear_stencil_ = clear_stencil;
     pass->name_ = std::move(name);
     pass->queue_ = queue;
-    // The recorder owns no VkCommandBuffers of its own — the graph replays
-    // every pass into its per-slot buffer — and it never fails without them.
-    pass->recorder_ = CommandBuffer::create(*context_, auto_barriers, /*allocate_buffers=*/false).value();
+    // The recorder owns no VkCommandBuffer of its own — the graph replays
+    // every pass into its per-slot buffer — so creating one cannot fail.
+    pass->recorder_ = CommandBuffer::create(*context_, auto_barriers).value();
     pass->recorder_->set_event_sink(&pass->events_);
     passes_.push_back(pass);
     dirty_ = true;

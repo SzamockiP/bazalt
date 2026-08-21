@@ -10,38 +10,13 @@
 
 std::expected<std::shared_ptr<CommandBuffer>, Error> CommandBuffer::create(
     Context& context,
-    std::optional<bool> auto_barriers,
-    bool allocate_buffers)
+    std::optional<bool> auto_barriers)
 {
     auto ctx = context.shared_from_this();
     auto cmd = std::shared_ptr<CommandBuffer>(new CommandBuffer(ctx));
-    // Per-command-buffer override of the Context-wide mode, so one hot
-    // path can go manual without flipping the whole application.
+    // Per-pass override of the Context-wide mode, so one hot pass can go
+    // manual without flipping the whole application.
     cmd->auto_barriers_ = auto_barriers.value_or(ctx->auto_barriers());
-    // Told once, here and not in begin(): the mask describes the device, not
-    // the recording, so tracker_.reset() must leave it alone.
-    cmd->tracker_.set_all_shader_stages(ctx->all_shader_stages());
-    if (!allocate_buffers)
-    {
-        return cmd;
-    }
-    cmd->command_buffers_.resize(ctx->frames_in_flight(), VK_NULL_HANDLE);
-
-    VkCommandBufferAllocateInfo allocInfo{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .pNext = nullptr,
-        .commandPool = ctx->command_pool(),
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = ctx->frames_in_flight()};
-
-    if (auto e = check(
-            ctx->vk().vkAllocateCommandBuffers(ctx->device(), &allocInfo, cmd->command_buffers_.data()),
-            "allocate command buffers",
-            ErrorCode::Resource))
-    {
-        return std::unexpected(*e);
-    }
-
     return cmd;
 }
 
@@ -59,15 +34,6 @@ CommandBuffer::~CommandBuffer()
             context_->defer_destroy([vk = &context_->vk(), device = context_->device(), pool = occlusion_pool_]
                                     { vk->vkDestroyQueryPool(device, pool, nullptr); });
         }
-        if (!command_buffers_.empty())
-        {
-            context_->defer_destroy(
-                [vk = &context_->vk(),
-                 device = context_->device(),
-                 pool = context_->command_pool(),
-                 buffers = std::move(command_buffers_)]
-                { vk->vkFreeCommandBuffers(device, pool, static_cast<uint32_t>(buffers.size()), buffers.data()); });
-        }
     }
 }
 
@@ -76,17 +42,11 @@ CommandBuffer& CommandBuffer::begin()
     commands_.clear();
     used_sets_.clear();
     used_buffers_.clear();
-    // A reused command buffer must forget its previous recording entirely,
-    // or it would emit barriers against uses that no longer exist.
-    tracker_.reset();
     bound_graphics_sets_.clear();
     bound_compute_sets_.clear();
     bound_graphics_pipeline_.reset();
     bound_compute_pipeline_.reset();
     bound_last_pipeline_.reset();
-    tracked_writes_ = false;
-    in_rendering_ = false;
-    rendering_insert_pos_ = 0;
     // Timers are re-declared each recording; the query pool itself is kept
     // and reset (vkCmdResetQueryPool) at the top of every replay. Bumping
     // the generation invalidates handles from the previous recording.
@@ -361,32 +321,6 @@ void record_render_pass_end(const VolkDeviceTable& vk, VkCommandBuffer cmd)
     vk.vkCmdEndRendering(cmd);
 }
 
-CommandBuffer& CommandBuffer::begin_rendering(
-    const std::shared_ptr<RenderTarget>& target,
-    const std::optional<std::vector<std::array<float, 4>>>& clear_colors,
-    float clear_depth,
-    std::uint32_t clear_stencil)
-{
-    commands_.emplace_back(
-        [clear_colors, clear_depth, clear_stencil, target](VkCommandBuffer cmd, const FrameContext& frame)
-        {
-            const bool preserve = !clear_colors.has_value();
-            record_render_pass_transitions_in(*frame.vk, cmd, *target, preserve);
-            record_render_pass_begin(*frame.vk, cmd, *target, clear_colors, clear_depth, clear_stencil);
-        });
-    // vkCmdPipelineBarrier is illegal inside a dynamic rendering scope, so
-    // auto barriers discovered between begin and end are hoisted to just
-    // before this lambda (record_barrier_ reads these two fields).
-    in_rendering_ = true;
-    rendering_insert_pos_ = commands_.size() - 1;
-    return *this;
-}
-
-// The transition half of closing a rendering scope: every attachment retires
-// to the target's final layout, and the per-subresource bookkeeping runs.
-// Split for the same reason as the entry half — the graph executor skips this
-// entirely between two passes that preserve one target (the look-ahead), and
-// runs it verbatim on the last pass of such a chain.
 void record_render_pass_transitions_out(const VolkDeviceTable& vk, VkCommandBuffer cmd, RenderTarget& rt_ref)
 {
     RenderTarget* target = &rt_ref;
@@ -512,18 +446,6 @@ void record_render_pass_transitions_out(const VolkDeviceTable& vk, VkCommandBuff
     // usual case. Must follow on_rendering_recorded: that is what
     // makes the per-subresource state true.
     target->record_even_out(vk, cmd);
-}
-
-CommandBuffer& CommandBuffer::end_rendering(const std::shared_ptr<RenderTarget>& target)
-{
-    commands_.emplace_back(
-        [target](VkCommandBuffer cmd, const FrameContext& frame)
-        {
-            record_render_pass_end(*frame.vk, cmd);
-            record_render_pass_transitions_out(*frame.vk, cmd, *target);
-        });
-    in_rendering_ = false;
-    return *this;
 }
 
 CommandBuffer& CommandBuffer::set_viewport(float x, float y, float width, float height)
@@ -763,24 +685,32 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Buffer> buffer
     {
         return std::unexpected(err_resource("barrier: buffer is null"));
     }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.barrier() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
-    }
     const StageAccess s = to_vk(src, context_->all_shader_stages());
     const StageAccess d = to_vk(dst, context_->all_shader_stages());
-    // Keep the auto-tracker in sync, for the reason the image overload below
-    // does it: the caller just expressed this dependency, so the next
-    // automatic use of the buffer must not emit the first-use floor on top of
-    // it. No-op in manual mode (the tracker is never consulted) — except in
-    // pass mode, where the note always reaches the graph's fold: a manual
-    // pass's barriers are exactly what its neighbour passes need to know.
+    // Tell the fold what this barrier just established, for the reason the
+    // image overload below does it: the caller expressed the dependency here,
+    // so a later automatic use must not put its first-use floor on top of it,
+    // and a neighbouring pass must order against the consumers named here.
+    // Reported whatever auto_barriers_ says — a manual pass's barriers are
+    // exactly what the passes around it need to know.
     note_buffer_state_(buffer, d.stages, d.access);
-    record_barrier_(
-        std::move(buffer),
-        {.src_stages = s.stages, .dst_stages = d.stages, .src_access = s.access, .dst_access = d.access});
+    commands_.emplace_back(
+        [buffer = std::move(buffer), s, d](VkCommandBuffer cmd, const FrameContext& frame)
+        {
+            VkBufferMemoryBarrier barrier{
+                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = s.access,
+                .dstAccessMask = d.access,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                // Resolved at replay, never captured: a DynamicBuffer has one
+                // handle per frame in flight.
+                .buffer = buffer->get(),
+                .offset = 0,
+                .size = VK_WHOLE_SIZE};
+            frame.vk->vkCmdPipelineBarrier(cmd, s.stages, d.stages, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+        });
     return {};
 }
 
@@ -789,12 +719,6 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Image> image, 
     if (!image)
     {
         return std::unexpected(err_resource("barrier: image is null"));
-    }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.barrier() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
     }
     const auto old_layout = image_layout_for(src);
     const auto new_layout = image_layout_for(dst);
@@ -806,19 +730,31 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Image> image, 
     }
     const StageAccess s = to_vk(src, context_->all_shader_stages());
     const StageAccess d = to_vk(dst, context_->all_shader_stages());
-    // Keep the auto-tracker in sync: a later automatic use of this image in
-    // the same recording must see the post-barrier layout, not re-transition
-    // from a stale one. No-op in manual mode (the tracker is never consulted);
-    // in pass mode the note always reaches the graph's fold.
+    // Tell the fold the layout this leaves the image in, or a later automatic
+    // use would transition it again from a stale one — a validation error plus
+    // a useless barrier.
     note_image_state_(image, *new_layout, d.stages, d.access);
-    record_image_barrier_(
-        std::move(image),
-        {.old_layout = *old_layout,
-         .new_layout = *new_layout,
-         .src_stages = s.stages,
-         .dst_stages = d.stages,
-         .src_access = s.access,
-         .dst_access = d.access});
+    commands_.emplace_back(
+        [image = std::move(image), old = *old_layout, now = *new_layout, s, d](
+            VkCommandBuffer cmd, const FrameContext& frame)
+        {
+            // All mips and all layers together: the fold holds one layout per
+            // image, and a cube or an array is used as a whole.
+            record_image_transition(
+                *frame.vk,
+                cmd,
+                image->vk_image(),
+                old,
+                now,
+                s.access,
+                d.access,
+                s.stages,
+                d.stages,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0,
+                image->mip_levels(),
+                image->barrier_layers(image->array_layers()));
+        });
     return {};
 }
 
@@ -827,12 +763,6 @@ std::expected<void, Error> CommandBuffer::generate_mipmaps(std::shared_ptr<Image
     if (!image)
     {
         return std::unexpected(err_resource("generate_mipmaps: image is null"));
-    }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.generate_mipmaps() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
     }
     if (image->mip_levels() <= 1)
     {
@@ -871,12 +801,6 @@ std::expected<void, Error> CommandBuffer::copy_image(
     if (!src || !dst)
     {
         return std::unexpected(err_resource("copy_image: image is null"));
-    }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.copy_image() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
     }
     if (src->width() != dst->width() || src->height() != dst->height() || src->depth() != dst->depth() ||
         src->format() != dst->format() || src->array_layers() != dst->array_layers())
@@ -933,12 +857,6 @@ std::expected<void, Error> CommandBuffer::blit_image(
             "blit_image: source and destination are the same image. A blit within one "
             "image is what generate_mipmaps does"));
     }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.blit_image() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
-    }
     if (src->samples() != 1 || dst->samples() != 1)
     {
         return std::unexpected(err_resource(
@@ -992,12 +910,6 @@ std::expected<void, Error> CommandBuffer::copy_buffer(
     {
         return std::unexpected(err_resource("copy_buffer: buffer is null"));
     }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.copy_buffer() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
-    }
     const VkDeviceSize length = size != 0 ? size : bytes_after(src->size(), src_offset);
     if (length == 0)
     {
@@ -1042,12 +954,6 @@ std::expected<void, Error> CommandBuffer::fill_buffer(
     {
         return std::unexpected(err_resource("fill_buffer: buffer is null"));
     }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.fill_buffer() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
-    }
     if (offset % 4 != 0 || (size != 0 && size % 4 != 0))
     {
         return std::unexpected(err_resource(
@@ -1081,12 +987,6 @@ std::expected<void, Error> CommandBuffer::clear_image(std::shared_ptr<Image> ima
     if (!image)
     {
         return std::unexpected(err_resource("clear_image: image is null"));
-    }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.clear_image() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
     }
     if (format_info(image->format()).depth)
     {
@@ -1337,20 +1237,6 @@ CommandBuffer& CommandBuffer::bind_descriptor_set(
     return *this;
 }
 
-std::expected<void, Error> CommandBuffer::claim_for_frame(std::uint64_t serial)
-{
-    if (recorded_serial_ == serial)
-    {
-        return std::unexpected(err_state(
-            "This CommandBuffer was already submitted in the current frame. Each "
-            "window needs its own CommandBuffer — one holds a single command "
-            "buffer per frame slot, so replaying it twice would overwrite work "
-            "still in flight."));
-    }
-    recorded_serial_ = serial;
-    return {};
-}
-
 void CommandBuffer::reset_query_pools(VkCommandBuffer vkCmd, const FrameContext& frame)
 {
     // Timer query pool: created/grown here (the scope count is known once
@@ -1381,42 +1267,6 @@ void CommandBuffer::reset_query_pools(VkCommandBuffer vkCmd, const FrameContext&
     }
 }
 
-void CommandBuffer::execute(VkCommandBuffer vkCmd, const FrameContext& frame)
-{
-    reset_query_pools(vkCmd, frame);
-
-    // Replay wrap-around. In-recording barriers order uses within one
-    // replay, but the same recording ran last frame and may still be in
-    // flight — its trailing reads/writes race with this replay's first
-    // write. One conservative memory barrier at the top covers that.
-    // Emitted only when the recording writes a tracked buffer at all:
-    // read-only recordings race with nothing.
-    if (auto_barriers_ && tracked_writes_)
-    {
-        VkMemoryBarrier barrier{
-            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-            .pNext = nullptr,
-            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-            // INDIRECT_COMMAND_READ is in here for the same reason
-            // VERTEX_ATTRIBUTE_READ is (0.19): the canonical indirect chain has
-            // compute writing the draw arguments, so frame N+1's command
-            // processor reads exactly what frame N's dispatch is still writing.
-            // Missing it is invisible without sync validation.
-            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
-                             VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
-                             VK_ACCESS_INDIRECT_COMMAND_READ_BIT};
-        // Not constexpr any more: the shader-stage half of this mask depends on
-        // which stages the device enabled (see Context::all_shader_stages).
-        const VkPipelineStageFlags stages = context_->all_shader_stages() | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
-                                            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
-        frame.vk->vkCmdPipelineBarrier(vkCmd, stages, stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
-    }
-    for (auto& cmd_func : commands_)
-    {
-        cmd_func(vkCmd, frame);
-    }
-}
-
 void CommandBuffer::finish_image_transfer_(const std::shared_ptr<Image>& src, const std::shared_ptr<Image>& dst)
 {
     src->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -1433,20 +1283,12 @@ void CommandBuffer::note_buffer_state_(
     VkPipelineStageFlags dst_stages,
     VkAccessFlags dst_access)
 {
-    if (event_sink_ != nullptr)
-    {
-        event_sink_->push_back(
-            {.kind = UseEvent::Kind::BufferNote,
-             .buffer = buffer,
-             .stages = dst_stages,
-             .access = dst_access,
-             .position = commands_.size()});
-        return;
-    }
-    if (auto_barriers_)
-    {
-        tracker_.note_buffer_access(buffer.get(), dst_stages, dst_access);
-    }
+    event_sink_->push_back(
+        {.kind = UseEvent::Kind::BufferNote,
+         .buffer = buffer,
+         .stages = dst_stages,
+         .access = dst_access,
+         .position = commands_.size()});
 }
 
 void CommandBuffer::note_image_state_(
@@ -1455,80 +1297,13 @@ void CommandBuffer::note_image_state_(
     VkPipelineStageFlags dst_stages,
     VkAccessFlags dst_access)
 {
-    if (event_sink_ != nullptr)
-    {
-        event_sink_->push_back(
-            {.kind = UseEvent::Kind::ImageNote,
-             .image = image,
-             .layout = layout,
-             .stages = dst_stages,
-             .access = dst_access,
-             .position = commands_.size()});
-        return;
-    }
-    if (auto_barriers_)
-    {
-        tracker_.note_image_layout(image.get(), layout, dst_stages, dst_access);
-    }
-}
-
-void CommandBuffer::record_barrier_(std::shared_ptr<Buffer> buffer, ResourceTracker::Barrier b)
-{
-    hoist_or_push_(
-        [buffer = std::move(buffer), b](VkCommandBuffer cmd, const FrameContext& frame)
-        {
-            VkBufferMemoryBarrier barrier{
-                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-                .pNext = nullptr,
-                .srcAccessMask = b.src_access,
-                .dstAccessMask = b.dst_access,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                // Resolved at execute time, never captured: a DynamicBuffer
-                // has one handle per frame in flight.
-                .buffer = buffer->get(),
-                .offset = 0,
-                .size = VK_WHOLE_SIZE};
-            frame.vk->vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 1, &barrier, 0, nullptr);
-        });
-}
-
-void CommandBuffer::record_image_barrier_(std::shared_ptr<Image> image, ResourceTracker::ImageBarrier b)
-{
-    hoist_or_push_(
-        [image = std::move(image), b](VkCommandBuffer cmd, const FrameContext& frame)
-        {
-            // All mips and all layers transition together: the tracker holds
-            // one layout per image, and a cube/array is used as a whole. A
-            // volume spells that VK_REMAINING_ARRAY_LAYERS.
-            record_image_transition(
-                *frame.vk,
-                cmd,
-                image->vk_image(),
-                b.old_layout,
-                b.new_layout,
-                b.src_access,
-                b.dst_access,
-                b.src_stages,
-                b.dst_stages,
-                VK_IMAGE_ASPECT_COLOR_BIT,
-                0,
-                image->mip_levels(),
-                image->barrier_layers(image->array_layers()));
-        });
-}
-
-void CommandBuffer::hoist_or_push_(std::function<void(VkCommandBuffer, const FrameContext&)> lambda)
-{
-    if (in_rendering_)
-    {
-        commands_.insert(commands_.begin() + static_cast<std::ptrdiff_t>(rendering_insert_pos_), std::move(lambda));
-        ++rendering_insert_pos_;
-    }
-    else
-    {
-        commands_.push_back(std::move(lambda));
-    }
+    event_sink_->push_back(
+        {.kind = UseEvent::Kind::ImageNote,
+         .image = image,
+         .layout = layout,
+         .stages = dst_stages,
+         .access = dst_access,
+         .position = commands_.size()});
 }
 
 void CommandBuffer::record_timer_write_(std::uint32_t slot, VkPipelineStageFlagBits stage)
@@ -1775,33 +1550,19 @@ void CommandBuffer::track_use_(
     {
         return;
     }
-    if (writes)
-    {
-        tracked_writes_ = true;
-    }
     // Only a STORAGE buffer carries VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, so it
-    // is the only type a shader can write. The tracker uses that to narrow
-    // its first-use floor rather than to switch it off — every type can be
-    // written by cmd.copy_buffer and cmd.fill_buffer.
+    // is the only type a shader can write. The fold uses that to narrow its
+    // first-use floor rather than to switch it off — every type can be written
+    // by copy_buffer and fill_buffer.
     const bool shader_writable = buffer->buffer_type() == BufferType::STORAGE;
-    if (event_sink_ != nullptr)
-    {
-        // Pass mode: the graph folds every pass's events through one tracker
-        // at compile time, so nothing is decided here.
-        event_sink_->push_back(
-            {.kind = UseEvent::Kind::BufferUse,
-             .buffer = buffer,
-             .stages = stages,
-             .access = access,
-             .writes = writes,
-             .shader_writable = shader_writable,
-             .position = commands_.size()});
-        return;
-    }
-    if (auto b = tracker_.use(buffer.get(), stages, access, writes, shader_writable))
-    {
-        record_barrier_(buffer, *b);
-    }
+    event_sink_->push_back(
+        {.kind = UseEvent::Kind::BufferUse,
+         .buffer = buffer,
+         .stages = stages,
+         .access = access,
+         .writes = writes,
+         .shader_writable = shader_writable,
+         .position = commands_.size()});
 }
 
 void CommandBuffer::track_image_use_(
@@ -1816,31 +1577,15 @@ void CommandBuffer::track_image_use_(
     {
         return;
     }
-    if (writes)
-    {
-        tracked_writes_ = true;
-    }
-    if (event_sink_ != nullptr)
-    {
-        event_sink_->push_back(
-            {.kind = UseEvent::Kind::ImageUse,
-             .image = image,
-             .layout = layout,
-             .stages = stages,
-             .access = access,
-             .writes = writes,
-             .only_if_tracked = only_if_tracked,
-             .position = commands_.size()});
-        return;
-    }
-    if (only_if_tracked && !tracker_.tracks(image.get()))
-    {
-        return;
-    }
-    if (auto b = tracker_.use_image(image.get(), layout, stages, access, writes))
-    {
-        record_image_barrier_(image, *b);
-    }
+    event_sink_->push_back(
+        {.kind = UseEvent::Kind::ImageUse,
+         .image = image,
+         .layout = layout,
+         .stages = stages,
+         .access = access,
+         .writes = writes,
+         .only_if_tracked = only_if_tracked,
+         .position = commands_.size()});
 }
 
 bool CommandBuffer::pipeline_writes_(
