@@ -57,6 +57,14 @@ image waits for it.
   producer on each queue and checks that the two agree. It runs headless with
   sync validation on, and it prints whether your device has a separate compute
   queue family.
+- **28_gpu_culling** draws 200,000 cubes instead of 20,000, and its title
+  reports the frame's GPU time beside the FPS. At the smaller size the whole
+  GPU frame cost 0.05 ms, so culling had nothing to save and the FPS did not
+  move. The docstring also says why the cull pass stays on the graphics queue:
+  the draw reads what it wrote in the same frame, so a second queue only adds
+  a semaphore.
+- **42_pass_toggles** reports FPS and GPU time in its title, so switching a
+  pass off shows what it cost.
 
 ### Fixed
 

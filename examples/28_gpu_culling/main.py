@@ -11,14 +11,27 @@ Two windows, one Context, one culled scene:
 The observer is the whole point. From inside the culled camera nothing looks
 culled — that is what culling means, and it is measurable: the culled view renders
 PIXEL-IDENTICAL with culling on and off, while the observer's pixel count drops
-by roughly a factor of seven (about 99,000 to about 13,000 on the machine this
-was written on — press P to get your own). Fly out to the side and you can see the scene
+sharply — press P with culling on, then C and P again, and read your own two
+numbers rather than mine (they depend on where you have flown the observer, and
+the ratio is the claim). Fly out to the side and you can see the scene
 has been cut to a wedge: cubes exist inside the yellow frustum and nowhere else,
 and the wedge swings around as the culling camera turns.
 
-About 1,570 of the 20,000 survive, cross-checked against the same test run on the
-CPU — which is how the frustum-plane bug below was found, because a wrong plane
-still produces a plausible-looking number.
+About 16,000 of the 200,000 survive, cross-checked against the same test run on
+the CPU — which is how the frustum-plane bug below was found, because a wrong
+plane still produces a plausible-looking number.
+
+**Read the GPU milliseconds in the title, not the FPS.** The two say different
+things and only one of them is about culling. With 200,000 cubes on the machine
+this was written on the frame's own GPU work is about 0.52 ms with culling off
+and about 0.07 ms with it on — seven times less, which is the claim. The FPS
+counter beside it measures the whole loop: two windows, two acquires, two
+presents and the compositor, which together cost more than either number above.
+At 20,000 cubes, where this example started, the entire GPU frame was 0.05 ms
+and the FPS was the same with culling on and off — or slightly WORSE with it on,
+because recording one more pass costs a little CPU and the GPU had nothing left
+to save. Culling pays when the drawing is the expensive part, and that takes a
+scene big enough to be worth culling.
 
 Each frame:
 
@@ -29,6 +42,14 @@ Each frame:
      atomically increments `instanceCount`, and compacts the survivors.
   3. `p.draw_indexed_indirect(args)` draws whatever that came to — in BOTH
      windows, from one argument buffer.
+
+The cull pass stays on `Queue.GRAPHICS`, and that is measured rather than
+assumed: moving it to `Queue.COMPUTE` makes this frame SLOWER, because the draw
+reads what the dispatch wrote in the same frame. The graph then has to split the
+frame into two submits and put a semaphore between them, and nothing overlaps —
+the drawing is waiting for the culling either way. A second queue pays when the
+compute work is independent of the frame that submits it: a simulation the NEXT
+frame draws, or post-processing of the previous one. See examples/45_async_compute.
 
 The CPU never learns the count. That is what makes it different from culling on the
 host: no readback, and no per-instance buffer to size.
@@ -47,6 +68,7 @@ Close either window to exit.
 
 Press P from outside the frustum with culling on, then C and P again: the two
 numbers are the claim above, measured on your machine rather than remembered.
+Watch the GPU milliseconds in the title while you press C, for the other half.
 """
 
 import struct
@@ -60,7 +82,10 @@ import bazalt as bz
 logger = bz.Logger()
 logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
-ctx = bz.Context(logger)
+# gpu_timing=True puts a timestamp pair around every windowed submit. Without it
+# the only number available is the FPS, and at this size the FPS measures the
+# presentation rather than the culling — see the note in the docstring.
+ctx = bz.Context(logger, gpu_timing=True)
 
 culled_window = bz.Window(760, 560, "Bazalt Demo - culled view (the frustum)", logger=logger)
 culled_window.set_position(60, 90)
@@ -70,7 +95,11 @@ observer_window.set_position(860, 90)
 culled_renderer = ctx.create_renderer(culled_window)
 observer_renderer = ctx.create_renderer(observer_window)
 
-COUNT = 20000
+# Ten times what this example started with, and the reason is the whole point of
+# it: at 20,000 the drawing costs 0.05 ms and there is nothing for culling to
+# save. Culling is a way to not draw things, so the scene has to be big enough
+# that drawing it is the expensive part.
+COUNT = 200000
 INDEX_COUNT = 36
 
 # ── the candidates ────────────────────────────────────────────────────────
@@ -223,6 +252,8 @@ start = time.time()
 last = start
 frames = 0
 fps_timer = start
+gpu_ms = None
+gpu_timing_ok = True
 
 
 def culling_view_proj(aspect):
@@ -392,10 +423,29 @@ while culled_window.is_open() and observer_window.is_open():
                 state = "on" if culling else "OFF"
                 print(f"observer: {drawn} drawn pixels of {packed.size}, culling {state}")
 
+    # The frame's own GPU cost, which is what culling changes. None until the
+    # ring has cycled once (the number is the frame submitted frames_in_flight
+    # ago), so it is read every frame and kept when it arrives.
+    if gpu_timing_ok:
+        try:
+            measured = culled_renderer.gpu_time_ms
+        except bz.UnsupportedError:
+            # Advertised and unusable — MoltenVK on a paravirtual device does
+            # this. The demo keeps running without the number.
+            gpu_timing_ok = False
+        else:
+            if measured is not None:
+                gpu_ms = measured
+
     frames += 1
     if time.time() - fps_timer >= 1.0:
         state = "on" if culling else "OFF"
-        culled_window.set_title(f"Bazalt Demo - culled view | culling {state} | {frames} FPS")
+        # Both numbers, because they answer different questions: the GPU figure
+        # is the frame's work and the FPS is the loop around it, presentation
+        # included. Culling moves the first one.
+        cost = f" | GPU {gpu_ms:.3f} ms" if gpu_ms is not None else ""
+        culled_window.set_title(
+            f"Bazalt Demo - culled view | culling {state}{cost} | {frames} FPS")
         observer_window.set_title(
             f"Bazalt Demo - observer | WASD+QE move, RMB look | culling {state}")
         frames = 0
