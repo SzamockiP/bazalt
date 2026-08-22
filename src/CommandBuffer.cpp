@@ -725,11 +725,17 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Buffer> buffer
     commands_.emplace_back(
         [buffer = std::move(buffer), s, d](VkCommandBuffer cmd, const FrameContext& frame)
         {
+            // Narrowed to the replaying family: Access.SHADER_READ means every
+            // shader stage this Context has, and a compute-only queue supports
+            // one of them. What the narrowing drops is carried by the batch's
+            // semaphore wait instead.
+            const StageAccess src = narrow_src(s, frame.legal_stages);
+            const StageAccess dst = narrow_dst(d, frame.legal_stages);
             VkBufferMemoryBarrier barrier{
                 .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
                 .pNext = nullptr,
-                .srcAccessMask = s.access,
-                .dstAccessMask = d.access,
+                .srcAccessMask = src.access,
+                .dstAccessMask = dst.access,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 // Resolved at replay, never captured: a DynamicBuffer has one
@@ -737,7 +743,7 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Buffer> buffer
                 .buffer = buffer->get(),
                 .offset = 0,
                 .size = VK_WHOLE_SIZE};
-            frame.vk->vkCmdPipelineBarrier(cmd, s.stages, d.stages, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+            frame.vk->vkCmdPipelineBarrier(cmd, src.stages, dst.stages, 0, 0, nullptr, 1, &barrier, 0, nullptr);
         });
     return {};
 }
@@ -768,16 +774,18 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Image> image, 
         {
             // All mips and all layers together: the fold holds one layout per
             // image, and a cube or an array is used as a whole.
+            const StageAccess src = narrow_src(s, frame.legal_stages);
+            const StageAccess dst = narrow_dst(d, frame.legal_stages);
             record_image_transition(
                 *frame.vk,
                 cmd,
                 image->vk_image(),
                 old,
                 now,
-                s.access,
-                d.access,
-                s.stages,
-                d.stages,
+                src.access,
+                dst.access,
+                src.stages,
+                dst.stages,
                 VK_IMAGE_ASPECT_COLOR_BIT,
                 0,
                 image->mip_levels(),
@@ -864,7 +872,7 @@ std::expected<void, Error> CommandBuffer::copy_image(
             "it, GENERAL)"));
     }
     commands_.emplace_back([src, dst, layout = *src_layout](VkCommandBuffer cmd, const FrameContext& frame)
-                           { record_image_copy(*frame.vk, cmd, *src, *dst, layout); });
+                           { record_image_copy(*frame.vk, cmd, *src, *dst, layout, frame.legal_stages); });
     finish_image_transfer_(src, dst);
     return {};
 }
@@ -1023,7 +1031,7 @@ std::expected<void, Error> CommandBuffer::clear_image(const std::shared_ptr<Imag
             "(cmd.rendering(target, clear_depth=...))"));
     }
     commands_.emplace_back([image, color](VkCommandBuffer cmd, const FrameContext& frame)
-                           { record_image_clear(*frame.vk, cmd, *image, color); });
+                           { record_image_clear(*frame.vk, cmd, *image, color, frame.legal_stages); });
     image->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     note_image_state_(
         image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, context_->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT);

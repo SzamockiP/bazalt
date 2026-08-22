@@ -81,6 +81,91 @@ inline constexpr StageAccess to_vk(Access access, VkPipelineStageFlags all_shade
     return {all_shader_stages, VK_ACCESS_SHADER_READ_BIT};
 }
 
+// Which access bits a stage mask is allowed to carry (the spec's "Supported
+// access types" table, in the shape the narrowing below needs). Dropping a
+// stage from a mask must drop the accesses only that stage could perform, or
+// the barrier names an access no stage in its mask supports — which is a
+// validation error rather than a conservative one.
+inline constexpr VkAccessFlags access_supported_by(VkPipelineStageFlags stages)
+{
+    // TOP_OF_PIPE and BOTTOM_OF_PIPE support no access at all; ALL_COMMANDS
+    // supports every one, and the two ends of the pipe are what an emptied
+    // mask falls back to, so an empty result there is correct.
+    VkAccessFlags access = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    if (stages & VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
+    {
+        return ~VkAccessFlags{0};
+    }
+    if (stages & VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT)
+    {
+        access |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    }
+    if (stages & VK_PIPELINE_STAGE_VERTEX_INPUT_BIT)
+    {
+        access |= VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+    }
+    constexpr VkPipelineStageFlags kShaderStages =
+        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+        VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT | VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    if (stages & kShaderStages)
+    {
+        access |= VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    }
+    if (stages & VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+    {
+        access |= VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
+    }
+    if (stages & VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+    {
+        access |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    }
+    if (stages & (VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT))
+    {
+        access |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    }
+    if (stages & VK_PIPELINE_STAGE_TRANSFER_BIT)
+    {
+        access |= VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    }
+    if (stages & VK_PIPELINE_STAGE_HOST_BIT)
+    {
+        access |= VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT;
+    }
+    return access;
+}
+
+// Narrow one half of a barrier to what the replaying queue family supports.
+//
+// Every stage bit in a vkCmdPipelineBarrier must be one the pool's family
+// supports, and a compute-only family supports a handful. The tracker computes
+// in graphics vocabulary because the fold does not know which queue will replay
+// a pass, so the narrowing happens where the barrier is EMITTED.
+//
+// An emptied mask does not mean "no dependency": it means the dependency is
+// carried by something else — the semaphore wait that got this batch its work
+// in the first place. TOP_OF_PIPE as a source and BOTTOM_OF_PIPE as a
+// destination are the empty scopes that say so, and both carry no access.
+inline constexpr StageAccess narrow(StageAccess sa, VkPipelineStageFlags legal, VkPipelineStageFlags when_empty)
+{
+    const VkPipelineStageFlags stages = sa.stages & legal;
+    if (stages == 0)
+    {
+        return {when_empty, 0};
+    }
+    return {stages, sa.access & access_supported_by(stages)};
+}
+
+inline constexpr StageAccess narrow_src(StageAccess sa, VkPipelineStageFlags legal)
+{
+    return narrow(sa, legal, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+}
+
+inline constexpr StageAccess narrow_dst(StageAccess sa, VkPipelineStageFlags legal)
+{
+    return narrow(sa, legal, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+}
+
 // The image layout each shader access implies: a storage image written by a
 // shader lives in GENERAL, a sampled image in SHADER_READ_ONLY. Only these two
 // shader accesses name an image layout; the rest are buffer-only. Backs the

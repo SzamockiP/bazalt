@@ -438,6 +438,11 @@ void Graph::note_attachment_writes_(const Pass& pass, ResourceTracker& tracker)
 
 void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame) const
 {
+    // Every mask is narrowed to what the replaying queue family supports (see
+    // narrow_src/narrow_dst). On a graphics family the legal set is everything,
+    // so nothing changes; on a compute-only one the graphics stages go and the
+    // dependency they expressed is carried by this batch's semaphore wait.
+    const VkPipelineStageFlags legal = frame.legal_stages;
     VkPipelineStageFlags src = 0;
     VkPipelineStageFlags dst = 0;
 
@@ -445,13 +450,15 @@ void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame)
     bufs.reserve(buffers.size());
     for (const auto& [buffer, b] : buffers)
     {
-        src |= b.src_stages;
-        dst |= b.dst_stages;
+        const StageAccess s = narrow_src({b.src_stages, b.src_access}, legal);
+        const StageAccess d = narrow_dst({b.dst_stages, b.dst_access}, legal);
+        src |= s.stages;
+        dst |= d.stages;
         bufs.push_back(
             {.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
              .pNext = nullptr,
-             .srcAccessMask = b.src_access,
-             .dstAccessMask = b.dst_access,
+             .srcAccessMask = s.access,
+             .dstAccessMask = d.access,
              .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
              .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
              .buffer = buffer->get(),
@@ -463,8 +470,10 @@ void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame)
     imgs.reserve(images.size());
     for (const auto& [image, b] : images)
     {
-        src |= b.src_stages;
-        dst |= b.dst_stages;
+        const StageAccess s = narrow_src({b.src_stages, b.src_access}, legal);
+        const StageAccess d = narrow_dst({b.dst_stages, b.dst_access}, legal);
+        src |= s.stages;
+        dst |= d.stages;
         // All mips and all layers: the fold holds one layout per image. The
         // aspect comes from the FORMAT rather than being COLOR — a depth
         // image reaches this path as soon as a pass samples the depth another
@@ -473,8 +482,8 @@ void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame)
         imgs.push_back(
             {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
              .pNext = nullptr,
-             .srcAccessMask = b.src_access,
-             .dstAccessMask = b.dst_access,
+             .srcAccessMask = s.access,
+             .dstAccessMask = d.access,
              .oldLayout = b.old_layout,
              .newLayout = b.new_layout,
              .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -492,10 +501,12 @@ void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame)
     {
         return;
     }
+    // BOTTOM_OF_PIPE for an empty destination, not TOP: an empty second scope
+    // is the one that waits for nothing, and TOP there would block everything.
     frame.vk->vkCmdPipelineBarrier(
         cmd,
         src != 0 ? src : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        dst != 0 ? dst : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        dst != 0 ? dst : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         0,
         0,
         nullptr,
@@ -578,16 +589,20 @@ void Graph::execute_batch(const Batch& batch, VkCommandBuffer vkCmd, const Frame
     // resource: read-only graphs race with nothing.
     if (tracked_writes_)
     {
+        const VkPipelineStageFlags wide = context_->all_shader_stages() | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                                          VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+        const StageAccess s = narrow_src({wide, VK_ACCESS_SHADER_WRITE_BIT}, frame.legal_stages);
+        const StageAccess d = narrow_dst(
+            {wide,
+             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
+                 VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT},
+            frame.legal_stages);
         VkMemoryBarrier barrier{
             .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
             .pNext = nullptr,
-            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
-                             VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
-                             VK_ACCESS_INDIRECT_COMMAND_READ_BIT};
-        const VkPipelineStageFlags stages = context_->all_shader_stages() | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
-                                            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
-        frame.vk->vkCmdPipelineBarrier(vkCmd, stages, stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+            .srcAccessMask = s.access,
+            .dstAccessMask = d.access};
+        frame.vk->vkCmdPipelineBarrier(vkCmd, s.stages, d.stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     }
 
     for (std::size_t i = batch.first; i < batch.last; ++i)
