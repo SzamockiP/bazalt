@@ -292,6 +292,11 @@ GPU as a calculator.
   find out which resources a shader writes, so a storage image written by a fragment
   shader is ordered for you. `add_pass(auto_barriers=False)` gives that job back to you
   through `p.barrier()`, for that pass alone.
+- **A pass is a handle, so a frame is editable.** `p.enabled = False` drops one pass out
+  of the frame and `graph.remove(p)` takes it out for good. Bazalt works out the barriers
+  again for the passes that remain, so switching an effect off never leaves a stale
+  barrier behind, and nothing is recorded a second time. This is what an effect chain you
+  are still tuning wants, and it used to mean rebuilding the frame around an `if`.
 - **Compute beside graphics.** One graph holds a compute pass and a render pass. A
   dispatch writes the vertices and the draw reads them. Results come back as NumPy arrays.
   Each pass names the queue it runs on. A later release adds a second queue, and that
@@ -312,7 +317,9 @@ GPU as a calculator.
   memory and not that much RAM as well.
 - **One rule for what blocks.** Every write is asynchronous and every read blocks. A handle
   is its own future, so normal code waits nowhere. `buf.read()` blocks, because it has
-  nothing to give you until the bytes arrive.
+  nothing to give you until the bytes arrive. Every submit hands back a `Serial`, so
+  `ctx.submit(g, wait=False, after=earlier)` orders one submit behind another on the GPU
+  while the CPU carries on.
 - **Hot reload.** Bazalt watches the shaders you loaded, their `#include` files and your
   images, then applies the edits in place. A mistake does not stop the application.
 - **Headless, and notebook-ready.** Draw into an offscreen target and read the pixels as a
