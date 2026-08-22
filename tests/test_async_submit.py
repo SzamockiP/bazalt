@@ -236,18 +236,33 @@ def test_forced_single_queue_aliases_the_compute_queue(extra_context, monkeypatc
 
 def test_a_buffer_dropped_after_a_two_queue_submit_is_reclaimed(ctx):
     """A deletion key is per queue now: a resource dropped while work runs on
-    either queue must outlive both. The referee is the validation layer, which
-    reports a handle freed under running work."""
-    pipeline, buf, dset = counting_setup(ctx)
+    either queue must outlive both. The flush happens BEFORE the wait on
+    purpose — begin_frame() reclaims, and a key that only named the graphics
+    queue would find it reached and free a buffer the compute queue is still
+    dispatching over. The referee is the validation layer.
+
+    A race the test can lose rather than a proof: on a fast enough GPU the
+    dispatch finishes before the flush and there is nothing to free early. The
+    work is sized to make that unlikely, not impossible."""
+    comp = ctx.compile_shader(str(SHADER_DIR / "add_one.comp"), bz.ShaderStage.COMPUTE)
+    pipeline = ctx.compute_pipeline().shader(comp).storage_buffer(0).build()
+    buf = ctx.create_buffer(np.zeros(1 << 20, np.float32),
+                            bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    pool = ctx.create_descriptor_pool(max_sets=4, storage_buffers=4)
+    dset = pool.allocate_set(pipeline, set=0)
+    dset.set_buffer(0, buf)
+
     g = ctx.graph()
-    (g.add_pass(name="on compute", queue=bz.Queue.COMPUTE)
-        .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1))
+    for _ in range(8):
+        (g.add_pass(name="on compute", queue=bz.Queue.COMPUTE)
+            .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0)
+            .dispatch((1 << 20) // 64))
     ctx.submit(g, wait=False)
 
-    del g, dset, buf, pipeline
-    ctx.wait()
+    del g, dset, buf, pipeline, pool
     for _ in range(ctx.frames_in_flight + 1):
         ctx.begin_frame()
+    ctx.wait()
 
 
 def test_async_compute_is_reported_honestly(ctx):

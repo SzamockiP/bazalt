@@ -2803,6 +2803,40 @@ its price stops belonging here and becomes backlog.
   and a decision about what `t.ms` means when the slot has not cycled (the `gpu_time_ms`
   answer, presumably: None until it has). **Estimate: ~200 lines.**
 
+- **Uploads on a TRANSFER queue, not on the compute one** (asked during 0.29, priced here).
+  The question was whether the upload worker could move to the compute queue now that one
+  exists, and hand the finished resource to graphics. It could, for part of its work, and it
+  is the wrong queue.
+
+  **What stops it today** is `generate_mipmaps`: the chain is `vkCmdBlitImage` and a blit needs
+  a GRAPHICS-capable family, so a mipped upload cannot leave the graphics queue at all. A plain
+  `vkCmdCopyBufferToImage` is legal on compute AND on transfer, so an upload without mips could
+  move tomorrow.
+
+  **Why compute is the wrong home.** A staging copy is bandwidth-bound DMA, not shader work.
+  The machine this was written on reports six families — graphics+compute+transfer (16 queues),
+  **transfer-only (2)**, compute+transfer (8), and three video/optical-flow ones — and the
+  transfer-only family is a dedicated engine that copies over PCIe in parallel with graphics
+  AND with compute. Putting the copy on the compute queue spends a queue that could be
+  computing and gains nothing a graphics submit does not already have; putting it on the
+  transfer family is what actually overlaps the copy with the frame.
+
+  **What the win is, precisely.** Not throughput: the PCIe bandwidth is the same wherever the
+  copy is submitted from, and the PNG decode is CPU work on the worker thread that no queue
+  touches. The win is that the copy stops competing with the frame's own work for the graphics
+  queue's execution slots, which on a discrete GPU with a DMA engine is a real number and on an
+  iGPU with one family is zero.
+
+  **Price.** A third `QueueRuntime` with its pool and timeline is the small half. The real cost
+  is that `upload_serial_` on Buffer and Image is a scalar on the GRAPHICS timeline today, and
+  `require_uploads_resident` returns one number that `submit_batches` waits there — all of that
+  becomes per-queue. A mipped upload also splits in two: the copy on the transfer queue, the
+  blit cascade on graphics, with a semaphore between them and the resource's serial then naming
+  two timelines. **Paid by:** anyone loading many textures while rendering, on a discrete GPU.
+  **Estimate: ~450 lines.** The handoff itself is already bought — 0.29's `CONCURRENT` sharing
+  means no ownership-transfer protocol, so crossing a family costs a semaphore wait and nothing
+  else.
+
 - **A second queue inside the graphics family is not created** (0.29). Where a device has no
   compute-only family, bazalt aliases the graphics queue rather than asking for a second
   queue on the same family. **Price:** `vkb::DeviceBuilder::custom_queue_setup` REPLACES the
