@@ -32,8 +32,9 @@ ways and prints the wall-clock cost of each:
      in flight run out, which hides the problem some of the time, and a
      driver is free to run them in parallel whenever it can.
 
-After 0.29 adds a second queue, `after=` is also how work on one queue waits
-for work on the other. The spelling here does not change.
+Since 0.29 there is a second queue, and `after=` is also how work on one queue
+waits for work on the other. The spelling here does not change.
+examples/45_async_compute shows that half.
 
 Run it with no arguments.
 """

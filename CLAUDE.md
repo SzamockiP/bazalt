@@ -112,6 +112,16 @@ reproducible locally on any driver:
 BAZALT_FORCE_VULKAN_1_2=1 venv/Scripts/python.exe -m pytest -q
 ```
 
+`BAZALT_FORCE_SINGLE_QUEUE=1` is the same kind of knob and 0.29 added it for the same reason:
+CI's drivers report ONE queue family, so the aliased-compute path is what runs there and the
+separate-queue path is what runs on a developer GPU. This forces the alias on hardware that
+has two families, so both halves are reachable in one place. `list_devices()` ignores it,
+because that one reports the hardware.
+
+```bash
+BAZALT_FORCE_SINGLE_QUEUE=1 venv/Scripts/python.exe -m pytest -q
+```
+
 The macOS SDK install is a composite action (`.github/actions/install-vulkan-sdk-macos`)
 because both macOS jobs need it. macOS has no system Vulkan, so nothing there works without
 the LunarG SDK — that is the platform's contract, not a CI detail.
@@ -123,11 +133,20 @@ The layering exists so nothing below `Renderer.hpp` knows swapchains exist.
 - **`Context.hpp`** — owns the device and everything per-Context: the **device dispatch
   table** (`ctx.vk()`), VMA allocator, the frame ring (a monotonic *serial*, not a wrapping
   index), the serial-keyed deferred destruction queue, the sampler cache, and debug-name
-  plumbing. Since 0.28 the queue itself is a **`QueueRuntime`** — handle, family, timeline
-  semaphore, serial counter, mutex and command pool in one struct, of which exactly one
-  (graphics) is constructed. That is the seam async compute needs: a second queue is a
-  second instance, and two timelines mean two queues never co-signal one semaphore. The
-  deletion-queue key goes through `retire_key()` for the same reason. Both windowed and headless submits advance the same ring. Since 0.15 any
+  plumbing. Since 0.28 a queue is a **`QueueRuntime`** — handle, family and its flags, the
+  legal barrier stages of that family, timeline semaphore, reserved and submitted serial
+  counters, a mutex POINTER and a command pool. **Two are constructed since 0.29.** Where the
+  device has a compute-only family they are two queues; where it has none, the compute runtime
+  aliases the graphics `VkQueue` and its mutex (external synchronization is about the queue,
+  so a second lock over one handle would be a race) and keeps its own timeline and pool — so
+  the cross-queue path runs on every driver, including CI's single-family ones.
+  `Feature::ASYNC_COMPUTE` reports which you have; `BAZALT_FORCE_SINGLE_QUEUE=1` forces the
+  alias. One timeline per runtime because two queues cannot keep one counter strictly
+  increasing without waiting on each other — NOT because the spec forbids co-signalling, which
+  is the binary rule and what 0.28's comment wrongly quoted. The deletion-queue key and the
+  ring's slot serials are per queue (`retire_key()`, `note_slot_submit`), and `lock_queues()`
+  takes both mutexes for whoever idles the device. Both windowed and headless submits advance
+  the same ring, and both record into it. Since 0.15 any
   number of Contexts may be alive: **every device-level `vk*` call goes through
   `ctx.vk()`**, and `create_instance_` calls `volkLoadInstanceOnly`, so the device-level
   globals stay null and a call site that skipped the table crashes instead of silently
@@ -141,8 +160,11 @@ The layering exists so nothing below `Renderer.hpp` knows swapchains exist.
   pipeline and pass work against a window, an offscreen image, or one cube face. A render
   pass **infers** subresource/multiview/viewport from the target — no knobs on the verb.
 - **`Graph.hpp`** — THE way to describe work since 0.28. A `Graph` holds `Pass` objects in
-  add order (never reordered), owns one `VkCommandBuffer` per ring slot, and compiles the
-  barriers for the whole frame at the first submit after anything changed. `Graph::compile_`
+  add order (never reordered), groups consecutive passes on one queue into **batches** (0.29),
+  owns one `VkCommandBuffer` per batch per ring slot from that batch's queue pool, and
+  compiles the barriers for the whole frame at the first submit after anything changed. A
+  dependency that crosses a batch on another queue is a timeline wait rather than a barrier —
+  `Context::submit_batches` emits one `vkQueueSubmit` per batch and threads the waits. `Graph::compile_`
   folds every enabled pass's `UseEvent`s through ONE `ResourceTracker`: a use inside the
   graph names its real predecessor and gets an exact edge, a render pass's barriers all go
   into its entry batch (one merged `vkCmdPipelineBarrier`), and the **look-ahead** elides
@@ -164,7 +186,9 @@ The layering exists so nothing below `Renderer.hpp` knows swapchains exist.
   entry points are loaded under KHR names and aliased onto the core symbols
   (`Context::alias_dynamic_rendering_entry_points`), so call sites only use core names.
 - **`UploadManager.hpp`** — one worker thread decodes images and submits copies/mipgen on
-  the graphics queue; each submit signals the Context timeline, so frames wait GPU-side.
+  the graphics queue; each submit signals the graphics timeline, so frames wait GPU-side. It
+  stays on that queue permanently — mipgen is a blit cascade and a blit needs graphics — so a
+  compute batch that reads an uploaded image waits the graphics timeline for it.
 - **`HotReload.hpp`** — watches the shaders (plus `#include`s) and images bazalt itself
   loaded, recompiling/re-uploading in place; a bad edit logs and keeps the last good
   version. Drained on the main thread from `begin_frame` / `ctx.submit`.

@@ -1844,7 +1844,26 @@ pair and its `with` sugar — are gone, and a frame is a `Graph` of `Pass` objec
   `Serial` is already queue-tagged; the deletion queue reads and writes its key through
   `retire_key()` so the multi-timeline key shape changes in one place; a submit's waits are
   a list rather than a fixed pair; and the fold already groups same-queue runs of passes
-  into batches, of which there is exactly one today. The recommendation for the sharing
+  into batches, of which there is exactly one today.
+
+  **The last of those five was not true, and 0.29 found out by looking.** `Pass::queue_`
+  was written by `add_pass` and read by nothing — the accessor had zero callers, `compiled_`
+  was flat, and the only thing named "batch" was `BarrierBatch`, which groups barriers by
+  replay POSITION, a different axis entirely. There were no batches to have one of. The
+  header comment said the same thing, so the claim was consistent with itself and with
+  nothing else. **The general form is worth more than the correction: a seam nobody has
+  crossed is a plan, and writing it in the present tense turns a plan into a fact the next
+  release believes.** Four of the five really were there; this one cost a day of the
+  estimate. And the honest version of the entry is what 0.29 shipped — the fold groups
+  maximal runs of same-queue passes into batches now, and it took a data structure, a
+  command buffer per (queue, ordinal, slot), and a submit loop, not a rename.
+
+  A second thing the list did not say, and this one is a trap rather than an omission:
+  **adding `QueueKind::Compute` produced zero compile errors.** There is no `switch` over
+  `QueueKind` anywhere in the codebase, so nothing forced a single site to consider the new
+  value. Every one of them had to be found by hand. The 0.19 lesson about `std::unreachable`
+  on a pybind enum reads like insurance against this and is not: a `switch` with no `default`
+  catches a new enumerator, and an `if` comparing against one member catches nothing. The recommendation for the sharing
   mode is `VK_SHARING_MODE_CONCURRENT` over both families, because it deletes the whole
   queue-family ownership-transfer protocol at a bandwidth cost that is noise for
   prototyping — with `EXCLUSIVE` plus release/acquire barriers priced but not bought.
@@ -1909,6 +1928,172 @@ pair and its `with` sugar — are gone, and a frame is a `Graph` of `Pass` objec
   was left out because nothing has hit it: closing it would be speculation about a shape
   (a retained graph whose shaders change their writes under it) that no example and no test
   produces. The entry exists so the next person meets a decision instead of a surprise.
+
+### Async compute (0.29)
+
+The release the graph was built for. `Queue.COMPUTE` is a new enum VALUE, the default is
+unchanged, and a program written against 0.28 schedules exactly as it did — which is what
+0.28 bought by shipping the parameter one release early.
+
+- **A device without a compute-only family runs the same program, through an ALIASED
+  runtime.** `Context` owns two `QueueRuntime`s. Where the device has a family with COMPUTE
+  and without GRAPHICS they are two queues; where it does not, the compute runtime holds the
+  graphics `VkQueue` and a POINTER to its mutex, and keeps a timeline and a command pool of
+  its own. So `Queue.COMPUTE` never fails for want of hardware, and the ordering rules are
+  identical on both — only the overlap is missing.
+
+  Two reasons, and the second is the one that would not have been guessed. A program that
+  asks for a compute pass wants its work done, and refusing on a laptop iGPU makes every
+  portable program write `if ctx.supports(...)` around a scheduling decision that has one
+  correct answer either way. And **CI has one queue family**: lavapipe and MoltenVK both
+  report a single family, so an implementation that only builds the cross-queue machinery
+  where a second family exists would ship that machinery untested. With the alias, every
+  semaphore wait, per-queue deletion key and per-queue slot serial runs on every driver,
+  and `BAZALT_FORCE_SINGLE_QUEUE=1` reproduces it on a developer GPU.
+
+  **`Feature::ASYNC_COMPUTE` is what keeps that honest**, and it is the first row whose
+  capability is a FACT about the device rather than a bit it can be asked to turn on — hence
+  the seventh column in `FeatureInfo`, a `bool DeviceFeatures::*`. `ctx.supports()` answers
+  whether the overlap is real, and `features=[ASYNC_COMPUTE]` refuses the device that cannot
+  give it, which is the `set_fullscreen_exclusive` contract from 0.25: asking is not getting,
+  and the API says which you got.
+
+- **vk-bootstrap's `QueueType::compute` cannot be trusted, and the failure is silent.**
+  `get_queue_index(compute)` prefers a family without GRAPHICS and falls back to the first
+  family with the COMPUTE bit, which on a single-family device is the graphics family;
+  `get_queue` then returns queue 0 of it — bit for bit the handle already in
+  `graphics_q_.queue`. A second runtime built on that answer would carry a second
+  `std::mutex` over ONE `VkQueue`, which is a race wearing a lock. So the family INDEX is
+  compared against the graphics one and the fallback is detected rather than inherited.
+  The general form: **a library function that "falls back" answers a different question than
+  the one you asked, and the answer looks identical.**
+
+- **The timeline rule 0.28 wrote down was the wrong rule.** `Context.hpp` said two queues
+  never co-signal one semaphore "which the spec forbids". That is the BINARY rule. For a
+  timeline the spec forbids a pending signal that is not strictly greater than the current
+  value and than every pending signal, and a value difference above
+  `maxTimelineSemaphoreValueDifference`; two queues signalling one timeline is not forbidden.
+  One timeline per runtime is still right, and now for the reason that holds: two queues
+  cannot keep one counter strictly increasing without waiting on each other, which is exactly
+  the serialization the second queue exists to avoid. A timeline is device-scope, so either
+  queue waits on either one, and that is what carries every cross-queue edge below.
+
+- **A graph is BATCHES: maximal runs of consecutive enabled passes on one queue, in add
+  order.** Each owns a `VkCommandBuffer` per ring slot from its own queue's pool, and each is
+  one `vkQueueSubmit`. Nothing is reordered — the 0.28 decision stands untouched, and a
+  cross-queue dependency becomes a wait rather than a move.
+
+  The command-buffer rows are **grow-only**, allocated at compile and freed once in
+  `~Graph`. A row entry is re-recorded only by the same (queue, ordinal, slot), and per-queue
+  slot pacing proves that slot's previous replay finished on EVERY queue before it comes
+  round again — the same argument one buffer per slot always rested on, with the ring now
+  paced per queue.
+
+- **Three kinds of cross-queue ordering, and the third is the decision.**
+
+  (a) *Inside one replay.* A use whose producer sits in an earlier batch on the other queue
+  gets a timeline wait from that batch's serial. The tracker keeps `visible_*` and the last
+  reader PER QUEUE for this: a read on the graphics queue makes a write visible there and
+  says nothing about the compute queue, and one shared pair would let the second read skip
+  the wait the first one made unnecessary only for itself. For an image the layout transition
+  stays and its SOURCE scope goes — `TOP_OF_PIPE` with no access — because the semaphore's
+  second scope already covers every access of every later command on this queue, so what is
+  left to do is move the layout and nothing else.
+
+  (b) *Across replays of ONE graph.* Every batch waits the previous replay's serial on the
+  other queues, gated by `tracked_writes_` exactly as the wrap-around barrier is. This is the
+  wrap-around barrier's own argument one level up: frame N+1 races frame N, and a pipeline
+  barrier reaches back over one queue only. Its own queue therefore needs no wait, and gets
+  none — a barrier's first scope covers everything submitted earlier there.
+
+  (c) *Between DIFFERENT graphs on different queues: nothing.* `after=` is the only order.
+
+  **(c) is the owner's decision and the alternatives were both rejected.** A global floor —
+  every batch waiting whatever else was submitted on the other queue — is what the first-use
+  floors do one level down, and it would make the common case correct by making the feature
+  pointless: two graphs on two queues would never overlap, which is the only reason to put
+  them on two queues. Its opposite, dropping (b) as well, was rejected for the shape it
+  breaks rather than the shape it allows: "build one graph, submit it every frame" is what
+  the README teaches, and a producer on the compute queue overwriting what last frame's
+  consumer is reading is that shape's most ordinary bug. So the line is drawn where the
+  library can see the dependency: within a graph and within its own replays, bazalt knows
+  what a pass reads; between two graphs it knows only what the caller says, and `after=` is
+  the caller saying it.
+
+- **Refusals go by `QueueKind`, not by the family the device happens to have.** A render
+  pass on `Queue.COMPUTE`, `blit_image` and `generate_mipmaps` are refused whether or not the
+  compute runtime is an alias sitting on the graphics family — where all three would in fact
+  work. One contract on every driver beats a program that runs on the developer's machine and
+  raises on the user's. The reverse holds for the barrier stage masks below, and the
+  distinction is the point: a REFUSAL is API and follows the API's vocabulary, while a
+  BARRIER is a device fact and follows the device.
+
+- **Every barrier is narrowed to the family that replays it.** A `vkCmdPipelineBarrier` may
+  only name stages its pool's family supports, and a compute-only family supports about seven
+  of them. The tracker keeps computing in graphics vocabulary — the fold does not know which
+  queue will replay a pass when it computes the barrier — and `narrow_src`/`narrow_dst` cut
+  the mask where the barrier is EMITTED, from the family flags the `FrameContext` carries.
+  An emptied mask is not a dropped dependency: it means the semaphore carries it, and
+  `TOP_OF_PIPE` (source) and `BOTTOM_OF_PIPE` (destination) are the empty scopes that say so.
+  This is the `all_shader_stages` lesson from 0.19 one dimension over — a mask wide enough
+  for one context is illegal in another — and the access bits have to be masked with the
+  surviving stages for the same reason.
+
+  **The old empty-destination fallback was `TOP_OF_PIPE`**, which waits for nothing and
+  blocks everything. It never fired before, because a destination mask was never empty.
+
+- **`CONCURRENT` over both families, as 0.28 recommended** — and EXCLUSIVE on the alias path,
+  because `CONCURRENT` with one family index repeated is invalid. The swapchain images stay
+  EXCLUSIVE whatever the device: a compute pass cannot reach one, since a render target is
+  what names a swapchain image and a render pass is refused on the compute queue.
+
+- **A `Serial` carries one value per queue AND the Context that made it.** The first because
+  a submit of a two-queue graph signals both, so `wait(serial)` and `after=` have to reach
+  both — `after_wait_values` is per-timeline maxima now, which is what the 0.28 comment
+  predicted. The second was a bug the release found rather than a feature: `ctx_a.wait(
+  serial_from_ctx_b)` used to wait ctx_a's timeline for a number that means something else
+  on ctx_b, which returns too early or hangs and never says why. It raises `ResourceError`
+  through the same `require_same_context` every resource goes through.
+
+- **`ctx.wait()` waits the last SIGNALLED serial, not the last reserved one.** A failed
+  `vkQueueSubmit` drops its reservation deliberately (the next submit signals a higher value,
+  and every wait is ">="), but a wait for the dropped number itself has nothing to wake it.
+  `wait_for_submits` waited exactly that, so a `ctx.wait()` after a failed present hung
+  forever. Two counters per runtime now: `serial` reserves, `submitted` records what a queue
+  really promised. **A monotonic counter with ">=" waits absorbs a dropped reservation, and
+  0.20 wrote that down — what it did not say is that the absorbing happens for waits on LATER
+  values, and a wait for the dropped value is not one of them.**
+
+- **The ring is paced per queue, and the windowed path pays into it now.** `slot_serial_`
+  holds one value per queue per slot and `note_slot_submit` MERGES rather than assigns, so a
+  second window presenting into one slot cannot erase what the first left on the other queue.
+  `acquire()` waits those serials beside its fence, because the fence rides the last GRAPHICS
+  batch and says nothing about a compute batch of the same frame. Before 0.29 only the
+  headless path recorded a slot serial at all, so there were two pacing mechanisms on one
+  ring and a mixed loop was covered by neither — see the ring audit under `Priced, not
+  forbidden`.
+
+- **`ctx.submit()` while a window holds an acquired image raises `StateError`.** A headless
+  submit advances the frame ring, and the ring slot is what indexes that window's fence and
+  its acquire semaphore, so the present that follows waits a semaphore nobody will signal.
+  This was silent before, and it is the sibling of the `set_present_mode` refusal that has
+  been guarded since 0.16 — the ring audit found the asymmetry, not a bug report.
+
+- **Uploads stay on the graphics queue, permanently, and a compute batch waits for them
+  there.** Not a simplification: `generate_mipmaps` is a blit cascade, a blit needs a graphics
+  queue, and the upload worker runs mipgen. So the upload serial is a graphics-timeline value
+  whatever reads it, which is why `submit_batches` puts that one wait on every batch. It is
+  also why the upload wait and `after=` are waited on their OWN queue as well, where the
+  previous-replay wait is not: those name other submitters, and only a barrier inside this
+  graph's own command buffers reaches back over its own queue. Sync validation caught the
+  version that got this wrong, in one line, the first time the suite ran.
+
+- **The negative control worked, and it decided a question the plan had left open.** Whether
+  sync validation reports a hazard ACROSS two real queues was unknown when the plan was
+  written; the manual-mode run (`auto_barriers=False`, which emits no use events at all, so
+  the fold has nothing to order) reports it on this hardware. Both cross-queue tests
+  therefore have the pair the 0.24 lesson demands — the claim fails against the unfixed
+  build — and both run on two real queues and on the aliased runtime.
 
 ### Asynchronous submits
 
@@ -2536,6 +2721,59 @@ its price stops belonging here and becomes backlog.
   on some hardware and nothing to write. **Paid by:** a tiler, in theory; nobody has
   measured it here. For a prototyping library rule 4 decides this one, and the escape hatch
   stays `raw_extensions` plus the handles.
+- **The frame ring caps how much work can be in flight, and the cap is the ring rather than
+  the hardware** (audited in 0.29, when async compute made the ring the thing everything
+  paces against). `submit(wait=False)` waits for the slot it is about to record into, so at
+  most `frames_in_flight` submits — four, at the very most — are ever outstanding. A headless
+  compute prototype that wants sixteen independent dispatches queued cannot have them, and
+  the number it can have is a value chosen for latency in a windowed loop.
+
+  The pacing is also per CONTEXT rather than per graph: graph A's submit is throttled by
+  graph B's earlier submit on the same slot, though they share nothing.
+
+  **Price of lifting it:** a graph would own a free-list of command buffers rather than a row
+  indexed by the ring, each carrying the serial it last signalled and picked by comparing
+  against `completed_submit_serial()`, growing on demand instead of blocking. That is the
+  cheap half. The expensive half is that something else then has to name the slot for a
+  DYNAMIC buffer and for a frame descriptor set: `update()` writes `ctx.frame_index()` today,
+  and "an update before the call lands in the slot this submit reads" is the whole contract
+  of the headless path. Removing the ring from the submit means giving that contract a new
+  owner, and `SwapchainRenderer` needs its own frame counter back — which is precisely what
+  0.14 removed. **Paid by:** a headless compute loop, in throughput.
+  **Estimate: ~600 lines**, most of it the DynamicBuffer/descriptor-set half, and the design
+  question is bigger than the typing.
+
+- **A headless submit IS a frame, so the update rule is opposite in the two shapes** (audited
+  in 0.29). Windowed: `begin_frame()` advances the ring on entry, so an update belongs AFTER
+  it. Headless: `ctx.submit()` advances after submitting, so an update belongs BEFORE it. A
+  loop that calls both per iteration advances twice and the update no longer lands in the
+  slot the submit reads. Nothing refuses it and no test covers it.
+  **Price of closing it:** either a guard (a headless submit inside an open windowed frame is
+  already refused since 0.29 when a window holds an image — this is the same shape without
+  the acquire, so the counter cannot see it), or making the two rules one, which is the entry
+  above. **Estimate: ~40 lines** for a guard that catches the common case, and the honest
+  version is the ring entry.
+
+- **A pass's query pools are not per ring slot** (0.22, audited again in 0.29). One
+  `timer_pool_` and one `occlusion_pool_` per recorder, reset on every replay, guarded only
+  by the recording generation — which catches a `graph.reset()` and not "this graph is still
+  in flight". Reading `t.ms` from a graph submitted every frame therefore reads slots the GPU
+  may be rewriting. **The workaround is in the library's own flagship example**:
+  `examples/34_showcase` keeps `frames_in_flight` graphs and reads each slot's timers just
+  before rebuilding it — the ring, duplicated in Python, which is the clearest evidence in
+  this file that the abstraction leaks. **Price:** pools sized × slots plus a slot-aware read,
+  and a decision about what `t.ms` means when the slot has not cycled (the `gpu_time_ms`
+  answer, presumably: None until it has). **Estimate: ~200 lines.**
+
+- **A second queue inside the graphics family is not created** (0.29). Where a device has no
+  compute-only family, bazalt aliases the graphics queue rather than asking for a second
+  queue on the same family. **Price:** `vkb::DeviceBuilder::custom_queue_setup` REPLACES the
+  per-family default, so every family's queues would have to be described by hand, and the
+  family's `queueCount` may be 1 anyway — on the drivers where this matters most it usually
+  is. **Paid by:** nobody measured; two queues on one family share the hardware queue on most
+  drivers, so the win is a scheduling hint rather than parallelism. **Estimate: ~120 lines**,
+  and the reason it is here rather than done is that the measurement comes first.
+
 - **The record-time descriptor walk is per descriptor, not per binding** (0.21). A draw asks
   the tracker about every bound descriptor, so a 500-texture array is 500 hash lookups — at
   RECORD time only, since replay costs nothing, and a sampled image the tracker never saw
@@ -3131,6 +3369,94 @@ used to claim.
   character stream did not, so an `InputText` field in a bazalt program is deaf today. **Two
   entries that looked independent are one feature and its prerequisite**, which is the kind of
   thing a backlog hides until somebody prices it.
+
+### The API-ceiling audit (0.29)
+
+The owner's question when 0.29 was planned: *does the API still give a user everything Vulkan
+can do, without ceremony?* The whole public surface was read against what a Vulkan programmer
+would reach for, and each gap sorted into UNREACHABLE (no way around it), REACHABLE-BUT-AWKWARD
+(possible through an escape hatch) or DESIGNED-OUT (already refused here, with the reason).
+
+**Two were fixed in 0.29 because each was one line** — HLSL textures and STORAGE-as-index,
+both above. The rest is this list, priced. It is deliberately not sorted by size: the first
+entry is the one that unlocks eight others.
+
+- **`raw_extensions` is INSTANCE-only, and there are no raw handles.** This is the root gap,
+  and it makes rule 2 less true than the rule's own wording claims: device extensions come
+  exclusively from the `Feature` table, so a capability with no row cannot be reached at all,
+  and no `VkDevice`/`VkImage`/`VkBuffer`/`VkQueue` is exposed to build on one. Closing it —
+  a device-level `raw_extensions` plus handle accessors — converts push descriptors, `VkEvent`
+  split barriers, secondary command buffers, pipeline-statistics queries, descriptor buffers,
+  VRS, shader objects and conditional rendering from UNREACHABLE to reachable-with-effort, in
+  one change. The `external_memory` half stays priced separately at ~600-900 lines (see
+  `Proposed features`); the handles alone are **~250 lines** and mostly documentation about
+  what a caller may do with them.
+- **Per-subresource manual barriers.** `p.barrier(image, ...)` covers every mip and layer, and
+  the buffer overload takes no offset or size. The AUTOMATIC tracker has tracked per
+  `(layer, mip)` since 0.18; the manual vocabulary never grew the same reach, so a bloom
+  pyramid that wants to barrier one level has to barrier the chain. **~150 lines**, and it
+  pairs with the sub-resource `set_image` already on this list — one subresource vocabulary,
+  two verbs.
+- **Sampler state: six fields of about thirteen.** One `filter` for magnification and
+  minification, one `address_mode` for all three axes, anisotropy as a bool pinned to 16x, no
+  LOD clamp, no reduction mode (min/max), border colour limited to opaque black and white.
+  A streaming system wants `minLod`; a cylinder decal wants REPEAT on U with CLAMP on V; a
+  Hi-Z pyramid wants a min reduction. **~180 lines**, contained to `SamplerDesc`, the six
+  lines of `create_sampler` and the cache key.
+- **Dynamic state is viewport and scissor only.** Stencil reference, depth bias, line width
+  and blend constants are baked into the pipeline, so an outline system with per-object
+  stencil IDs needs one pipeline per ID. The shape is already proven by `set_viewport` /
+  `set_scissor`: an opt-in list plus a `p.set_*` verb per state. **~200 lines** for the three
+  worth having.
+- **Fixed-function bits hardcoded off**: `logicOp`, `depthBounds`, `alphaToOne`,
+  `depthBiasClamp`, and `rasterizerDiscardEnable`. The last is the interesting one — a
+  depth-only or query-only pass that runs the vertex stage and throws the fragments away
+  cannot be spelled, and `color_mask(False x4)` still rasterizes and still shades.
+  **~120 lines** for the set.
+- **The viewport has no depth range and there is exactly one.** `set_viewport` hardcodes
+  0..1, so a first-person weapon compressed into [0, 0.1] and reverse-Z partial ranges are
+  out, as is `gl_ViewportIndex`. **~80 lines** for the range; multi-viewport is a `Feature`
+  row and more.
+- **The swapchain format and colour space are chosen for you.** No `format=` or
+  `color_space=` on `create_renderer`, so HDR10 and scRGB output are unreachable and so is a
+  plain UNORM swapchain for manual tonemapping. Present modes are fully covered, which is what
+  makes the gap look accidental. **~200 lines**, including what to do when the device refuses
+  the request (the `set_fullscreen_exclusive` answer: ask, then report what you got).
+- **Four descriptor types.** No separate sampler, no texel buffers (`samplerBuffer`), no
+  dynamic offsets, no input attachments. The first has an ergonomic workaround now (0.29 folds
+  HLSL's pair), the second has none, the third is REACHABLE-BUT-AWKWARD through one descriptor
+  set per object or an SSBO indexed by a push constant — which is the modern spelling anyway —
+  and the fourth is HARD (see below).
+- **No persistently mapped buffer as a numpy view.** Every `update()` maps, copies and unmaps,
+  so a numpy particle simulation walks its data twice per frame. **~200 lines**, and the
+  design question is the frame-slot lifetime rule a view would have to carry, which
+  `buffer.address` already documents for its own case.
+- **No `vkCmdUpdateBuffer`, no buffer-to-image copy in a pass, and no region blit.**
+  `fill_buffer` writes one repeated word, `copy_image` needs identical extents and
+  `blit_image` covers the whole image, so patching a counter mid-frame, turning an SSBO into
+  a texture, and packing an atlas each need a way round. **~250 lines** for the three.
+- **No `DONT_CARE` load or store op.** A first pass that writes every pixel still clears, and
+  a depth buffer nobody samples is still written out — on a tiler that is the whole depth
+  buffer leaving tile memory. It has to ride `clear_color`'s existing question rather than
+  become a second bool beside it (0.16 rejected exactly that). **~120 lines.**
+- **Push-constant ranges are always at offset 0 with one merged stage mask**, so two stages
+  cannot own disjoint halves of the 128-byte budget and a shared range costs both of them the
+  same bytes. **~100 lines.**
+- **Buffer usage and memory placement are not choosable.** `buffer_usage_for` is a closed
+  switch, so `UNIFORM|STORAGE` in one buffer cannot be spelled, and `MemoryUsage` has two
+  members, so device-local host-visible (ReBAR) and host-cached readback memory are out.
+  A `usage=` kwarg is **~120 lines**; the memory half is a design question about what the two
+  existing members would then mean.
+- **HARD: no subpasses and no input attachments.** Dynamic rendering is a hard requirement,
+  so there is no `VkRenderPass` to hang them on, and a tile-local deferred G-buffer that never
+  leaves tile memory cannot be built — every pass round-trips through memory. This is the
+  price of the 1.2 baseline plus rule 3, it is real, and nothing here proposes to pay it.
+
+**Two things the audit found that are worth more than any single entry.** The first is that
+almost every gap above is a DEFAULT rather than a wall — a hardcoded field in a struct bazalt
+fills, not a shape the design forbids — which is what makes the list cheap in total and
+uninteresting in parts. The second is the root entry: a library whose escape hatch is
+"raw_extensions" should be able to reach a device extension through it, and today it cannot.
 
 ### Small, and looked at
 
@@ -4026,7 +4352,51 @@ Lasting engineering conclusions, distilled from the retrospectives. Do not repea
   is a different constant. `SetOptimizationLevel(performance)` would fold a cosmetic change
   into identical SPIR-V, and the test would lie green.
 
+- **A barrier may only name stages the pool's queue family supports** (0.29). Every stage bit
+  in a `vkCmdPipelineBarrier` has to be one the command buffer's family has, and a compute-only
+  family has about seven of the sixteen. The tracker computes a barrier before anything knows
+  which queue will replay it, so the narrowing belongs at the emission site, not at the
+  computation. Same shape as the 0.19 `all_shader_stages` lesson, one dimension over — and the
+  access bits must be masked with the stages that survive, or the barrier names an access no
+  stage in its mask supports.
+
+- **An empty barrier scope has two spellings and they are opposites** (0.29). `TOP_OF_PIPE` as
+  a SOURCE waits for nothing, which is what you want when a semaphore already carried the
+  dependency; `TOP_OF_PIPE` as a DESTINATION blocks everything after it, and the empty
+  destination is `BOTTOM_OF_PIPE`. bazalt had the wrong one as its fallback for two releases and
+  nothing noticed, because a destination mask was never empty until a compute family narrowed
+  one.
+
+- **A semaphore wait makes a write visible to everything later on that queue, not only to the
+  stages that waited** (0.29, spec 7.4.2). Its second scope is every command later in submission
+  order and every memory access of them, which is what lets a cross-queue image use keep its
+  layout transition and drop the transition's source scope. Weaker than a barrier in reach —
+  one queue only — and much wider in what it makes visible.
+
+- **vk-bootstrap's `QueueType::compute` falls back to the graphics family and says nothing**
+  (0.29). `get_queue` then hands back queue 0 of that family, which is the graphics queue's own
+  handle. Any code that treats the result as "a second queue" gets a second mutex over one
+  `VkQueue`. Compare the index, never the handle, and never the absence of an error.
+
 ### Tests and CI
+
+- **CI's hardware decides which half of a feature gets tested, so build the half CI can run**
+  (0.29). lavapipe and MoltenVK both report a single queue family, so an async-compute
+  implementation that only builds its cross-queue machinery where a second family exists would
+  ship that machinery untested on every platform CI has. Aliasing the queue instead — same
+  timeline count, same semaphore waits, same per-queue keys, one `VkQueue` — puts the whole path
+  under every job, and `BAZALT_FORCE_SINGLE_QUEUE=1` reproduces it on a developer GPU. The
+  generalization: when a feature has a fast path and a fallback, prefer the design where BOTH
+  run the same code, and give the difference a `Feature` row rather than a branch.
+
+- **A negative control can fail by being too easy, not only by being too hard** (0.29). The
+  first HLSL test declared a `Texture2D` and a `SamplerState` with a binding on the texture
+  only — and it passed against the unfixed build, because glslang puts the lone sampler on the
+  texture's binding, where the combined descriptor happens to feed both halves. The shader that
+  FAILS is the one where the sampler carries its own `[[vk::binding]]`, which is also the
+  idiomatic one the documentation tells people to write. **When a test passes before the fix,
+  the next question is not "is the fix needed" but "is the test the shape a user writes".**
+
 
 - **The `ctx` fixture asserts ONLY on `Source.VALIDATION` with `ERROR`.** Tests that cause
   errors on purpose also log, and the structural `source` field makes the distinction
