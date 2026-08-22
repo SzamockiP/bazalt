@@ -61,6 +61,14 @@ queue's ORDERING — work that must not be delayed by the frame and must not
 delay it. That is a scheduling property, and it is why the queue is the
 caller's choice rather than the library's.
 
+One number to carry away, because it decides whether the question is even worth
+asking: another queue means another `vkQueueSubmit`, and a submit costs about
+0.07-0.11 ms on the driver this was written against — more than an EMPTY submit
+has any right to. So a pass is worth moving only when it is worth more than a
+submit. The simulation here is, at any of the octave counts above. The culling
+in examples/28_gpu_culling is not: that whole frame's GPU work is smaller than
+one submit.
+
 Keys: SPACE switches the queue, +/- change the simulation cost, ESC exits.
 """
 

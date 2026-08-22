@@ -2098,6 +2098,31 @@ unchanged, and a program written against 0.28 schedules exactly as it did — wh
   stays; what the test pins is that the added wait is not itself illegal. The docstring says
   so, because a regression guard filed as a proof is how a suite starts lying.
 
+- **What a second queue really costs is a second SUBMIT, not a semaphore** — measured after
+  0.29 shipped, when the culling example turned out slower on the compute queue and the
+  obvious explanation was the cross-queue wait. It was not. Four variants of one frame
+  (200,000 candidates, cull then indirect draw), milliseconds per frame:
+
+        one submit, both on the graphics queue        0.104
+        two submits, SAME queue, ordered by after=    0.181   (+0.077)
+        two submits, cull on the compute queue        0.176   (+0.072)
+        as above but the draw reads the PREVIOUS
+          frame, so nothing waits in-frame            0.167   (+0.063)
+        one submit plus one EMPTY extra submit        0.216   (+0.112)
+        recording the whole frame, submitting nothing 0.011
+
+  Splitting the frame in two costs the same whether the halves are on one queue or on two,
+  removing the dependency saves almost nothing, and an extra submit with NO WORK IN IT costs
+  more than the real second batch did. On this driver a `vkQueueSubmit` is 70-110 microseconds
+  — WDDM kernel transition and driver scheduling — and recording the frame is 11.
+
+  **The rule that falls out, and it is the useful part:** bazalt turns "another queue" into
+  "another submit" by construction (one batch per queue run, one `vkQueueSubmit` per batch),
+  so a pass is worth moving only if it is worth more than a submit. At example 28's scale the
+  whole frame's GPU work is about 0.07 ms — less than one submit — so the split doubles the
+  frame whatever is in it. The threshold is a property of the platform rather than of bazalt,
+  and it is why the queue is a decision rather than a default.
+
 - **A second queue does not create parallelism the hardware did not already have, and
   0.29 measured that rather than assuming it either way** (examples/46_async_overlap). Two
   independent halves of a frame — a million-point simulation and a million-point draw, with

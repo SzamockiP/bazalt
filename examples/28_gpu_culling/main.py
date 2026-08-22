@@ -44,12 +44,18 @@ Each frame:
      windows, from one argument buffer.
 
 The cull pass stays on `Queue.GRAPHICS`, and that is measured rather than
-assumed: moving it to `Queue.COMPUTE` makes this frame SLOWER, because the draw
-reads what the dispatch wrote in the same frame. The graph then has to split the
-frame into two submits and put a semaphore between them, and nothing overlaps —
-the drawing is waiting for the culling either way. A second queue pays when the
-compute work is independent of the frame that submits it: a simulation the NEXT
-frame draws, or post-processing of the previous one. See examples/45_async_compute.
+assumed: moving it to `Queue.COMPUTE` makes this frame SLOWER. The reason is not
+the semaphore between the two halves, which is what it looks like — the same
+frame split into two submits on ONE queue costs the same, and a frame whose draw
+does not wait for the dispatch at all costs nearly as much. What costs is the
+second `vkQueueSubmit`: about 0.07-0.11 ms on this driver, against a frame whose
+entire GPU work is 0.07 ms. Another queue means another submit, so a pass is
+worth moving only when it is worth more than a submit.
+
+Here it never is, and the dependency settles it anyway: the drawing is waiting
+for the culling by definition. A second queue pays for work the frame does NOT
+consume — a simulation the next frame draws, or post-processing of the previous
+one. See examples/46_async_overlap, which is that shape with a switch on it.
 
 The CPU never learns the count. That is what makes it different from culling on the
 host: no readback, and no per-instance buffer to size.
