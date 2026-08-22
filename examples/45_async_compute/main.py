@@ -123,6 +123,12 @@ for name, queue in (("graphics", bz.Queue.GRAPHICS), ("compute", bz.Queue.COMPUT
     results[name] = value
     print(f"producer on {name:8} -> {value:6}  ({ms:6.2f} ms for {STEPS} replays)")
 
+# The milliseconds are wall clock for a deliberately tiny workload, so submit
+# overhead dominates them and the two numbers trade places between runs. They
+# are here to show the program did something, not to measure the overlap: for
+# that the compute pass has to be long enough to hide behind the graphics work,
+# which a demo that must finish in a second cannot be.
+
 logger.flush()
 print(f"expected {expected}")
 print(f"sync-validation hazards: {len(hazards)}")
