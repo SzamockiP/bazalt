@@ -243,6 +243,13 @@ struct FrameContext
     // rule that a deferred lambda holds nothing that (indirectly) holds the
     // Context. A raw pointer into a Context that outlives its own recordings.
     const VolkDeviceTable* vk = nullptr;
+
+    // Which pipeline stage bits a barrier recorded into THIS batch's command
+    // buffer may carry — the queue family's legal set (0.29). A compute-only
+    // family supports far fewer than the graphics one, and every stage bit in
+    // a vkCmdPipelineBarrier must be one the pool's family supports. Defaults
+    // to everything, so a recorder nobody told is unchanged.
+    VkPipelineStageFlags legal_stages = ~VkPipelineStageFlags{0};
 };
 
 // A render target backed by Images this object owns, with no swapchain and no

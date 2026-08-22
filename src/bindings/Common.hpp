@@ -868,56 +868,89 @@ struct TimestampRange
 // the last that still raised from under the release: a vkBeginCommandBuffer or
 // vkEndCommandBuffer that returns DEVICE_LOST or an out-of-memory result would
 // have crashed the interpreter instead of raising bz.DeviceLostError.
-inline std::expected<VkCommandBuffer, Error> record_frame(
+// One recorded command buffer per batch, in submit order. The timestamps and
+// the capture ride the GRAPHICS batches — the first opens the measurement and
+// the last closes it — so gpu_time_ms measures the graphics span of the frame,
+// which is what a window's frame time means.
+inline std::expected<std::vector<Context::SubmitBatch>, Error> record_frame(
     Graph& graph,
     const Context& ctx,
     TimestampRange ts = {},
     SwapchainRenderer* capture_into = nullptr)
 {
+    if (auto r = graph.compile(); !r)
+    {
+        return std::unexpected(r.error());
+    }
+
     const VolkDeviceTable& vk = ctx.vk();
     const std::uint32_t frame_index = ctx.frame_index();
-    VkCommandBuffer vkCmd = graph.get(frame_index);
-    vk.vkResetCommandBuffer(vkCmd, 0);
+    const std::span<const Graph::Batch> batches = graph.batches();
 
-    VkCommandBufferBeginInfo beginInfo{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .pNext = nullptr,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        .pInheritanceInfo = nullptr};
-
-    if (auto e = check(vk.vkBeginCommandBuffer(vkCmd, &beginInfo), "begin recording command buffer"))
+    std::size_t first_graphics = batches.size();
+    std::size_t last_graphics = batches.size();
+    for (std::size_t i = 0; i < batches.size(); ++i)
     {
-        return std::unexpected(*e);
+        if (batches[i].queue == QueueKind::Graphics)
+        {
+            first_graphics = (std::min)(first_graphics, i);
+            last_graphics = i;
+        }
     }
 
-    // The queries must be reset on the device before use; doing it here (rather
-    // than once up front) keeps them per-frame and needs no hostQueryReset.
-    if (ts.pool != VK_NULL_HANDLE)
+    std::vector<Context::SubmitBatch> recorded;
+    recorded.reserve(batches.size());
+    for (std::size_t i = 0; i < batches.size(); ++i)
     {
-        vk.vkCmdResetQueryPool(vkCmd, ts.pool, ts.first, 2);
-        vk.vkCmdWriteTimestamp(vkCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, ts.pool, ts.first);
+        const Graph::Batch& batch = batches[i];
+        VkCommandBuffer vkCmd = graph.command_buffer(batch, frame_index);
+        vk.vkResetCommandBuffer(vkCmd, 0);
+
+        VkCommandBufferBeginInfo beginInfo{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .pNext = nullptr,
+            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            .pInheritanceInfo = nullptr};
+
+        if (auto e = check(vk.vkBeginCommandBuffer(vkCmd, &beginInfo), "begin recording command buffer"))
+        {
+            return std::unexpected(*e);
+        }
+
+        // The queries must be reset on the device before use; doing it here
+        // (rather than once up front) keeps them per-frame and needs no
+        // hostQueryReset.
+        if (ts.pool != VK_NULL_HANDLE && i == first_graphics)
+        {
+            vk.vkCmdResetQueryPool(vkCmd, ts.pool, ts.first, 2);
+            vk.vkCmdWriteTimestamp(vkCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, ts.pool, ts.first);
+        }
+
+        graph.execute_batch(batch, vkCmd, FrameContext{frame_index, &vk, ctx.queue_stages(batch.queue)});
+
+        if (i == last_graphics)
+        {
+            // After the recording, so the copy sees the finished frame; before
+            // the closing timestamp, so the capture's cost is visible in
+            // gpu_time_ms.
+            if (capture_into)
+            {
+                capture_into->record_capture(vkCmd);
+            }
+            if (ts.pool != VK_NULL_HANDLE)
+            {
+                vk.vkCmdWriteTimestamp(vkCmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, ts.pool, ts.first + 1);
+            }
+        }
+
+        if (auto e = check(vk.vkEndCommandBuffer(vkCmd), "record command buffer"))
+        {
+            return std::unexpected(*e);
+        }
+        recorded.push_back(Context::SubmitBatch{.queue = batch.queue, .cmd = vkCmd, .waits = batch.waits});
     }
 
-    graph.execute(vkCmd, FrameContext{frame_index, &vk});
-
-    // After the recording, so the copy sees the finished frame; before the
-    // closing timestamp, so the capture's cost is visible in gpu_time_ms.
-    if (capture_into)
-    {
-        capture_into->record_capture(vkCmd);
-    }
-
-    if (ts.pool != VK_NULL_HANDLE)
-    {
-        vk.vkCmdWriteTimestamp(vkCmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, ts.pool, ts.first + 1);
-    }
-
-    if (auto e = check(vk.vkEndCommandBuffer(vkCmd), "record command buffer"))
-    {
-        return std::unexpected(*e);
-    }
-
-    return vkCmd;
+    return recorded;
 }
 
 inline std::expected<void, Error> SwapchainRenderer::present(
@@ -930,15 +963,28 @@ inline std::expected<void, Error> SwapchainRenderer::present(
     {
         ts = {timestamp_pool(), 2 * current_frame()};
     }
-    auto vkCmd = record_frame(*graph, *context(), ts, capture ? this : nullptr);
-    if (!vkCmd)
+    auto batches = record_frame(*graph, *context(), ts, capture ? this : nullptr);
+    if (!batches)
     {
         // Nothing was submitted, and acquire() already reset this slot's fence.
         // Without this the raise below is followed by a hang on the next frame.
         abandon_frame_();
-        return std::unexpected(vkCmd.error());
+        return std::unexpected(batches.error());
     }
-    end_frame(*vkCmd, upload_wait_serial);
+    // A window can only be drawn into by the graphics queue, so a graph with no
+    // graphics batch has nothing to present. Refused here rather than inside
+    // submit_batches so the frame is given back first.
+    if (std::ranges::none_of(
+            *batches, [](const Context::SubmitBatch& batch) { return batch.queue == QueueKind::Graphics; }))
+    {
+        abandon_frame_();
+        return std::unexpected(err_state(
+            "present(): this graph has no pass on Queue.GRAPHICS, and only the graphics queue "
+            "can draw into a window. Add the pass that renders into the window, or run the "
+            "graph with ctx.submit()."));
+    }
+    const QueueSerials signalled = end_frame(*batches, upload_wait_serial, graph->replay_wait());
+    graph->note_replay_serials(signalled);
     if (timestamps_supported())
     {
         // The slot now holds results acquire() can read once its fence signals.
@@ -1302,8 +1348,20 @@ inline std::expected<QueueSerials, Error> context_submit(
     bool wait,
     const QueueSerials& after = {})
 {
+    // A window that has acquired an image owns the current ring slot: its
+    // fence and its acquire semaphore are indexed by it, and advancing the ring
+    // underneath would leave the present waiting on a semaphore nobody signals.
+    if (context.acquired_images() > 0)
+    {
+        return std::unexpected(err_state(
+            "submit(): a window on this Context holds an acquired swapchain image. A headless "
+            "submit advances the frame ring, and that moves the ring slot under the window's "
+            "fence and semaphores. Call renderer.present() for that window first, or call "
+            "ctx.submit() before acquire()."));
+    }
+
     // The ring slot this submit is about to record into may still be busy with
-    // an earlier asynchronous submit, whose command buffer is the SAME one.
+    // an earlier asynchronous submit, whose command buffers are the SAME ones.
     // Blocking submits have already waited, so this is free for them.
     context.wait_for_slot();
 
@@ -1328,52 +1386,22 @@ inline std::expected<QueueSerials, Error> context_submit(
     {
         return std::unexpected(upload_wait_serial.error());
     }
-    auto recorded = record_frame(*graph, context);
-    if (!recorded)
+    auto batches = record_frame(*graph, context);
+    if (!batches)
     {
-        return std::unexpected(recorded.error());
+        return std::unexpected(batches.error());
     }
-    VkCommandBuffer vkCmd = *recorded;
 
-    VkSemaphore timeline = context.submit_timeline();
-    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-    std::uint64_t submitted_serial = 0;
-    const std::uint64_t wait_value = (std::max)(*upload_wait_serial, after[queue_index(QueueKind::Graphics)]);
-
+    QueueSerials signalled{};
+    auto submitted = context.submit_batches(*batches, *upload_wait_serial, after, graph->replay_wait(), signalled);
+    // Both recorded even when the submit failed halfway: the batches that DID
+    // go are running, so the ring slot and this graph's next replay must be
+    // paced against them.
+    context.note_slot_submit(signalled);
+    graph->note_replay_serials(signalled);
+    if (!submitted)
     {
-        std::lock_guard lock(context.queue_mutex());
-        const std::uint64_t serial = context.advance_submit_serial();
-
-        VkTimelineSemaphoreSubmitInfo timelineInfo{
-            .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
-            .pNext = nullptr,
-            .waitSemaphoreValueCount = 1,
-            .pWaitSemaphoreValues = &wait_value,
-            .signalSemaphoreValueCount = 1,
-            .pSignalSemaphoreValues = &serial};
-        VkSubmitInfo submitInfo{
-            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .pNext = &timelineInfo,
-            // A timeline wait for value 0 is trivially satisfied, so this
-            // needs no branching on whether uploads are pending.
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &timeline,
-            .pWaitDstStageMask = &waitStage,
-            .commandBufferCount = 1,
-            .pCommandBuffers = &vkCmd,
-            .signalSemaphoreCount = 1,
-            .pSignalSemaphores = &timeline};
-
-        if (auto e = check(
-                context.vk().vkQueueSubmit(context.graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
-                "submit command buffer"))
-        {
-            return std::unexpected(*e);
-        }
-
-        context.note_submitted(QueueKind::Graphics, serial);
-        context.note_slot_submit({serial, 0});
-        submitted_serial = serial;
+        return std::unexpected(submitted.error());
     }
 
     // wait=True is the default and the old behaviour: the next line reads
@@ -1392,7 +1420,7 @@ inline std::expected<QueueSerials, Error> context_submit(
     // queue the same way.
     if (wait)
     {
-        if (auto r = context.wait_for_serial(submitted_serial); !r)
+        if (auto r = context.wait_for_serials(signalled); !r)
         {
             return std::unexpected(r.error());
         }
@@ -1407,7 +1435,7 @@ inline std::expected<QueueSerials, Error> context_submit(
     // forever). After, not before, submitting — an update() made before this
     // call must land in the slot this submit reads.
     context.advance_frame();
-    return QueueSerials{submitted_serial, 0};
+    return signalled;
 }
 
 // The merged GPU-side wait `after=` asks for: a Serial, a list of Serials, or

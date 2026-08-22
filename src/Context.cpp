@@ -308,6 +308,154 @@ std::expected<std::uint64_t, Error> Context::submit_one_shot(VkCommandBuffer cmd
     return serial;
 }
 
+std::expected<void, Error> Context::submit_batches(
+    std::span<const SubmitBatch> batches,
+    std::uint64_t upload_serial,
+    const QueueSerials& after,
+    const QueueSerials& previous_replay,
+    QueueSerials& signalled,
+    SubmitBinaries* binaries)
+{
+    // Which batch signalled which value, so a later one can wait for it.
+    std::vector<std::uint64_t> serial_of(batches.size(), 0);
+
+    std::size_t first_graphics = batches.size();
+    std::size_t last_graphics = batches.size();
+    for (std::size_t i = 0; i < batches.size(); ++i)
+    {
+        if (batches[i].queue == QueueKind::Graphics)
+        {
+            first_graphics = (std::min)(first_graphics, i);
+            last_graphics = i;
+        }
+    }
+    if (binaries != nullptr && first_graphics == batches.size())
+    {
+        return std::unexpected(err_state(
+            "present(): this graph has no pass on Queue.GRAPHICS, and only the graphics queue "
+            "can draw into a window. Add the pass that renders into the window, or run the "
+            "graph with ctx.submit()."));
+    }
+
+    for (std::size_t i = 0; i < batches.size(); ++i)
+    {
+        const SubmitBatch& batch = batches[i];
+        QueueRuntime& rt = runtime(batch.queue);
+        const std::size_t own = queue_index(batch.queue);
+
+        // What this batch waits for, per timeline.
+        //
+        // Uploads ride the graphics timeline whatever queue reads them, so this
+        // one entry covers both cases — and it is waited even by a graphics
+        // batch, because the upload worker is a different submitter: same queue
+        // is not the same submission chain, and the replay wrap-around barrier
+        // names shader writes rather than the transfer write a staging copy is.
+        QueueSerials want{};
+        want[queue_index(QueueKind::Graphics)] = upload_serial;
+        // Same argument for after=: it names another graph's submit.
+        max_merge(want, after);
+        for (const std::size_t j : batch.waits)
+        {
+            if (j >= i)
+            {
+                return std::unexpected(err_state("internal: a batch waits for one that has not been submitted yet"));
+            }
+            const std::size_t producer = queue_index(batches[j].queue);
+            want[producer] = (std::max)(want[producer], serial_of[j]);
+        }
+        // The previous replay of THIS graph is the one dependency its own queue
+        // already has: a pipeline barrier's first scope covers everything
+        // submitted earlier on the same queue, which is what the wrap-around
+        // barrier at the top of every batch is for. The other queues have no
+        // such reach, so they are waited.
+        for (std::size_t q = 0; q < kQueueCount; ++q)
+        {
+            if (q != own)
+            {
+                want[q] = (std::max)(want[q], previous_replay[q]);
+            }
+        }
+
+        std::vector<VkSemaphore> wait_semaphores;
+        std::vector<VkPipelineStageFlags> wait_stages;
+        std::vector<std::uint64_t> wait_values;
+        if (binaries != nullptr && i == first_graphics && binaries->wait != VK_NULL_HANDLE)
+        {
+            wait_semaphores.push_back(binaries->wait);
+            wait_stages.push_back(binaries->wait_stage);
+            wait_values.push_back(0); // ignored for a binary semaphore
+        }
+        for (std::size_t q = 0; q < kQueueCount; ++q)
+        {
+            if (want[q] == 0)
+            {
+                continue;
+            }
+            wait_semaphores.push_back(runtime(static_cast<QueueKind>(q)).timeline);
+            // ALL_COMMANDS because a batch is a whole frame's worth of work
+            // and the dependency may be consumed anywhere in it. Universal, so
+            // it is legal on a compute-only family too.
+            wait_stages.push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+            wait_values.push_back(want[q]);
+        }
+
+        std::vector<VkSemaphore> signal_semaphores;
+        std::vector<std::uint64_t> signal_values;
+        const bool last_graphics_batch = binaries != nullptr && i == last_graphics;
+        VkFence fence = VK_NULL_HANDLE;
+        if (last_graphics_batch && binaries->signal != VK_NULL_HANDLE)
+        {
+            signal_semaphores.push_back(binaries->signal);
+            signal_values.push_back(0);
+        }
+
+        std::lock_guard lock(*rt.mutex);
+        const std::uint64_t serial = ++rt.serial;
+        signal_semaphores.push_back(rt.timeline);
+        signal_values.push_back(serial);
+        if (last_graphics_batch)
+        {
+            fence = binaries->fence;
+        }
+
+        VkTimelineSemaphoreSubmitInfo timelineInfo{
+            .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+            .pNext = nullptr,
+            .waitSemaphoreValueCount = static_cast<std::uint32_t>(wait_values.size()),
+            .pWaitSemaphoreValues = wait_values.data(),
+            .signalSemaphoreValueCount = static_cast<std::uint32_t>(signal_values.size()),
+            .pSignalSemaphoreValues = signal_values.data()};
+        VkSubmitInfo submitInfo{
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .pNext = &timelineInfo,
+            .waitSemaphoreCount = static_cast<std::uint32_t>(wait_semaphores.size()),
+            .pWaitSemaphores = wait_semaphores.data(),
+            .pWaitDstStageMask = wait_stages.data(),
+            .commandBufferCount = 1,
+            .pCommandBuffers = &batch.cmd,
+            .signalSemaphoreCount = static_cast<std::uint32_t>(signal_semaphores.size()),
+            .pSignalSemaphores = signal_semaphores.data()};
+
+        if (auto e = check(vk_.vkQueueSubmit(rt.queue, 1, &submitInfo, fence), "submit command buffer"))
+        {
+            // The reservation is dropped on purpose: a timeline signal only has
+            // to be GREATER than the current value, and every wait is ">=", so
+            // the next submit satisfies anything that was waiting for this one.
+            // What must not be dropped is `signalled` — the earlier batches are
+            // still running.
+            return std::unexpected(*e);
+        }
+        rt.submitted.store(serial);
+        serial_of[i] = serial;
+        signalled[own] = serial;
+        if (binaries != nullptr && i == first_graphics)
+        {
+            binaries->wait_consumed = true;
+        }
+    }
+    return {};
+}
+
 std::expected<void, Error> Context::wait_for_serial(QueueKind kind, std::uint64_t serial) const
 {
     QueueSerials serials{};

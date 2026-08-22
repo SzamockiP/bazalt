@@ -173,6 +173,46 @@ def test_one_graph_cannot_serve_two_windows(ctx):
         window_a = window_b = None
 
 
+def test_submit_while_an_image_is_acquired_is_refused(ctx):
+    """A headless ctx.submit() advances the frame ring, and the ring slot is
+    what indexes a window's in-flight fence and its acquire semaphore. Between
+    acquire() and present() that moves the slot under a frame already half
+    done: the present then waits a semaphore nobody signals and signals a fence
+    acquire() never reset. It used to do exactly that, silently (0.29)."""
+    if ctx.headless:
+        pytest.skip("no swapchain support (headless Context)")
+    window_a, _ = _two_windows()
+    renderer = None
+    try:
+        renderer = ctx.create_renderer(window_a)
+        pipeline = _solid_pipeline(ctx, renderer)
+
+        g = ctx.graph()
+        with g.add_pass(renderer, clear_color=[0, 0, 0, 1]) as p:
+            p.bind_pipeline(pipeline)
+            p.draw(3)
+
+        other = ctx.graph()
+        with other.add_pass(name="empty"):
+            pass
+
+        bz.poll_events()
+        ctx.begin_frame()
+        if not renderer.acquire():
+            pytest.skip("window did not acquire (minimized?)")
+
+        with pytest.raises(bz.StateError, match="acquired swapchain image"):
+            ctx.submit(other)
+
+        # Giving the image back makes the same call legal again, which is what
+        # says the guard is about the state and not about the graph.
+        renderer.present(g)
+        ctx.submit(other)
+    finally:
+        renderer = None
+        window_a = None
+
+
 def test_acquire_twice_without_begin_frame_is_an_error(ctx):
     """One check catches both the double acquire and the loop that forgot
     ctx.begin_frame() — they are the same mistake seen from two sides."""

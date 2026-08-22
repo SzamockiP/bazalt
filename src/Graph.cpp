@@ -65,25 +65,10 @@ std::expected<void, Error> Pass::guard(VerbScope scope, const char* verb) const
 
 std::expected<std::shared_ptr<Graph>, Error> Graph::create(Context& context)
 {
-    auto ctx = context.shared_from_this();
-    auto graph = std::shared_ptr<Graph>(new Graph(ctx));
-    graph->command_buffers_.resize(ctx->frames_in_flight(), VK_NULL_HANDLE);
-
-    VkCommandBufferAllocateInfo allocInfo{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .pNext = nullptr,
-        .commandPool = ctx->command_pool(),
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = ctx->frames_in_flight()};
-
-    if (auto e = check(
-            ctx->vk().vkAllocateCommandBuffers(ctx->device(), &allocInfo, graph->command_buffers_.data()),
-            "allocate graph command buffers",
-            ErrorCode::Resource))
-    {
-        return std::unexpected(*e);
-    }
-    return graph;
+    // Nothing is allocated here since 0.29: how many command buffers a graph
+    // needs follows from its batches, and a fresh graph has no passes yet.
+    // compile() allocates, and grows the rows when a rebuild adds a batch.
+    return std::shared_ptr<Graph>(new Graph(context.shared_from_this()));
 }
 
 Graph::~Graph()
@@ -94,13 +79,23 @@ Graph::~Graph()
     {
         pass->removed_ = true;
     }
-    if (context_ && !command_buffers_.empty())
+    if (!context_)
     {
+        return;
+    }
+    // One deferred free per queue: a command buffer goes back to the pool it
+    // came from, and the two runtimes have one pool each.
+    for (std::size_t i = 0; i < kQueueCount; ++i)
+    {
+        if (command_buffers_[i].empty())
+        {
+            continue;
+        }
         context_->defer_destroy(
             [vk = &context_->vk(),
              device = context_->device(),
-             pool = context_->command_pool(),
-             buffers = std::move(command_buffers_)]
+             pool = context_->command_pool(static_cast<QueueKind>(i)),
+             buffers = std::move(command_buffers_[i])]
             { vk->vkFreeCommandBuffers(device, pool, static_cast<uint32_t>(buffers.size()), buffers.data()); });
     }
 }
@@ -158,6 +153,7 @@ void Graph::reset()
     }
     passes_.clear();
     compiled_.clear();
+    batches_.clear();
     dirty_ = true;
 }
 
@@ -167,8 +163,8 @@ std::expected<void, Error> Graph::claim_for_frame(std::uint64_t serial)
     {
         return std::unexpected(err_state(
             "This Graph was already submitted in the current frame. Each window needs its "
-            "own Graph — one holds a single command buffer per frame slot, so replaying it "
-            "twice would overwrite work still in flight."));
+            "own Graph — one holds a single command buffer per batch per frame slot, so "
+            "replaying it twice would overwrite work still in flight."));
     }
     recorded_serial_ = serial;
     return {};
@@ -187,9 +183,58 @@ Graph::BarrierBatch& Graph::batch_at_(CompiledPass& cp, std::size_t position)
     return cp.mid.back().second;
 }
 
-void Graph::compile_()
+std::expected<void, Error> Graph::compile()
+{
+    if (!dirty_)
+    {
+        return {};
+    }
+    return compile_();
+}
+
+std::expected<void, Error> Graph::ensure_command_buffers_()
+{
+    std::array<std::size_t, kQueueCount> needed{};
+    for (const Batch& batch : batches_)
+    {
+        std::size_t& count = needed[queue_index(batch.queue)];
+        count = (std::max)(count, batch.ordinal + 1);
+    }
+
+    const std::uint32_t frames = context_->frames_in_flight();
+    for (std::size_t i = 0; i < kQueueCount; ++i)
+    {
+        std::vector<VkCommandBuffer>& row = command_buffers_[i];
+        const std::size_t want = needed[i] * frames;
+        if (row.size() >= want)
+        {
+            continue;
+        }
+        const auto extra = static_cast<std::uint32_t>(want - row.size());
+        const std::size_t at = row.size();
+        row.resize(want, VK_NULL_HANDLE);
+        VkCommandBufferAllocateInfo allocInfo{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .commandPool = context_->command_pool(static_cast<QueueKind>(i)),
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = extra};
+        if (auto e = check(
+                context_->vk().vkAllocateCommandBuffers(context_->device(), &allocInfo, row.data() + at),
+                "allocate graph command buffers",
+                ErrorCode::Resource))
+        {
+            row.resize(at);
+            return std::unexpected(*e);
+        }
+    }
+    return {};
+}
+
+std::expected<void, Error> Graph::compile_()
 {
     compiled_.clear();
+    batches_.clear();
     tracked_writes_ = false;
 
     // Sealing is what lets this fold trust every pass's use list; disabled
@@ -217,6 +262,30 @@ void Graph::compile_()
         {
             compiled_.push_back(CompiledPass{.pass = pass.get()});
         }
+    }
+
+    // The batches: maximal runs of consecutive enabled passes on one queue, in
+    // add order. A graph with no enabled pass gets one empty graphics batch,
+    // so a submit always has something to signal and a window always has a
+    // command buffer to present.
+    std::array<std::size_t, kQueueCount> per_queue{};
+    for (std::size_t i = 0; i < compiled_.size(); ++i)
+    {
+        const QueueKind queue = compiled_[i].pass->queue();
+        if (batches_.empty() || batches_.back().queue != queue)
+        {
+            batches_.push_back(
+                Batch{.queue = queue, .first = i, .last = i + 1, .ordinal = per_queue[queue_index(queue)]++});
+        }
+        else
+        {
+            batches_.back().last = i + 1;
+        }
+        compiled_[i].batch = batches_.size() - 1;
+    }
+    if (batches_.empty())
+    {
+        batches_.push_back(Batch{.queue = QueueKind::Graphics, .first = 0, .last = 0, .ordinal = 0});
     }
 
     // The priced "a preserved second pass re-transitions the attachment" entry
@@ -308,6 +377,7 @@ void Graph::compile_()
     }
 
     dirty_ = false;
+    return ensure_command_buffers_();
 }
 
 void Graph::correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker)
@@ -490,19 +560,15 @@ namespace
 
 } // namespace
 
-void Graph::execute(VkCommandBuffer vkCmd, const FrameContext& frame)
+void Graph::execute_batch(const Batch& batch, VkCommandBuffer vkCmd, const FrameContext& frame)
 {
-    if (dirty_)
+    // Query-pool resets are illegal inside a render pass, so this batch's
+    // pools reset here, before anything opens. Per batch rather than per
+    // graph: a reset has to run on the queue that writes the queries, and each
+    // batch is its own submit.
+    for (std::size_t i = batch.first; i < batch.last; ++i)
     {
-        compile_();
-    }
-
-    // Query-pool resets are illegal inside a render pass, so every pass's
-    // pools reset here, before anything opens — the same spot execute() gives
-    // them on the inline path.
-    for (auto& cp : compiled_)
-    {
-        cp.pass->recorder().reset_query_pools(vkCmd, frame);
+        compiled_[i].pass->recorder().reset_query_pools(vkCmd, frame);
     }
 
     // Replay wrap-around, verbatim from the inline recorder: in-graph barriers
@@ -524,8 +590,9 @@ void Graph::execute(VkCommandBuffer vkCmd, const FrameContext& frame)
         frame.vk->vkCmdPipelineBarrier(vkCmd, stages, stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     }
 
-    for (const CompiledPass& cp : compiled_)
+    for (std::size_t i = batch.first; i < batch.last; ++i)
     {
+        const CompiledPass& cp = compiled_[i];
         Pass& pass = *cp.pass;
         CommandBuffer& rec = pass.recorder();
         cp.entry.record(vkCmd, frame);
@@ -551,10 +618,10 @@ void Graph::execute(VkCommandBuffer vkCmd, const FrameContext& frame)
         else
         {
             std::size_t at = 0;
-            for (const auto& [position, batch] : cp.mid)
+            for (const auto& [position, barriers] : cp.mid)
             {
                 rec.replay_range(vkCmd, frame, at, position);
-                batch.record(vkCmd, frame);
+                barriers.record(vkCmd, frame);
                 at = position;
             }
             rec.replay_range(vkCmd, frame, at, rec.command_count());

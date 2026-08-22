@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -565,6 +566,57 @@ public:
     // not enough to keep the promise.
     std::expected<std::uint64_t, Error> submit_one_shot(VkCommandBuffer cmd, std::uint64_t after = 0);
 
+    // ── Submitting a graph ────────────────────────────────────────────────────
+    //
+    // One recorded batch: which queue runs it, its command buffer, and the
+    // earlier batches of the same submit whose work it must wait for. The
+    // indices are into the span handed to submit_batches.
+    struct SubmitBatch
+    {
+        QueueKind queue = QueueKind::Graphics;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        std::vector<std::size_t> waits;
+    };
+
+    // The binary semaphores and the fence a WINDOWED submit adds, which a
+    // headless one has no use for. The acquire semaphore is waited by the
+    // first graphics batch and the render-finished one is signalled by the
+    // last, because a present waits for the drawing and nothing else.
+    struct SubmitBinaries
+    {
+        VkSemaphore wait = VK_NULL_HANDLE;
+        VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        VkSemaphore signal = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        // Out: whether the submit that carries `wait` was accepted. A binary
+        // semaphore already consumed must not be waited a second time.
+        bool wait_consumed = false;
+    };
+
+    // Submits a graph's batches, in order, one vkQueueSubmit each.
+    //
+    // Every batch waits: the uploads it may read (on the graphics timeline —
+    // uploads never leave that queue), whatever `after` names, the previous
+    // replay of this graph on the OTHER queues, and the batches of this submit
+    // it depends on. Its own queue needs no wait: submission order plus the
+    // replay wrap-around barrier already cover it.
+    //
+    // Every wait names a value that was reserved AND submitted earlier in this
+    // same loop, or by a submit that already returned. Timeline semaphores
+    // would permit waiting for a value nobody has promised yet; nothing here
+    // relies on that.
+    //
+    // `signalled` is filled as the loop goes and stays valid on failure: the
+    // batches that did get submitted are running, and the caller has to pace
+    // the ring and the next replay against them anyway.
+    std::expected<void, Error> submit_batches(
+        std::span<const SubmitBatch> batches,
+        std::uint64_t upload_serial,
+        const QueueSerials& after,
+        const QueueSerials& previous_replay,
+        QueueSerials& signalled,
+        SubmitBinaries* binaries = nullptr);
+
     // The one place that blocks on the submission timeline. Everything that
     // waits for GPU work — a frame's ring slot, an image upload, a readback —
     // comes through here, so a wait is never wider than the work it waits for.
@@ -695,6 +747,22 @@ public:
     // return null for it. The pointer is a loader trampoline dispatching on the
     // VkDevice argument, so it is correct for every Context in the process.
     void set_debug_name(VkObjectType type, std::uint64_t handle, const std::string& name) const;
+
+    // How many windows on this Context hold an acquired swapchain image.
+    //
+    // A headless ctx.submit() advances the frame ring, and the ring slot is
+    // what indexes a window's fence and its acquire semaphore — so a submit
+    // between acquire() and present() moves the slot under a frame that is
+    // already half done, and the present then waits a semaphore nobody will
+    // signal. It used to do exactly that, silently; it raises now.
+    void note_image_acquired(bool acquired)
+    {
+        acquired_images_ += acquired ? 1 : -1;
+    }
+    std::int32_t acquired_images() const
+    {
+        return acquired_images_;
+    }
 
     // VkQueue is externally synchronized. Today every submit happens on the main
     // thread, so this mutex is uncontended — it exists because 0.5's upload
@@ -868,6 +936,7 @@ private:
     bool gpu_timing_ = false;
     bool shader_printf_ = false;
     std::uint64_t frame_serial_ = 0;
+    std::int32_t acquired_images_ = 0;
 
     // How buffers and images are shared between the two families, decided once
     // at device creation. The array is a member so the pointer handed out by
