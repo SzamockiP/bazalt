@@ -10,16 +10,9 @@
 #include <vector>
 #include "CommandBuffer.hpp"
 
-// Which queue a pass runs on. One member today, and Queue.COMPUTE deliberately
-// does NOT exist yet: 0.29 adds the member (the Feature-row pattern — a new
-// capability is a new enum value, never a new parameter), together with the
-// second QueueRuntime it needs. Accepting COMPUTE now and running it
-// sequentially was rejected: 0.29 would then silently change the scheduling of
-// unedited 0.28 programs, a behaviour break dressed as a no-op.
-enum class QueueKind
-{
-    Graphics
-};
+// QueueKind lives in Queue.hpp since 0.29: Context owns the runtimes and the
+// tracker has to know which queue folded a use, and neither header may include
+// the other. Reached from here through CommandBuffer.hpp.
 
 class Graph;
 
@@ -138,9 +131,11 @@ private:
 //
 // The graph never reorders passes. On one queue a topological sort could only
 // produce the order the caller wrote or a surprise, and determinism is a
-// prototyping feature. The 0.29 cross-queue edges come from the same fold
-// without reordering either: the fold groups maximal runs of same-queue
-// passes into batches, and today that is always exactly one batch.
+// prototyping feature. Two queues change nothing about that: the fold groups
+// maximal runs of same-queue passes into BATCHES, in add order, and a use whose
+// producer sits in another batch becomes a semaphore wait rather than a moved
+// pass. (0.28's comment here claimed the batches already existed. They did not
+// — Pass::queue_ was written and never read. 0.29 built them.)
 class Graph : public std::enable_shared_from_this<Graph>
 {
 public:

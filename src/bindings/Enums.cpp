@@ -49,7 +49,10 @@ void bind_enums(py::module_& m)
         .value("EXCLUSIVE_FULLSCREEN", Feature::EXCLUSIVE_FULLSCREEN)
         .value("BUFFER_ADDRESS", Feature::BUFFER_ADDRESS)
         .value("SHADER_INT64", Feature::SHADER_INT64)
-        .value("WORKGROUP_SIZE", Feature::WORKGROUP_SIZE);
+        .value("WORKGROUP_SIZE", Feature::WORKGROUP_SIZE)
+        // The first row that names a fact about the device's queues rather
+        // than a bit it can be asked to turn on.
+        .value("ASYNC_COMPUTE", Feature::ASYNC_COMPUTE);
 
     // The gamepad layout GLFW maps every known pad onto, renamed rather than
     // translated: the values ARE the GLFW ones, so the two cannot drift.

@@ -2,17 +2,22 @@
 
 void bind_graphs(py::module_& m)
 {
-    // A submit's identity: which queue signalled, and the timeline value it
-    // signalled. Opaque on purpose — no attributes, no ordering, no
-    // arithmetic. Handing out the integer would let callers build on a total
-    // order across submits, which stops existing the day a second queue
-    // arrives; the handle keeps that door open at zero cost. The repr shows
-    // the value because a debugger deserves it; code cannot reach it.
+    // A submit's identity: one timeline value per queue, because a submit of a
+    // two-queue graph signals both. Opaque on purpose — no attributes, no
+    // ordering, no arithmetic. Handing out the integers would let callers build
+    // on a total order across submits, and with two timelines there is none.
+    // The repr shows both values because a debugger deserves it; code cannot
+    // reach them.
     py::class_<Serial>(m, "Serial")
         .def(
             "__repr__",
             [](const Serial& self)
-            { return std::format("<bazalt.Serial queue={} value={}>", self.queue_id, self.value); });
+            {
+                return std::format(
+                    "<bazalt.Serial graphics={} compute={}>",
+                    self.values[queue_index(QueueKind::Graphics)],
+                    self.values[queue_index(QueueKind::Compute)]);
+            });
 
     py::class_<Graph, std::shared_ptr<Graph>>(m, "Graph")
         // Render pass: the target is required and never None — a pass without

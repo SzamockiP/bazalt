@@ -183,7 +183,10 @@ SwapchainRenderer::~SwapchainRenderer()
 
     if (context_->device())
     {
-        std::lock_guard lock(context_->queue_mutex());
+        // Both queue mutexes: an idle drains every queue, so every queue's
+        // submitter must be held off. lock_queues() skips the compute lock when
+        // it IS the graphics one (locking one mutex twice is undefined).
+        auto locks = context_->lock_queues();
         context_->vk().vkDeviceWaitIdle(context_->device());
     }
 
@@ -820,6 +823,10 @@ std::expected<void, Error> SwapchainRenderer::create_swapchain_manually(
         .imageExtent = extent,
         .imageArrayLayers = 1,
         .imageUsage = image_usage,
+        // EXCLUSIVE, unlike every other image: a swapchain image is acquired,
+        // drawn and presented on the graphics queue only. A compute pass cannot
+        // reach one — a render target is what names it, and a render pass is
+        // refused on the compute queue.
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices = nullptr,
@@ -946,7 +953,10 @@ std::expected<void, Error> SwapchainRenderer::create_swapchain_manually(
 void SwapchainRenderer::recreate_swapchain()
 {
     {
-        std::lock_guard lock(context_->queue_mutex());
+        // Both queue mutexes: an idle drains every queue, so every queue's
+        // submitter must be held off. lock_queues() skips the compute lock when
+        // it IS the graphics one (locking one mutex twice is undefined).
+        auto locks = context_->lock_queues();
         context_->vk().vkDeviceWaitIdle(context_->device());
     }
 
@@ -1050,9 +1060,9 @@ std::expected<void, Error> SwapchainRenderer::create_depth_resources()
         .samples = samples_,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .queueFamilyIndexCount = 0,
-        .pQueueFamilyIndices = nullptr,
+        .sharingMode = context_->sharing().mode,
+        .queueFamilyIndexCount = context_->sharing().family_count,
+        .pQueueFamilyIndices = context_->sharing().families,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
 
     VmaAllocationCreateInfo allocImageInfo = {};
@@ -1110,9 +1120,9 @@ std::expected<void, Error> SwapchainRenderer::create_depth_resources()
             .samples = samples_,
             .tiling = VK_IMAGE_TILING_OPTIMAL,
             .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-            .queueFamilyIndexCount = 0,
-            .pQueueFamilyIndices = nullptr,
+            .sharingMode = context_->sharing().mode,
+            .queueFamilyIndexCount = context_->sharing().family_count,
+            .pQueueFamilyIndices = context_->sharing().families,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
 
         VmaAllocationCreateInfo allocColorInfo = {};

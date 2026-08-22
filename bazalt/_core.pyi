@@ -213,6 +213,13 @@ class Feature(IntEnum):
     #: the shader still compiles and the driver may still run it, but it is
     #: undefined behaviour that the validation layers report.
     WORKGROUP_SIZE = 24
+    #: A queue family that does compute and not graphics (0.29). True means a
+    #: pass on `Queue.COMPUTE` runs on its own queue, beside the graphics work.
+    #: False means it runs on the graphics queue under its own timeline: the
+    #: same program with the same ordering rules, without the overlap.
+    #: `Context(required=[Feature.ASYNC_COMPUTE])` refuses a device that has
+    #: none.
+    ASYNC_COMPUTE = 25
 
 # ── Enums ──────────────────────────────────────────────────────────────
 

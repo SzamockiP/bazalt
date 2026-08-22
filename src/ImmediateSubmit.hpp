@@ -42,9 +42,9 @@ inline std::expected<std::pair<VkBuffer, VmaAllocation>, Error> create_staging_b
         .size = size,
         .usage = static_cast<VkBufferUsageFlags>(
             upload ? VK_BUFFER_USAGE_TRANSFER_SRC_BIT : VK_BUFFER_USAGE_TRANSFER_DST_BIT),
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .queueFamilyIndexCount = 0,
-        .pQueueFamilyIndices = nullptr};
+        .sharingMode = context.sharing().mode,
+        .queueFamilyIndexCount = context.sharing().family_count,
+        .pQueueFamilyIndices = context.sharing().families};
 
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = upload ? VMA_MEMORY_USAGE_CPU_ONLY : VMA_MEMORY_USAGE_GPU_TO_CPU;

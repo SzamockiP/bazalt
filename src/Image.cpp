@@ -387,9 +387,9 @@ std::expected<std::shared_ptr<Image>, Error> Image::create_empty(
         // needs a feature we don't enable, and SAMPLED/TRANSFER are dead weight
         // (you sample the single-sample resolve, never this).
         .usage = usage_for_image(context, format, samples),
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .queueFamilyIndexCount = 0,
-        .pQueueFamilyIndices = nullptr,
+        .sharingMode = context.sharing().mode,
+        .queueFamilyIndexCount = context.sharing().family_count,
+        .pQueueFamilyIndices = context.sharing().families,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
 
     VmaAllocationCreateInfo allocInfo{};

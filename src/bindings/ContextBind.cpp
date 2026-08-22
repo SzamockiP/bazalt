@@ -944,15 +944,15 @@ void bind_context(py::module_& m)
             {
                 require_open(self, "submit");
                 require_same_context(&self, graph->owner(), "submit");
-                const std::uint64_t after_value = after_wait_value(after);
-                std::expected<std::uint64_t, Error> r;
+                const QueueSerials after_values = after_wait_values(self, after);
+                std::expected<QueueSerials, Error> r;
                 {
                     // May block (the wait for this serial when wait=True, and
                     // the ring slot wait either way) — release the GIL.
                     py::gil_scoped_release release;
-                    r = context_submit(self, std::move(graph), wait, after_value);
+                    r = context_submit(self, std::move(graph), wait, after_values);
                 }
-                return Serial{.queue_id = 0, .value = unwrap(std::move(r), self.logger().get())};
+                return Serial{.values = unwrap(std::move(r), self.logger().get()), .owner = &self};
             },
             py::arg("graph"),
             py::kw_only(),
@@ -976,9 +976,14 @@ void bind_context(py::module_& m)
                 }
                 else
                 {
-                    const std::uint64_t value = py::cast<const Serial&>(serial).value;
+                    // Checked before the GIL goes: a Serial from another
+                    // Context names a value on a timeline this one does not
+                    // own, and waiting for it is a hang rather than an error.
+                    const Serial& handle = py::cast<const Serial&>(serial);
+                    require_same_context(&self, handle.owner, "wait");
+                    const QueueSerials values = handle.values;
                     py::gil_scoped_release release;
-                    r = self.wait_for_serial(value);
+                    r = self.wait_for_serials(values);
                     if (r)
                     {
                         self.flush_deletion_queue();

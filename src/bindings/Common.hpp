@@ -1296,11 +1296,11 @@ inline std::vector<std::byte> update_pixels_from_numpy(
 // (the merged `after=` serials), or 0 for none. Merged into one wait because a
 // timeline wait is ">=": on one timeline the max IS the whole list. Returns
 // the serial this submit signals — the Python-facing Serial handle.
-inline std::expected<std::uint64_t, Error> context_submit(
+inline std::expected<QueueSerials, Error> context_submit(
     Context& context,
     std::shared_ptr<Graph> graph,
     bool wait,
-    std::uint64_t after_value = 0)
+    const QueueSerials& after = {})
 {
     // The ring slot this submit is about to record into may still be busy with
     // an earlier asynchronous submit, whose command buffer is the SAME one.
@@ -1338,7 +1338,7 @@ inline std::expected<std::uint64_t, Error> context_submit(
     VkSemaphore timeline = context.submit_timeline();
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     std::uint64_t submitted_serial = 0;
-    const std::uint64_t wait_value = (std::max)(*upload_wait_serial, after_value);
+    const std::uint64_t wait_value = (std::max)(*upload_wait_serial, after[queue_index(QueueKind::Graphics)]);
 
     {
         std::lock_guard lock(context.queue_mutex());
@@ -1371,7 +1371,8 @@ inline std::expected<std::uint64_t, Error> context_submit(
             return std::unexpected(*e);
         }
 
-        context.note_slot_submit(serial);
+        context.note_submitted(QueueKind::Graphics, serial);
+        context.note_slot_submit({serial, 0});
         submitted_serial = serial;
     }
 
@@ -1406,28 +1407,38 @@ inline std::expected<std::uint64_t, Error> context_submit(
     // forever). After, not before, submitting — an update() made before this
     // call must land in the slot this submit reads.
     context.advance_frame();
-    return submitted_serial;
+    return QueueSerials{submitted_serial, 0};
 }
 
 // The merged GPU-side wait `after=` asks for: a Serial, a list of Serials, or
-// None. One value because every serial lives on the one graphics timeline
-// today; when 0.29 adds a queue, this grows into per-timeline maxima.
-inline std::uint64_t after_wait_value(const py::object& after)
+// None. Per-timeline maxima since 0.29 — a timeline wait is ">=", so on ONE
+// timeline the maximum is the whole list, and with two the maxima are.
+//
+// Each Serial is checked against this Context first. A Serial carries a number
+// that only means something on the timeline that signalled it, so waiting for
+// another Context's serial is either a wait that returns too early or a hang.
+// The GIL is held here (the submit binding releases it after this returns),
+// which is what makes raising legal.
+inline QueueSerials after_wait_values(const Context& self, const py::object& after)
 {
+    QueueSerials merged{};
     if (after.is_none())
     {
-        return 0;
+        return merged;
     }
     if (py::isinstance<Serial>(after))
     {
-        return py::cast<const Serial&>(after).value;
+        const Serial& serial = py::cast<const Serial&>(after);
+        require_same_context(&self, serial.owner, "submit");
+        return serial.values;
     }
-    std::uint64_t value = 0;
     for (const auto& item : py::cast<py::sequence>(after))
     {
-        value = (std::max)(value, py::cast<const Serial&>(item).value);
+        const Serial& serial = py::cast<const Serial&>(item);
+        require_same_context(&self, serial.owner, "submit");
+        max_merge(merged, serial.values);
     }
-    return value;
+    return merged;
 }
 
 // Attach a debug name to a Vulkan handle (empty name -> no-op). Non-dispatchable

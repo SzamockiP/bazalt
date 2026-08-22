@@ -3,6 +3,7 @@
 #include <VkBootstrap.h>
 #include <vk_mem_alloc.h>
 
+#include <array>
 #include <atomic>
 #include <deque>
 #include <expected>
@@ -22,6 +23,7 @@
 // For Format and its device-resolved spelling (vk_format below).
 #include "Format.hpp"
 #include "Logger.hpp"
+#include "Queue.hpp"
 #include "Sampler.hpp"
 
 // How hard to try to turn on the validation layers.
@@ -134,15 +136,21 @@ struct ContextConfig
     std::vector<std::string> raw_extensions;
 };
 
-// A submit's identity, as the caller holds it: which queue signalled, and the
-// timeline value it signalled. Opaque in Python on purpose — handing out the
-// bare integer would let callers compare serials from different queues, an
-// order that stops existing the day a second queue arrives (0.29). Everything
-// on the graphics queue today, so queue_id is always 0.
+class Context;
+
+// A submit's identity, as the caller holds it: one timeline value per queue,
+// because a submit of a two-queue graph signals both. Opaque in Python on
+// purpose — a bare integer would invite comparing serials from different
+// queues, an order that does not exist now that there are two timelines.
+//
+// `owner` is what lets another Context refuse it. ctx_a.wait(a_serial_from_b)
+// used to wait ctx_a's timeline for a number that means something else on
+// ctx_b, which is either a wait that returns too early or a hang, never an
+// error.
 struct Serial
 {
-    std::uint32_t queue_id = 0;
-    std::uint64_t value = 0;
+    QueueSerials values{};
+    const Context* owner = nullptr;
 };
 
 class Context : public std::enable_shared_from_this<Context>
@@ -227,21 +235,60 @@ public:
     {
         return vkb_physical_device_.physical_device;
     }
+    // ── The queues ────────────────────────────────────────────────────────────
+    //
+    // Two runtimes since 0.29 (see QueueRuntime below). Every accessor comes in
+    // a pair: the bare name answers for the graphics queue, which is what the
+    // upload worker, the one-shot submits and the swapchain all mean, and the
+    // QueueKind overload answers for whichever queue a batch runs on.
+    VkQueue queue(QueueKind kind) const
+    {
+        return runtime(kind).queue;
+    }
     VkQueue graphics_queue() const
     {
         return graphics_q_.queue;
+    }
+    std::uint32_t queue_family(QueueKind kind) const
+    {
+        return runtime(kind).family;
     }
     std::uint32_t graphics_queue_family() const
     {
         return graphics_q_.family;
     }
+    // The stage bits a vkCmdPipelineBarrier recorded for this queue may carry —
+    // legal_stages_for() of its family, computed once at device creation. A
+    // compute pass that aliases the graphics queue reports the graphics mask,
+    // because the FAMILY is what the rule is about.
+    VkPipelineStageFlags queue_stages(QueueKind kind) const
+    {
+        return runtime(kind).legal_stages;
+    }
     VmaAllocator allocator() const
     {
         return allocator_;
     }
+    VkCommandPool command_pool(QueueKind kind) const
+    {
+        return runtime(kind).pool;
+    }
     VkCommandPool command_pool() const
     {
         return graphics_q_.pool;
+    }
+    // How buffers and images must be shared between the families. CONCURRENT
+    // over both when they differ, EXCLUSIVE when the compute runtime aliases
+    // the graphics queue — CONCURRENT with one repeated index is invalid.
+    struct Sharing
+    {
+        VkSharingMode mode = VK_SHARING_MODE_EXCLUSIVE;
+        std::uint32_t family_count = 0;
+        const std::uint32_t* families = nullptr;
+    };
+    const Sharing& sharing() const
+    {
+        return sharing_;
     }
     // Shared by every pipeline built on this Context, so a second pipeline that
     // repeats work the first one did (the common case under hot reload, where a
@@ -406,35 +453,63 @@ public:
     // frame, not once per window.
     void begin_frame();
 
-    // ── Submission timeline ───────────────────────────────────────────────────
+    // ── Submission timelines ──────────────────────────────────────────────────
     //
-    // One timeline semaphore counts EVERY submission on the graphics queue —
-    // frame submits, headless submits, one-shot submits, async uploads. Its
-    // counter answers the only synchronization question the CPU side ever asks:
-    // "has the GPU passed point X?" — uniformly for windowed and headless, and
-    // it is what makes async uploads awaitable.
+    // One timeline semaphore per queue. Each counts EVERY submission on its own
+    // queue — frame submits, headless submits, one-shot submits, async uploads
+    // — and its counter answers the only synchronization question the CPU side
+    // ever asks: "has the GPU passed point X?".
+    //
+    // One per queue rather than one shared: a timeline signal must be strictly
+    // greater than the current value and than every pending signal, and two
+    // queues cannot keep one counter increasing without waiting on each other,
+    // which is the serialization the second queue exists to avoid. (Two queues
+    // signalling one semaphore is what the BINARY rule forbids outright; 0.28's
+    // comment here quoted that rule for a timeline, which is not what it says.)
+    // A timeline is device-scope, so either queue may WAIT on either one.
+    VkSemaphore submit_timeline(QueueKind kind) const
+    {
+        return runtime(kind).timeline;
+    }
     VkSemaphore submit_timeline() const
     {
         return graphics_q_.timeline;
     }
 
-    // Reserve the serial the next submit will signal. Call while holding
-    // queue_mutex(), immediately before the vkQueueSubmit that signals it.
+    // Reserve the serial the next submit on this queue will signal. Call while
+    // holding queue_mutex(kind), immediately before the vkQueueSubmit that
+    // signals it.
+    std::uint64_t advance_submit_serial(QueueKind kind)
+    {
+        return ++runtime(kind).serial;
+    }
     std::uint64_t advance_submit_serial()
     {
         return ++graphics_q_.serial;
     }
 
-    // The key a resource dropped NOW must retire under: the newest reserved
-    // submit serial. The one place that spells the deletion-queue key, so a
-    // second queue (0.29) changes what a key is here and in
-    // flush_deletion_queue, and nowhere else.
-    std::uint64_t retire_key() const
+    // Records that a reserved serial really was submitted. wait_for_submits()
+    // waits THIS rather than the reserved value: a failed vkQueueSubmit signals
+    // nothing, so a reserved-but-dropped serial would be waited for forever.
+    void note_submitted(QueueKind kind, std::uint64_t serial)
     {
-        return graphics_q_.serial.load();
+        runtime(kind).submitted.store(serial);
     }
 
-    std::uint64_t completed_submit_serial() const;
+    // The key a resource dropped NOW must retire under: the newest reserved
+    // serial on EVERY queue, because a resource may be referenced by work on
+    // any of them. flush_deletion_queue frees an entry once every queue has
+    // passed its own half.
+    QueueSerials retire_key() const
+    {
+        return {graphics_q_.serial.load(), compute_q_.serial.load()};
+    }
+
+    std::uint64_t completed_submit_serial(QueueKind kind) const;
+    std::uint64_t completed_submit_serial() const
+    {
+        return completed_submit_serial(QueueKind::Graphics);
+    }
 
     // ── Asynchronous headless submits ─────────────────────────────────────────
     //
@@ -451,8 +526,11 @@ public:
     // timeline already counts every submit, so remembering which serial last
     // used a slot is enough.
 
-    // Records that `serial` is the newest submit occupying the current ring slot.
-    void note_slot_submit(std::uint64_t serial);
+    // Records the serials the newest submit left on the current ring slot, one
+    // per queue. Max-merged rather than assigned: two windows present into one
+    // slot, and the second must not erase what the first left on the other
+    // queue.
+    void note_slot_submit(const QueueSerials& serials);
 
     // Blocks until the submit that last used the current ring slot has finished.
     // Cheap when the slot is free: a timeline wait on a value already reached
@@ -490,7 +568,16 @@ public:
     // The one place that blocks on the submission timeline. Everything that
     // waits for GPU work — a frame's ring slot, an image upload, a readback —
     // comes through here, so a wait is never wider than the work it waits for.
-    std::expected<void, Error> wait_for_serial(std::uint64_t serial) const;
+    std::expected<void, Error> wait_for_serial(QueueKind kind, std::uint64_t serial) const;
+    std::expected<void, Error> wait_for_serial(std::uint64_t serial) const
+    {
+        return wait_for_serial(QueueKind::Graphics, serial);
+    }
+
+    // The same wait over both timelines, in ONE vkWaitSemaphores. The zero
+    // entries are dropped rather than waited for: 0 is trivially reached, but a
+    // semaphore that has never been signalled still costs the call an entry.
+    std::expected<void, Error> wait_for_serials(const QueueSerials& serials) const;
 
     // ── Deferred destruction ──────────────────────────────────────────────────
     //
@@ -613,9 +700,36 @@ public:
     // thread, so this mutex is uncontended — it exists because 0.5's upload
     // worker submits from its own thread, and every vkQueueSubmit/Present/
     // WaitIdle must hold it from then on.
+    // The mutex guarding one queue. On a device with no separate compute family
+    // the two runtimes share a VkQueue, and therefore share this: external
+    // synchronization is about the QUEUE, not about the runtime that names it.
+    std::mutex& queue_mutex(QueueKind kind)
+    {
+        return *runtime(kind).mutex;
+    }
+
+    // Both queue mutexes, for the callers that idle the whole device
+    // (swapchain recreation, the upload worker's destructor). Graphics first,
+    // always, and the compute lock is skipped when it IS the graphics one —
+    // locking one mutex twice is undefined.
+    struct QueueLocks
+    {
+        std::unique_lock<std::mutex> graphics;
+        std::unique_lock<std::mutex> compute;
+    };
+    QueueLocks lock_queues()
+    {
+        QueueLocks locks{std::unique_lock(graphics_q_.own_mutex), {}};
+        if (compute_q_.mutex != &graphics_q_.own_mutex)
+        {
+            locks.compute = std::unique_lock(compute_q_.own_mutex);
+        }
+        return locks;
+    }
+
     std::mutex& queue_mutex()
     {
-        return graphics_q_.mutex;
+        return *graphics_q_.mutex;
     }
 
 private:
@@ -668,23 +782,50 @@ private:
     vkb::Device vkb_device_;
 
     // Everything a queue needs to be submitted to safely: the handle, its
-    // family, the timeline that counts its submits, the serial counter that
-    // timeline signals, the mutex that externally synchronizes it, and the
-    // command pool on its family. One instance today (graphics). This is the
-    // 0.29 seam: async compute adds a second QueueRuntime — two timelines mean
-    // two queues never co-signal one semaphore, which the spec forbids — and
-    // every accessor above picks a runtime instead of the field.
+    // family and that family's flags, the timeline that counts its submits, the
+    // serial counter that timeline signals, the mutex that externally
+    // synchronizes it, and a command pool on its family.
+    //
+    // Two instances since 0.29. On a device with a compute-only family they are
+    // two real queues. On one without — lavapipe, MoltenVK, plenty of iGPUs —
+    // the compute runtime ALIASES the graphics VkQueue: same handle, same
+    // mutex (external synchronization is about the queue, so a second lock over
+    // one handle would be a race wearing a lock), but its own timeline and its
+    // own command pool. That keeps one code path for both, so the cross-queue
+    // machinery runs everywhere and Feature::ASYNC_COMPUTE reports whether the
+    // overlap is real.
     struct QueueRuntime
     {
         VkQueue queue = VK_NULL_HANDLE;
         std::uint32_t family = 0;
+        VkQueueFlags family_flags = 0;
+        // legal_stages_for(family_flags): which stage bits a barrier recorded
+        // into `pool` may name.
+        VkPipelineStageFlags legal_stages = ~VkPipelineStageFlags{0};
         VkSemaphore timeline = VK_NULL_HANDLE;
+        // Reserved by advance_submit_serial, under `mutex`.
         std::atomic<std::uint64_t> serial{0};
-        std::mutex mutex;
+        // The newest reserved serial that a vkQueueSubmit actually accepted.
+        // Never the same thing as `serial`: a failed submit drops its
+        // reservation, and nothing will ever signal it.
+        std::atomic<std::uint64_t> submitted{0};
+        std::mutex own_mutex;
+        // &own_mutex, or the graphics runtime's when this one aliases it.
+        std::mutex* mutex = &own_mutex;
         VkCommandPool pool = VK_NULL_HANDLE;
     };
 
     QueueRuntime graphics_q_;
+    QueueRuntime compute_q_;
+
+    QueueRuntime& runtime(QueueKind kind)
+    {
+        return kind == QueueKind::Compute ? compute_q_ : graphics_q_;
+    }
+    const QueueRuntime& runtime(QueueKind kind) const
+    {
+        return kind == QueueKind::Compute ? compute_q_ : graphics_q_;
+    }
 
     VmaAllocator allocator_ = VK_NULL_HANDLE;
     VkPipelineCache pipeline_cache_ = VK_NULL_HANDLE;
@@ -728,12 +869,19 @@ private:
     bool shader_printf_ = false;
     std::uint64_t frame_serial_ = 0;
 
-    // Which submit serial last used each ring slot. Only an asynchronous
-    // headless submit fills it; a blocking one has already waited.
-    std::vector<std::uint64_t> slot_serial_;
+    // How buffers and images are shared between the two families, decided once
+    // at device creation. The array is a member so the pointer handed out by
+    // sharing() stays valid: a Context is neither copied nor moved.
+    std::array<std::uint32_t, kQueueCount> sharing_families_{};
+    Sharing sharing_;
+
+    // Which submit serials last used each ring slot, one per queue. Filled by
+    // both submit paths since 0.29 — before it only the headless one did, so a
+    // window's work paced nothing.
+    std::vector<QueueSerials> slot_serial_;
 
     std::mutex deletion_mutex_;
-    std::deque<std::pair<std::uint64_t, std::function<void()>>> deletion_queue_;
+    std::deque<std::pair<QueueSerials, std::function<void()>>> deletion_queue_;
 
     std::unordered_map<std::uint32_t, std::shared_ptr<Sampler>> sampler_cache_;
     std::unique_ptr<UploadManager> upload_manager_;

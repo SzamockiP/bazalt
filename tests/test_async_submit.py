@@ -10,6 +10,7 @@ submit, and submit(after=serial) orders one submit after another on the GPU
 without blocking the CPU.
 """
 
+import os
 import pathlib
 
 import pytest
@@ -135,3 +136,34 @@ def test_a_serial_is_opaque(ctx):
     assert not hasattr(s, "value")
     with pytest.raises(TypeError):
         s < s  # noqa: B015 — the refusal is the assertion
+
+
+# ── the compute queue (0.29) ──────────────────────────────────────────────
+
+
+def test_async_compute_is_reported_honestly(ctx):
+    """A queue family that does compute and not graphics is a fact about the
+    hardware, so it is a Feature row like any other and nobody has to ask for
+    it. On a device without one, Queue.COMPUTE still works — it runs on the
+    graphics queue under its own timeline — and this is how a caller finds out
+    which of the two they got."""
+    answer = ctx.supports(bz.Feature.ASYNC_COMPUTE)
+    assert isinstance(answer, bool)
+    if os.environ.get("BAZALT_FORCE_SINGLE_QUEUE") != "1":
+        # The Device reports the same hardware fact, and list_devices() never
+        # reads the test knob.
+        matching = [d for d in bz.list_devices() if d.name == ctx.device_name]
+        assert matching and matching[0].supports(bz.Feature.ASYNC_COMPUTE) == answer
+
+
+def test_requiring_async_compute_on_a_single_queue_device_raises(monkeypatch):
+    """features= is a refusal, not a preference: a program that only makes sense
+    with real overlap says so and gets an error rather than a silent fallback.
+
+    The knob makes this deterministic everywhere — on a GPU that HAS a compute
+    family the Context would otherwise be built successfully and prove nothing.
+    """
+    monkeypatch.setenv("BAZALT_FORCE_SINGLE_QUEUE", "1")
+    with pytest.raises(bz.InitializationError, match="ASYNC_COMPUTE"):
+        bz.Context(features=[bz.Feature.ASYNC_COMPUTE])
+
