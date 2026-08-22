@@ -528,8 +528,23 @@ CommandBuffer& CommandBuffer::bind_vertex_buffer(const std::shared_ptr<Buffer>& 
     return *this;
 }
 
-CommandBuffer& CommandBuffer::bind_index_buffer(const std::shared_ptr<Buffer>& buffer)
+std::expected<void, Error> CommandBuffer::bind_index_buffer(const std::shared_ptr<Buffer>& buffer)
 {
+    if (!buffer)
+    {
+        return std::unexpected(err_resource("bind_index_buffer: buffer is null"));
+    }
+    // STORAGE is accepted because it carries INDEX_BUFFER_BIT since 0.29, for
+    // the reason buffer_usage_for gives. VERTEX and UNIFORM do not, and binding
+    // one used to fail inside the layers instead of here.
+    if (const BufferType type = buffer->buffer_type(); type != BufferType::INDEX && type != BufferType::STORAGE)
+    {
+        return std::unexpected(err_resource(
+            std::format(
+                "bind_index_buffer: indices must live in a BufferType.INDEX buffer, or in a "
+                "BufferType.STORAGE one when a compute shader writes them. This is a {} buffer.",
+                buffer_type_name(type))));
+    }
     track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_INDEX_READ_BIT, false);
     record_buffer_use_(buffer);
     commands_.emplace_back(
@@ -539,7 +554,7 @@ CommandBuffer& CommandBuffer::bind_index_buffer(const std::shared_ptr<Buffer>& b
             // accepts UINT16 indices, which used to be read back at half count.
             frame.vk->vkCmdBindIndexBuffer(cmd, buffer->get(), 0, buffer->index_type());
         });
-    return *this;
+    return {};
 }
 
 CommandBuffer& CommandBuffer::draw(uint32_t vertexCount, uint32_t instances)

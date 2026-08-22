@@ -1424,7 +1424,16 @@ class Pass:
         """Bind a vertex buffer. binding=0 feeds vertex_format (per vertex),
         binding=1 feeds instance_format (per instance)."""
         ...
-    def bind_index_buffer(self, buffer: Buffer) -> Pass: ...
+    def bind_index_buffer(self, buffer: Buffer) -> Pass:
+        """Bind the index buffer.
+
+        Takes a `BufferType.INDEX` buffer, or a `BufferType.STORAGE` one when a
+        compute shader writes the indices (0.29). Any other type raises
+        `ResourceError`.
+
+        The indices are 32-bit unless the buffer was made with
+        `DataType.UINT16` or from a uint16 array."""
+        ...
     def draw(self, vertex_count: int, instances: int = 1) -> Pass: ...
     def draw_indexed(self, index_count: int, first_index: int = 0,
                      vertex_offset: int = 0, instances: int = 1) -> Pass:
@@ -2490,7 +2499,10 @@ class Context:
         Without `language=`, the extension decides:
 
         - `.hlsl` — HLSL. Use `[[vk::binding(n, set)]]` on resources; bare
-          `register()` piles everything into one Vulkan binding space.
+          `register()` piles everything into one Vulkan binding space. A
+          `Texture2D` and a `SamplerState` become ONE combined texture binding
+          at the texture's slot (0.29), which is what `.texture()` declares, so
+          the sampler needs no binding of its own.
         - anything else — GLSL. That covers .vert/.frag/.comp and whatever
           else a project calls its files.
 

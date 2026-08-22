@@ -82,7 +82,7 @@ void bind_commands(py::module_& m)
             {
                 guard(*self, Pass::VerbScope::Render, "bind_index_buffer");
                 require_same_context(self->recorder().owner(), buffer->owner(), "bind_index_buffer");
-                self->recorder().bind_index_buffer(buffer);
+                unwrap(self->recorder().bind_index_buffer(buffer), nullptr);
                 return self;
             },
             py::arg("buffer"))

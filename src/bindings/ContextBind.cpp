@@ -240,6 +240,15 @@ void bind_context(py::module_& m)
                 auto buffer = unwrap(
                     Buffer::create(self, info.ptr, contiguous_nbytes(info, "create_buffer"), type, usage),
                     self.logger().get());
+                // The list overload above records the data type so
+                // bind_index_buffer can pick UINT16; this one never did, so a
+                // uint16 numpy index array was read back at UINT32 and drew
+                // half the triangles from garbage (0.29). "H" is the struct
+                // code for an unsigned 16-bit integer.
+                if (info.format == py::format_descriptor<std::uint16_t>::format())
+                {
+                    buffer->set_data_type(DataType::UINT16);
+                }
                 name_buffer(self, buffer, name);
                 return py::cast(buffer);
             },

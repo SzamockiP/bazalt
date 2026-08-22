@@ -128,7 +128,12 @@ public:
     // binding one buffer and binding the other are the same operation.
     CommandBuffer& bind_vertex_buffer(const std::shared_ptr<Buffer>& buffer, std::uint32_t binding = 0);
 
-    CommandBuffer& bind_index_buffer(const std::shared_ptr<Buffer>& buffer);
+    // Returns expected since 0.29: a STORAGE buffer is a legitimate index
+    // buffer now (a compute shader that rewrites an index list), so the verb
+    // has a type to check, and a VERTEX or UNIFORM buffer here used to reach
+    // the layers as a VUID naming neither the call nor the fix. Same argument
+    // and same shape as the indirect verbs.
+    std::expected<void, Error> bind_index_buffer(const std::shared_ptr<Buffer>& buffer);
 
     // instances= is a kwarg on both draw verbs rather than a third verb: the
     // instance count is one argument of a draw, and draw_indexed_instanced was a
