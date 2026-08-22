@@ -2844,8 +2844,11 @@ its price stops belonging here and becomes backlog.
   windows who wants them in ONE submit rather than two; today two graphs cost two submits
   and work correctly. **Estimate: ~300 lines**, and the second half of the price is the
   design question rather than the typing.
-- **Ownership transfer for async compute stays unpaid, and 0.29 should buy CONCURRENT
-  instead** (0.28). With a second queue family, `VK_SHARING_MODE_EXCLUSIVE` requires a
+- ✅ **Ownership transfer for async compute stays unpaid, and 0.29 should buy CONCURRENT
+  instead** (0.28) — SETTLED in 0.29, exactly as recommended: `CONCURRENT` over both families
+  where they differ, `EXCLUSIVE` where the compute runtime aliases the graphics queue (one
+  repeated family index is invalid). No ownership-transfer protocol was written, and the entry
+  below stays as the record of what was not bought. The original follows. With a second queue family, `VK_SHARING_MODE_EXCLUSIVE` requires a
   release barrier on one queue and an acquire on the other for contents to survive.
   **Price of doing it properly:** the queue-family ownership protocol in the fold, which is
   roughly triple the cross-queue logic and a new class of barrier the tracker has no field
