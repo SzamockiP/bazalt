@@ -2098,6 +2098,28 @@ unchanged, and a program written against 0.28 schedules exactly as it did — wh
   stays; what the test pins is that the added wait is not itself illegal. The docstring says
   so, because a regression guard filed as a proof is how a suite starts lying.
 
+- **A second queue does not create parallelism the hardware did not already have, and
+  0.29 measured that rather than assuming it either way** (examples/46_async_overlap). Two
+  independent halves of a frame — a million-point simulation and a million-point draw, with
+  the draw reading the buffer the dispatch is not writing — cost the SUM of their times on
+  one queue AND on two, across a 16x range of simulation cost. A perfect overlap would have
+  cost the larger of the two, and it never appeared.
+
+  The reason is not the queues. Both halves are shader work and either one alone saturates
+  the machine, so running them together cannot make the total smaller. Overlap pays where one
+  side leaves units IDLE for the other to fill — a raster- or bandwidth-bound pass beside an
+  ALU-bound dispatch, a depth prepass, a shadow map — and two workloads that both want every
+  ALU are not that. The one place the numbers moved was where the two halves were the same
+  size, and there the second queue was worth about 7%.
+
+  **The opposite direction is much larger and much easier to hit**, which is why 28's
+  docstring now says so: where the draw consumes what the dispatch wrote IN THE SAME FRAME,
+  moving that dispatch to the compute queue makes the frame twice as slow, because the graph
+  must split it into two submits with a semaphore between them and nothing can overlap
+  anyway. `Queue.COMPUTE` is a scheduling decision — work that must not be delayed by the
+  frame and must not delay it — and it is the caller's precisely because the library cannot
+  see which of those two shapes the caller has.
+
 - **The release review found the hole the tests were shaped away from, and it is the sharpest
   lesson here.** A NOTE — what a manual `p.barrier()`, a `copy_image` and a `clear_image`
   report to the fold — used to be modelled as a completed READ. That is right about what it

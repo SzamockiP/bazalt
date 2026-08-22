@@ -57,6 +57,12 @@ image waits for it.
   producer on each queue and checks that the two agree. It runs headless with
   sync validation on, and it prints whether your device has a separate compute
   queue family.
+- **46_async_overlap** simulates a million points on one queue while it draws
+  the previous frame's points on the other, and SPACE moves the simulation
+  between the two while it runs. The measured result is in its docstring: on
+  the machine it was written on the frame costs the sum of the two halves
+  whichever queue they are on, because both halves saturate the same units.
+  Overlap needs idle silicon, not only a second queue.
 - **28_gpu_culling** draws 200,000 cubes instead of 20,000, and its title
   reports the frame's GPU time beside the FPS. At the smaller size the whole
   GPU frame cost 0.05 ms, so culling had nothing to save and the FPS did not
