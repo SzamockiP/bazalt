@@ -2180,6 +2180,53 @@ unchanged, and a program written against 0.28 schedules exactly as it did — wh
   therefore have the pair the 0.24 lesson demands — the claim fails against the unfixed
   build — and both run on two real queues and on the aliased runtime.
 
+### The queues after 0.29, and where they end
+
+**0.30 is the transfer queue.** Assigned rather than priced, and the entry under `Priced, not
+forbidden` says what it costs; this says why it is a release of its own and what may travel
+with it.
+
+- **Uploads are the one customer that pays nothing to move.** 0.29 measured that another queue
+  means another `vkQueueSubmit`, and that a submit is 70-110 microseconds on this driver — which
+  is why moving the culling dispatch of `examples/28_gpu_culling` makes that frame twice as
+  slow. An upload does not have that problem, and the reason is worth stating plainly: it
+  ALREADY submits on its own (`Context::submit_one_shot`, one per upload since 0.18). Moving it
+  to the transfer queue changes which queue that existing submit goes to. It adds nothing. So
+  the one workload that cannot afford the cost of a second queue is the one that has already
+  paid it, which is a good sign that this is where the third runtime belongs.
+
+- **The machinery is 0.29's, generalized from two to three.** `kQueueCount` becomes 3 and
+  `QueueSerials` grows a slot; the per-queue deletion keys, ring-slot serials, legal stage
+  masks and CONCURRENT sharing already index by queue and need no new idea. What is genuinely
+  new is small and specific: `Buffer::upload_serial_` and `Image::upload_serial_` are scalars
+  on the graphics timeline and become per queue, `require_uploads_resident` returns a
+  `QueueSerials` rather than one number, and a MIPPED upload splits in two — the copy on the
+  transfer queue, the blit cascade on graphics, with a semaphore between them, because
+  `vkCmdBlitImage` needs a graphics family and always will.
+
+- **`Queue.TRANSFER` ships with it, and that is the same subject rather than a second one.**
+  A transfer runtime that only bazalt may use is half a feature: the caller who wants to stream
+  a texture atlas or move a readback out of the frame's way has the same problem the upload
+  worker has. The verb set is what the family supports — copies, fills, clears — and the
+  refusals follow the 0.29 rule already written: refuse by `QueueKind`, so the contract reads
+  the same on a device that has no transfer-only family and aliases it.
+
+- **Two small additions belong in the same release**, by rule 5's test — they share the subject
+  rather than the mood. `p.copy_buffer_to_image()` and its mirror (`U18` in the API-ceiling
+  audit) and `p.update_buffer()` (`U17`): a transfer queue whose only verbs are buffer-to-buffer
+  and same-size image copies is a queue almost nobody can put their own work on. What does NOT
+  belong: the frame-ring rework, the sampler fields, the dynamic state — all priced, none of
+  them about queues.
+
+- **And then the queues are finished.** Vulkan has eight queue-capability bits and only three
+  describe work bazalt schedules: GRAPHICS, COMPUTE and TRANSFER. Of the rest, SPARSE_BINDING is
+  a memory-residency operation submitted through `vkQueueBindSparse` rather than a pass anything
+  records into, PROTECTED is DRM content paths, VIDEO_DECODE and VIDEO_ENCODE are a different
+  library-shaped subject that the scope test sends to the raw-handle escape hatch, OPTICAL_FLOW
+  is one vendor's, and DATA_GRAPH is newer than this file. So `Queue` ends with three members,
+  and it ends there for a reason rather than for now — which is worth writing down, because an
+  enum that looks open invites a fourth member nobody has a use for.
+
 ### Asynchronous submits
 
 - **`submit(wait=False)` is paced by the ring, not by a fence per submit** (0.18). The
@@ -2850,10 +2897,11 @@ its price stops belonging here and becomes backlog.
   and a decision about what `t.ms` means when the slot has not cycled (the `gpu_time_ms`
   answer, presumably: None until it has). **Estimate: ~200 lines.**
 
-- **Uploads on a TRANSFER queue, not on the compute one** (asked during 0.29, priced here).
-  The question was whether the upload worker could move to the compute queue now that one
-  exists, and hand the finished resource to graphics. It could, for part of its work, and it
-  is the wrong queue.
+- **Uploads on a TRANSFER queue, not on the compute one** (asked during 0.29, priced here,
+  and ASSIGNED TO 0.30 — see "The queues after 0.29, and where they end" above for why it is
+  a release rather than an entry). The question was whether the upload worker could move to
+  the compute queue now that one exists, and hand the finished resource to graphics. It could,
+  for part of its work, and it is the wrong queue.
 
   **What stops it today** is `generate_mipmaps`: the chain is `vkCmdBlitImage` and a blit needs
   a GRAPHICS-capable family, so a mipped upload cannot leave the graphics queue at all. A plain
@@ -2880,9 +2928,11 @@ its price stops belonging here and becomes backlog.
   becomes per-queue. A mipped upload also splits in two: the copy on the transfer queue, the
   blit cascade on graphics, with a semaphore between them and the resource's serial then naming
   two timelines. **Paid by:** anyone loading many textures while rendering, on a discrete GPU.
-  **Estimate: ~450 lines.** The handoff itself is already bought — 0.29's `CONCURRENT` sharing
-  means no ownership-transfer protocol, so crossing a family costs a semaphore wait and nothing
-  else.
+  **Estimate: ~450 lines**, plus about 250 for the two transfer verbs that travel with it.
+  The handoff itself is already bought — 0.29's `CONCURRENT` sharing means no
+  ownership-transfer protocol, so crossing a family costs a semaphore wait and nothing else.
+  And unlike every other candidate for a second queue, an upload pays no extra submit: it
+  already had one.
 
 - **A second queue inside the graphics family is not created** (0.29). Where a device has no
   compute-only family, bazalt aliases the graphics queue rather than asking for a second
