@@ -572,6 +572,63 @@ def run_compute_image_then_draw_case(queue):
     return hazards, target.color[0].read()
 
 
+def run_attachment_read_then_redraw_case():
+    """Draw into an offscreen target, sample it from the COMPUTE queue, then
+    clear and draw into it again.
+
+    The third pass is the point. Its attachment transition is built by the
+    RenderTarget rather than by the fold — a clearing pass comes from UNDEFINED
+    and asks nothing about what went before — so the read the compute queue is
+    still doing has nothing to order it against. A pipeline barrier could not
+    carry it anyway: the reader is on the other queue. This is the
+    write-after-read the fold has to notice by asking the tracker who has
+    touched the attachment, before the pass runs.
+    """
+    hazards = []
+    log = bz.Logger(min_severity=bz.Severity.INFO)
+
+    @log.on_message
+    def _(msg):
+        if msg.source == bz.Source.VALIDATION and "hazard" in msg.text.lower():
+            hazards.append(msg.text)
+
+    context = bz.Context(log, validation="sync")
+    vert = context.compile_shader(str(SHADER_DIR / "triangle.vert"), bz.ShaderStage.VERTEX)
+    frag = context.compile_shader(str(SHADER_DIR / "triangle.frag"), bz.ShaderStage.FRAGMENT)
+    target = context.create_render_target(64, 64)
+    draw = (context.graphics_pipeline()
+            .vertex_shader(vert).fragment_shader(frag)
+            .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+            .build(target))
+    vbuf = context.create_buffer(
+        [0.0, -0.5, 0.0, 1.0, 0.0, 0.0,
+         -0.5, 0.5, 0.0, 0.0, 1.0, 0.0,
+         0.5, 0.5, 0.0, 0.0, 0.0, 1.0],
+        bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+
+    # The compute half samples the attachment into a storage image, so its read
+    # of the attachment is a descriptor use the fold can see.
+    sample = context.compile_shader(str(SHADER_DIR / "sample_texture.comp"), bz.ShaderStage.COMPUTE)
+    copy = context.compute_pipeline().shader(sample).texture(0).storage_image(1).build()
+    scratch = context.create_image(64, 64, bz.Format.RGBA8)
+    pool = context.create_descriptor_pool()
+    copy_set = pool.allocate_set(copy)
+    copy_set.set_image(0, target.color[0])
+    copy_set.set_storage_image(1, scratch)
+
+    g = context.graph()
+    with g.add_pass(target, [0.1, 0.2, 0.3, 1.0], name="draw") as p:
+        p.bind_pipeline(draw).bind_vertex_buffer(vbuf).draw(3)
+    (g.add_pass(name="sample on compute", queue=bz.Queue.COMPUTE)
+        .bind_pipeline(copy).bind_descriptor_set(copy_set, copy).dispatch(8, 8))
+    with g.add_pass(target, [0.0, 0.0, 0.0, 1.0], name="redraw") as p:
+        p.bind_pipeline(draw).bind_vertex_buffer(vbuf).draw(3)
+    context.submit(g)
+
+    log.flush()
+    return hazards
+
+
 def run_preserve_chain_case():
     """Two render passes on one target, the second preserving — the look-ahead.
 
@@ -667,6 +724,25 @@ def test_a_storage_image_written_on_either_queue_is_sampled_safely(ctx, queue):
     hazards, pixels = run_compute_image_then_draw_case(kind)
     assert hazards == []
     assert pixels[32, 32, :3].sum() > 0, "the sampled image was black"
+
+
+def test_a_pass_that_redraws_an_attachment_waits_for_a_compute_reader(ctx):
+    """A clearing render pass builds its entry transition from the target and
+    asks the fold nothing, so the compute queue's read of that attachment has
+    to be found the other way round: the fold asks the tracker who has touched
+    the image before the pass runs (Graph::compile_, cross_queue_touches).
+
+    A REGRESSION GUARD, NOT A PROOF, and the difference was measured rather
+    than assumed. The fix was disabled and the build rerun, and this test still
+    passed: sync validation does not report this write-after-read, though the
+    race is real by the spec — the third pass writes an attachment the second
+    is still sampling from another queue, with nothing between them. So what
+    this pins is that the ordering the fold adds is not itself illegal, and the
+    hazard it closes is argued from the spec rather than shown by a layer.
+
+    On a device whose compute queue aliases the graphics one it proves even
+    less: one queue orders the two passes anyway."""
+    assert run_attachment_read_then_redraw_case() == []
 
 
 def test_a_preserve_chain_satisfies_sync_validation(ctx):

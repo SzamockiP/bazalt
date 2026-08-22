@@ -2088,6 +2088,16 @@ unchanged, and a program written against 0.28 schedules exactly as it did — wh
   graph's own command buffers reaches back over its own queue. Sync validation caught the
   version that got this wrong, in one line, the first time the suite ran.
 
+- **One of the two cross-queue holes is argued rather than shown, and the difference was
+  measured.** A clearing render pass builds its entry transition from the RenderTarget and
+  asks the fold nothing, so a pass on the other queue that SAMPLED that attachment has
+  nothing to order it against — the fold has to ask the tracker who has touched the image
+  before the pass runs (`cross_queue_touches`). The fix was then disabled and the build rerun,
+  and the test still passed: sync validation does not report that write-after-read, on this
+  layer and this hardware. The race is real by the spec and the ordering is cheap, so the code
+  stays; what the test pins is that the added wait is not itself illegal. The docstring says
+  so, because a regression guard filed as a proof is how a suite starts lying.
+
 - **The negative control worked, and it decided a question the plan had left open.** Whether
   sync validation reports a hazard ACROSS two real queues was unknown when the plan was
   written; the manual-mode run (`auto_barriers=False`, which emits no use events at all, so
