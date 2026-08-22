@@ -71,15 +71,13 @@ def test_depth_only_pass_writes_sampleable_depth(ctx, triangle_shaders, triangle
                   .depth_test(True)
                   .build(shadow))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(shadow)
-    cmd.bind_pipeline(depth_pipe)
-    cmd.bind_vertex_buffer(vbuf)
-    cmd.bind_index_buffer(ibuf)
-    cmd.draw_indexed(3)
-    cmd.end_rendering(shadow)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(shadow) as p:
+        p.bind_pipeline(depth_pipe)
+        p.bind_vertex_buffer(vbuf)
+        p.bind_index_buffer(ibuf)
+        p.draw_indexed(3)
+    ctx.submit(g)
 
     # Direct readback: (h, w) float32, cleared to 1.0, triangle at z=0.
     depth = shadow.depth.read()
@@ -103,14 +101,12 @@ def test_depth_only_pass_writes_sampleable_depth(ctx, triangle_shaders, triangle
     # NEAREST: linear filtering of depth formats is not universally supported.
     dset.set_image(0, shadow.depth, sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
-    cmd2 = ctx.create_command_buffer()
-    cmd2.begin()
-    cmd2.begin_rendering(screen, clear_color=[0, 0, 0, 1])
-    cmd2.bind_pipeline(view_pipe)
-    cmd2.bind_descriptor_set(dset, view_pipe, set=0)
-    cmd2.draw(3)
-    cmd2.end_rendering(screen)
-    ctx.submit(cmd2)
+    g2 = ctx.graph()
+    with g2.add_pass(screen, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(view_pipe)
+        p.bind_descriptor_set(dset, view_pipe, set=0)
+        p.draw(3)
+    ctx.submit(g2)
 
     pixels = screen.color[0].read()
     assert pixels[2, 2, 0] == 255, "far depth should view as white"
@@ -143,13 +139,11 @@ def test_mrt_renders_into_both_attachments(ctx):
                 .fragment_shader(mrt_frag)
                 .build(gbuf))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(gbuf, clear_color=[0, 0, 0, 0])
-    cmd.bind_pipeline(pipeline)
-    cmd.draw(3)
-    cmd.end_rendering(gbuf)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(gbuf, clear_color=[0, 0, 0, 0]) as p:
+        p.bind_pipeline(pipeline)
+        p.draw(3)
+    ctx.submit(g)
 
     a = gbuf.color[0].read()
     assert a.dtype == np.float16
@@ -188,15 +182,13 @@ def test_color_attachment_samples_as_a_texture(ctx, triangle_shaders, triangle_b
              .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
              .build(first))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(first, clear_color=CLEAR)
-    cmd.bind_pipeline(pipe1)
-    cmd.bind_vertex_buffer(vbuf)
-    cmd.bind_index_buffer(ibuf)
-    cmd.draw_indexed(3)
-    cmd.end_rendering(first)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(first, clear_color=CLEAR) as p:
+        p.bind_pipeline(pipe1)
+        p.bind_vertex_buffer(vbuf)
+        p.bind_index_buffer(ibuf)
+        p.draw_indexed(3)
+    ctx.submit(g)
 
     fullscreen = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     tex_frag = ctx.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
@@ -211,14 +203,12 @@ def test_color_attachment_samples_as_a_texture(ctx, triangle_shaders, triangle_b
     dset = pool.allocate_set(pipe2, set=0)
     dset.set_image(0, first.color[0])
 
-    cmd2 = ctx.create_command_buffer()
-    cmd2.begin()
-    cmd2.begin_rendering(second, clear_color=[0, 0, 0, 1])
-    cmd2.bind_pipeline(pipe2)
-    cmd2.bind_descriptor_set(dset, pipe2, set=0)
-    cmd2.draw(3)
-    cmd2.end_rendering(second)
-    ctx.submit(cmd2)
+    g2 = ctx.graph()
+    with g2.add_pass(second, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipe2)
+        p.bind_descriptor_set(dset, pipe2, set=0)
+        p.draw(3)
+    ctx.submit(g2)
 
     np.testing.assert_array_equal(second.color[0].read(), first.color[0].read())
 
@@ -236,22 +226,18 @@ def test_create_render_target_is_the_only_way_to_make_one(ctx):
     the stub and every annotation name, and the thing it returns draws."""
     made = ctx.create_render_target(8, 8)
     assert isinstance(made, bz.RenderTarget)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(made, clear_color=[1, 0, 0, 1])
-    cmd.end_rendering(made)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass(made, clear_color=[1, 0, 0, 1])
+    ctx.submit(g)
     assert np.all(made.color[0].read()[:, :, 0] == 255)
 
 
 def test_create_render_target_takes_borrowed_images(ctx):
     mine = ctx.create_image(8, 8, bz.Format.RGBA8)
     target = ctx.create_render_target(color=[mine])
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=[0, 1, 0, 1])
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass(target, clear_color=[0, 1, 0, 1])
+    ctx.submit(g)
     assert np.all(mine.read()[:, :, 1] == 255)
 
 

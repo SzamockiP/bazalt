@@ -91,7 +91,7 @@ def test_a_fragment_write_is_ordered_against_a_later_read(ctx, extra_context):
     """The defect debt #3 was hiding, and the headline claim of the release.
 
     A fragment shader writes a storage image; a compute pass then reads it. There is
-    no cmd.barrier() anywhere. Before 0.19 track_draw_ handled no storage images at
+    no p.barrier() anywhere. Before 0.19 track_draw_ handled no storage images at
     all, while DescriptorSet.set_storage_image had already recorded the image as
     resting in GENERAL — so the layout the descriptor promised and the layout the
     image was in disagreed, and this was a validation error rather than a slow path.
@@ -132,16 +132,16 @@ def test_a_fragment_write_is_ordered_against_a_later_read(ctx, extra_context):
     cset.set_storage_image(0, img)
     cset.set_buffer(1, out)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
-        c.bind_pipeline(graphics)
-        c.bind_descriptor_set(gset, graphics, set=0)
-        c.draw(3)
-    cmd.bind_pipeline(reader)
-    cmd.bind_descriptor_set(cset, reader, set=0)
-    cmd.dispatch(1)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(graphics)
+        p.bind_descriptor_set(gset, graphics, set=0)
+        p.draw(3)
+    with g.add_pass() as p:
+        p.bind_pipeline(reader)
+        p.bind_descriptor_set(cset, reader, set=0)
+        p.dispatch(1)
+    ctx.submit(g)
     ctx.wait()
 
     # refl_frag_store.frag stores (0, 1, 0, 1).
@@ -212,14 +212,14 @@ def test_two_dispatches_reading_one_buffer_need_no_barrier(ctx):
     set1 = pool.allocate_set(pipeline, set=1)
     set1.set_buffer(1, read_only)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_descriptor_set(set0, pipeline, set=0)
-    cmd.bind_descriptor_set(set1, pipeline, set=1)
-    cmd.dispatch(1)
-    cmd.dispatch(1)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass() as p:
+        p.bind_pipeline(pipeline)
+        p.bind_descriptor_set(set0, pipeline, set=0)
+        p.bind_descriptor_set(set1, pipeline, set=1)
+        p.dispatch(1)
+        p.dispatch(1)
+    ctx.submit(g)
     ctx.wait()
 
 
@@ -232,11 +232,10 @@ def test_a_draw_with_no_pipeline_bound_stays_conservative(ctx):
     adds no error of its own; what it must not do is get quieter about barriers.
     """
     buf = ctx.create_buffer(64, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
     # No bind_pipeline, so nothing is recorded to consult. Recording must not throw.
-    cmd.barrier(buf, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
-    ctx.submit(cmd)
+    g.add_pass().barrier(buf, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
+    ctx.submit(g)
     ctx.wait()
 
 

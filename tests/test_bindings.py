@@ -25,13 +25,12 @@ CLEAR_RGB = np.array([26, 51, 77])
 
 
 def submit_and_read(ctx, target, record):
-    """Record commands via `record(cmd)`, submit, and read the target back."""
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=CLEAR)
-    record(cmd)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    """Record commands via `record(p)` into one render pass, submit, and read
+    the target back."""
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=CLEAR) as p:
+        record(p)
+    ctx.submit(g)
     return target.color[0].read()
 
 
@@ -49,10 +48,10 @@ def test_plain_draw_renders(ctx, triangle_shaders, triangle_buffers):
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                 .build(target))
 
-    def record(cmd):
-        cmd.bind_pipeline(pipeline)
-        cmd.bind_vertex_buffer(vbuf)
-        cmd.draw(3)
+    def record(p):
+        p.bind_pipeline(pipeline)
+        p.bind_vertex_buffer(vbuf)
+        p.draw(3)
 
     pixels = submit_and_read(ctx, target, record)
     assert not np.allclose(pixels[32, 32, :3], CLEAR_RGB, atol=2), \
@@ -71,10 +70,10 @@ def test_push_constants_reach_the_shader(ctx, fullscreen_vert):
                 .push_constant(16, bz.ShaderStage.FRAGMENT)
                 .build(target))
 
-    def record(cmd):
-        cmd.bind_pipeline(pipeline)
-        cmd.push_constants(pipeline, 0, struct.pack("4f", 1.0, 0.5, 0.0, 1.0))
-        cmd.draw(3)
+    def record(p):
+        p.bind_pipeline(pipeline)
+        p.push_constants(pipeline, 0, struct.pack("4f", 1.0, 0.5, 0.0, 1.0))
+        p.draw(3)
 
     pixels = submit_and_read(ctx, target, record)
     assert np.allclose(pixels[32, 32, :3], [255, 128, 0], atol=2), pixels[32, 32]
@@ -99,16 +98,14 @@ def test_blend_composites_two_draws(ctx, fullscreen_vert):
                 .blend(True)
                 .build(target))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0])
-    cmd.bind_pipeline(pipeline)
-    cmd.push_constants(pipeline, 0, struct.pack("4f", 1.0, 0.0, 0.0, 0.5))
-    cmd.draw(3)
-    cmd.push_constants(pipeline, 0, struct.pack("4f", 0.0, 0.0, 1.0, 0.5))
-    cmd.draw(3)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(pipeline)
+        p.push_constants(pipeline, 0, struct.pack("4f", 1.0, 0.0, 0.0, 0.5))
+        p.draw(3)
+        p.push_constants(pipeline, 0, struct.pack("4f", 0.0, 0.0, 1.0, 0.5))
+        p.draw(3)
+    ctx.submit(g)
 
     pixels = target.color[0].read()
     assert np.allclose(pixels[32, 32, :3], [64, 0, 128], atol=3), pixels[32, 32]
@@ -137,19 +134,17 @@ def test_uniform_buffer_via_frame_descriptor_set(ctx, fullscreen_vert):
     dset = pool.allocate_frame_set(pipeline, set=0)
     dset.set_buffer(0, ubuf)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=CLEAR)
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_descriptor_set(dset, pipeline, set=0)
-    cmd.draw(3)
-    cmd.end_rendering(target)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=CLEAR) as p:
+        p.bind_pipeline(pipeline)
+        p.bind_descriptor_set(dset, pipeline, set=0)
+        p.draw(3)
 
-    ctx.submit(cmd)
+    ctx.submit(g)
     assert np.allclose(target.color[0].read()[32, 32, :3], [0, 255, 0], atol=2)
 
     ubuf.update([1.0, 0.0, 1.0, 1.0])
-    ctx.submit(cmd)
+    ctx.submit(g)
     assert np.allclose(target.color[0].read()[32, 32, :3], [255, 0, 255], atol=2)
 
 
@@ -173,14 +168,12 @@ def test_static_uniform_buffer_binds_and_reads(ctx, fullscreen_vert):
     dset = pool.allocate_set(pipeline, set=0)  # static set for a static buffer
     dset.set_buffer(0, ubuf)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=CLEAR)
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_descriptor_set(dset, pipeline, set=0)
-    cmd.draw(3)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=CLEAR) as p:
+        p.bind_pipeline(pipeline)
+        p.bind_descriptor_set(dset, pipeline, set=0)
+        p.draw(3)
+    ctx.submit(g)
     assert np.allclose(target.color[0].read()[32, 32, :3], [0, 128, 255], atol=2)
 
 
@@ -205,10 +198,10 @@ def test_storage_buffer_read_in_fragment_shader(ctx, fullscreen_vert, usage):
         dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, sbuf)
 
-    def record(cmd):
-        cmd.bind_pipeline(pipeline)
-        cmd.bind_descriptor_set(dset, pipeline, set=0)
-        cmd.draw(3)
+    def record(p):
+        p.bind_pipeline(pipeline)
+        p.bind_descriptor_set(dset, pipeline, set=0)
+        p.draw(3)
 
     pixels = submit_and_read(ctx, target, record)
     assert np.allclose(pixels[32, 32, :3], [0, 0, 255], atol=2), pixels[32, 32]
@@ -268,10 +261,10 @@ def test_texture_is_sampled(ctx, fullscreen_vert, tmp_path):
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_image(0, tex)
 
-    def record(cmd):
-        cmd.bind_pipeline(pipeline)
-        cmd.bind_descriptor_set(dset, pipeline, set=0)
-        cmd.draw(3)
+    def record(p):
+        p.bind_pipeline(pipeline)
+        p.bind_descriptor_set(dset, pipeline, set=0)
+        p.draw(3)
 
     pixels = submit_and_read(ctx, target, record)
 

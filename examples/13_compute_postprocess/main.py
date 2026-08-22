@@ -5,16 +5,16 @@ The 0.9 headline, end to end:
   * a compute shader writes a procedural image into a STORAGE image with
     imageStore (no vertices, no fragment shader) — ctx.create_image gives it
     STORAGE usage automatically, DescriptorSet.set_storage_image binds it;
-  * a fullscreen pass samples that image to the screen. The barrier that takes
-    the image from GENERAL (storage) to SHADER_READ_ONLY (sampled) is recorded
-    for you and hoisted before the render pass — no cmd.barrier() by hand;
-  * cmd.timer() measures the dispatch — a handle you stop with a `with` block
+  * a fullscreen pass samples that image to the screen. The graph sees the
+    compute pass write the image and the render pass read it, so it puts the
+    barrier from GENERAL (storage) to SHADER_READ_ONLY (sampled) between the
+    two — no p.barrier() by hand;
+  * p.timer() measures the dispatch — a handle you stop with a `with` block
     or t.stop() and read back with t.ms after a blocking submit (no window
     needed, which is why the measurement below runs before the render loop).
 
-The command buffer is re-recorded each frame only because the animation time is
-a push constant; the storage-image barriers are recomputed identically each
-time.
+The graph is rebuilt each frame only because the animation time is a push
+constant; the storage-image barriers compile to the same thing each time.
 """
 
 import struct
@@ -65,22 +65,23 @@ present_set = pool.allocate_set(present)
 present_set.set_image(0, image)
 
 
-def record(cmd, t):
-    cmd.begin()
-    (cmd.bind_pipeline(generate)
+def record(g, t):
+    g.reset()
+    (g.add_pass(name="generate")
+        .bind_pipeline(generate)
         .bind_descriptor_set(gen_set, generate)
         .push_constants(generate, 0, struct.pack("<f", t))
         .dispatch((W + 7) // 8, (H + 7) // 8))
-    with cmd.rendering(renderer) as c:
-        c.bind_pipeline(present).bind_descriptor_set(present_set, present).draw(3)
+    with g.add_pass(renderer, name="present") as p:
+        p.bind_pipeline(present).bind_descriptor_set(present_set, present).draw(3)
 
 
 # Measure the compute cost with one blocking headless submit — the timer reads
 # back reliably here (no swapchain, no frames-in-flight race).
-measure = ctx.create_command_buffer()
-measure.begin()
-with measure.timer() as t:
-    (measure.bind_pipeline(generate)
+measure = ctx.graph()
+measure_pass = measure.add_pass(name="generate")
+with measure_pass.timer() as t:
+    (measure_pass.bind_pipeline(generate)
         .bind_descriptor_set(gen_set, generate)
         .push_constants(generate, 0, struct.pack("<f", 0.0))
         .dispatch((W + 7) // 8, (H + 7) // 8))
@@ -92,7 +93,7 @@ try:
 except bz.UnsupportedError:
     print("compute generate: timestamps unsupported on this device")
 
-cmd = ctx.create_command_buffer()
+g = ctx.graph()
 start = time.time()
 last_time = start
 frame_count = 0
@@ -113,5 +114,5 @@ while window.is_open():
         frame_count = 0
         fps_timer = 0.0
 
-    record(cmd, current_time - start)
-    renderer.present(cmd)
+    record(g, current_time - start)
+    renderer.present(g)

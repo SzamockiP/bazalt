@@ -90,10 +90,9 @@ pool = ctx.create_descriptor_pool()
 desc_set = pool.allocate_frame_set(pipeline)
 desc_set.set_buffer(0, ubuf)
 
-cmd = ctx.create_command_buffer()
-cmd.begin()
-with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.04, 1.0]) as c:
-    (c.bind_pipeline(pipeline)
+g = ctx.graph()
+with g.add_pass(renderer, clear_color=[0.02, 0.02, 0.04, 1.0]) as p:
+    (p.bind_pipeline(pipeline)
       .bind_descriptor_set(desc_set, pipeline)
       .bind_vertex_buffer(vbuf)
       .bind_index_buffer(ibuf)
@@ -115,7 +114,7 @@ while window.is_open():
         model = glm.rotate(glm.mat4(1.0), t * 0.7, glm.vec3(0.3, 1.0, 0.2))
         mvp = proj * view * model
         ubuf.update(bytes(glm.transpose(mvp)))
-        renderer.present(cmd)
+        renderer.present(g)
 
         frame_count += 1
         if time.time() - fps_timer >= 1.0:

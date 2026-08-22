@@ -15,24 +15,90 @@
 #include "DescriptorSet.hpp"
 #include "ResourceTracker.hpp"
 
-// Records commands once and replays them every submit.
+// One resource touch, as the graph compiler consumes it (0.28). In pass mode
+// the recorder appends these instead of computing barriers inline: the graph
+// folds every pass's events through one ResourceTracker at compile time, which
+// is what turns the per-recording floors into precise cross-pass edges. A Note
+// is a manual barrier (or a transfer verb's aftermath) seeding the fold, the
+// same contract note_buffer_access/note_image_layout carry inline.
+struct UseEvent
+{
+    enum class Kind
+    {
+        BufferUse,
+        ImageUse,
+        BufferNote,
+        ImageNote
+    };
+    Kind kind;
+    std::shared_ptr<Buffer> buffer;
+    std::shared_ptr<Image> image;
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkPipelineStageFlags stages = 0;
+    VkAccessFlags access = 0;
+    bool writes = false;
+    bool shader_writable = false;
+    // "Only if something already wrote this image" — the sampled-image rule.
+    // An uploaded texture the tracker never saw rests in SHADER_READ_ONLY
+    // already, and transitioning it from a tracker's UNDEFINED would DISCARD
+    // it. Inline mode answers this at record time against its own tracker; a
+    // pass cannot, because the writer is another pass, so the flag travels and
+    // the graph's fold decides.
+    bool only_if_tracked = false;
+    // Index into commands_ this use precedes — where a computed barrier must
+    // land in a pass without a target. A render pass puts every barrier in its
+    // entry batch instead (vkCmdPipelineBarrier is illegal inside dynamic
+    // rendering), so there the position only orders the fold.
+    std::size_t position = 0;
+};
+
+// The four parts of a rendering scope, called by the graph executor. They are
+// separate because the compile decides the transitions with the whole frame in
+// view: two passes that render into one target and preserve it keep the
+// attachment in its layout, so the executor skips the transition halves at
+// that seam and emits one in-place barrier instead.
+void record_render_pass_transitions_in(const VolkDeviceTable& vk, VkCommandBuffer cmd, RenderTarget& rt, bool preserve);
+void record_render_pass_begin(
+    const VolkDeviceTable& vk,
+    VkCommandBuffer cmd,
+    RenderTarget& rt,
+    const std::optional<std::vector<std::array<float, 4>>>& clear_colors,
+    float clear_depth,
+    std::uint32_t clear_stencil);
+void record_render_pass_end(const VolkDeviceTable& vk, VkCommandBuffer cmd);
+void record_render_pass_transitions_out(const VolkDeviceTable& vk, VkCommandBuffer cmd, RenderTarget& rt);
+
+// Records the commands of ONE pass as closures, and reports what they touch.
+//
+// This is the engine behind Pass, and since 0.28 it is nothing else. The Graph
+// owns the VkCommandBuffers, decides every barrier by folding the passes'
+// events, and replays these closures itself — so a recorder holds no Vulkan
+// object of its own except its query pools, and it computes no barrier. It
+// could not: whatever wrote what this pass reads was recorded by a DIFFERENT
+// recorder, and only the graph sees both.
 //
 // The recorded lambdas take a FrameContext rather than a SwapchainRenderer&.
-// That single change is what lets the same command buffer be replayed against a
-// window, an offscreen image, or (later) a compute-only submit: this file no
-// longer knows that swapchains exist.
+// That is what lets one recording be replayed against a window, an offscreen
+// image or a compute-only submit: this file does not know swapchains exist.
 class CommandBuffer
 {
 public:
-    // Takes a Context, not a renderer: command buffers are a device resource and
-    // have nothing to do with presentation. This is what lets a headless Context
-    // with no renderer at all record commands.
+    // Takes a Context, not a renderer: this is a device resource and has
+    // nothing to do with presentation. It is what lets a headless Context with
+    // no renderer at all record commands.
     static std::expected<std::shared_ptr<CommandBuffer>, Error> create(
         Context& context,
         std::optional<bool> auto_barriers = std::nullopt);
 
-    // Deferred: a per-frame VkCommandBuffer may still be executing when the
-    // Python object is dropped.
+    // Where resource uses are reported. The Pass owns both the recorder and
+    // the sink, and sets this immediately after create().
+    void set_event_sink(std::vector<UseEvent>* sink)
+    {
+        event_sink_ = sink;
+    }
+
+    // Deferred: a query pool may still be in use by a submit in flight when
+    // the Python object is dropped.
     ~CommandBuffer();
 
     CommandBuffer(const CommandBuffer&) = delete;
@@ -44,39 +110,12 @@ public:
         return context_.get();
     }
 
+    // Clears the recording. The Graph calls it when a pass retires, which is
+    // what makes a Timer handle from before a reset report Superseded.
     CommandBuffer& begin();
 
-    // The target is explicit. It used to default to "the swapchain" implicitly,
-    // which made presentation a special case dressed up as the default and left
-    // no way to name anything else. Naming what you draw into costs one token
-    // and buys one rule that holds everywhere.
-    // One clear per colour attachment. Empty → black; a single entry clears every
-    // attachment (the common case); N entries clear attachment i with entry i
-    // (per-attachment clears for MRT). The binding accepts both [r,g,b,a] and
-    // [[r,g,b,a], …] and normalises to this.
-    //
-    // nullopt means PRESERVE: load what the attachment already holds instead of
-    // clearing it, which is what puts a second pass on one target (opaque then
-    // transparent, or a UI over a scene). It has to be a distinct state from an
-    // empty vector, because empty already means "clear to black".
-    //
-    // Colour and depth preserve together. Splitting them would be two knobs on
-    // the verb for one question, and the multi-pass case wants both.
-    //
-    // clear_depth is the value, not a second preserve switch: 1.0 is the far
-    // plane and the default, 0.0 is what a reversed-depth buffer starts from
-    // (which is the only way depth_test(compare=GREATER) can ever pass). It is
-    // ignored when the pass preserves.
-    CommandBuffer& begin_rendering(
-        const std::shared_ptr<RenderTarget>& target,
-        const std::optional<std::vector<std::array<float, 4>>>& clear_colors,
-        float clear_depth = 1.0f,
-        std::uint32_t clear_stencil = 0);
-
-    CommandBuffer& end_rendering(const std::shared_ptr<RenderTarget>& target);
-
     // Explicit override for split-screen and similar. The no-argument version is
-    // gone: begin_rendering already covers the whole-target case.
+    // gone: a render pass covers the whole-target case itself.
     CommandBuffer& set_viewport(float x, float y, float width, float height);
 
     CommandBuffer& set_scissor(std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height);
@@ -155,10 +194,11 @@ public:
     // is not either — one rule for both.
     std::expected<void, Error> dispatch_indirect(std::shared_ptr<Buffer> buffer, VkDeviceSize offset = 0);
 
-    // Manual-mode barrier (also legal, if redundant, in auto mode). Refused
-    // inside a rendering scope: vkCmdPipelineBarrier is invalid there, and in
-    // manual mode nothing is hoisted by magic — that would be a second,
-    // implicit way of doing the explicit thing.
+    // Manual-mode barrier (also legal, if redundant, in auto mode). Only in a
+    // pass without a target, which the binding checks: vkCmdPipelineBarrier is
+    // invalid inside a rendering scope, and a render pass IS one. Nothing is
+    // moved out of the way by magic — that would be a second, implicit way of
+    // doing the explicit thing.
     std::expected<void, Error> barrier(std::shared_ptr<Buffer> buffer, Access src, Access dst);
 
     // The image counterpart: transition an image between shader accesses by
@@ -183,7 +223,7 @@ public:
     // image, the default) or SHADER_WRITE (GENERAL — mip 0 fresh from a compute
     // imageStore). Its scope doubles as the barrier waiting on that producer.
     // Refused inside a rendering scope (blits and barriers are illegal there).
-    std::expected<void, Error> generate_mipmaps(std::shared_ptr<Image> image, Access src = Access::SHADER_READ);
+    std::expected<void, Error> generate_mipmaps(const std::shared_ptr<Image>& image, Access src = Access::SHADER_READ);
 
     // Copy one image into another of the same size and format. The history
     // buffer every temporal effect needs: keep last frame's result to blend
@@ -199,8 +239,8 @@ public:
     //
     // Refused inside a rendering scope, like every other transfer verb.
     std::expected<void, Error> copy_image(
-        std::shared_ptr<Image> src,
-        std::shared_ptr<Image> dst,
+        const std::shared_ptr<Image>& src,
+        const std::shared_ptr<Image>& dst,
         Access src_access = Access::SHADER_READ);
 
     // A copy that RESIZES: the two images need not share an extent, and `filter`
@@ -216,8 +256,8 @@ public:
     // tracker treats an image's layout at the start of a replay as UNDEFINED, so
     // the caller names where the source actually is.
     std::expected<void, Error> blit_image(
-        std::shared_ptr<Image> src,
-        std::shared_ptr<Image> dst,
+        const std::shared_ptr<Image>& src,
+        const std::shared_ptr<Image>& dst,
         Access src_access = Access::SHADER_READ,
         VkFilter filter = VK_FILTER_LINEAR);
 
@@ -253,7 +293,7 @@ public:
     // accumulation or history buffer, or clearing a storage image a compute
     // shader only writes part of. A depth image is refused: clearing depth is
     // what a rendering pass does, and it needs the depth clear value.
-    std::expected<void, Error> clear_image(std::shared_ptr<Image> image, std::array<float, 4> color);
+    std::expected<void, Error> clear_image(const std::shared_ptr<Image>& image, std::array<float, 4> color);
 
     // ── GPU timers ──────────────────────────────────────────────────────────
     //
@@ -386,20 +426,27 @@ public:
         return used_buffers_;
     }
 
-    VkCommandBuffer get(std::uint32_t frame_index) const
+    // ── The replay surface the graph executor drives ────────────────────────
+    //
+    // The executor replays a pass's commands itself, interleaving the barriers
+    // the compile scheduled — so it takes the pieces rather than a whole
+    // execute(): the query-pool resets (illegal inside a render pass, so they
+    // run before any pass opens) and a range replay.
+
+    void reset_query_pools(VkCommandBuffer vkCmd, const FrameContext& frame);
+
+    void replay_range(VkCommandBuffer vkCmd, const FrameContext& frame, std::size_t from, std::size_t to) const
     {
-        return command_buffers_[frame_index];
+        for (std::size_t i = from; i < to; ++i)
+        {
+            commands_[i](vkCmd, frame);
+        }
     }
 
-    // One CommandBuffer owns one VkCommandBuffer per ring slot, so replaying it
-    // twice inside one logical frame resets and re-records a buffer the first
-    // replay very likely still has in flight. Unreachable before 0.14 (one
-    // window meant one replay per frame); now it is the obvious way to try to
-    // drive two windows, so it gets a sentence instead of a pending-state VUID
-    // — which a build without the validation layers wouldn't print at all.
-    std::expected<void, Error> claim_for_frame(std::uint64_t serial);
-
-    void execute(VkCommandBuffer vkCmd, const FrameContext& frame);
+    std::size_t command_count() const
+    {
+        return commands_.size();
+    }
 
 private:
     CommandBuffer(std::shared_ptr<Context> context)
@@ -411,28 +458,27 @@ private:
     // destination: the transfer leaves the source sampleable too, and an Image
     // (or a tracker) that still believed it was in GENERAL would hand a stale
     // oldLayout to the next use — a validation error with no obvious author.
-    void finish_image_transfer_(Image* src, Image* dst);
+    void finish_image_transfer_(const std::shared_ptr<Image>& src, const std::shared_ptr<Image>& dst);
 
-    // Records a buffer-barrier lambda. Inside a rendering scope it is hoisted
-    // to just before the begin_rendering lambda (vkCmdPipelineBarrier is
-    // illegal inside dynamic rendering); deferred recording makes the insert
-    // a cheap vector operation on data that only exists at record time.
-    void record_barrier_(std::shared_ptr<Buffer> buffer, ResourceTracker::Barrier b);
+    // The one spelling of "this recording just put the resource into this
+    // state, visible to (stages, access)". A manual barrier, generate_mipmaps
+    // and the image transfers all report through it, and it reaches the sink
+    // whatever auto_barriers_ says — a manual pass's barriers are exactly what
+    // the fold needs in order to place its neighbours' barriers correctly.
+    void note_buffer_state_(
+        const std::shared_ptr<Buffer>& buffer,
+        VkPipelineStageFlags dst_stages,
+        VkAccessFlags dst_access);
 
-    // The image counterpart: an image-memory barrier that also carries the
-    // layout transition the tracker computed. Same hoisting as buffers — a
-    // vkCmdPipelineBarrier is illegal inside dynamic rendering, so a transition
-    // discovered mid-pass (a compute-written image about to be sampled) lands
-    // just before begin_rendering.
-    void record_image_barrier_(std::shared_ptr<Image> image, ResourceTracker::ImageBarrier b);
-
-    // Push a recorded barrier, or hoist it before begin_rendering when inside a
-    // rendering scope. Shared by the buffer and image paths.
-    void hoist_or_push_(std::function<void(VkCommandBuffer, const FrameContext&)> lambda);
+    void note_image_state_(
+        const std::shared_ptr<Image>& image,
+        VkImageLayout layout,
+        VkPipelineStageFlags dst_stages,
+        VkAccessFlags dst_access);
 
     // A recorded timestamp write. Captures `this` (safe: the lambda only runs
-    // inside this->execute) and reads timer_pool_ at execute, so it no-ops when
-    // timestamps are unsupported and follows the pool across a grow.
+    // while the graph replays this recorder) and reads timer_pool_ then, so it
+    // no-ops when timestamps are unsupported and follows the pool across a grow.
     void record_timer_write_(std::uint32_t slot, VkPipelineStageFlagBits stage);
 
     // Best-effort query pool sized for `needed` slots. Queries timestamp
@@ -476,9 +522,9 @@ private:
         const char* what);
 
     // The command processor reads the arguments at DRAW_INDIRECT, which is earlier
-    // than any shader stage — so a compute pass that wrote them in this recording
-    // needs the barrier this produces, and hoist_or_push_ lifts it out of a
-    // rendering scope on its own.
+    // than any shader stage — so a pass that wrote them needs the barrier this
+    // reports, and the graph puts it in this pass's entry batch, before the
+    // rendering scope opens.
     void track_indirect_(const std::shared_ptr<Buffer>& buffer);
 
     void track_use_(
@@ -492,7 +538,8 @@ private:
         VkImageLayout layout,
         VkPipelineStageFlags stages,
         VkAccessFlags access,
-        bool writes);
+        bool writes,
+        bool only_if_tracked = false);
 
     // Does the pipeline bound at this bind point write (set, binding)?
     //
@@ -518,7 +565,7 @@ private:
     //    layout the image was in disagreed unless the user wrote a barrier by hand.
     //  * Compute LOSES barriers it did not need. `use(..., writes=true)` wipes read
     //    state, so two dispatches that only read the same input SSBO used to get a
-    //    WAW barrier between them, and tracked_writes_ also switched on the
+    //    WAW barrier between them, and a reported write also switches on the graph's
     //    per-replay memory barrier. A `readonly buffer` shared down a chain of
     //    passes is the common case, not an exotic one.
     //
@@ -540,22 +587,16 @@ private:
     void track_dispatch_();
 
     std::shared_ptr<Context> context_;
-    std::vector<VkCommandBuffer> command_buffers_;
     std::vector<std::function<void(VkCommandBuffer, const FrameContext&)>> commands_;
     std::vector<std::shared_ptr<DescriptorSet>> used_sets_;
     std::vector<std::shared_ptr<Buffer>> used_buffers_;
 
-    // Frame serial of the last replay; UINT64_MAX = never replayed. A sentinel
-    // rather than 0, because the headless ctx.submit legitimately runs its first
-    // submit at serial 0 (it advances the ring after submitting, not before).
-    std::uint64_t recorded_serial_ = UINT64_MAX;
+    // Where resource uses are reported, for the graph to fold. Owned by the
+    // Pass that owns this recorder, and set before anything is recorded.
+    std::vector<UseEvent>* event_sink_ = nullptr;
 
-    // ── record-time state (reset by begin(), never touched at execute) ──
+    // ── record-time state (reset by begin(), never touched at replay) ──
     bool auto_barriers_ = true;
-    ResourceTracker tracker_;
-    bool tracked_writes_ = false;
-    bool in_rendering_ = false;
-    std::size_t rendering_insert_pos_ = 0;
     std::unordered_map<uint32_t, std::shared_ptr<DescriptorSet>> bound_graphics_sets_;
     std::unordered_map<uint32_t, std::shared_ptr<DescriptorSet>> bound_compute_sets_;
     // Record-time state, so the tracker can read the bound shaders' reflection.

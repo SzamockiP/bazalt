@@ -36,6 +36,7 @@ renderer = ctx.create_renderer(window)
 
 print("plug in a gamepad and move the sticks. ESC or close the window to quit.")
 announced = False
+g = ctx.graph()
 
 while window.is_open():
     bz.poll_events()
@@ -72,15 +73,14 @@ while window.is_open():
             f"L({pad.axis(bz.GamepadAxis.LEFT_X):+.2f}, {pad.axis(bz.GamepadAxis.LEFT_Y):+.2f}) "
             f"R({pad.axis(bz.GamepadAxis.RIGHT_X):+.2f}, {pad.axis(bz.GamepadAxis.RIGHT_Y):+.2f})")
 
-    # One recording per frame: the clear colour is baked into it, and the clear
-    # colour is the whole picture here. `with ctx.record()` is cmd.begin() with
-    # the closing half it never had — it suits a loop like this one, which builds
-    # a command buffer per frame anyway.
-    with ctx.record() as cmd:
-        with cmd.rendering(renderer, clear_color=color):
-            pass
+    # One pass per frame, and it draws nothing: the clear colour belongs to the
+    # pass, and the clear colour is the whole picture here. reset() drops the
+    # pass and keeps the GPU objects — it suits a loop like this one, which
+    # describes the frame again anyway.
+    g.reset()
+    g.add_pass(renderer, clear_color=color)
 
     ctx.begin_frame()
     if renderer.acquire():
-        renderer.present(cmd)
+        renderer.present(g)
     time.sleep(0.004)

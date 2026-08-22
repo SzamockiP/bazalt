@@ -114,6 +114,7 @@ add_library(_core MODULE
     src/CommandBuffer.cpp
     src/Context.cpp
     src/DescriptorSet.cpp
+    src/Graph.cpp
     src/Image.cpp
     src/Pipeline.cpp
     src/RenderTarget.cpp
@@ -125,6 +126,7 @@ add_library(_core MODULE
     src/bindings/Resources.cpp
     src/bindings/Pipelines.cpp
     src/bindings/Commands.cpp
+    src/bindings/Graphs.cpp
     src/bindings/Windowing.cpp
     src/bindings/ContextBind.cpp
     src/bindings/Targets.cpp

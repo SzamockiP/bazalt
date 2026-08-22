@@ -1,0 +1,19 @@
+// Reads and writes the SAME image. Legal without any barrier of its own
+// because each invocation touches one texel and never its neighbours — the
+// hazard is between PASSES, and that is the graph's job.
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, rgba8) uniform image2D img;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(img);
+    if (p.x >= sz.x || p.y >= sz.y) return;
+
+    vec4 c = imageLoad(img, p);
+    // Sepia-ish: push the colour towards warm.
+    vec3 warm = vec3(dot(c.rgb, vec3(0.393, 0.769, 0.189)),
+                     dot(c.rgb, vec3(0.349, 0.686, 0.168)),
+                     dot(c.rgb, vec3(0.272, 0.534, 0.131)));
+    imageStore(img, p, vec4(warm, c.a));
+}

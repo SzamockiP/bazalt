@@ -5,7 +5,7 @@
   * a compute shader fills all six faces with imageStore, writing through the
     2D_ARRAY storage view — no vertices, no fragment shader;
   * the cubemap is baked ONCE, up front: a compute dispatch fills the faces,
-    then cmd.barrier(cubemap, SHADER_WRITE, SHADER_READ) transitions all six
+    then p.barrier(cubemap, SHADER_WRITE, SHADER_READ) transitions all six
     layers from GENERAL (storage) to SHADER_READ_ONLY (sampled). After that the
     render loop just samples it every frame — no regeneration;
   * a fullscreen pass turns each pixel into a world-space ray and samples the
@@ -95,25 +95,25 @@ def camera_push(yaw, pitch):
 # Bake the cubemap once: fill every face in compute, then transition all six
 # layers from GENERAL (storage) to SHADER_READ_ONLY (sampled) by hand. A
 # blocking headless submit, so it's done before the loop starts.
-setup = ctx.create_command_buffer()
-setup.begin()
-(setup.bind_pipeline(generate)
-      .bind_descriptor_set(gen_set, generate)
-      .dispatch((SKY + 7) // 8, (SKY + 7) // 8, 6))
-setup.barrier(cubemap, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
+setup = ctx.graph()
+bake = setup.add_pass()
+(bake.bind_pipeline(generate)
+     .bind_descriptor_set(gen_set, generate)
+     .dispatch((SKY + 7) // 8, (SKY + 7) // 8, 6))
+bake.barrier(cubemap, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
 ctx.submit(setup)
 
 
-def record(cmd, yaw, pitch):
-    cmd.begin()
-    with cmd.rendering(renderer) as c:
-        (c.bind_pipeline(skybox)
+def record(graph, yaw, pitch):
+    graph.reset()
+    with graph.add_pass(renderer) as p:
+        (p.bind_pipeline(skybox)
           .bind_descriptor_set(sky_set, skybox)
           .push_constants(skybox, 0, camera_push(yaw, pitch))
           .draw(3))
 
 
-cmd = ctx.create_command_buffer()
+graph = ctx.graph()
 yaw, pitch = 0.0, 0.0
 last_time = time.time()
 frame_count = 0
@@ -139,5 +139,5 @@ while window.is_open():
     yaw += mouse.dx * 0.002
     pitch = max(-math.pi / 2 + 0.01, min(math.pi / 2 - 0.01, pitch - mouse.dy * 0.002))
 
-    record(cmd, yaw, pitch)
-    renderer.present(cmd)
+    record(graph, yaw, pitch)
+    renderer.present(graph)

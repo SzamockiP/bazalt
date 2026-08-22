@@ -2,9 +2,9 @@
 
 One STORAGE buffer is both the simulation state and the vertex buffer: the
 compute shader integrates {pos, vel} pairs in place, and the draw fetches
-them directly (STORAGE buffers carry VERTEX usage since 0.6). The barrier
-between the dispatch's writes and the vertex fetch is recorded automatically
-— the command buffer is recorded once and replayed every frame.
+them directly (STORAGE buffers carry VERTEX usage since 0.6). The graph puts
+the barrier between the dispatch's writes and the vertex fetch — it is built
+once and sent every frame.
 """
 
 import math
@@ -58,16 +58,16 @@ pool = ctx.create_descriptor_pool()
 sim_set = pool.allocate_set(sim)
 sim_set.set_buffer(0, particles)
 
-# Recorded once. The dispatch -> vertex-fetch barrier is hoisted before the
-# rendering scope automatically; replay-to-replay ordering is handled too.
-cmd = ctx.create_command_buffer()
-cmd.begin()
-(cmd.bind_pipeline(sim)
+# Built once. The dispatch -> vertex-fetch barrier goes between the two passes
+# automatically; submit-to-submit ordering is handled too.
+g = ctx.graph()
+(g.add_pass(name="simulate")
+    .bind_pipeline(sim)
     .bind_descriptor_set(sim_set, sim)
     .push_constants(sim, 0, struct.pack("<f", 1.0 / 60.0))
     .dispatch((N + 63) // 64))
-with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.05, 1.0]) as c:
-    c.bind_pipeline(draw).bind_vertex_buffer(particles).draw(N)
+with g.add_pass(renderer, clear_color=[0.02, 0.02, 0.05, 1.0], name="present") as p:
+    p.bind_pipeline(draw).bind_vertex_buffer(particles).draw(N)
 
 last_time = time.time()
 frame_count = 0
@@ -88,4 +88,4 @@ while window.is_open():
             frame_count = 0
             fps_timer = 0.0
 
-        renderer.present(cmd)
+        renderer.present(g)

@@ -105,6 +105,8 @@ pool = ctx.create_descriptor_pool()
 desc_set = pool.allocate_frame_set(solid)
 desc_set.set_buffer(0, ubuf)
 
+g = ctx.graph()
+
 show_normals = True
 normal_length = 0.25
 
@@ -135,22 +137,21 @@ while window.is_open():
     # every frame and not once at startup.
     ubuf.update(bytes(glm.transpose(proj * view)) + bytes(glm.transpose(model)))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(renderer, clear_color=[0.04, 0.05, 0.08, 1.0]) as c:
-        c.bind_pipeline(solid)
-        c.bind_descriptor_set(desc_set, solid)
-        c.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(index_count)
+    g.reset()
+    with g.add_pass(renderer, clear_color=[0.04, 0.05, 0.08, 1.0], name="sphere") as p:
+        p.bind_pipeline(solid)
+        p.bind_descriptor_set(desc_set, solid)
+        p.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(index_count)
     if show_normals and normal_length > 0.0:
         # A second pass that preserves what the first drew: the lines sit on top of
         # the shaded surface and share its depth buffer, so the ones facing away
         # are hidden by the sphere.
-        with cmd.rendering(renderer, clear_color=None) as c:
-            c.bind_pipeline(normals)
-            c.bind_descriptor_set(desc_set, normals)
-            c.push_constants(normals, 0, struct.pack("f", normal_length))
-            c.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(index_count)
-    renderer.present(cmd)
+        with g.add_pass(renderer, clear_color=None, name="normals") as p:
+            p.bind_pipeline(normals)
+            p.bind_descriptor_set(desc_set, normals)
+            p.push_constants(normals, 0, struct.pack("f", normal_length))
+            p.bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(index_count)
+    renderer.present(g)
 
     frames += 1
     if time.time() - fps_timer >= 1.0:

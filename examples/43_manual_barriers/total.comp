@@ -1,0 +1,16 @@
+// Reads the whole array and adds it into a single slot with an atomic. The
+// pass that runs this READS what the scaling passes wrote, so it must not
+// start before they finish.
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) readonly buffer Data { float values[]; };
+layout(set = 0, binding = 1) buffer Total { uint total; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < values.length()) {
+        // Integer atomics only, so the value is scaled and truncated. This is
+        // an example about barriers, not about accumulation accuracy.
+        atomicAdd(total, uint(values[i] * 1000.0));
+    }
+}

@@ -76,11 +76,11 @@ def main():
     # waits for the upload above, because nothing else can see the dependency.
     push = struct.pack("<QQQ", big.address, out.address, words)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.timer() as gpu:
-        cmd.bind_pipeline(pipeline).push_constants(pipeline, 0, push).dispatch(1)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    p = g.add_pass()
+    with p.timer() as gpu:
+        p.bind_pipeline(pipeline).push_constants(pipeline, 0, push).dispatch(1)
+    ctx.submit(g)
 
     # Every partial sum wrapped at 2^32 in the shader, so the total only agrees
     # with the real one modulo that.

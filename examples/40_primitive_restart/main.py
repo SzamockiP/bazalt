@@ -95,6 +95,8 @@ print(f"{BUFFERS[True][1]} indices with the two sentinels, {BUFFERS[False][1]} w
 restart = True
 wireframe = False
 
+g = ctx.graph()
+
 while window.is_open():
     bz.poll_events()
     if window.is_key_pressed(bz.Key.ESCAPE):
@@ -107,22 +109,22 @@ while window.is_open():
 
     buffer, count = BUFFERS[restart]
 
-    with ctx.record() as cmd:
-        with cmd.rendering(renderer, clear_color=[0.05, 0.07, 0.10, 1.0]):
-            cmd.bind_pipeline(PIPELINES[(restart, wireframe and HAS_WIREFRAME)])
-            cmd.bind_vertex_buffer(vbuf)
-            cmd.bind_index_buffer(buffer)
-            # ONE draw either way. The sentinel is the only difference.
-            cmd.draw_indexed(count)
+    g.reset()
+    with g.add_pass(renderer, clear_color=[0.05, 0.07, 0.10, 1.0]) as p:
+        p.bind_pipeline(PIPELINES[(restart, wireframe and HAS_WIREFRAME)])
+        p.bind_vertex_buffer(vbuf)
+        p.bind_index_buffer(buffer)
+        # ONE draw either way. The sentinel is the only difference.
+        p.draw_indexed(count)
 
     ctx.begin_frame()
     if renderer.acquire():
-        renderer.present(cmd)
+        renderer.present(g)
 
     window.set_title(
         f"Bazalt Demo - Primitive restart | {'ON: 3 blades' if restart else 'OFF: 1 ribbon'}"
         + (" | wireframe" if wireframe and HAS_WIREFRAME else ""))
 
-cmd = None
+g = None
 renderer = None
 window = None

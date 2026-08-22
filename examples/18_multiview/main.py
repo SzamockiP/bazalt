@@ -1,7 +1,7 @@
 """Multiview environment capture — the six cube faces in ONE pass.
 
 This is example 16 (dynamic reflections) with the six capture passes collapsed
-into one via multiview: cmd.rendering(env.all_layers()) renders the room into
+into one via multiview: g.add_pass(env.all_layers()) renders the room into
 every cube face in a single draw, and the vertex shader picks each face's matrix
 with gl_ViewIndex. Same result as the six-pass loop, fewer submissions and less
 CPU — the whole point of multiview.
@@ -193,24 +193,24 @@ reflect_set = pool.allocate_set(reflect_pipe)
 reflect_set.set_image(0, env.color[0], sampler=ctx.create_sampler(filter=bz.Filter.LINEAR))
 
 
-def record(cmd, eye, camera_vp):
-    cmd.begin()
+def record(g, eye, camera_vp):
+    g.reset()
     faces_ubo.update(face_bytes)
     # Capture: ONE pass, all six faces (multiview).
-    with cmd.rendering(env.all_layers(), clear_color=[0, 0, 0, 1]) as c:
-        (c.bind_pipeline(capture_pipe)
+    with g.add_pass(env.all_layers(), clear_color=[0, 0, 0, 1], name="capture") as p:
+        (p.bind_pipeline(capture_pipe)
           .bind_descriptor_set(capture_set, capture_pipe)
           .bind_vertex_buffer(room_vbuf)
           .bind_index_buffer(room_ibuf)
           .draw_indexed(room_count))
 
-    with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.03, 1.0]) as c:
-        (c.bind_pipeline(room_pipe)
+    with g.add_pass(renderer, clear_color=[0.02, 0.02, 0.03, 1.0], name="scene") as p:
+        (p.bind_pipeline(room_pipe)
           .push_constants(room_pipe, 0, bytes(glm.transpose(camera_vp)))
           .bind_vertex_buffer(room_vbuf)
           .bind_index_buffer(room_ibuf)
           .draw_indexed(room_count))
-        (c.bind_pipeline(reflect_pipe)
+        (p.bind_pipeline(reflect_pipe)
           .bind_descriptor_set(reflect_set, reflect_pipe)
           .push_constants(reflect_pipe, 0,
                           bytes(glm.transpose(camera_vp)) + struct.pack("4f", eye.x, eye.y, eye.z, 0.0))
@@ -219,7 +219,7 @@ def record(cmd, eye, camera_vp):
           .draw_indexed(cube_count))
 
 
-cmd = ctx.create_command_buffer()
+g = ctx.graph()
 camera = Camera(pos=(0.0, 2.5, 5.0), yaw=-math.pi / 2, pitch=-0.45)
 
 TITLE = "Bazalt Demo - Multiview Environment Capture"
@@ -247,5 +247,5 @@ while window.is_open():
     camera.update_mouse(mouse.dx, mouse.dy)
     camera.process_keyboard(window, dt)
 
-    record(cmd, camera.pos, camera.view_proj(W / H))
-    renderer.present(cmd)
+    record(g, camera.pos, camera.view_proj(W / H))
+    renderer.present(g)

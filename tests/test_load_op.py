@@ -55,18 +55,15 @@ def test_second_pass_keeps_what_the_first_one_drew(ctx, push_pipeline):
     target = ctx.create_render_target(64, 64)
     pipeline = push_pipeline(target)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=RED)
-    cmd.end_rendering(target)
+    g = ctx.graph()
+    g.add_pass(target, clear_color=RED)
 
-    cmd.begin_rendering(target, clear_color=None)
-    cmd.set_scissor(0, 0, 32, 64)
-    cmd.bind_pipeline(pipeline)
-    cmd.push_constants(pipeline, 0, colour(0.0, 1.0, 0.0, 1.0))
-    cmd.draw(3)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    with g.add_pass(target, clear_color=None) as p:
+        p.set_scissor(0, 0, 32, 64)
+        p.bind_pipeline(pipeline)
+        p.push_constants(pipeline, 0, colour(0.0, 1.0, 0.0, 1.0))
+        p.draw(3)
+    ctx.submit(g)
 
     pixels = target.color[0].read()
     assert np.allclose(pixels[32, 8, :3], [0, 255, 0], atol=2), pixels[32, 8]
@@ -74,29 +71,26 @@ def test_second_pass_keeps_what_the_first_one_drew(ctx, push_pipeline):
 
 
 def test_preserve_survives_a_replay(ctx, push_pipeline):
-    """Two submits of the same recording must land on the same pixels.
+    """Two submits of the same graph must land on the same pixels.
 
-    A recording is replayed every frame, so a preserved pass reads whatever the
+    A graph is replayed every frame, so a preserved pass reads whatever the
     previous replay left. Pass 1 still clears, which is what keeps the sequence
     idempotent — and this is the case that would drift if it did not.
     """
     target = ctx.create_render_target(64, 64)
     pipeline = push_pipeline(target)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=RED)
-    cmd.end_rendering(target)
-    cmd.begin_rendering(target, clear_color=None)
-    cmd.set_scissor(0, 0, 32, 64)
-    cmd.bind_pipeline(pipeline)
-    cmd.push_constants(pipeline, 0, colour(0.0, 1.0, 0.0, 1.0))
-    cmd.draw(3)
-    cmd.end_rendering(target)
+    g = ctx.graph()
+    g.add_pass(target, clear_color=RED)
+    with g.add_pass(target, clear_color=None) as p:
+        p.set_scissor(0, 0, 32, 64)
+        p.bind_pipeline(pipeline)
+        p.push_constants(pipeline, 0, colour(0.0, 1.0, 0.0, 1.0))
+        p.draw(3)
 
-    ctx.submit(cmd)
+    ctx.submit(g)
     first = target.color[0].read().copy()
-    ctx.submit(cmd)
+    ctx.submit(g)
     second = target.color[0].read()
 
     assert np.array_equal(first, second)
@@ -114,20 +108,17 @@ def test_depth_survives_into_the_second_pass(ctx, push_pipeline):
     near = push_pipeline(target, depth_test=True)
     far = push_pipeline(target, far=True, depth_test=True)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=[0.0, 0.0, 0.0, 1.0])
-    cmd.bind_pipeline(near)
-    cmd.push_constants(near, 0, colour(0.0, 1.0, 0.0, 1.0))
-    cmd.draw(3)
-    cmd.end_rendering(target)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:
+        p.bind_pipeline(near)
+        p.push_constants(near, 0, colour(0.0, 1.0, 0.0, 1.0))
+        p.draw(3)
 
-    cmd.begin_rendering(target, clear_color=None)
-    cmd.bind_pipeline(far)
-    cmd.push_constants(far, 0, colour(0.0, 0.0, 1.0, 1.0))
-    cmd.draw(3)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    with g.add_pass(target, clear_color=None) as p:
+        p.bind_pipeline(far)
+        p.push_constants(far, 0, colour(0.0, 0.0, 1.0, 1.0))
+        p.draw(3)
+    ctx.submit(g)
 
     pixels = target.color[0].read()
     assert np.allclose(pixels[32, 32, :3], [0, 255, 0], atol=2), \
@@ -140,11 +131,9 @@ def test_an_empty_clear_list_still_means_black(ctx):
     They used to collapse into one empty vector, so this pins the distinction.
     """
     target = ctx.create_render_target(64, 64)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=[])
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass(target, clear_color=[])
+    ctx.submit(g)
 
     assert np.allclose(target.color[0].read()[32, 32, :3], [0, 0, 0], atol=1)
 
@@ -156,16 +145,12 @@ def test_multisampled_preserve_is_rejected(ctx):
         pytest.skip("GPU reports no MSAA support (max_samples == 1)")
 
     target = ctx.create_render_target(64, 64, samples=min(4, ctx.max_samples()))
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
 
+    # add_pass is the one entry point (the old begin_rendering/rendering pair
+    # collapsed into it), and it must reject at the call, not on submit.
     with pytest.raises(bz.ResourceError, match="nothing to preserve"):
-        cmd.begin_rendering(target, clear_color=None)
-
-    # The `with` sugar goes through the same guard, and must reject at the call
-    # rather than inside __enter__.
-    with pytest.raises(bz.ResourceError, match="nothing to preserve"):
-        cmd.rendering(target, clear_color=None)
+        g.add_pass(target, clear_color=None)
 
 
 def test_a_multisampled_target_still_clears(ctx):
@@ -174,10 +159,8 @@ def test_a_multisampled_target_still_clears(ctx):
         pytest.skip("GPU reports no MSAA support (max_samples == 1)")
 
     target = ctx.create_render_target(64, 64, samples=min(4, ctx.max_samples()))
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=RED)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass(target, clear_color=RED)
+    ctx.submit(g)
 
     assert np.allclose(target.color[0].read()[32, 32, :3], [255, 0, 0], atol=2)

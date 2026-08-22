@@ -297,6 +297,16 @@ public:
         return image_states_.contains(image);
     }
 
+    // The layout this fold has left the image in, or nullopt where it has never
+    // seen it. A render pass derives its entry barrier from the RenderTarget
+    // rather than from any state, so when it PRESERVES an attachment something
+    // else moved, the graph asks here and corrects the difference first.
+    std::optional<VkImageLayout> layout_of(Image* image) const
+    {
+        const auto it = image_states_.find(image);
+        return it == image_states_.end() ? std::nullopt : std::optional{it->second.layout};
+    }
+
     // A manual cmd.barrier(image) / generate_mipmaps already recorded a real
     // transition to `layout`, making prior work available to (dst_stages,
     // dst_access). Seed the tracker so a following automatic use of the same
@@ -320,6 +330,43 @@ public:
         st.read_access = dst_access;
         st.visible_stages = dst_stages;
         st.visible_access = dst_access;
+    }
+
+    // A render pass WROTE this image as an attachment, and left it in `layout`.
+    // The graph reports this after folding a render pass, because an attachment
+    // write is not a descriptor use and nothing else would report it — without
+    // it a later pass sampling the image sees no predecessor and gets no
+    // barrier, which is a READ_AFTER_WRITE hazard on the most ordinary thing a
+    // frame does.
+    //
+    // Distinct from note_image_layout, which models a COMPLETED read: this one
+    // has to leave the write PENDING so the next read is ordered against it.
+    // The layout is already correct on the device (the pass's own exit
+    // transition put it there), so nothing here asks for a transition — only
+    // for the memory dependency.
+    //
+    // `visible_*` is what that exit transition already made available. A
+    // colour attachment retires naming the fragment shader, because sampling
+    // the result is what an offscreen target is for, so a fragment read after
+    // it needs nothing more and gets no second barrier. A read from any OTHER
+    // stage — a compute pass consuming a rendered texture — is outside what
+    // the retire named, and that one does get the barrier.
+    void note_image_write(
+        Image* image,
+        VkImageLayout layout,
+        VkPipelineStageFlags src_stages,
+        VkAccessFlags src_access,
+        VkPipelineStageFlags visible_stages,
+        VkAccessFlags visible_access)
+    {
+        ImageState& st = image_states_[image];
+        st = {};
+        st.layout = layout;
+        st.written = true;
+        st.write_stages = src_stages;
+        st.write_access = src_access;
+        st.visible_stages = visible_stages;
+        st.visible_access = visible_access;
     }
 
     void note_image_layout(

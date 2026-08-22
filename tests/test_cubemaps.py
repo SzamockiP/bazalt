@@ -61,15 +61,13 @@ def test_cubemap_from_arrays_samples_every_face(ctx, fullscreen_vert):
     dset.set_image(0, cube)
 
     for i, direction in enumerate(FACE_DIRS):
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(target)
-        cmd.bind_pipeline(pipeline)
-        cmd.bind_descriptor_set(dset, pipeline, set=0)
-        cmd.push_constants(pipeline, 0, struct.pack("4f", *direction, 0.0))
-        cmd.draw(3)
-        cmd.end_rendering(target)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target) as p:
+            p.bind_pipeline(pipeline)
+            p.bind_descriptor_set(dset, pipeline, set=0)
+            p.push_constants(pipeline, 0, struct.pack("4f", *direction, 0.0))
+            p.draw(3)
+        ctx.submit(g)
 
         got = target.color[0].read()[4, 4, :3]
         assert np.allclose(got, [i * 40, 0, 0], atol=2), f"face {i}: {got}"
@@ -89,12 +87,12 @@ def test_empty_texture_array_filled_by_compute(ctx):
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_storage_image(0, arr)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_descriptor_set(dset, pipeline, set=0)
-    cmd.dispatch(2, 2, 4)  # 16/8 x 16/8 x layers
-    ctx.submit(cmd)
+    g = ctx.graph()
+    p = g.add_pass()
+    p.bind_pipeline(pipeline)
+    p.bind_descriptor_set(dset, pipeline, set=0)
+    p.dispatch(2, 2, 4)  # 16/8 x 16/8 x layers
+    ctx.submit(g)
 
     # Layer 0: red = 0/5 = 0, green 0.25, blue 0.5 (UNORM * 255).
     assert np.allclose(arr.read()[8, 8], [0, 64, 128, 255], atol=2), arr.read()[8, 8]
@@ -121,20 +119,19 @@ def test_empty_cubemap_compute_filled_then_sampled(ctx, fullscreen_vert):
     sample_set.set_image(0, cube)
 
     for i, direction in enumerate(FACE_DIRS):
-        # Fill + sample in one recording so the auto-barrier hoists the
+        # Fill + sample on one graph so the auto-barrier places the
         # GENERAL->SHADER_READ_ONLY transition (all six layers) before the pass.
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.bind_pipeline(fill)
-        cmd.bind_descriptor_set(fill_set, fill, set=0)
-        cmd.dispatch(2, 2, 6)
-        cmd.begin_rendering(target)
-        cmd.bind_pipeline(sampler_pipe)
-        cmd.bind_descriptor_set(sample_set, sampler_pipe, set=0)
-        cmd.push_constants(sampler_pipe, 0, struct.pack("4f", *direction, 0.0))
-        cmd.draw(3)
-        cmd.end_rendering(target)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        p = g.add_pass()
+        p.bind_pipeline(fill)
+        p.bind_descriptor_set(fill_set, fill, set=0)
+        p.dispatch(2, 2, 6)
+        with g.add_pass(target) as r:
+            r.bind_pipeline(sampler_pipe)
+            r.bind_descriptor_set(sample_set, sampler_pipe, set=0)
+            r.push_constants(sampler_pipe, 0, struct.pack("4f", *direction, 0.0))
+            r.draw(3)
+        ctx.submit(g)
 
         # Face i red = i/5 * 255; green 0.25, blue 0.5.
         expected = [round(i / 5 * 255), 64, 128]
@@ -146,7 +143,7 @@ def test_empty_cubemap_compute_filled_then_sampled(ctx, fullscreen_vert):
 
 
 def test_compute_baked_cubemap_sampled_in_a_later_submit(ctx, fullscreen_vert):
-    """cmd.barrier(image, SHADER_WRITE, SHADER_READ) transitions a compute-baked
+    """p.barrier(image, SHADER_WRITE, SHADER_READ) transitions a compute-baked
     cubemap to sampleable, so a LATER submit can sample it — bake once, sample
     many. The cross-submit layout is what the automatic tracker can't reach."""
     comp = ctx.compile_shader(str(SHADER_DIR / "store_array.comp"), bz.ShaderStage.COMPUTE)
@@ -157,10 +154,10 @@ def test_compute_baked_cubemap_sampled_in_a_later_submit(ctx, fullscreen_vert):
     fill_set.set_storage_image(0, cube)
 
     # Bake once: fill every face, then transition to sampleable — its own submit.
-    bake = ctx.create_command_buffer()
-    bake.begin()
-    bake.bind_pipeline(fill).bind_descriptor_set(fill_set, fill, set=0).dispatch(2, 2, 6)
-    bake.barrier(cube, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
+    bake = ctx.graph()
+    p = bake.add_pass()
+    p.bind_pipeline(fill).bind_descriptor_set(fill_set, fill, set=0).dispatch(2, 2, 6)
+    p.barrier(cube, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
     ctx.submit(bake)
 
     # Sample in separate submits, no regeneration — each face keeps its colour.
@@ -170,14 +167,12 @@ def test_compute_baked_cubemap_sampled_in_a_later_submit(ctx, fullscreen_vert):
     sample_set.set_image(0, cube)
 
     for i, direction in enumerate(FACE_DIRS):
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(target)
-        cmd.bind_pipeline(pipeline).bind_descriptor_set(sample_set, pipeline, set=0)
-        cmd.push_constants(pipeline, 0, struct.pack("4f", *direction, 0.0))
-        cmd.draw(3)
-        cmd.end_rendering(target)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target) as p:
+            p.bind_pipeline(pipeline).bind_descriptor_set(sample_set, pipeline, set=0)
+            p.push_constants(pipeline, 0, struct.pack("4f", *direction, 0.0))
+            p.draw(3)
+        ctx.submit(g)
         expected = [round(i / 5 * 255), 64, 128]
         assert np.allclose(target.color[0].read()[4, 4, :3], expected, atol=2), \
             f"face {i}: {target.color[0].read()[4, 4, :3]}"
@@ -187,15 +182,15 @@ def test_image_barrier_rejects_non_shader_access(ctx):
     """The image barrier's layout follows the access; only the two shader
     accesses name an image layout."""
     cube = ctx.create_image(8, 8, bz.Format.RGBA8, cube=True)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass()
     with pytest.raises(bz.ResourceError):
-        cmd.barrier(cube, bz.Access.VERTEX_READ, bz.Access.SHADER_READ)
+        p.barrier(cube, bz.Access.VERTEX_READ, bz.Access.SHADER_READ)
 
 
-def test_manual_barrier_then_auto_sample_in_one_recording(ctx, fullscreen_vert):
-    """A manual cmd.barrier(image) must compose with an AUTOMATIC sample of the
-    same image in ONE recording. The barrier seeds the tracker, so the auto path
+def test_manual_barrier_then_auto_sample_in_one_graph(ctx, fullscreen_vert):
+    """A manual p.barrier(image) must compose with an AUTOMATIC sample of the
+    same image on ONE graph. The barrier seeds the tracker, so the auto path
     sees the post-barrier layout and emits no second transition; without that
     seeding it would re-transition from a stale GENERAL and the validation-as-
     assert ctx fixture would catch the layout mismatch."""
@@ -212,17 +207,17 @@ def test_manual_barrier_then_auto_sample_in_one_recording(ctx, fullscreen_vert):
     sample_set.set_image(0, cube)
 
     for i, direction in enumerate(FACE_DIRS):
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.bind_pipeline(fill).bind_descriptor_set(fill_set, fill, set=0).dispatch(2, 2, 6)
-        # Manual barrier mid-recording, then an automatic sample of the same image.
-        cmd.barrier(cube, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
-        cmd.begin_rendering(target)
-        cmd.bind_pipeline(sampler_pipe).bind_descriptor_set(sample_set, sampler_pipe, set=0)
-        cmd.push_constants(sampler_pipe, 0, struct.pack("4f", *direction, 0.0))
-        cmd.draw(3)
-        cmd.end_rendering(target)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        p = g.add_pass()
+        p.bind_pipeline(fill).bind_descriptor_set(fill_set, fill, set=0).dispatch(2, 2, 6)
+        # Manual barrier in the compute pass, then an automatic sample of the
+        # same image in the render pass after it.
+        p.barrier(cube, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
+        with g.add_pass(target) as r:
+            r.bind_pipeline(sampler_pipe).bind_descriptor_set(sample_set, sampler_pipe, set=0)
+            r.push_constants(sampler_pipe, 0, struct.pack("4f", *direction, 0.0))
+            r.draw(3)
+        ctx.submit(g)
 
         expected = [round(i / 5 * 255), 64, 128]
         assert np.allclose(target.color[0].read()[4, 4, :3], expected, atol=2), \

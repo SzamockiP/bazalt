@@ -86,13 +86,13 @@ def fullscreen_pipeline(ctx, frag, target):
 
 def make_renderer(ctx, target, pipeline):
     def render():
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(target, clear_color=[0, 0, 0, 1])
-        cmd.bind_pipeline(pipeline)
-        cmd.draw(3)
-        cmd.end_rendering(target)
-        ctx.submit(cmd)  # drains pending hot reloads
+        # A fresh graph per call, so each frame picks up the pipeline the
+        # watcher may have rebuilt since the last one.
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+            p.bind_pipeline(pipeline)
+            p.draw(3)
+        ctx.submit(g)  # drains pending hot reloads
         return target.color[0].read()
     return render
 
@@ -100,11 +100,9 @@ def make_renderer(ctx, target, pipeline):
 def drive_drain(ctx):
     """A clear-only submit whose only purpose is to run the watcher drain."""
     t = ctx.create_render_target(8, 8)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(t, clear_color=[0, 0, 0, 1])
-    cmd.end_rendering(t)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass(t, clear_color=[0, 0, 0, 1])
+    ctx.submit(g)
 
 
 # ── shaders ────────────────────────────────────────────────────────────────

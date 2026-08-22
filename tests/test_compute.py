@@ -52,12 +52,12 @@ def test_dispatch_doubles_a_storage_buffer(ctx):
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, sbuf)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_descriptor_set(dset, pipeline, set=0)
-    cmd.dispatch(2)  # 128 / local_size_x=64
-    ctx.submit(cmd)
+    g = ctx.graph()
+    p = g.add_pass()
+    p.bind_pipeline(pipeline)
+    p.bind_descriptor_set(dset, pipeline, set=0)
+    p.dispatch(2)  # 128 / local_size_x=64
+    ctx.submit(g)
 
     # The headless submit waits idle, so no barrier is needed between the
     # dispatch and this readback.
@@ -78,13 +78,13 @@ def test_push_constants_reach_a_compute_shader(ctx):
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, sbuf)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_descriptor_set(dset, pipeline, set=0)
-    cmd.push_constants(pipeline, 0, struct.pack("<f", 5.0))
-    cmd.dispatch(1)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    p = g.add_pass()
+    p.bind_pipeline(pipeline)
+    p.bind_descriptor_set(dset, pipeline, set=0)
+    p.push_constants(pipeline, 0, struct.pack("<f", 5.0))
+    p.dispatch(1)
+    ctx.submit(g)
 
     assert np.allclose(sbuf.read(np.float32), data + 5.0)
 
@@ -106,12 +106,12 @@ def test_uniform_buffer_reaches_a_compute_shader(ctx):
     dset.set_buffer(0, sbuf)
     dset.set_buffer(1, ubuf)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_descriptor_set(dset, pipeline, set=0)
-    cmd.dispatch(1)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    p = g.add_pass()
+    p.bind_pipeline(pipeline)
+    p.bind_descriptor_set(dset, pipeline, set=0)
+    p.dispatch(1)
+    ctx.submit(g)
 
     assert np.allclose(sbuf.read(np.float32), data * 3.0)
 
@@ -151,12 +151,12 @@ def test_a_compute_shader_can_sample_a_texture(ctx):
                                                       address_mode=bz.AddressMode.CLAMP))
     dset.set_storage_image(1, dst)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.bind_pipeline(pipe)
-    cmd.bind_descriptor_set(dset, pipe, set=0)
-    cmd.dispatch(4, 4)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    p = g.add_pass()
+    p.bind_pipeline(pipe)
+    p.bind_descriptor_set(dset, pipe, set=0)
+    p.dispatch(4, 4)
+    ctx.submit(g)
 
     out = dst.read()[:, :, 0].astype(int)
     # The corners keep the source's own values, so the sampler read the image.
@@ -199,17 +199,16 @@ def test_update_after_bind_on_a_plain_binding(extra_context):
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, solid((255, 0, 0)))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
-        c.bind_pipeline(pipe).bind_descriptor_set(dset, pipe, set=0).draw(3)
-    ctx.submit(cmd, wait=False)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipe).bind_descriptor_set(dset, pipe, set=0).draw(3)
+    ctx.submit(g, wait=False)
 
     # The submit is still pending here, which is the whole point.
     dset.set_image(0, solid((0, 255, 0)))
     ctx.wait()
 
-    ctx.submit(cmd)
+    ctx.submit(g)
     assert np.allclose(target.color[0].read()[16, 16, :3], (0, 255, 0), atol=2)
 
 

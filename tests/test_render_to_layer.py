@@ -36,15 +36,13 @@ def _sample_depth_layer(ctx, target, layer):
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, target.depth, sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(screen, clear_color=[0, 0, 0, 1])
-    cmd.bind_pipeline(pipe)
-    cmd.bind_descriptor_set(dset, pipe, set=0)
-    cmd.push_constants(pipe, 0, struct.pack("i", layer))
-    cmd.draw(3)
-    cmd.end_rendering(screen)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(screen, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipe)
+        p.bind_descriptor_set(dset, pipe, set=0)
+        p.push_constants(pipe, 0, struct.pack("i", layer))
+        p.draw(3)
+    ctx.submit(g)
     return screen.color[0].read()
 
 
@@ -64,15 +62,13 @@ def _sample_color_layer(ctx, target, layer):
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, target.color[0], sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(screen, clear_color=[0, 0, 0, 1])
-    cmd.bind_pipeline(pipe)
-    cmd.bind_descriptor_set(dset, pipe, set=0)
-    cmd.push_constants(pipe, 0, struct.pack("i", layer))
-    cmd.draw(3)
-    cmd.end_rendering(screen)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(screen, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipe)
+        p.bind_descriptor_set(dset, pipe, set=0)
+        p.push_constants(pipe, 0, struct.pack("i", layer))
+        p.draw(3)
+    ctx.submit(g)
     return screen.color[0].read()
 
 
@@ -92,19 +88,16 @@ def test_render_into_specific_layer(ctx, triangle_shaders, triangle_buffers):
                   .depth_test(True)
                   .build(target.layer(0)))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
     # Layer 0: clear only, no draw — leaves the whole layer at clear depth 1.0.
-    cmd.begin_rendering(target.layer(0))
-    cmd.end_rendering(target.layer(0))
+    g.add_pass(target.layer(0))
     # Layer 1: the triangle.
-    cmd.begin_rendering(target.layer(1))
-    cmd.bind_pipeline(depth_pipe)
-    cmd.bind_vertex_buffer(vbuf)
-    cmd.bind_index_buffer(ibuf)
-    cmd.draw_indexed(3)
-    cmd.end_rendering(target.layer(1))
-    ctx.submit(cmd)
+    with g.add_pass(target.layer(1)) as p:
+        p.bind_pipeline(depth_pipe)
+        p.bind_vertex_buffer(vbuf)
+        p.bind_index_buffer(ibuf)
+        p.draw_indexed(3)
+    ctx.submit(g)
 
     layer0 = _sample_depth_layer(ctx, target, 0)
     layer1 = _sample_depth_layer(ctx, target, 1)
@@ -129,12 +122,10 @@ def test_render_into_mip(ctx):
     target = ctx.create_render_target(64, 64, color=bz.Format.RGBA8, mip_levels=3)
     colors = [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1]]
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
     for m, c in enumerate(colors):
-        cmd.begin_rendering(target.layer(0, mip=m), clear_color=c)  # clear-only, no draw
-        cmd.end_rendering(target.layer(0, mip=m))
-    ctx.submit(cmd)
+        g.add_pass(target.layer(0, mip=m), clear_color=c)  # clear-only, no draw
+    ctx.submit(g)
 
     screen = ctx.create_render_target(8, 8)
     pipe = (ctx.graphics_pipeline()
@@ -149,15 +140,13 @@ def test_render_into_mip(ctx):
 
     expected = [[255, 0, 0], [0, 255, 0], [0, 0, 255]]
     for m in range(3):
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(screen, clear_color=[0, 0, 0, 1])
-        cmd.bind_pipeline(pipe)
-        cmd.bind_descriptor_set(dset, pipe, set=0)
-        cmd.push_constants(pipe, 0, struct.pack("f", float(m)))
-        cmd.draw(3)
-        cmd.end_rendering(screen)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(screen, clear_color=[0, 0, 0, 1]) as p:
+            p.bind_pipeline(pipe)
+            p.bind_descriptor_set(dset, pipe, set=0)
+            p.push_constants(pipe, 0, struct.pack("f", float(m)))
+            p.draw(3)
+        ctx.submit(g)
         assert np.array_equal(screen.color[0].read()[4, 4, :3], expected[m]), \
             f"mip {m}: {screen.color[0].read()[4, 4, :3]}"
 
@@ -168,11 +157,9 @@ def test_render_into_layer_and_mip(ctx):
     both can be selected at once and the pass is validation-clean (the view and
     the barrier must agree on {layer 1, mip 1}, or the ctx fixture flags it)."""
     target = ctx.create_render_target(32, 32, color=bz.Format.RGBA8, layers=2, mip_levels=2)
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target.layer(1, mip=1), clear_color=[1, 0, 0, 1])
-    cmd.end_rendering(target.layer(1, mip=1))
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass(target.layer(1, mip=1), clear_color=[1, 0, 0, 1])
+    ctx.submit(g)
 
 
 def test_combined_axis_bounds_are_checked(ctx):
@@ -200,11 +187,10 @@ def test_multiview_renders_all_layers_in_one_pass(ctx):
             .fragment_shader(mv_frag)
             .build(target.all_layers()))  # pipeline picks up the view mask
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target.all_layers(), clear_color=[0, 0, 0, 1]) as c:
-        c.bind_pipeline(pipe).draw(3)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target.all_layers(), clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipe).draw(3)
+    ctx.submit(g)
 
     for i in range(3):
         px = _sample_color_layer(ctx, target, i)
@@ -239,11 +225,10 @@ def test_msaa_multiview_resolves_all_layers(ctx):
             .fragment_shader(mv_frag)
             .build(target.all_layers()))  # picks up both samples and view mask
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target.all_layers(), clear_color=[0, 0, 0, 1]) as c:
-        c.bind_pipeline(pipe).draw(3)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target.all_layers(), clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipe).draw(3)
+    ctx.submit(g)
 
     for i in range(3):
         px = _sample_color_layer(ctx, target, i)
@@ -310,14 +295,11 @@ def test_msaa_layered_resolves_per_layer(ctx, triangle_shaders, triangle_buffers
             .depth_test(True)
             .build(target.layer(0)))  # picks up samples from the target
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target.layer(0), clear_color=clear)
-    cmd.end_rendering(target.layer(0))
-    cmd.begin_rendering(target.layer(1), clear_color=clear)
-    cmd.bind_pipeline(pipe).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
-    cmd.end_rendering(target.layer(1))
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass(target.layer(0), clear_color=clear)
+    with g.add_pass(target.layer(1), clear_color=clear) as p:
+        p.bind_pipeline(pipe).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
+    ctx.submit(g)
 
     l0 = _sample_color_layer(ctx, target, 0)
     l1 = _sample_color_layer(ctx, target, 1)

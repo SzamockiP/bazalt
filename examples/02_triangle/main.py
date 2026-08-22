@@ -32,19 +32,18 @@ vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, 
 indices = [0, 1, 2]
 ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
 
-# Record command buffer once
-cmd = ctx.create_command_buffer()
-cmd.begin()
-with cmd.rendering(renderer, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
-    (c.bind_pipeline(pipeline)
+# Build the graph once
+g = ctx.graph()
+with g.add_pass(renderer, clear_color=[0.1, 0.2, 0.3, 1.0]) as p:
+    (p.bind_pipeline(pipeline)
       .bind_vertex_buffer(vbuf)
       .bind_index_buffer(ibuf)
       .draw_indexed(3))
 
-# Main loop. One recording, replayed every frame: the command buffer holds
-# lambdas, not a frame's worth of state, so nothing here needs re-recording.
+# Main loop. One graph, sent every frame: a pass holds lambdas, not a frame's
+# worth of state, so nothing here needs a rebuild.
 while window.is_open():
     bz.poll_events()
     ctx.begin_frame()
     if renderer.acquire():
-        renderer.present(cmd)
+        renderer.present(g)

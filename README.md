@@ -47,18 +47,18 @@ vbuf = ctx.create_buffer([
      0.5,  0.5, 0.0,   0.0, 0.0, 1.0,
 ], bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
 
-# The triangle does not change, so record the commands one time and send the
-# same recording every frame.
-cmd = ctx.create_command_buffer()
-cmd.begin()
-with cmd.rendering(renderer, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
-    c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).draw(3)
+# You describe a frame as passes on a graph. A pass with a render target draws
+# into it. The triangle does not change, so build the graph one time and send
+# the same graph every frame.
+g = ctx.graph()
+with g.add_pass(renderer, clear_color=[0.1, 0.2, 0.3, 1.0]) as p:
+    p.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).draw(3)
 
 while window.is_open():
     bz.poll_events()
     ctx.begin_frame()          # opens one frame for every window on this Context
     if renderer.acquire():     # False when this window sits the frame out
-        renderer.present(cmd)
+        renderer.present(g)
 ```
 
 ```glsl
@@ -111,16 +111,19 @@ That is why bazalt has no `y_up` switch. A flipped viewport reverses the triangl
 so `CullMode` and `FrontFace` would mean opposite things depending on a keyword argument,
 and the rasterizer would point up while `image.read()`, `copy_image` and `set_scissor` still
 measure from the top left. If you want a flipped viewport anyway, nothing stops you:
-`cmd.set_viewport(0, height, width, -height)` inside the rendering scope overrides the one
-bazalt emits.
+`p.set_viewport(0, height, width, -height)` inside a render pass overrides the one bazalt
+emits.
 
 ## Compute writes an image, and you edit it while it runs
 
 A compute shader fills an image texel by texel. A fullscreen triangle then samples that
-image. Two things happen here that you do not write:
+image. That is two passes, and two things happen here that you do not write:
 
-- Bazalt sees that the dispatch writes the image and the draw reads it. It records the
-  barrier and the layout change between them.
+- Bazalt compares what each pass reads with what the earlier passes wrote. It sees that the
+  compute pass writes the image and the render pass reads it, so it puts the barrier and
+  the layout change between them. It does this for the whole frame at one time, so an
+  image that two passes use in a row keeps the right layout instead of changing back and
+  forth.
 - `hot_reload=True` watches every file bazalt loaded. Edit `pattern.comp` with the window
   open and the picture changes. A typo logs a `ShaderError` and the last good version stays
   on screen.
@@ -160,7 +163,7 @@ write_set.set_storage_image(0, image)
 read_set = pool.allocate_set(present)
 read_set.set_image(0, image)
 
-cmd = ctx.create_command_buffer()
+g = ctx.graph()
 start = time.time()
 
 while window.is_open():
@@ -169,15 +172,18 @@ while window.is_open():
     if not renderer.acquire():
         continue
 
-    cmd.begin()
-    (cmd.bind_pipeline(generate)
+    # The push constant changes every frame, so build the graph again. Use
+    # reset() rather than a new graph: it keeps the GPU objects.
+    g.reset()
+    (g.add_pass(name="pattern")
+        .bind_pipeline(generate)
         .bind_descriptor_set(write_set, generate)
         .push_constants(generate, 0, struct.pack("<f", time.time() - start))
         .dispatch((W + 7) // 8, (H + 7) // 8))
-    with cmd.rendering(renderer) as c:
-        c.bind_pipeline(present).bind_descriptor_set(read_set, present).draw(3)
+    with g.add_pass(renderer, name="present") as p:
+        p.bind_pipeline(present).bind_descriptor_set(read_set, present).draw(3)
 
-    renderer.present(cmd)
+    renderer.present(g)
 ```
 
 ```glsl
@@ -234,11 +240,10 @@ target = ctx.create_render_target(800, 600, depth=bz.Format.D32F)
 
 pipeline = ...   # the triangle pipeline above, built with .build(target)
 
-cmd = ctx.create_command_buffer()
-cmd.begin()
-with cmd.rendering(target, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
-    c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).draw(3)
-ctx.submit(cmd)
+g = ctx.graph()
+with g.add_pass(target, clear_color=[0.1, 0.2, 0.3, 1.0]) as p:
+    p.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).draw(3)
+ctx.submit(g)
 
 pixels = target.color[0].read()      # numpy (600, 800, 4) uint8
 ```
@@ -259,7 +264,7 @@ from PIL import Image
 
 with bz.Context() as ctx:
     target = ctx.create_render_target(512, 512)
-    # ...record and submit...
+    # ...build a graph and submit it...
     pixels = target.color[0].read()
 
 Image.fromarray(pixels)              # the cell shows it
@@ -281,12 +286,16 @@ GPU as a calculator.
 
 - **Vulkan, and not an engine.** You keep the pipelines, the command buffers and the memory.
   Bazalt removes the setup code and the object lifetimes.
-- **Barriers on their own.** Bazalt tracks the hazards while you record, then inserts the
-  barriers and the layout changes. It reads the SPIR-V to find out which resources a shader
-  writes, so a storage image written by a fragment shader is ordered for you.
-  `Context(auto_barriers=False)` gives that job back to you through `cmd.barrier()`.
-- **Compute beside graphics.** One command buffer holds a dispatch and a draw. A dispatch
-  writes the vertices and the draw reads them. Results come back as NumPy arrays.
+- **Barriers on their own.** You describe a frame as passes on a graph. Bazalt compares
+  what each pass reads with what the earlier passes wrote, then puts the barriers and the
+  layout changes between them — for the whole frame at one time. It reads the SPIR-V to
+  find out which resources a shader writes, so a storage image written by a fragment
+  shader is ordered for you. `add_pass(auto_barriers=False)` gives that job back to you
+  through `p.barrier()`, for that pass alone.
+- **Compute beside graphics.** One graph holds a compute pass and a render pass. A
+  dispatch writes the vertices and the draw reads them. Results come back as NumPy arrays.
+  Each pass names the queue it runs on. A later release adds a second queue, and that
+  needs no change to this API: you get a new value to pass, and the choice stays yours.
 - **Images in every shape.** 2D textures, texture arrays, cubemaps and 3D volumes come from
   one function: `create_image(w, h, cube=True)` or `create_image(w, h, depth=n)`. A volume
   is a `sampler3D` in the shader — colour-grading LUTs, volumetric noise, raymarched
@@ -320,14 +329,15 @@ GPU as a calculator.
   something happens, for one that does not.
 - **Tools for a picture that looks wrong.** The validation layers report through a Python
   logger. `Context(shader_printf=True)` sends `debugPrintfEXT()` from a shader to that
-  logger. `Context(gpu_timing=True)` and `cmd.timer()` measure a frame or one slice of a
-  recording. `cmd.label()` makes a RenderDoc capture readable. A compiled shader also tells
+  logger. `Context(gpu_timing=True)` and `p.timer()` measure a frame or one part of a
+  pass. `p.label()` and the pass name make a RenderDoc capture readable. A compiled shader also tells
   you what bazalt read out of it: `shader.writes`, `shader.writes_unknown` and
   `shader.prints`.
 - **Wide reach.** Vulkan 1.2 is the baseline and bazalt uses 1.3 where the driver has it. You
   ask for a capability by what it does, never by a version or an extension name.
-- **No ceiling.** `cmd.barrier()`, `raw_extensions` and the Vulkan handles stay open for the
-  work bazalt does not cover.
+- **No ceiling.** A manual pass with `p.barrier()`, `submit(after=...)` to order whole
+  submits by hand, `raw_extensions` and the Vulkan handles stay open for the work bazalt
+  does not cover.
 
 ## Design rules
 
@@ -346,6 +356,7 @@ Every directory in `examples/` runs on its own.
 | Subject | Examples |
 | --- | --- |
 | Basics | [01_empty_window](examples/01_empty_window), [02_triangle](examples/02_triangle), [03_textured_quad](examples/03_textured_quad), [04_colored_cube](examples/04_colored_cube), [05_textured_cube](examples/05_textured_cube), [06_multiple_cubes](examples/06_multiple_cubes), [07_model_loading](examples/07_model_loading) |
+| The graph | [42_pass_toggles](examples/42_pass_toggles) (switch a pass off, take one out), [43_manual_barriers](examples/43_manual_barriers) (one manual pass beside the automatic ones), [44_submit_order](examples/44_submit_order) (Serial handles and `after=`) |
 | Compute | [11_particles](examples/11_particles) (compute writes the vertices), [13_compute_postprocess](examples/13_compute_postprocess), [41_buffer_address](examples/41_buffer_address) (a buffer larger than a descriptor can bind) |
 | Shadows and deferred | [09_shadow_map](examples/09_shadow_map), [17_cascade_shadows](examples/17_cascade_shadows), [10_gbuffer_mrt](examples/10_gbuffer_mrt) |
 | Cubemaps and layers | [14_skybox](examples/14_skybox), [16_env_capture](examples/16_env_capture) (six faces), [18_multiview](examples/18_multiview) |

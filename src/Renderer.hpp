@@ -17,7 +17,7 @@
 #include "RenderTarget.hpp"
 #include "SurfaceProvider.hpp"
 
-class CommandBuffer;
+class Graph;
 
 struct SwapchainSupportDetails
 {
@@ -230,7 +230,7 @@ public:
     // Fails rather than raises: the caller reached here with the GIL released,
     // and the recording it drives can fail on a lost device.
     std::expected<void, Error> present(
-        std::shared_ptr<CommandBuffer> cmd,
+        std::shared_ptr<Graph> graph,
         std::uint64_t upload_wait_serial = 0,
         bool capture = false);
 

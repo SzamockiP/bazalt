@@ -38,12 +38,11 @@ def test_readme_triangle(ctx):
         +0.5, +0.5, 0.0, 0.0, 0.0, 1.0,
     ], bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
-        c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).draw(3)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.1, 0.2, 0.3, 1.0]) as p:
+        p.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).draw(3)
 
-    ctx.submit(cmd)
+    ctx.submit(g)
 
     pixels = target.color[0].read()
     assert pixels.shape == (600, 800, 4)
@@ -86,16 +85,16 @@ def test_readme_compute_writes_an_image(ctx):
     read_set = pool.allocate_set(present, set=0)
     read_set.set_image(0, image)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    (cmd.bind_pipeline(generate)
+    g = ctx.graph()
+    (g.add_pass(name="pattern")
+        .bind_pipeline(generate)
         .bind_descriptor_set(write_set, generate, set=0)
         .push_constants(generate, 0, struct.pack("<f", 0.0))
         .dispatch((W + 7) // 8, (H + 7) // 8))
-    with cmd.rendering(target) as c:
-        c.bind_pipeline(present).bind_descriptor_set(read_set, present, set=0).draw(3)
+    with g.add_pass(target, name="present") as p:
+        p.bind_pipeline(present).bind_descriptor_set(read_set, present, set=0).draw(3)
 
-    ctx.submit(cmd)
+    ctx.submit(g)
 
     pixels = target.color[0].read()
     assert pixels.shape == (H, W, 4)
@@ -113,11 +112,9 @@ def test_readme_notebook_section(extra_context):
     context = extra_context()
     with context as ctx:
         target = ctx.create_render_target(64, 64)
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        with cmd.rendering(target, clear_color=[0.1, 0.2, 0.3, 1.0]):
-            pass
-        ctx.submit(cmd)
+        g = ctx.graph()
+        g.add_pass(target, clear_color=[0.1, 0.2, 0.3, 1.0])
+        ctx.submit(g)
         pixels = target.color[0].read()
 
     assert pixels.shape == (64, 64, 4)
@@ -158,7 +155,7 @@ def test_readme_projection_matrix():
 
 def test_readme_negative_viewport_flips(ctx):
     """Kept in step with the same section, which offers
-    cmd.set_viewport(0, h, w, -h) as the escape hatch that makes a y_up switch
+    p.set_viewport(0, h, w, -h) as the escape hatch that makes a y_up switch
     unnecessary. If this stops working, the section is advertising a ceiling
     bazalt does not actually leave open."""
     target = ctx.create_render_target(64, 64)
@@ -178,13 +175,12 @@ def test_readme_negative_viewport_flips(ctx):
     ], bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
 
     def halves(flip):
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
             if flip:
-                c.set_viewport(0.0, 64.0, 64.0, -64.0)
-            c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).draw(3)
-        ctx.submit(cmd)
+                p.set_viewport(0.0, 64.0, 64.0, -64.0)
+            p.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).draw(3)
+        ctx.submit(g)
         lit = target.color[0].read()[:, :, 0] > 128
         return int(lit[:32].sum()), int(lit[32:].sum())
 

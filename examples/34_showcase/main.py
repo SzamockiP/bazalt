@@ -17,7 +17,7 @@ One scene exercises the features that examples 09-32 introduce one at a time:
     the camera (a 22 m window, texel-snapped) instead of covering the scene —
     one map keeps the texel density cascades exist for. The receiver samples
     a rotated Poisson disk over the hardware PCF.
-  * Glass renders in a second blended pass over the opaques. The .mtl's
+  * Glass renders in a second blended draw over the opaques. The .mtl's
     dissolve/illum-4 transparency lands in the material pixel's alpha, the
     glass commands leave the opaque indirect buffer (their indexCount is 0
     there), and the shadow shader's discard drops them.
@@ -40,9 +40,9 @@ One scene exercises the features that examples 09-32 introduce one at a time:
   * Fireflies fly at night. A compute pass integrates them, a point draw
     renders them, and the scene shader reads the same buffer as a list of
     small point lights.
-  * Profiling is first class: cmd.label() around every pass, name= on every
-    resource, cmd.timer() per pass and gpu_timing for the frame total. Open a
-    capture in Nsight or RenderDoc and the frame reads like this docstring.
+  * Profiling is first class: name= on every pass and on every resource,
+    p.timer() per pass and gpu_timing for the frame total. Open a capture in
+    Nsight or RenderDoc and the frame reads like this docstring.
 
 The work is split the way the frame is: SceneLoader owns the geometry and the
 materials, DayNightCycle owns the sun, ShadowRenderer owns the depth pass and
@@ -588,8 +588,8 @@ class SceneLoader:
         hi[1] = min(mn[1] + 5.0, mx[1])
         self.firefly_box = (lo, hi)
 
-    def bind_geometry(self, c):
-        return c.bind_vertex_buffer(self.vertices).bind_index_buffer(self.indices)
+    def bind_geometry(self, p):
+        return p.bind_vertex_buffer(self.vertices).bind_index_buffer(self.indices)
 
 
 class ShadowRenderer:
@@ -663,14 +663,16 @@ class ShadowRenderer:
                         round(origin.y * half) / half - origin.y, 0.0)
         return glm.translate(glm.mat4(1.0), snap) * light_vp
 
-    def record(self, cmd, bindless_set):
-        with cmd.rendering(self.target) as c:
-            (c.bind_pipeline(self.pipeline)
+    def record(self, g, bindless_set):
+        """Add the depth-only pass to the graph. Returns its timer."""
+        with g.add_pass(self.target, name="shadow") as p, p.timer() as t:
+            (p.bind_pipeline(self.pipeline)
               .bind_descriptor_set(self.frame_set, self.pipeline, set=0)
               .bind_descriptor_set(bindless_set, self.pipeline, set=1))
-            (self.scene.bind_geometry(c)
+            (self.scene.bind_geometry(p)
               .draw_indexed_indirect(self.scene.shadow_args,
                                      count=self.scene.submesh_count))
+        return t
 
 
 class Fireflies:
@@ -720,17 +722,18 @@ class Fireflies:
         self.draw_set = pool.allocate_frame_set(self.draw_pipeline)
         self.draw_set.set_buffer(0, frame_ubo)
 
-    def record_simulation(self, cmd, dt, now):
+    def record_simulation(self, g, dt, now):
         lo, hi = self.box
-        (cmd.bind_pipeline(self.sim_pipeline)
-            .bind_descriptor_set(self.sim_set, self.sim_pipeline)
-            .push_constants(self.sim_pipeline, offset=0,
-                            data=struct.pack("<8f", lo[0], lo[1], lo[2], dt,
-                                             hi[0], hi[1], hi[2], now))
-            .dispatch((FIREFLY_COUNT + 63) // 64))
+        (g.add_pass(name="fireflies")
+          .bind_pipeline(self.sim_pipeline)
+          .bind_descriptor_set(self.sim_set, self.sim_pipeline)
+          .push_constants(self.sim_pipeline, offset=0,
+                          data=struct.pack("<8f", lo[0], lo[1], lo[2], dt,
+                                           hi[0], hi[1], hi[2], now))
+          .dispatch((FIREFLY_COUNT + 63) // 64))
 
-    def record_draw(self, c):
-        (c.bind_pipeline(self.draw_pipeline)
+    def record_draw(self, p):
+        (p.bind_pipeline(self.draw_pipeline)
           .bind_descriptor_set(self.draw_set, self.draw_pipeline)
           .bind_vertex_buffer(self.buffer)
           .draw(FIREFLY_COUNT))
@@ -820,47 +823,62 @@ class PostProcessor:
                                         self.godray_rt.color[0],
                                         self.ao_rt.color[0])
 
-    def blur(self, cmd, source_set, target, dx, dy):
-        with cmd.rendering(target) as c:
-            (c.bind_pipeline(self.blur_pipe)
+    def blur(self, g, source_set, target, dx, dy, name):
+        with g.add_pass(target, name=name) as p, p.timer() as t:
+            (p.bind_pipeline(self.blur_pipe)
               .bind_descriptor_set(source_set, self.blur_pipe)
               .push_constants(self.blur_pipe, offset=0,
                               data=struct.pack("<4f", dx, dy, 0.0, 0.0))
               .draw(3))
+        return t
 
-    def fullscreen(self, cmd, pipeline, dset, target, push):
-        with cmd.rendering(target) as c:
-            (c.bind_pipeline(pipeline)
+    def fullscreen(self, g, pipeline, dset, target, push, name):
+        with g.add_pass(target, name=name) as p, p.timer() as t:
+            (p.bind_pipeline(pipeline)
               .bind_descriptor_set(dset, pipeline)
               .push_constants(pipeline, offset=0, data=push)
               .draw(3))
+        return t
 
-    def record(self, cmd, day, sun_uv, sun_vis):
+    def record(self, g, day, sun_uv, sun_vis):
+        """Add the chain's passes. Returns one timer per pass: a timer lives
+        inside a single pass, so the frame's "post" number is their sum."""
         hw, hh = self.hw, self.hh
+        timers = []
 
-        self.fullscreen(cmd, self.ao_pipe, self.ao_set, self.ao_rt,
-                        struct.pack("<8f", math.tan(math.radians(CAM_FOV) / 2.0),
-                                    W / H, CAM_NEAR, CAM_FAR,
-                                    self.AO_RADIUS, self.AO_STRENGTH, 0.0, 0.0))
-        self.blur(cmd, self.ao_blur_h_set, self.ao_tmp_rt, 1.0 / hw, 0.0)
-        self.blur(cmd, self.ao_blur_v_set, self.ao_rt, 0.0, 1.0 / hh)
+        timers.append(self.fullscreen(
+            g, self.ao_pipe, self.ao_set, self.ao_rt,
+            struct.pack("<8f", math.tan(math.radians(CAM_FOV) / 2.0),
+                        W / H, CAM_NEAR, CAM_FAR,
+                        self.AO_RADIUS, self.AO_STRENGTH, 0.0, 0.0), "SSAO"))
+        timers.append(self.blur(g, self.ao_blur_h_set, self.ao_tmp_rt,
+                                1.0 / hw, 0.0, "SSAO blur H"))
+        timers.append(self.blur(g, self.ao_blur_v_set, self.ao_rt,
+                                0.0, 1.0 / hh, "SSAO blur V"))
 
-        self.fullscreen(cmd, self.prepass_pipe, self.prepass_set, self.prepass_rt,
-                        struct.pack("<4f", self.BLOOM_THRESHOLD, self.BLOOM_CEILING,
-                                    0.0, 0.0))
+        timers.append(self.fullscreen(
+            g, self.prepass_pipe, self.prepass_set, self.prepass_rt,
+            struct.pack("<4f", self.BLOOM_THRESHOLD, self.BLOOM_CEILING,
+                        0.0, 0.0), "post prepass"))
         # Two gaussian iterations, the second three times as wide: one 9-tap
         # pass is too narrow for a glow, and widening its step alone bands.
         for i, step in enumerate(self.BLOOM_STEPS):
-            self.blur(cmd, self.bloom_h_sets[i], self.blur_b_rt, step / hw, 0.0)
-            self.blur(cmd, self.bloom_v_set, self.blur_a_rt, 0.0, step / hh)
+            timers.append(self.blur(g, self.bloom_h_sets[i], self.blur_b_rt,
+                                    step / hw, 0.0, f"bloom blur H {i}"))
+            timers.append(self.blur(g, self.bloom_v_set, self.blur_a_rt,
+                                    0.0, step / hh, f"bloom blur V {i}"))
 
-        self.fullscreen(cmd, self.godray_pipe, self.godray_set, self.godray_rt,
-                        struct.pack("<4f", sun_uv[0], sun_uv[1], 0.9 * sun_vis, 0.94))
+        timers.append(self.fullscreen(
+            g, self.godray_pipe, self.godray_set, self.godray_rt,
+            struct.pack("<4f", sun_uv[0], sun_uv[1], 0.9 * sun_vis, 0.94),
+            "god rays"))
+        return timers
 
-    def record_composite(self, cmd, day):
-        self.fullscreen(cmd, self.composite_pipe, self.composite_set, self.output,
+    def record_composite(self, g, day):
+        self.fullscreen(g, self.composite_pipe, self.composite_set, self.output,
                         struct.pack("<8f", day["night"], day["exposure"],
-                                    day["warmth"], 0.0, 0.0, 0.0, 0.0, 0.0))
+                                    day["warmth"], 0.0, 0.0, 0.0, 0.0, 0.0),
+                        "composite")
 
 
 class DemoApp:
@@ -909,13 +927,14 @@ class DemoApp:
                                   self.renderer, shader)
         self.create_scene_sets()
 
-        # One command buffer per frame slot. The recording changes every frame
-        # (push constants carry the matrices), and a ring is what lets the
-        # per-pass timers be read back: Timer.ms raises StateError once its
-        # command buffer is re-recorded, so each slot's timers are read just
-        # before that slot records again — its submit finished long ago.
+        # One graph per frame slot. The passes change every frame (push
+        # constants carry the matrices), so each frame resets its graph and
+        # adds them again, and a ring is what lets the per-pass timers be read
+        # back: Timer.ms raises StateError once its graph is reset, so each
+        # slot's timers are read just before that slot is rebuilt — its submit
+        # finished long ago.
         self.slot_count = self.ctx.frames_in_flight
-        self.cmds = [self.ctx.create_command_buffer() for _ in range(self.slot_count)]
+        self.graphs = [self.ctx.graph() for _ in range(self.slot_count)]
         self.slot_timers = [None] * self.slot_count
         self.pass_ms = {}
         self.timing_ok = True
@@ -1054,75 +1073,68 @@ class DemoApp:
         self.frame_ubo.update(bytes(glm.transpose(view_proj))
                               + bytes(glm.transpose(light_vp)) + tail)
 
-    def record(self, cmd, view_proj, day, sun_uv, sun_vis, dt, now):
-        cmd.begin()
-        timers = {}
+    def record(self, g, view_proj, day, sun_uv, sun_vis, dt, now):
+        g.reset()
 
-        with cmd.label("cull"):
-            with cmd.timer() as timers["cull"]:
-                cmd.fill_buffer(self.scene.visible_counter, 0)
-                (cmd.bind_pipeline(self.cull_pipe)
-                    .bind_descriptor_set(self.cull_set, self.cull_pipe)
-                    .push_constants(self.cull_pipe, offset=0,
-                                    data=bytes(glm.transpose(view_proj))
-                                    + struct.pack("<I", self.scene.submesh_count))
-                    .dispatch((self.scene.submesh_count + 63) // 64))
+        with g.add_pass(name="cull") as p, p.timer() as cull_timer:
+            p.fill_buffer(self.scene.visible_counter, 0)
+            (p.bind_pipeline(self.cull_pipe)
+              .bind_descriptor_set(self.cull_set, self.cull_pipe)
+              .push_constants(self.cull_pipe, offset=0,
+                              data=bytes(glm.transpose(view_proj))
+                              + struct.pack("<I", self.scene.submesh_count))
+              .dispatch((self.scene.submesh_count + 63) // 64))
 
-        with cmd.label("fireflies"):
-            self.fireflies.record_simulation(cmd, dt, now)
+        self.fireflies.record_simulation(g, dt, now)
+        shadow_timer = self.shadows.record(g, self.bindless_set)
 
-        with cmd.label("shadow"):
-            with cmd.timer() as timers["shadow"]:
-                self.shadows.record(cmd, self.bindless_set)
+        # ONE rendering scope: an MSAA target refuses clear_color=None, so
+        # sky, geometry, glass and fireflies are pipeline switches, not passes.
+        with g.add_pass(self.scene_rt, clear_color=[0.0, 0.0, 0.0, 1.0],
+                        name="scene") as p, p.timer() as scene_timer:
+            (p.bind_pipeline(self.sky_pipe)
+              .bind_descriptor_set(self.sky_set, self.sky_pipe)
+              .push_constants(self.sky_pipe, offset=0,
+                              data=self.camera.sky_push())
+              .draw(3))
+            (p.bind_pipeline(self.scene_pipe)
+              .bind_descriptor_set(self.scene_set, self.scene_pipe, set=0)
+              .bind_descriptor_set(self.bindless_set, self.scene_pipe, set=1))
+            (self.scene.bind_geometry(p)
+              .draw_indexed_indirect(self.scene.cull_args,
+                                     count=self.scene.submesh_count))
+            if self.scene.glass_count:
+                (p.bind_pipeline(self.glass_pipe)
+                  .bind_descriptor_set(self.scene_set, self.glass_pipe, set=0)
+                  .bind_descriptor_set(self.bindless_set, self.glass_pipe, set=1)
+                  .draw_indexed_indirect(self.scene.glass_args,
+                                         count=self.scene.glass_count))
+            self.fireflies.record_draw(p)
 
-        with cmd.label("scene"):
-            with cmd.timer() as timers["scene"]:
-                # ONE rendering scope: an MSAA target refuses
-                # clear_color=None, so sky, geometry, glass and fireflies are
-                # pipeline switches, not passes.
-                with cmd.rendering(self.scene_rt, clear_color=[0.0, 0.0, 0.0, 1.0]) as c:
-                    (c.bind_pipeline(self.sky_pipe)
-                      .bind_descriptor_set(self.sky_set, self.sky_pipe)
-                      .push_constants(self.sky_pipe, offset=0,
-                                      data=self.camera.sky_push())
-                      .draw(3))
-                    (c.bind_pipeline(self.scene_pipe)
-                      .bind_descriptor_set(self.scene_set, self.scene_pipe, set=0)
-                      .bind_descriptor_set(self.bindless_set, self.scene_pipe, set=1))
-                    (self.scene.bind_geometry(c)
-                      .draw_indexed_indirect(self.scene.cull_args,
-                                             count=self.scene.submesh_count))
-                    if self.scene.glass_count:
-                        (c.bind_pipeline(self.glass_pipe)
-                          .bind_descriptor_set(self.scene_set, self.glass_pipe, set=0)
-                          .bind_descriptor_set(self.bindless_set, self.glass_pipe, set=1)
-                          .draw_indexed_indirect(self.scene.glass_args,
-                                                 count=self.scene.glass_count))
-                    self.fireflies.record_draw(c)
+        post_timers = self.post.record(g, day, sun_uv, sun_vis)
+        self.post.record_composite(g, day)
 
-        with cmd.label("post"):
-            with cmd.timer() as timers["post"]:
-                self.post.record(cmd, day, sun_uv, sun_vis)
-
-        with cmd.label("composite"):
-            self.post.record_composite(cmd, day)
-
-        return timers
+        # A timer belongs to one pass, so a name whose work spans several
+        # passes carries the list and reports their sum.
+        return {"cull": [cull_timer], "shadow": [shadow_timer],
+                "scene": [scene_timer], "post": post_timers}
 
     def read_slot_timers(self, slot):
         """Fold the timers recorded frames_in_flight ago into smoothed times.
 
-        Read BEFORE this slot's command buffer records again — after that,
-        Timer.ms raises StateError by design.
+        Read BEFORE this slot's graph is reset — after that, Timer.ms raises
+        StateError by design.
         """
         timers = self.slot_timers[slot]
         if not timers or not self.timing_ok:
             return
         try:
-            for name, timer in timers.items():
-                ms = timer.ms
-                if ms is not None:
-                    self.pass_ms[name] = self.pass_ms.get(name, ms) * 0.9 + ms * 0.1
+            for name, group in timers.items():
+                readings = [t.ms for t in group]
+                if None in readings:
+                    continue
+                ms = sum(readings)
+                self.pass_ms[name] = self.pass_ms.get(name, ms) * 0.9 + ms * 0.1
         except bz.UnsupportedError:
             self.timing_ok = False  # this GPU never answers; stop asking
         except bz.StateError:
@@ -1178,10 +1190,10 @@ class DemoApp:
 
             slot = frame_index % self.slot_count
             self.read_slot_timers(slot)
-            cmd = self.cmds[slot]
-            self.slot_timers[slot] = self.record(cmd, view_proj, day, sun_uv,
+            g = self.graphs[slot]
+            self.slot_timers[slot] = self.record(g, view_proj, day, sun_uv,
                                                  sun_vis, dt, now)
-            self.renderer.present(cmd)
+            self.renderer.present(g)
             frame_index += 1
 
             frames += 1

@@ -74,7 +74,7 @@ def load(path):
     # Rewriting a descriptor set that a submitted frame is still reading is
     # illegal: Vulkan only allows it for bindings created with
     # UPDATE_AFTER_BIND, which is a descriptor-indexing feature. With frames in
-    # flight, the previous frame's command buffer still references this set.
+    # flight, the previous frame's submit still reads this set.
     #
     # So wait first. A drop or a paste happens when a person does something, not
     # every frame, so the stall costs nothing here — and it is the honest fix
@@ -103,6 +103,7 @@ def icon_from(image):
 yaw = 0.0
 pitch = 0.0
 looking = False
+g = ctx.graph()
 
 while window.is_open():
     bz.poll_events()
@@ -169,11 +170,11 @@ while window.is_open():
     model = glm.rotate(glm.mat4(1.0), glm.radians(yaw), glm.vec3(0, 1, 0))
     model = glm.rotate(model, glm.radians(pitch), glm.vec3(1, 0, 0))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(renderer, clear_color=[0.05, 0.06, 0.09, 1.0]) as c:
-        c.bind_pipeline(pipeline)
-        c.bind_descriptor_set(desc_set, pipeline)
-        c.push_constants(pipeline, 0, bytes(glm.transpose(proj * view * model)))
-        c.draw(6)
-    renderer.present(cmd)
+    # The matrix follows the mouse, so rebuild the graph every frame.
+    g.reset()
+    with g.add_pass(renderer, clear_color=[0.05, 0.06, 0.09, 1.0]) as p:
+        p.bind_pipeline(pipeline)
+        p.bind_descriptor_set(desc_set, pipeline)
+        p.push_constants(pipeline, 0, bytes(glm.transpose(proj * view * model)))
+        p.draw(6)
+    renderer.present(g)

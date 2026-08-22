@@ -60,15 +60,13 @@ def _render_white_triangle(ctx, triangle_shaders, white_triangle, samples, depth
         builder = builder.depth_test(True)
     pipe = builder.build(target)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=[0, 0, 0, 1])
-    cmd.bind_pipeline(pipe)
-    cmd.bind_vertex_buffer(vbuf)
-    cmd.bind_index_buffer(ibuf)
-    cmd.draw_indexed(3)
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipe)
+        p.bind_vertex_buffer(vbuf)
+        p.bind_index_buffer(ibuf)
+        p.draw_indexed(3)
+    ctx.submit(g)
     return target
 
 
@@ -168,14 +166,12 @@ def test_custom_resolve_reads_individual_samples(ctx, triangle_shaders, white_tr
     # NEAREST because a multisampled image is fetched, never filtered.
     dset.set_image(0, target.multisampled_color[0], sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(screen, clear_color=[0, 0, 0, 1])
-    cmd.bind_pipeline(pipe)
-    cmd.bind_descriptor_set(dset, pipe)
-    cmd.draw(3)
-    cmd.end_rendering(screen)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(screen, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipe)
+        p.bind_descriptor_set(dset, pipe)
+        p.draw(3)
+    ctx.submit(g)
 
     pixels = screen.color[0].read()
     single = pixels[:, :, 0].astype(np.int32)
@@ -208,11 +204,9 @@ def test_msaa_depth_resolves_to_sampleable_depth(ctx, triangle_shaders, white_tr
 def test_per_attachment_clears(ctx):
     """Two colour attachments cleared to different colours in one pass."""
     mrt = ctx.create_render_target(16, 16, color=[bz.Format.RGBA8, bz.Format.RGBA8])
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(mrt, clear_color=[[255, 0, 0, 255], [0, 255, 0, 255]])
-    cmd.end_rendering(mrt)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass(mrt, clear_color=[[255, 0, 0, 255], [0, 255, 0, 255]])
+    ctx.submit(g)
 
     assert list(mrt.color[0].read()[8, 8]) == [255, 0, 0, 255]
     assert list(mrt.color[1].read()[8, 8]) == [0, 255, 0, 255]
@@ -221,11 +215,9 @@ def test_per_attachment_clears(ctx):
 def test_single_clear_applies_to_all_attachments(ctx):
     """A single [r,g,b,a] clears every attachment — the pre-existing behaviour."""
     mrt = ctx.create_render_target(16, 16, color=[bz.Format.RGBA8, bz.Format.RGBA8])
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(mrt, clear_color=[0, 0, 255, 255])
-    cmd.end_rendering(mrt)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass(mrt, clear_color=[0, 0, 255, 255])
+    ctx.submit(g)
 
     assert list(mrt.color[0].read()[8, 8]) == [0, 0, 255, 255]
     assert list(mrt.color[1].read()[8, 8]) == [0, 0, 255, 255]
@@ -264,9 +256,7 @@ def test_render_target_debug_name_is_accepted(ctx):
     """name= is additive and must not disturb rendering (the name only shows up
     in validation messages, which this suite already asserts stay silent)."""
     target = ctx.create_render_target(16, 16, color=bz.Format.RGBA8, name="gbuffer")
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=[0.2, 0.2, 0.2, 1.0])
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass(target, clear_color=[0.2, 0.2, 0.2, 1.0])
+    ctx.submit(g)
     assert target.color[0].read().shape == (16, 16, 4)

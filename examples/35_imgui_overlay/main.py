@@ -186,8 +186,8 @@ class ImGuiOverlay:
 
         imgui.new_frame()
 
-    def draw(self, cmd):
-        """Render whatever the frame built. Call inside a rendering scope."""
+    def draw(self, p):
+        """Render whatever the frame built. Call inside a render pass."""
         imgui.render()
         data = imgui.get_draw_data()
         if data is None or not data.commands_lists:
@@ -220,19 +220,19 @@ class ImGuiOverlay:
         width, height = imgui.get_io().display_size
         push = struct.pack("4f", 2.0 / width, 2.0 / height, -1.0, -1.0)
 
-        cmd.bind_pipeline(self.pipeline)
-        cmd.bind_descriptor_set(self.dset)
-        cmd.push_constants(0, push)
-        cmd.bind_vertex_buffer(self.vbuf)
-        cmd.bind_index_buffer(self.ibuf)
+        p.bind_pipeline(self.pipeline)
+        p.bind_descriptor_set(self.dset)
+        p.push_constants(0, push)
+        p.bind_vertex_buffer(self.vbuf)
+        p.bind_index_buffer(self.ibuf)
         for elem_count, index_offset, clip in draws:
             x = max(int(clip.x), 0)
             y = max(int(clip.y), 0)
-            cmd.set_scissor(x, y, max(int(clip.z) - x, 0), max(int(clip.w) - y, 0))
-            cmd.draw_indexed(elem_count, first_index=index_offset)
-        # The scissor is pipeline state the next recording inherits nothing of,
-        # but the same recording would, so put it back.
-        cmd.set_scissor(0, 0, int(width), int(height))
+            p.set_scissor(x, y, max(int(clip.z) - x, 0), max(int(clip.w) - y, 0))
+            p.draw_indexed(elem_count, first_index=index_offset)
+        # The scissor is pipeline state the next pass inherits nothing of, but
+        # the rest of this pass would, so put it back.
+        p.set_scissor(0, 0, int(width), int(height))
 
     def apply_cursor(self):
         """What ImGui wants the pointer to look like right now."""
@@ -282,6 +282,7 @@ animate = True
 title = "Bazalt Demo - ImGui overlay"
 
 print("drag the panel, turn the knobs, and type in the title box. ESC quits.")
+g = ctx.graph()
 start = time.perf_counter()
 last = start
 elapsed = 0.0
@@ -319,13 +320,13 @@ while window.is_open():
 
     scene_push = struct.pack("4f4f", *tint, 1.0, elapsed, scale, speed, warp)
 
-    with ctx.record() as cmd:
-        with cmd.rendering(renderer, clear_color=[0.05, 0.05, 0.07, 1.0]):
-            cmd.bind_pipeline(scene)
-            cmd.push_constants(0, scene_push)
-            cmd.draw(3)
-            overlay.draw(cmd)
+    g.reset()
+    with g.add_pass(renderer, clear_color=[0.05, 0.05, 0.07, 1.0]) as p:
+        p.bind_pipeline(scene)
+        p.push_constants(0, scene_push)
+        p.draw(3)
+        overlay.draw(p)
 
     ctx.begin_frame()
     if renderer.acquire():
-        renderer.present(cmd)
+        renderer.present(g)

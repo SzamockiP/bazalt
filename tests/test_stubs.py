@@ -134,11 +134,13 @@ def test_the_target_types_are_not_constructible():
             cls(None, 16, 16)
 
     # The survivors of the same audit. read_pixels stays on the renderer because
-    # a screenshot is different work; the two begin/end pairs stay because a
-    # recording can be split across functions, which no `with` block spans.
+    # a screenshot is different work; the label pair stays because a recording
+    # can be split across functions, which no `with` block spans. The rendering
+    # pair died in 0.28: the target moved onto add_pass, and the pass boundary
+    # IS the rendering scope.
     assert hasattr(bz.SwapchainRenderer, "read_pixels")
-    for pair in ("begin_rendering", "end_rendering", "begin_label", "end_label"):
-        assert hasattr(bz.CommandBuffer, pair)
+    for pair in ("begin_label", "end_label"):
+        assert hasattr(bz.Pass, pair)
 
 
 def _bound_classes():

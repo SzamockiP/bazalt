@@ -90,11 +90,10 @@ def test_sampling_without_wait_renders_correctly(ctx, fullscreen_and_textured, t
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_image(0, tex)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
-        c.bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).draw(3)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).draw(3)
+    ctx.submit(g)
 
     pixels = target.color[0].read()
     assert np.allclose(pixels[15, 15, :3], red[:3], atol=2), pixels[15, 15]
@@ -117,11 +116,10 @@ def test_unrelated_submits_do_not_wait_for_uploads(ctx, triangle_shaders, triang
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                 .build(target))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
-        c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0.1, 0.2, 0.3, 1.0]) as p:
+        p.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
+    ctx.submit(g)
     assert target.color[0].read() is not None
 
     ctx.wait()
@@ -193,11 +191,10 @@ def test_drawing_from_a_fresh_buffer_needs_no_wait(ctx, triangle_shaders):
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                 .build(target))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(target, clear_color=[0, 0, 0, 1]) as c:
-        c.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipeline).bind_vertex_buffer(vbuf).bind_index_buffer(ibuf).draw_indexed(3)
+    ctx.submit(g)
 
     pixels = target.color[0].read()
     assert pixels[32, 32, 0] > 200, pixels[32, 32]

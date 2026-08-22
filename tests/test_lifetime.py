@@ -43,27 +43,25 @@ def test_dropping_everything_between_submits_is_safe(ctx, triangle_shaders):
                     .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                     .build(target))
 
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(target, clear_color=CLEAR)
-        cmd.bind_pipeline(pipeline)
-        cmd.bind_vertex_buffer(vbuf)
-        cmd.bind_index_buffer(ibuf)
-        cmd.draw_indexed(3)
-        cmd.end_rendering(target)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=CLEAR) as p:
+            p.bind_pipeline(pipeline)
+            p.bind_vertex_buffer(vbuf)
+            p.bind_index_buffer(ibuf)
+            p.draw_indexed(3)
+        ctx.submit(g)
 
         centre = target.color[0].read()[32, 32, :3]
         assert not np.allclose(centre, np.array(CLEAR[:3]) * 255, atol=2)
 
         # Drop every resource this iteration created. Their handles go through
         # the deletion queue; the next iteration submits over them.
-        del cmd, pipeline, vbuf, ibuf
+        del g, p, pipeline, vbuf, ibuf
         gc.collect()
 
 
-def test_rerecording_a_command_buffer_drops_old_resources_safely(ctx, triangle_shaders, triangle_buffers):
-    """cmd.begin() clears the recorded lambdas — the shared_ptrs they held were
+def test_resetting_a_graph_drops_old_resources_safely(ctx, triangle_shaders, triangle_buffers):
+    """g.reset() clears the recorded lambdas — the shared_ptrs they held were
     the only thing keeping dropped-from-Python resources alive. The frees this
     triggers must be deferred, not inline."""
     vert, frag = triangle_shaders
@@ -75,21 +73,20 @@ def test_rerecording_a_command_buffer_drops_old_resources_safely(ctx, triangle_s
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                 .build(target))
 
-    cmd = ctx.create_command_buffer()
+    g = ctx.graph()
 
     def record():
-        cmd.begin()
-        cmd.begin_rendering(target, clear_color=CLEAR)
-        cmd.bind_pipeline(pipeline)
-        cmd.bind_vertex_buffer(vbuf)
-        cmd.bind_index_buffer(ibuf)
-        cmd.draw_indexed(3)
-        cmd.end_rendering(target)
+        g.reset()
+        with g.add_pass(target, clear_color=CLEAR) as p:
+            p.bind_pipeline(pipeline)
+            p.bind_vertex_buffer(vbuf)
+            p.bind_index_buffer(ibuf)
+            p.draw_indexed(3)
 
     record()
-    ctx.submit(cmd)
+    ctx.submit(g)
     record()  # clears the previous recording while nothing else is pending
-    ctx.submit(cmd)
+    ctx.submit(g)
     assert target.color[0].read() is not None
 
 
@@ -118,12 +115,10 @@ def test_a_renderer_keeps_its_window_alive(ctx):
         frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
         pipeline = ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag).build(renderer)
 
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(renderer, clear_color=CLEAR)
-        cmd.bind_pipeline(pipeline)
-        cmd.draw(3)
-        cmd.end_rendering(renderer)
+        g = ctx.graph()
+        with g.add_pass(renderer, clear_color=CLEAR) as p:
+            p.bind_pipeline(pipeline)
+            p.draw(3)
 
         # The caller drops its only reference. Everything after this reads the
         # Window through the renderer's captured pointers.
@@ -134,7 +129,7 @@ def test_a_renderer_keeps_its_window_alive(ctx):
             bz.poll_events()
             ctx.begin_frame()
             if renderer.acquire():
-                renderer.present(cmd)
+                renderer.present(g)
     finally:
         renderer = None
         window = None
@@ -204,7 +199,7 @@ def test_using_a_closed_context_raises_state_error(extra_context):
     with pytest.raises(bz.StateError, match="closed"):
         context.create_render_target(8, 8)
     with pytest.raises(bz.StateError, match="closed"):
-        context.create_command_buffer()
+        context.graph()
     with pytest.raises(bz.StateError, match="closed"):
         context.graphics_pipeline()
     with pytest.raises(bz.StateError, match="closed"):

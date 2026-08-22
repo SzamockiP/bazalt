@@ -137,6 +137,8 @@ for name, topology, _, count, _, _ in draws:
 
 wireframe = False
 
+g = ctx.graph()
+
 while window.is_open():
     bz.poll_events()
     if window.is_key_pressed(bz.Key.ESCAPE):
@@ -144,21 +146,21 @@ while window.is_open():
     if window.was_key_pressed(bz.Key.W) and HAS_WIREFRAME:
         wireframe = not wireframe
 
-    with ctx.record() as cmd:
-        with cmd.rendering(renderer, clear_color=[0.05, 0.07, 0.10, 1.0]):
-            for _, _, buffer, count, filled, lined in draws:
-                cmd.bind_pipeline(lined if wireframe and lined else filled)
-                cmd.bind_vertex_buffer(vbuf)
-                cmd.bind_index_buffer(buffer)
-                cmd.draw_indexed(count)
+    g.reset()
+    with g.add_pass(renderer, clear_color=[0.05, 0.07, 0.10, 1.0]) as p:
+        for _, _, buffer, count, filled, lined in draws:
+            p.bind_pipeline(lined if wireframe and lined else filled)
+            p.bind_vertex_buffer(vbuf)
+            p.bind_index_buffer(buffer)
+            p.draw_indexed(count)
 
     ctx.begin_frame()
     if renderer.acquire():
-        renderer.present(cmd)
+        renderer.present(g)
 
     window.set_title("Bazalt Demo - Topologies | list, fan, strip"
                      + (" | wireframe" if wireframe and HAS_WIREFRAME else ""))
 
-cmd = None
+g = None
 renderer = None
 window = None

@@ -50,15 +50,14 @@ if ctx.supports(bz.Feature.IMAGE_VIEW_2D_ON_3D):
                   .fragment_shader(ctx.compile_shader("lut_slice.frag", bz.ShaderStage.FRAGMENT))
                   .push_constant(4, bz.ShaderStage.FRAGMENT)
                   .build(lut_target))
-    bake = ctx.create_command_buffer()
-    bake.begin()
+    bake = ctx.graph()
     for z in range(LUT_SIZE):
         # Texel centres, so both build paths produce the same LUT.
         slice_target = lut_target.layer(z)
-        with bake.rendering(slice_target) as c:
-            c.bind_pipeline(slice_pipe)
-            c.push_constants(slice_pipe, 0, struct.pack("<f", (z + 0.5) / LUT_SIZE))
-            c.draw(3)
+        with bake.add_pass(slice_target, name=f"lut slice {z}") as p:
+            p.bind_pipeline(slice_pipe)
+            p.push_constants(slice_pipe, 0, struct.pack("<f", (z + 0.5) / LUT_SIZE))
+            p.draw(3)
     ctx.submit(bake)
 else:
     print("no IMAGE_VIEW_2D_ON_3D on this driver - building the LUT in compute")
@@ -68,11 +67,11 @@ else:
                  .build())
     fill_set = pool.allocate_set(fill_pipe)
     fill_set.set_storage_image(0, lut)
-    bake = ctx.create_command_buffer()
-    bake.begin()
+    bake = ctx.graph()
     groups = LUT_SIZE // 4
-    bake.bind_pipeline(fill_pipe).bind_descriptor_set(fill_set, fill_pipe)
-    bake.dispatch(groups, groups, groups)
+    fill_pass = bake.add_pass(name="lut fill")
+    fill_pass.bind_pipeline(fill_pipe).bind_descriptor_set(fill_set, fill_pipe)
+    fill_pass.dispatch(groups, groups, groups)
     ctx.submit(bake)
 
 # ── the scene and the post pass ───────────────────────────────────────────
@@ -97,7 +96,7 @@ apply_set.set_image(0, scene_target.color[0])
 # CLAMP, not the default REPEAT: a colour of 0.999 must not wrap to 0.
 apply_set.set_image(1, lut, ctx.create_sampler(address_mode=bz.AddressMode.CLAMP))
 
-cmd = ctx.create_command_buffer()
+g = ctx.graph()
 split = 0.5
 start = time.time()
 while window.is_open():
@@ -112,13 +111,13 @@ while window.is_open():
     if not renderer.acquire():
         continue
 
-    cmd.begin()
-    with cmd.rendering(scene_target) as c:
-        c.bind_pipeline(scene_pipe)
-        c.push_constants(scene_pipe, 0, struct.pack("<f", time.time() - start))
-        c.draw(3)
-    with cmd.rendering(renderer) as c:
-        c.bind_pipeline(apply_pipe).bind_descriptor_set(apply_set, apply_pipe)
-        c.push_constants(apply_pipe, 0, struct.pack("<f", split))
-        c.draw(3)
-    renderer.present(cmd)
+    g.reset()
+    with g.add_pass(scene_target, name="scene") as p:
+        p.bind_pipeline(scene_pipe)
+        p.push_constants(scene_pipe, 0, struct.pack("<f", time.time() - start))
+        p.draw(3)
+    with g.add_pass(renderer, name="post") as p:
+        p.bind_pipeline(apply_pipe).bind_descriptor_set(apply_set, apply_pipe)
+        p.push_constants(apply_pipe, 0, struct.pack("<f", split))
+        p.draw(3)
+    renderer.present(g)

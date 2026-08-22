@@ -18,130 +18,124 @@ namespace
                     return false; // never swallow exceptions
                 });
     }
+
+    // Every recording verb passes the same gate first: the pass is live, not
+    // sealed, and the right kind for the verb. Raises so the verb bodies read
+    // straight.
+    void guard(const Pass& pass, Pass::VerbScope scope, const char* verb)
+    {
+        unwrap(pass.guard(scope, verb), nullptr);
+    }
 } // namespace
 
 void bind_commands(py::module_& m)
 {
-    // Every recording method returns the command buffer itself, so the two
-    // spellings are the same API:
-    //     cmd.begin_rendering(t).bind_pipeline(p).draw(3)
+    // Every recording method returns the pass itself, so the two spellings are
+    // the same API:
+    //     p.bind_pipeline(pipe).bind_vertex_buffer(vbuf).draw(3)
     // and the statement-per-line style both work. The lambdas return the
     // shared_ptr self (not the C++ reference) so pybind hands back the SAME
-    // Python object — `cmd.draw(3) is cmd`.
-    auto cmd = py::class_<CommandBuffer, std::shared_ptr<CommandBuffer>>(m, "CommandBuffer");
-    cmd.def(
-           "begin",
-           [](std::shared_ptr<CommandBuffer> self)
-           {
-               self->begin();
-               return self;
-           })
-        // The target is required. begin_rendering() silently meaning "the
-        // swapchain" made presentation a special case disguised as the default.
+    // Python object — `p.draw(3) is p`.
+    auto pass = py::class_<Pass, std::shared_ptr<Pass>>(m, "Pass");
+    pass
+        // The pass is a handle; `with` is sugar that seals it early. __exit__
+        // deliberately does NOT submit — who submits the graph is still the
+        // caller's decision.
+        .def("__enter__", [](std::shared_ptr<Pass> self) { return self; })
         .def(
-            "begin_rendering",
-            [](std::shared_ptr<CommandBuffer> self,
-               const std::shared_ptr<RenderTarget>& target,
-               const py::object& clear_color,
-               float clear_depth,
-               std::uint32_t clear_stencil)
+            "__exit__",
+            [](Pass& self, const py::object&, const py::object&, const py::object&)
             {
-                require_same_context(self->owner(), target->owner(), "begin_rendering");
-                require_sliced_when_3d(*target, "begin_rendering");
-                auto clears = parse_clear_colors(clear_color);
-                require_preservable(*target, !clears.has_value(), "begin_rendering");
-                self->begin_rendering(target, clears, clear_depth, clear_stencil);
-                return self;
-            },
-            py::arg("target"),
-            py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f),
-            py::arg("clear_depth") = 1.0f,
-            py::arg("clear_stencil") = 0)
-        .def(
-            "end_rendering",
-            [](std::shared_ptr<CommandBuffer> self, const std::shared_ptr<RenderTarget>& target)
-            {
-                self->end_rendering(target);
-                return self;
-            },
-            py::arg("target"))
-        // With-statement sugar over the same pair: __enter__ records
-        // begin_rendering and hands back the cmd, __exit__ records
-        // end_rendering unconditionally — the pair cannot be left open.
-        .def(
-            "rendering",
-            [](std::shared_ptr<CommandBuffer> self,
-               std::shared_ptr<RenderTarget> target,
-               const py::object& clear_color,
-               float clear_depth,
-               std::uint32_t clear_stencil)
-            {
-                require_same_context(self->owner(), target->owner(), "rendering");
-                require_sliced_when_3d(*target, "rendering");
-                auto clears = parse_clear_colors(clear_color);
-                require_preservable(*target, !clears.has_value(), "rendering");
-                return RenderingScope{
-                    .cmd = std::move(self),
-                    .target = std::move(target),
-                    .clear_color = std::move(clears),
-                    .clear_depth = clear_depth,
-                    .clear_stencil = clear_stencil};
-            },
-            py::arg("target"),
-            py::arg("clear_color") = py::make_tuple(0.0f, 0.0f, 0.0f, 1.0f),
-            py::arg("clear_depth") = 1.0f,
-            py::arg("clear_stencil") = 0)
-        // GPU timer: records the opening timestamp and returns a Timer handle.
-        // Stop it with t.stop() or a `with` block; read it back with t.ms.
-        .def(
-            "timer",
-            [](std::shared_ptr<CommandBuffer> self)
-            {
-                const std::size_t index = self->start_timer();
-                const std::uint64_t generation = self->recording_generation();
-                return std::make_shared<Timer>(Timer{std::move(self), index, generation, false});
+                self.seal();
+                return false; // never swallow exceptions
             })
-        // A named scope in a capture. `with cmd.label("shadow pass"):` is the
-        // form to use; begin_label/end_label are the escape hatch for a
-        // recording split across functions, exactly as begin_rendering/
-        // end_rendering are. end_label ignores an unbalanced close.
+        // Toggling a pass recompiles the graph without re-recording anything:
+        // a disabled pass is absent from the compile, and whatever it wrote is
+        // stale for the passes after it — the caller's responsibility, exactly
+        // as a submit it chose to skip.
+        .def_property("enabled", &Pass::enabled, &Pass::set_enabled)
+        .def_property_readonly("name", &Pass::name)
         .def(
-            "label",
-            [](std::shared_ptr<CommandBuffer> self, std::string name)
-            { return LabelScope{.cmd = std::move(self), .name = std::move(name)}; },
-            py::arg("name"))
-        .def(
-            "begin_label",
-            [](std::shared_ptr<CommandBuffer> self, const std::string& name)
+            "bind_pipeline",
+            [](std::shared_ptr<Pass> self, const std::shared_ptr<Pipeline>& pipeline)
             {
-                self->begin_label(name);
+                guard(*self, Pass::VerbScope::Any, "bind_pipeline");
+                require_same_context(self->recorder().owner(), pipeline->owner(), "bind_pipeline");
+                self->recorder().bind_pipeline(pipeline);
                 return self;
             },
-            py::arg("name"))
+            py::arg("pipeline"))
         .def(
-            "end_label",
-            [](std::shared_ptr<CommandBuffer> self)
+            "bind_vertex_buffer",
+            [](std::shared_ptr<Pass> self, const std::shared_ptr<Buffer>& buffer, std::uint32_t binding)
             {
-                self->end_label();
+                guard(*self, Pass::VerbScope::Render, "bind_vertex_buffer");
+                require_same_context(self->recorder().owner(), buffer->owner(), "bind_vertex_buffer");
+                self->recorder().bind_vertex_buffer(buffer, binding);
                 return self;
-            })
-        // Occlusion query: counts the fragments of the draws inside it that
-        // passed the depth and stencil tests. Must sit inside a rendering scope.
+            },
+            py::arg("buffer"),
+            py::arg("binding") = 0)
         .def(
-            "occlusion_query",
-            [](std::shared_ptr<CommandBuffer> self)
+            "bind_index_buffer",
+            [](std::shared_ptr<Pass> self, const std::shared_ptr<Buffer>& buffer)
             {
-                auto index = unwrap(self->start_occlusion_query(), nullptr);
-                const std::uint64_t generation = self->recording_generation();
-                return std::make_shared<OcclusionQuery>(OcclusionQuery{std::move(self), index, generation, false});
-            })
-        // The no-argument versions are gone: begin_rendering emits a full-target
-        // viewport and scissor itself. These remain for split-screen and similar.
+                guard(*self, Pass::VerbScope::Render, "bind_index_buffer");
+                require_same_context(self->recorder().owner(), buffer->owner(), "bind_index_buffer");
+                self->recorder().bind_index_buffer(buffer);
+                return self;
+            },
+            py::arg("buffer"))
+        .def(
+            "draw",
+            [](std::shared_ptr<Pass> self, uint32_t vertex_count, uint32_t instances)
+            {
+                guard(*self, Pass::VerbScope::Render, "draw");
+                self->recorder().draw(vertex_count, instances);
+                return self;
+            },
+            py::arg("vertex_count"),
+            py::arg("instances") = 1)
+        .def(
+            "draw_indexed",
+            [](std::shared_ptr<Pass> self,
+               uint32_t index_count,
+               uint32_t first_index,
+               int32_t vertex_offset,
+               uint32_t instances)
+            {
+                guard(*self, Pass::VerbScope::Render, "draw_indexed");
+                self->recorder().draw_indexed(index_count, first_index, vertex_offset, instances);
+                return self;
+            },
+            py::arg("index_count"),
+            py::arg("first_index") = 0,
+            py::arg("vertex_offset") = 0,
+            py::arg("instances") = 1)
+        // A dispatch inside a rendering scope is illegal in Vulkan, and a
+        // render pass IS one rendering scope — so the pass kind decides at
+        // record time, with a message naming the fix, where the old API left
+        // it to a replay-time validation error.
+        .def(
+            "dispatch",
+            [](std::shared_ptr<Pass> self, uint32_t group_count_x, uint32_t group_count_y, uint32_t group_count_z)
+            {
+                guard(*self, Pass::VerbScope::General, "dispatch");
+                self->recorder().dispatch(group_count_x, group_count_y, group_count_z);
+                return self;
+            },
+            py::arg("group_count_x"),
+            py::arg("group_count_y") = 1,
+            py::arg("group_count_z") = 1)
+        // The no-argument versions are gone since 0.16: a render pass emits a
+        // full-target viewport and scissor itself. These remain for
+        // split-screen and similar.
         .def(
             "set_viewport",
-            [](std::shared_ptr<CommandBuffer> self, float x, float y, float width, float height)
+            [](std::shared_ptr<Pass> self, float x, float y, float width, float height)
             {
-                self->set_viewport(x, y, width, height);
+                guard(*self, Pass::VerbScope::Render, "set_viewport");
+                self->recorder().set_viewport(x, y, width, height);
                 return self;
             },
             py::arg("x"),
@@ -150,84 +144,72 @@ void bind_commands(py::module_& m)
             py::arg("height"))
         .def(
             "set_scissor",
-            [](std::shared_ptr<CommandBuffer> self,
-               std::int32_t x,
-               std::int32_t y,
-               std::uint32_t width,
-               std::uint32_t height)
+            [](std::shared_ptr<Pass> self, std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height)
             {
-                self->set_scissor(x, y, width, height);
+                guard(*self, Pass::VerbScope::Render, "set_scissor");
+                self->recorder().set_scissor(x, y, width, height);
                 return self;
             },
             py::arg("x"),
             py::arg("y"),
             py::arg("width"),
             py::arg("height"))
+        // GPU timer: records the opening timestamp and returns a Timer handle.
+        // Stop it with t.stop() or a `with` block; read it back with t.ms.
         .def(
-            "bind_pipeline",
-            [](std::shared_ptr<CommandBuffer> self, const std::shared_ptr<Pipeline>& pipeline)
+            "timer",
+            [](const std::shared_ptr<Pass>& self)
             {
-                require_same_context(self->owner(), pipeline->owner(), "bind_pipeline");
-                self->bind_pipeline(pipeline);
+                guard(*self, Pass::VerbScope::Any, "timer");
+                CommandBuffer& rec = self->recorder();
+                const std::size_t index = rec.start_timer();
+                const std::uint64_t generation = rec.recording_generation();
+                auto cmd = std::shared_ptr<CommandBuffer>(self, &rec);
+                return std::make_shared<Timer>(Timer{std::move(cmd), index, generation, false});
+            })
+        // A named scope in a capture. `with p.label("shadow pass"):` is the
+        // form to use; begin_label/end_label are the escape hatch for a
+        // recording split across functions. end_label ignores an unbalanced
+        // close.
+        .def(
+            "label",
+            [](std::shared_ptr<Pass> self, std::string name)
+            {
+                guard(*self, Pass::VerbScope::Any, "label");
+                return LabelScope{.pass = std::move(self), .name = std::move(name)};
+            },
+            py::arg("name"))
+        .def(
+            "begin_label",
+            [](std::shared_ptr<Pass> self, const std::string& name)
+            {
+                guard(*self, Pass::VerbScope::Any, "begin_label");
+                self->recorder().begin_label(name);
                 return self;
             },
-            py::arg("pipeline"))
+            py::arg("name"))
         .def(
-            "bind_vertex_buffer",
-            [](std::shared_ptr<CommandBuffer> self, const std::shared_ptr<Buffer>& buffer, std::uint32_t binding)
+            "end_label",
+            [](std::shared_ptr<Pass> self)
             {
-                require_same_context(self->owner(), buffer->owner(), "bind_vertex_buffer");
-                self->bind_vertex_buffer(buffer, binding);
+                guard(*self, Pass::VerbScope::Any, "end_label");
+                self->recorder().end_label();
                 return self;
-            },
-            py::arg("buffer"),
-            py::arg("binding") = 0)
+            })
+        // Occlusion query: counts the fragments of the draws inside it that
+        // passed the depth and stencil tests. Vulkan requires it to begin and
+        // end within one render pass, which the pass kind now says up front.
         .def(
-            "bind_index_buffer",
-            [](std::shared_ptr<CommandBuffer> self, const std::shared_ptr<Buffer>& buffer)
+            "occlusion_query",
+            [](const std::shared_ptr<Pass>& self)
             {
-                require_same_context(self->owner(), buffer->owner(), "bind_index_buffer");
-                self->bind_index_buffer(buffer);
-                return self;
-            },
-            py::arg("buffer"))
-        .def(
-            "draw",
-            [](std::shared_ptr<CommandBuffer> self, uint32_t vertex_count, uint32_t instances)
-            {
-                self->draw(vertex_count, instances);
-                return self;
-            },
-            py::arg("vertex_count"),
-            py::arg("instances") = 1)
-        .def(
-            "draw_indexed",
-            [](std::shared_ptr<CommandBuffer> self,
-               uint32_t index_count,
-               uint32_t first_index,
-               int32_t vertex_offset,
-               uint32_t instances)
-            {
-                self->draw_indexed(index_count, first_index, vertex_offset, instances);
-                return self;
-            },
-            py::arg("index_count"),
-            py::arg("first_index") = 0,
-            py::arg("vertex_offset") = 0,
-            py::arg("instances") = 1)
-        .def(
-            "dispatch",
-            [](std::shared_ptr<CommandBuffer> self,
-               uint32_t group_count_x,
-               uint32_t group_count_y,
-               uint32_t group_count_z)
-            {
-                self->dispatch(group_count_x, group_count_y, group_count_z);
-                return self;
-            },
-            py::arg("group_count_x"),
-            py::arg("group_count_y") = 1,
-            py::arg("group_count_z") = 1);
+                guard(*self, Pass::VerbScope::Render, "occlusion_query");
+                CommandBuffer& rec = self->recorder();
+                auto index = unwrap(rec.start_occlusion_query(), nullptr);
+                const std::uint64_t generation = rec.recording_generation();
+                auto cmd = std::shared_ptr<CommandBuffer>(self, &rec);
+                return std::make_shared<OcclusionQuery>(OcclusionQuery{std::move(cmd), index, generation, false});
+            });
     // Indirect draw/dispatch: the arguments come out of a storage buffer the
     // GPU can write, so a compute pass decides what gets drawn. Chaining is
     // preserved (return self) even though these are fallible — unwrap raises,
@@ -241,10 +223,10 @@ void bind_commands(py::module_& m)
              {"draw_indirect", &CommandBuffer::draw_indirect},
              {"draw_indexed_indirect", &CommandBuffer::draw_indexed_indirect}})
     {
-        cmd.def(
+        pass.def(
             name,
             [name, verb](
-                std::shared_ptr<CommandBuffer> self,
+                std::shared_ptr<Pass> self,
                 std::shared_ptr<Buffer> buffer,
                 VkDeviceSize offset,
                 std::uint32_t count,
@@ -252,13 +234,15 @@ void bind_commands(py::module_& m)
                 VkDeviceSize count_offset,
                 std::uint32_t stride)
             {
-                require_same_context(self->owner(), buffer->owner(), name);
+                guard(*self, Pass::VerbScope::Render, name);
+                require_same_context(self->recorder().owner(), buffer->owner(), name);
                 if (count_buffer)
                 {
-                    require_same_context(self->owner(), count_buffer->owner(), name);
+                    require_same_context(self->recorder().owner(), count_buffer->owner(), name);
                 }
                 unwrap(
-                    ((*self).*verb)(std::move(buffer), offset, count, std::move(count_buffer), count_offset, stride),
+                    (self->recorder().*
+                     verb)(std::move(buffer), offset, count, std::move(count_buffer), count_offset, stride),
                     nullptr);
                 return self;
             },
@@ -269,22 +253,28 @@ void bind_commands(py::module_& m)
             py::arg("count_offset") = 0,
             py::arg("stride") = 0);
     }
-    cmd.def(
-           "dispatch_indirect",
-           [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, VkDeviceSize offset)
-           {
-               require_same_context(self->owner(), buffer->owner(), "dispatch_indirect");
-               unwrap(self->dispatch_indirect(std::move(buffer), offset), nullptr);
-               return self;
-           },
-           py::arg("buffer"),
-           py::arg("offset") = 0)
+    pass.def(
+            "dispatch_indirect",
+            [](std::shared_ptr<Pass> self, std::shared_ptr<Buffer> buffer, VkDeviceSize offset)
+            {
+                guard(*self, Pass::VerbScope::General, "dispatch_indirect");
+                require_same_context(self->recorder().owner(), buffer->owner(), "dispatch_indirect");
+                unwrap(self->recorder().dispatch_indirect(std::move(buffer), offset), nullptr);
+                return self;
+            },
+            py::arg("buffer"),
+            py::arg("offset") = 0)
+        // Manual barriers: the escape hatch inside the graph. A pass created
+        // with auto_barriers=False computes nothing for itself, and these are
+        // how its hazards are expressed — the graph's compile still sees them,
+        // so the automatic passes around it order correctly.
         .def(
             "barrier",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Buffer> buffer, Access src, Access dst)
+            [](std::shared_ptr<Pass> self, std::shared_ptr<Buffer> buffer, Access src, Access dst)
             {
-                require_same_context(self->owner(), buffer->owner(), "barrier");
-                unwrap(self->barrier(std::move(buffer), src, dst), nullptr);
+                guard(*self, Pass::VerbScope::General, "barrier");
+                require_same_context(self->recorder().owner(), buffer->owner(), "barrier");
+                unwrap(self->recorder().barrier(std::move(buffer), src, dst), nullptr);
                 return self;
             },
             py::arg("buffer"),
@@ -292,10 +282,11 @@ void bind_commands(py::module_& m)
             py::arg("dst"))
         .def(
             "barrier",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Image> image, Access src, Access dst)
+            [](std::shared_ptr<Pass> self, std::shared_ptr<Image> image, Access src, Access dst)
             {
-                require_same_context(self->owner(), image->owner(), "barrier");
-                unwrap(self->barrier(std::move(image), src, dst), nullptr);
+                guard(*self, Pass::VerbScope::General, "barrier");
+                require_same_context(self->recorder().owner(), image->owner(), "barrier");
+                unwrap(self->recorder().barrier(std::move(image), src, dst), nullptr);
                 return self;
             },
             py::arg("image"),
@@ -306,10 +297,11 @@ void bind_commands(py::module_& m)
         // image) or SHADER_WRITE (mip 0 fresh from compute imageStore).
         .def(
             "generate_mipmaps",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Image> image, Access src)
+            [](const std::shared_ptr<Pass>& self, const std::shared_ptr<Image>& image, Access src)
             {
-                require_same_context(self->owner(), image->owner(), "generate_mipmaps");
-                unwrap(self->generate_mipmaps(std::move(image), src), nullptr);
+                guard(*self, Pass::VerbScope::General, "generate_mipmaps");
+                require_same_context(self->recorder().owner(), image->owner(), "generate_mipmaps");
+                unwrap(self->recorder().generate_mipmaps(image, src), nullptr);
                 return self;
             },
             py::arg("image"),
@@ -317,14 +309,15 @@ void bind_commands(py::module_& m)
             py::arg("src") = Access::SHADER_READ)
         .def(
             "copy_image",
-            [](std::shared_ptr<CommandBuffer> self,
-               std::shared_ptr<Image> src,
-               std::shared_ptr<Image> dst,
+            [](const std::shared_ptr<Pass>& self,
+               const std::shared_ptr<Image>& src,
+               const std::shared_ptr<Image>& dst,
                Access src_access)
             {
-                require_same_context(self->owner(), src->owner(), "copy_image");
-                require_same_context(self->owner(), dst->owner(), "copy_image");
-                unwrap(self->copy_image(std::move(src), std::move(dst), src_access), nullptr);
+                guard(*self, Pass::VerbScope::General, "copy_image");
+                require_same_context(self->recorder().owner(), src->owner(), "copy_image");
+                require_same_context(self->recorder().owner(), dst->owner(), "copy_image");
+                unwrap(self->recorder().copy_image(src, dst, src_access), nullptr);
                 return self;
             },
             py::arg("src"),
@@ -336,15 +329,16 @@ void bind_commands(py::module_& m)
         // the sizes differ" has one answer in this library, not two enums.
         .def(
             "blit_image",
-            [](std::shared_ptr<CommandBuffer> self,
-               std::shared_ptr<Image> src,
-               std::shared_ptr<Image> dst,
+            [](const std::shared_ptr<Pass>& self,
+               const std::shared_ptr<Image>& src,
+               const std::shared_ptr<Image>& dst,
                Access src_access,
                Filter filter)
             {
-                require_same_context(self->owner(), src->owner(), "blit_image");
-                require_same_context(self->owner(), dst->owner(), "blit_image");
-                unwrap(self->blit_image(std::move(src), std::move(dst), src_access, to_vk_filter(filter)), nullptr);
+                guard(*self, Pass::VerbScope::General, "blit_image");
+                require_same_context(self->recorder().owner(), src->owner(), "blit_image");
+                require_same_context(self->recorder().owner(), dst->owner(), "blit_image");
+                unwrap(self->recorder().blit_image(src, dst, src_access, to_vk_filter(filter)), nullptr);
                 return self;
             },
             py::arg("src"),
@@ -354,16 +348,19 @@ void bind_commands(py::module_& m)
             py::arg("filter") = Filter::LINEAR)
         .def(
             "copy_buffer",
-            [](std::shared_ptr<CommandBuffer> self,
+            [](std::shared_ptr<Pass> self,
                std::shared_ptr<Buffer> src,
                std::shared_ptr<Buffer> dst,
                VkDeviceSize src_offset,
                VkDeviceSize dst_offset,
                VkDeviceSize size)
             {
-                require_same_context(self->owner(), src->owner(), "copy_buffer");
-                require_same_context(self->owner(), dst->owner(), "copy_buffer");
-                unwrap(self->copy_buffer(std::move(src), std::move(dst), src_offset, dst_offset, size), nullptr);
+                guard(*self, Pass::VerbScope::General, "copy_buffer");
+                require_same_context(self->recorder().owner(), src->owner(), "copy_buffer");
+                require_same_context(self->recorder().owner(), dst->owner(), "copy_buffer");
+                unwrap(
+                    self->recorder().copy_buffer(std::move(src), std::move(dst), src_offset, dst_offset, size),
+                    nullptr);
                 return self;
             },
             py::arg("src"),
@@ -374,14 +371,15 @@ void bind_commands(py::module_& m)
             py::arg("size") = 0)
         .def(
             "fill_buffer",
-            [](std::shared_ptr<CommandBuffer> self,
+            [](std::shared_ptr<Pass> self,
                std::shared_ptr<Buffer> buffer,
                std::uint32_t value,
                VkDeviceSize offset,
                VkDeviceSize size)
             {
-                require_same_context(self->owner(), buffer->owner(), "fill_buffer");
-                unwrap(self->fill_buffer(std::move(buffer), value, offset, size), nullptr);
+                guard(*self, Pass::VerbScope::General, "fill_buffer");
+                require_same_context(self->recorder().owner(), buffer->owner(), "fill_buffer");
+                unwrap(self->recorder().fill_buffer(std::move(buffer), value, offset, size), nullptr);
                 return self;
             },
             py::arg("buffer"),
@@ -391,16 +389,17 @@ void bind_commands(py::module_& m)
             py::arg("size") = 0)
         .def(
             "clear_image",
-            [](std::shared_ptr<CommandBuffer> self, std::shared_ptr<Image> image, const py::object& color)
+            [](const std::shared_ptr<Pass>& self, const std::shared_ptr<Image>& image, const py::object& color)
             {
-                require_same_context(self->owner(), image->owner(), "clear_image");
+                guard(*self, Pass::VerbScope::General, "clear_image");
+                require_same_context(self->recorder().owner(), image->owner(), "clear_image");
                 std::array<float, 4> rgba{0.0f, 0.0f, 0.0f, 1.0f};
                 auto seq = py::cast<py::sequence>(color);
                 for (std::size_t i = 0; i < 4 && i < py::len(seq); ++i)
                 {
                     rgba[i] = py::cast<float>(seq[i]);
                 }
-                unwrap(self->clear_image(std::move(image), rgba), nullptr);
+                unwrap(self->recorder().clear_image(image, rgba), nullptr);
                 return self;
             },
             py::arg("image"),
@@ -409,13 +408,14 @@ void bind_commands(py::module_& m)
         // constant range covers, so repeating it could only ever be wrong.
         .def(
             "push_constants",
-            [](std::shared_ptr<CommandBuffer> self,
+            [](std::shared_ptr<Pass> self,
                const std::shared_ptr<Pipeline>& pipeline,
                uint32_t offset,
                std::string_view data)
             {
-                require_same_context(self->owner(), pipeline->owner(), "push_constants");
-                self->push_constants(pipeline, offset, static_cast<uint32_t>(data.size()), data.data());
+                guard(*self, Pass::VerbScope::Any, "push_constants");
+                require_same_context(self->recorder().owner(), pipeline->owner(), "push_constants");
+                self->recorder().push_constants(pipeline, offset, static_cast<uint32_t>(data.size()), data.data());
                 return self;
             },
             py::arg("pipeline"),
@@ -426,23 +426,26 @@ void bind_commands(py::module_& m)
         // create_image and create_buffer already pick an overload.
         .def(
             "push_constants",
-            [](std::shared_ptr<CommandBuffer> self, uint32_t offset, std::string_view data)
+            [](std::shared_ptr<Pass> self, uint32_t offset, std::string_view data)
             {
-                unwrap(self->push_constants(offset, static_cast<uint32_t>(data.size()), data.data()), nullptr);
+                guard(*self, Pass::VerbScope::Any, "push_constants");
+                unwrap(
+                    self->recorder().push_constants(offset, static_cast<uint32_t>(data.size()), data.data()), nullptr);
                 return self;
             },
             py::arg("offset"),
             py::arg("data"))
         .def(
             "bind_descriptor_set",
-            [](std::shared_ptr<CommandBuffer> self,
+            [](std::shared_ptr<Pass> self,
                const std::shared_ptr<DescriptorSet>& descriptor_set,
                const std::shared_ptr<Pipeline>& pipeline,
                uint32_t set)
             {
-                require_same_context(self->owner(), descriptor_set->owner(), "bind_descriptor_set");
-                require_same_context(self->owner(), pipeline->owner(), "bind_descriptor_set");
-                self->bind_descriptor_set(descriptor_set, pipeline, set);
+                guard(*self, Pass::VerbScope::Any, "bind_descriptor_set");
+                require_same_context(self->recorder().owner(), descriptor_set->owner(), "bind_descriptor_set");
+                require_same_context(self->recorder().owner(), pipeline->owner(), "bind_descriptor_set");
+                self->recorder().bind_descriptor_set(descriptor_set, pipeline, set);
                 return self;
             },
             py::arg("descriptor_set"),
@@ -455,62 +458,28 @@ void bind_commands(py::module_& m)
         // cannot collide.
         .def(
             "bind_descriptor_set",
-            [](std::shared_ptr<CommandBuffer> self, const std::shared_ptr<DescriptorSet>& descriptor_set)
+            [](std::shared_ptr<Pass> self, const std::shared_ptr<DescriptorSet>& descriptor_set)
             {
-                require_same_context(self->owner(), descriptor_set->owner(), "bind_descriptor_set");
-                unwrap(self->bind_descriptor_set(descriptor_set), nullptr);
+                guard(*self, Pass::VerbScope::Any, "bind_descriptor_set");
+                require_same_context(self->recorder().owner(), descriptor_set->owner(), "bind_descriptor_set");
+                unwrap(self->recorder().bind_descriptor_set(descriptor_set), nullptr);
                 return self;
             },
             py::arg("descriptor_set"));
-
-    // `with ctx.record() as cmd:` — begin() on the way in, and deliberately no
-    // submit on the way out. The block brackets the RECORDING; who submits it is
-    // still the caller's choice, and a block that guessed between ctx.submit and
-    // renderer.present would be wrong half the time.
-    py::class_<RecordScope>(m, "RecordScope")
-        .def(
-            "__enter__",
-            [](RecordScope& self)
-            {
-                self.cmd->begin();
-                return self.cmd;
-            })
-        .def(
-            "__exit__",
-            [](RecordScope&, const py::object&, const py::object&, const py::object&)
-            {
-                return false; // never swallow exceptions
-            });
-
-    py::class_<RenderingScope>(m, "RenderingScope")
-        .def(
-            "__enter__",
-            [](RenderingScope& self)
-            {
-                self.cmd->begin_rendering(self.target, self.clear_color, self.clear_depth, self.clear_stencil);
-                return self.cmd;
-            })
-        .def(
-            "__exit__",
-            [](RenderingScope& self, const py::object&, const py::object&, const py::object&)
-            {
-                self.cmd->end_rendering(self.target);
-                return false; // never swallow exceptions
-            });
 
     py::class_<LabelScope>(m, "LabelScope")
         .def(
             "__enter__",
             [](LabelScope& self)
             {
-                self.cmd->begin_label(self.name);
-                return self.cmd;
+                self.pass->recorder().begin_label(self.name);
+                return self.pass;
             })
         .def(
             "__exit__",
             [](LabelScope& self, const py::object&, const py::object&, const py::object&)
             {
-                self.cmd->end_label();
+                self.pass->recorder().end_label();
                 return false; // never swallow exceptions
             });
 
@@ -519,7 +488,7 @@ void bind_commands(py::module_& m)
     //
     // Three answers, three shapes, on both readers. UnsupportedError when the
     // device cannot answer at all, StateError when the handle predates a
-    // begin(), and None only for "the submit is still running". They used to be
+    // reset, and None only for "the submit is still running". They used to be
     // one nullopt, and a caller could not tell "wait longer" from "this GPU
     // cannot" — which are opposite reactions.
     bind_query_handle<OcclusionQuery>(m, "OcclusionQuery")

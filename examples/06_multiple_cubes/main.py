@@ -120,11 +120,11 @@ pool = ctx.create_descriptor_pool()
 desc_set = pool.allocate_frame_set(pipeline)
 desc_set.set_buffer(0, ubuf)
 
-# Record commands
-cmd = ctx.create_command_buffer()
-cmd.begin()
-with cmd.rendering(renderer, clear_color=[0.05, 0.05, 0.05, 1.0]) as c:
-    (c.bind_pipeline(pipeline)
+# Build the graph. Only the uniform buffer changes, so one graph serves
+# every frame.
+g = ctx.graph()
+with g.add_pass(renderer, clear_color=[0.05, 0.05, 0.05, 1.0]) as p:
+    (p.bind_pipeline(pipeline)
       .bind_descriptor_set(desc_set, pipeline)
       .bind_vertex_buffer(vbuf)
       .bind_index_buffer(ibuf)
@@ -200,4 +200,4 @@ while window.is_open():
         
         ubuf.update(data)
         
-        renderer.present(cmd)
+        renderer.present(g)

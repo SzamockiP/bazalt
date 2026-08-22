@@ -14,29 +14,9 @@ std::expected<std::shared_ptr<CommandBuffer>, Error> CommandBuffer::create(
 {
     auto ctx = context.shared_from_this();
     auto cmd = std::shared_ptr<CommandBuffer>(new CommandBuffer(ctx));
-    // Per-command-buffer override of the Context-wide mode, so one hot
-    // path can go manual without flipping the whole application.
+    // Per-pass override of the Context-wide mode, so one hot pass can go
+    // manual without flipping the whole application.
     cmd->auto_barriers_ = auto_barriers.value_or(ctx->auto_barriers());
-    // Told once, here and not in begin(): the mask describes the device, not
-    // the recording, so tracker_.reset() must leave it alone.
-    cmd->tracker_.set_all_shader_stages(ctx->all_shader_stages());
-    cmd->command_buffers_.resize(ctx->frames_in_flight(), VK_NULL_HANDLE);
-
-    VkCommandBufferAllocateInfo allocInfo{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .pNext = nullptr,
-        .commandPool = ctx->command_pool(),
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = ctx->frames_in_flight()};
-
-    if (auto e = check(
-            ctx->vk().vkAllocateCommandBuffers(ctx->device(), &allocInfo, cmd->command_buffers_.data()),
-            "allocate command buffers",
-            ErrorCode::Resource))
-    {
-        return std::unexpected(*e);
-    }
-
     return cmd;
 }
 
@@ -54,12 +34,6 @@ CommandBuffer::~CommandBuffer()
             context_->defer_destroy([vk = &context_->vk(), device = context_->device(), pool = occlusion_pool_]
                                     { vk->vkDestroyQueryPool(device, pool, nullptr); });
         }
-        context_->defer_destroy(
-            [vk = &context_->vk(),
-             device = context_->device(),
-             pool = context_->command_pool(),
-             buffers = std::move(command_buffers_)]
-            { vk->vkFreeCommandBuffers(device, pool, static_cast<uint32_t>(buffers.size()), buffers.data()); });
     }
 }
 
@@ -68,17 +42,11 @@ CommandBuffer& CommandBuffer::begin()
     commands_.clear();
     used_sets_.clear();
     used_buffers_.clear();
-    // A reused command buffer must forget its previous recording entirely,
-    // or it would emit barriers against uses that no longer exist.
-    tracker_.reset();
     bound_graphics_sets_.clear();
     bound_compute_sets_.clear();
     bound_graphics_pipeline_.reset();
     bound_compute_pipeline_.reset();
     bound_last_pipeline_.reset();
-    tracked_writes_ = false;
-    in_rendering_ = false;
-    rendering_insert_pos_ = 0;
     // Timers are re-declared each recording; the query pool itself is kept
     // and reset (vkCmdResetQueryPool) at the top of every replay. Bumping
     // the generation invalidates handles from the previous recording.
@@ -91,390 +59,406 @@ CommandBuffer& CommandBuffer::begin()
     return *this;
 }
 
-CommandBuffer& CommandBuffer::begin_rendering(
-    const std::shared_ptr<RenderTarget>& target,
+// The transition half of opening a rendering scope: every attachment enters
+// its attachment layout. Split from the begin half in 0.28, because the graph
+// executor owns these transitions itself (its compile decides them with the
+// whole frame in view) while the inline recorder keeps recording both halves
+// back to back, in this order.
+void record_render_pass_transitions_in(const VolkDeviceTable& vk, VkCommandBuffer cmd, RenderTarget& rt, bool preserve)
+{
+    // A depth attachment that carries a stencil aspect is one image
+    // in one layout: DEPTH_ATTACHMENT_OPTIMAL covers the depth
+    // aspect only, so a combined format needs the combined layout,
+    // and every barrier, view and attachment info below reads both
+    // from here.
+    const VkImageAspectFlags depth_aspect = aspect_mask_for(rt.depth_format());
+    const bool stencil = has_stencil(rt.depth_format());
+    const VkImageLayout depth_layout = stencil ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                                               : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+
+    // Which layer/mip each attachment barrier must transition. Defaults
+    // to {layer 0, mip 0, one of each}; a SubresourceTarget narrows it to
+    // the single subresource its view renders into (render-to-layer/mip).
+    const RenderTarget::Subresource color_sr = rt.color_subresource();
+    const RenderTarget::Subresource depth_sr = rt.depth_subresource();
+
+    // Every colour attachment enters COLOR_ATTACHMENT_OPTIMAL. UNDEFINED
+    // as the source: contents are cleared each pass anyway.
+    //
+    // Except when preserving, where UNDEFINED discards exactly what
+    // is about to be loaded. The source is then the layout the
+    // previous pass retired to (the transitions-out half below), and the
+    // source stage covers both ways the attachment can have got there:
+    // written by an earlier pass, or sampled since.
+    const VkImageLayout color_old_layout = preserve ? rt.final_layout() : VK_IMAGE_LAYOUT_UNDEFINED;
+    const VkAccessFlags color_src_access = preserve ? (VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT)
+                                                    : 0;
+    const VkPipelineStageFlags color_src_stage =
+        preserve ? (VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+                 : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+    // LOAD_OP_LOAD reads the attachment, so preserving needs the
+    // read bit as well as the write.
+    const VkAccessFlags color_dst_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                           (preserve ? VK_ACCESS_COLOR_ATTACHMENT_READ_BIT : 0);
+    for (uint32_t i = 0; i < rt.color_count(); ++i)
+    {
+        record_image_transition(
+            vk,
+            cmd,
+            rt.color_image(i),
+            color_old_layout,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            color_src_access,
+            color_dst_access,
+            color_src_stage,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            color_sr.base_mip,
+            color_sr.mip_count,
+            color_sr.layer_count,
+            color_sr.base_layer);
+
+        // With MSAA the single-sample resolve target is a second
+        // attachment written this pass — it needs the same transition.
+        if (rt.color_resolve_image(i) != VK_NULL_HANDLE)
+        {
+            record_image_transition(
+                vk,
+                cmd,
+                rt.color_resolve_image(i),
+                color_old_layout,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                color_src_access,
+                color_dst_access,
+                color_src_stage,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                color_sr.base_mip,
+                color_sr.mip_count,
+                color_sr.layer_count,
+                color_sr.base_layer);
+        }
+    }
+
+    // Depth follows colour: preserving takes it from the layout the
+    // previous pass left it in, and a swapchain's scratch depth never
+    // leaves DEPTH_ATTACHMENT_OPTIMAL, which is exactly what
+    // depth_final_layout() reports for it.
+    const VkImageLayout depth_old_layout = preserve ? rt.depth_final_layout() : VK_IMAGE_LAYOUT_UNDEFINED;
+    const VkAccessFlags depth_src_access =
+        preserve ? (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT) : 0;
+    const VkPipelineStageFlags depth_src_stage =
+        preserve ? (VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+                 : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+
+    if (rt.depth_image() != VK_NULL_HANDLE)
+    {
+        const VkAccessFlags depth_dst_access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                                               (preserve ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT : 0);
+        record_image_transition(
+            vk,
+            cmd,
+            rt.depth_image(),
+            depth_old_layout,
+            depth_layout,
+            depth_src_access,
+            depth_dst_access,
+            depth_src_stage,
+            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+            depth_aspect,
+            depth_sr.base_mip,
+            depth_sr.mip_count,
+            depth_sr.layer_count,
+            depth_sr.base_layer);
+
+        // MSAA depth resolves into a single-sample image (offscreen
+        // only — a swapchain's scratch depth has no resolve target).
+        if (rt.depth_resolve_image() != VK_NULL_HANDLE)
+        {
+            record_image_transition(
+                vk,
+                cmd,
+                rt.depth_resolve_image(),
+                depth_old_layout,
+                depth_layout,
+                depth_src_access,
+                depth_dst_access,
+                depth_src_stage,
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                depth_aspect,
+                depth_sr.base_mip,
+                depth_sr.mip_count,
+                depth_sr.layer_count,
+                depth_sr.base_layer);
+        }
+    }
+}
+
+// The begin half: attachment info, vkCmdBeginRendering, and the whole-target
+// viewport and scissor.
+void record_render_pass_begin(
+    const VolkDeviceTable& vk,
+    VkCommandBuffer cmd,
+    RenderTarget& rt_ref,
     const std::optional<std::vector<std::array<float, 4>>>& clear_colors,
     float clear_depth,
     std::uint32_t clear_stencil)
 {
-    commands_.emplace_back(
-        [clear_colors, clear_depth, clear_stencil, target](VkCommandBuffer cmd, const FrameContext& frame)
+    RenderTarget* rt = &rt_ref;
+    const bool preserve = !clear_colors.has_value();
+    const bool stencil = has_stencil(rt->depth_format());
+    const VkImageLayout depth_layout = stencil ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                                               : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+
+    std::vector<VkRenderingAttachmentInfo> colorAttachments;
+    colorAttachments.reserve(rt->color_count());
+    for (uint32_t i = 0; i < rt->color_count(); ++i)
+    {
+        // One entry clears every attachment, N entries clear attachment
+        // i with entry i, and a preserving pass has no clear at all.
+        const std::array<float, 4> cc = [&]() -> std::array<float, 4>
         {
-            RenderTarget* rt = target.get();
-            const bool preserve = !clear_colors.has_value();
-
-            // A depth attachment that carries a stencil aspect is one image
-            // in one layout: DEPTH_ATTACHMENT_OPTIMAL covers the depth
-            // aspect only, so a combined format needs the combined layout,
-            // and every barrier, view and attachment info below reads both
-            // from here.
-            const VkImageAspectFlags depth_aspect = aspect_mask_for(rt->depth_format());
-            const bool stencil = has_stencil(rt->depth_format());
-            const VkImageLayout depth_layout = stencil ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-                                                       : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-
-            // Which layer/mip each attachment barrier must transition. Defaults
-            // to {layer 0, mip 0, one of each}; a SubresourceTarget narrows it to
-            // the single subresource its view renders into (render-to-layer/mip).
-            const RenderTarget::Subresource color_sr = rt->color_subresource();
-            const RenderTarget::Subresource depth_sr = rt->depth_subresource();
-
-            // Every colour attachment enters COLOR_ATTACHMENT_OPTIMAL. UNDEFINED
-            // as the source: contents are cleared each pass anyway.
-            //
-            // Except when preserving, where UNDEFINED discards exactly what
-            // is about to be loaded. The source is then the layout the
-            // previous pass retired to (end_rendering below), and the source
-            // stage covers both ways the attachment can have got there:
-            // written by an earlier pass, or sampled since.
-            const VkImageLayout color_old_layout = preserve ? rt->final_layout() : VK_IMAGE_LAYOUT_UNDEFINED;
-            const VkAccessFlags color_src_access =
-                preserve ? (VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT) : 0;
-            const VkPipelineStageFlags color_src_stage =
-                preserve ? (VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
-                         : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-
-            // LOAD_OP_LOAD reads the attachment, so preserving needs the
-            // read bit as well as the write.
-            const VkAccessFlags color_dst_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                                                   (preserve ? VK_ACCESS_COLOR_ATTACHMENT_READ_BIT : 0);
-            for (uint32_t i = 0; i < rt->color_count(); ++i)
+            if (preserve || clear_colors->empty())
             {
-                record_image_transition(
-                    *frame.vk,
-                    cmd,
-                    rt->color_image(i),
-                    color_old_layout,
-                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    color_src_access,
-                    color_dst_access,
-                    color_src_stage,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_IMAGE_ASPECT_COLOR_BIT,
-                    color_sr.base_mip,
-                    color_sr.mip_count,
-                    color_sr.layer_count,
-                    color_sr.base_layer);
-
-                // With MSAA the single-sample resolve target is a second
-                // attachment written this pass — it needs the same transition.
-                if (rt->color_resolve_image(i) != VK_NULL_HANDLE)
-                {
-                    record_image_transition(
-                        *frame.vk,
-                        cmd,
-                        rt->color_resolve_image(i),
-                        color_old_layout,
-                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                        color_src_access,
-                        color_dst_access,
-                        color_src_stage,
-                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                        VK_IMAGE_ASPECT_COLOR_BIT,
-                        color_sr.base_mip,
-                        color_sr.mip_count,
-                        color_sr.layer_count,
-                        color_sr.base_layer);
-                }
+                return {0.0f, 0.0f, 0.0f, 1.0f};
             }
+            return i < clear_colors->size() ? (*clear_colors)[i] : (*clear_colors)[0];
+        }();
+        // MSAA: render into the multisampled view, resolve (averaging
+        // the samples) into the single-sample target. The multisampled
+        // image is discarded afterwards unless the target asked to keep
+        // it — see the store-op below.
+        const bool resolve = rt->color_resolve_view(i) != VK_NULL_HANDLE;
+        colorAttachments.push_back(
+            {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+             .pNext = nullptr,
+             .imageView = rt->color_view(i),
+             .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+             .resolveMode = resolve ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_NONE,
+             .resolveImageView = resolve ? rt->color_resolve_view(i) : VK_NULL_HANDLE,
+             .resolveImageLayout = resolve ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+             .loadOp = preserve ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR,
+             // DONT_CARE on the multisampled attachment is what makes
+             // MSAA cheap: on a tiler the samples never leave tile
+             // memory, and the resolve is the only thing written out.
+             // A custom resolve needs them written out, so the target
+             // says so once (keep_samples=True) and pays for it there.
+             // Deriving this from "did anyone bind the multisampled
+             // image" is not available — that happens in another
+             // recording, or in another frame.
+             .storeOp = (resolve && !rt->keep_samples()) ? VK_ATTACHMENT_STORE_OP_DONT_CARE
+                                                         : VK_ATTACHMENT_STORE_OP_STORE,
+             .clearValue = {.color = {{cc[0], cc[1], cc[2], cc[3]}}}});
+    }
 
-            // Depth follows colour: preserving takes it from the layout the
-            // previous pass left it in, and a swapchain's scratch depth never
-            // leaves DEPTH_ATTACHMENT_OPTIMAL, which is exactly what
-            // depth_final_layout() reports for it.
-            const VkImageLayout depth_old_layout = preserve ? rt->depth_final_layout() : VK_IMAGE_LAYOUT_UNDEFINED;
-            const VkAccessFlags depth_src_access =
-                preserve ? (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT) : 0;
-            const VkPipelineStageFlags depth_src_stage =
-                preserve ? (VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
-                         : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    // Depth resolve uses SAMPLE_ZERO (averaging depth is meaningless and
+    // not guaranteed; taking sample 0 always is). Only offscreen targets
+    // resolve depth — the swapchain's scratch depth has no resolve view.
+    const bool depthResolve = rt->depth_resolve_view() != VK_NULL_HANDLE;
+    VkRenderingAttachmentInfo depthAttachment{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .pNext = nullptr,
+        .imageView = rt->depth_view(),
+        .imageLayout = depth_layout,
+        .resolveMode = depthResolve ? VK_RESOLVE_MODE_SAMPLE_ZERO_BIT : VK_RESOLVE_MODE_NONE,
+        .resolveImageView = depthResolve ? rt->depth_resolve_view() : VK_NULL_HANDLE,
+        .resolveImageLayout = depthResolve ? depth_layout : VK_IMAGE_LAYOUT_UNDEFINED,
+        .loadOp = preserve ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR,
+        // Always stored. It used to be DONT_CARE unless the depth
+        // would be consumed (shadow maps), which is the cheaper
+        // choice right up until a second pass preserves it: DONT_CARE
+        // makes the depth undefined the moment the first pass ends, so
+        // opaque-then-transparent on one target would z-test against
+        // garbage. The cost is depth bandwidth on tiled GPUs, and the
+        // upgrade path is deriving the store-op from whether a later
+        // pass in the same recording loads.
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue = {.depthStencil = {clear_depth, clear_stencil}}};
 
-            if (rt->depth_image() != VK_NULL_HANDLE)
-            {
-                const VkAccessFlags depth_dst_access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
-                                                       (preserve ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT : 0);
-                record_image_transition(
-                    *frame.vk,
-                    cmd,
-                    rt->depth_image(),
-                    depth_old_layout,
-                    depth_layout,
-                    depth_src_access,
-                    depth_dst_access,
-                    depth_src_stage,
-                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                    depth_aspect,
-                    depth_sr.base_mip,
-                    depth_sr.mip_count,
-                    depth_sr.layer_count,
-                    depth_sr.base_layer);
+    // The stencil aspect of the same image, named separately because
+    // dynamic rendering takes two attachment pointers. It follows the
+    // depth attachment in everything except which half of the clear
+    // value it reads — one image, one layout, one load-op, so a pass
+    // cannot preserve depth while clearing stencil.
+    VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
 
-                // MSAA depth resolves into a single-sample image (offscreen
-                // only — a swapchain's scratch depth has no resolve target).
-                if (rt->depth_resolve_image() != VK_NULL_HANDLE)
-                {
-                    record_image_transition(
-                        *frame.vk,
-                        cmd,
-                        rt->depth_resolve_image(),
-                        depth_old_layout,
-                        depth_layout,
-                        depth_src_access,
-                        depth_dst_access,
-                        depth_src_stage,
-                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                        depth_aspect,
-                        depth_sr.base_mip,
-                        depth_sr.mip_count,
-                        depth_sr.layer_count,
-                        depth_sr.base_layer);
-                }
-            }
+    VkRenderingInfo renderingInfo{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .renderArea = {{0, 0}, rt->extent()},
+        // Multiview renders every set layer in one pass (viewMask != 0);
+        // layerCount is then ignored. 0 keeps the ordinary single-layer path.
+        .layerCount = 1,
+        .viewMask = rt->view_mask(),
+        .colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size()),
+        .pColorAttachments = colorAttachments.empty() ? nullptr : colorAttachments.data(),
+        .pDepthAttachment = rt->depth_view() != VK_NULL_HANDLE ? &depthAttachment : nullptr,
+        .pStencilAttachment = (stencil && rt->depth_view() != VK_NULL_HANDLE) ? &stencilAttachment : nullptr};
 
-            std::vector<VkRenderingAttachmentInfo> colorAttachments;
-            colorAttachments.reserve(rt->color_count());
-            for (uint32_t i = 0; i < rt->color_count(); ++i)
-            {
-                // One entry clears every attachment, N entries clear attachment
-                // i with entry i, and a preserving pass has no clear at all.
-                const std::array<float, 4> cc = [&]() -> std::array<float, 4>
-                {
-                    if (preserve || clear_colors->empty())
-                    {
-                        return {0.0f, 0.0f, 0.0f, 1.0f};
-                    }
-                    return i < clear_colors->size() ? (*clear_colors)[i] : (*clear_colors)[0];
-                }();
-                // MSAA: render into the multisampled view, resolve (averaging
-                // the samples) into the single-sample target. The multisampled
-                // image is discarded afterwards unless the target asked to keep
-                // it — see the store-op below.
-                const bool resolve = rt->color_resolve_view(i) != VK_NULL_HANDLE;
-                colorAttachments.push_back(
-                    {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-                     .pNext = nullptr,
-                     .imageView = rt->color_view(i),
-                     .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                     .resolveMode = resolve ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_NONE,
-                     .resolveImageView = resolve ? rt->color_resolve_view(i) : VK_NULL_HANDLE,
-                     .resolveImageLayout = resolve ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-                                                   : VK_IMAGE_LAYOUT_UNDEFINED,
-                     .loadOp = preserve ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR,
-                     // DONT_CARE on the multisampled attachment is what makes
-                     // MSAA cheap: on a tiler the samples never leave tile
-                     // memory, and the resolve is the only thing written out.
-                     // A custom resolve needs them written out, so the target
-                     // says so once (keep_samples=True) and pays for it there.
-                     // Deriving this from "did anyone bind the multisampled
-                     // image" is not available — that happens in another
-                     // recording, or in another frame.
-                     .storeOp = (resolve && !rt->keep_samples()) ? VK_ATTACHMENT_STORE_OP_DONT_CARE
-                                                                 : VK_ATTACHMENT_STORE_OP_STORE,
-                     .clearValue = {.color = {{cc[0], cc[1], cc[2], cc[3]}}}});
-            }
+    vk.vkCmdBeginRendering(cmd, &renderingInfo);
 
-            // Depth resolve uses SAMPLE_ZERO (averaging depth is meaningless and
-            // not guaranteed; taking sample 0 always is). Only offscreen targets
-            // resolve depth — the swapchain's scratch depth has no resolve view.
-            const bool depthResolve = rt->depth_resolve_view() != VK_NULL_HANDLE;
-            VkRenderingAttachmentInfo depthAttachment{
-                .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-                .pNext = nullptr,
-                .imageView = rt->depth_view(),
-                .imageLayout = depth_layout,
-                .resolveMode = depthResolve ? VK_RESOLVE_MODE_SAMPLE_ZERO_BIT : VK_RESOLVE_MODE_NONE,
-                .resolveImageView = depthResolve ? rt->depth_resolve_view() : VK_NULL_HANDLE,
-                .resolveImageLayout = depthResolve ? depth_layout : VK_IMAGE_LAYOUT_UNDEFINED,
-                .loadOp = preserve ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR,
-                // Always stored. It used to be DONT_CARE unless the depth
-                // would be consumed (shadow maps), which is the cheaper
-                // choice right up until a second pass preserves it: DONT_CARE
-                // makes the depth undefined the moment the first pass ends, so
-                // opaque-then-transparent on one target would z-test against
-                // garbage. The cost is depth bandwidth on tiled GPUs, and the
-                // upgrade path is deriving the store-op from whether a later
-                // pass in the same recording loads.
-                .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                .clearValue = {.depthStencil = {clear_depth, clear_stencil}}};
+    // Emitted automatically: set_viewport()/set_scissor() took no arguments
+    // and silently read the swapchain, which is magic — just less legible
+    // than doing it here. set_viewport(x, y, w, h) remains for the cases
+    // that genuinely want something other than the whole target.
+    VkViewport viewport{
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = static_cast<float>(rt->extent().width),
+        .height = static_cast<float>(rt->extent().height),
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f};
+    vk.vkCmdSetViewport(cmd, 0, 1, &viewport);
 
-            // The stencil aspect of the same image, named separately because
-            // dynamic rendering takes two attachment pointers. It follows the
-            // depth attachment in everything except which half of the clear
-            // value it reads — one image, one layout, one load-op, so a pass
-            // cannot preserve depth while clearing stencil.
-            VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
-
-            VkRenderingInfo renderingInfo{
-                .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-                .pNext = nullptr,
-                .flags = 0,
-                .renderArea = {{0, 0}, rt->extent()},
-                // Multiview renders every set layer in one pass (viewMask != 0);
-                // layerCount is then ignored. 0 keeps the ordinary single-layer path.
-                .layerCount = 1,
-                .viewMask = rt->view_mask(),
-                .colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size()),
-                .pColorAttachments = colorAttachments.empty() ? nullptr : colorAttachments.data(),
-                .pDepthAttachment = rt->depth_view() != VK_NULL_HANDLE ? &depthAttachment : nullptr,
-                .pStencilAttachment = (stencil && rt->depth_view() != VK_NULL_HANDLE) ? &stencilAttachment : nullptr};
-
-            frame.vk->vkCmdBeginRendering(cmd, &renderingInfo);
-
-            // Emitted automatically: set_viewport()/set_scissor() took no arguments
-            // and silently read the swapchain, which is magic â€” just less legible
-            // than doing it here. set_viewport(x, y, w, h) remains for the cases
-            // that genuinely want something other than the whole target.
-            VkViewport viewport{
-                .x = 0.0f,
-                .y = 0.0f,
-                .width = static_cast<float>(rt->extent().width),
-                .height = static_cast<float>(rt->extent().height),
-                .minDepth = 0.0f,
-                .maxDepth = 1.0f};
-            frame.vk->vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-            VkRect2D scissor{.offset = {0, 0}, .extent = rt->extent()};
-            frame.vk->vkCmdSetScissor(cmd, 0, 1, &scissor);
-        });
-    // vkCmdPipelineBarrier is illegal inside a dynamic rendering scope, so
-    // auto barriers discovered between begin and end are hoisted to just
-    // before this lambda (record_barrier_ reads these two fields).
-    in_rendering_ = true;
-    rendering_insert_pos_ = commands_.size() - 1;
-    return *this;
+    VkRect2D scissor{.offset = {0, 0}, .extent = rt->extent()};
+    vk.vkCmdSetScissor(cmd, 0, 1, &scissor);
 }
 
-CommandBuffer& CommandBuffer::end_rendering(const std::shared_ptr<RenderTarget>& target)
+void record_render_pass_end(const VolkDeviceTable& vk, VkCommandBuffer cmd)
 {
-    commands_.emplace_back(
-        [target](VkCommandBuffer cmd, const FrameContext& frame)
+    vk.vkCmdEndRendering(cmd);
+}
+
+void record_render_pass_transitions_out(const VolkDeviceTable& vk, VkCommandBuffer cmd, RenderTarget& rt_ref)
+{
+    RenderTarget* target = &rt_ref;
+
+    const RenderTarget::Subresource color_sr = target->color_subresource();
+    const RenderTarget::Subresource depth_sr = target->depth_subresource();
+
+    // Every colour attachment retires to the target's final layout.
+    // (Was VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, unconditionally, on colour 0
+    // only â€” that one constant is why nothing but a swapchain could ever
+    // be drawn into.)
+    for (uint32_t i = 0; i < target->color_count(); ++i)
+    {
+        // With MSAA it is the resolve image that must reach the final
+        // layout, because that is the one that gets presented.
+        VkImage final_image = target->color_resolve_image(i) != VK_NULL_HANDLE ? target->color_resolve_image(i)
+                                                                               : target->color_image(i);
+        // The retire NAMES who reads next, and that is not decoration: a layout
+        // transition is itself a write, so a destination scope of
+        // (BOTTOM_OF_PIPE, 0) leaves the next reader unsynchronized against it.
+        // A pass that samples this attachment later in the same submit —
+        // render into a texture, then read it, which is what a G-buffer or a
+        // post-process chain is — then reports READ_AFTER_WRITE under sync
+        // validation. Depth has always named its reader (below); colour said
+        // nothing, and the asymmetry was the bug.
+        //
+        // A swapchain is the exception and keeps the empty scope: PRESENT_SRC
+        // is consumed by the presentation engine, which the present semaphore
+        // orders, and no shader may touch it at all.
+        const bool presented = target->final_layout() == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        record_image_transition(
+            vk,
+            cmd,
+            final_image,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            target->final_layout(),
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            presented ? 0 : VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            presented ? VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            color_sr.base_mip,
+            color_sr.mip_count,
+            color_sr.layer_count,
+            color_sr.base_layer);
+
+        // A kept multisampled image retires too, since 0.25, because it
+        // is then readable: target.multisampled_color[i] goes into a
+        // sampler2DMS for a custom resolve. It goes to
+        // SHADER_READ_ONLY_OPTIMAL rather than to final_layout(), and
+        // that difference is the point — a swapchain's final layout is
+        // PRESENT_SRC_KHR, and a multisampled image is never the thing
+        // that gets presented.
+        if (target->keep_samples() && target->color_resolve_image(i) != VK_NULL_HANDLE)
         {
-            frame.vk->vkCmdEndRendering(cmd);
+            record_image_transition(
+                vk,
+                cmd,
+                target->color_image(i),
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                color_sr.base_mip,
+                color_sr.mip_count,
+                color_sr.layer_count,
+                color_sr.base_layer);
+        }
+    }
 
-            const RenderTarget::Subresource color_sr = target->color_subresource();
-            const RenderTarget::Subresource depth_sr = target->depth_subresource();
+    // Depth retires to its own final layout when it will be consumed
+    // (offscreen: SHADER_READ_ONLY, which is what makes `target.depth`
+    // sampleable). The swapchain's depth stays put â€” no barrier.
+    const VkImageAspectFlags depth_aspect = aspect_mask_for(target->depth_format());
+    const VkImageLayout depth_layout = has_stencil(target->depth_format())
+                                           ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                                           : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    if (target->depth_image() != VK_NULL_HANDLE && target->depth_final_layout() != depth_layout)
+    {
+        // Same as colour: the resolved single-sample depth is what gets
+        // sampled, so it is the one that must reach the final layout.
+        VkImage final_depth = target->depth_resolve_image() != VK_NULL_HANDLE ? target->depth_resolve_image()
+                                                                              : target->depth_image();
+        record_image_transition(
+            vk,
+            cmd,
+            final_depth,
+            depth_layout,
+            target->depth_final_layout(),
+            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            depth_aspect,
+            depth_sr.base_mip,
+            depth_sr.mip_count,
+            depth_sr.layer_count,
+            depth_sr.base_layer);
 
-            // Every colour attachment retires to the target's final layout.
-            // (Was VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, unconditionally, on colour 0
-            // only â€” that one constant is why nothing but a swapchain could ever
-            // be drawn into.)
-            for (uint32_t i = 0; i < target->color_count(); ++i)
-            {
-                // With MSAA it is the resolve image that must reach the final
-                // layout, because that is the one that gets presented.
-                VkImage final_image = target->color_resolve_image(i) != VK_NULL_HANDLE ? target->color_resolve_image(i)
-                                                                                       : target->color_image(i);
-                record_image_transition(
-                    *frame.vk,
-                    cmd,
-                    final_image,
-                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    target->final_layout(),
-                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                    0,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                    VK_IMAGE_ASPECT_COLOR_BIT,
-                    color_sr.base_mip,
-                    color_sr.mip_count,
-                    color_sr.layer_count,
-                    color_sr.base_layer);
+        // The multisampled depth follows the multisampled colour, for
+        // the reason the colour comment gives. Symmetric on purpose:
+        // "the colour samples are readable and the depth samples are
+        // not" would be a second rule to remember, and it would show up
+        // as a validation error rather than as a message.
+        if (target->keep_samples() && target->depth_resolve_image() != VK_NULL_HANDLE)
+        {
+            record_image_transition(
+                vk,
+                cmd,
+                target->depth_image(),
+                depth_layout,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                depth_aspect,
+                depth_sr.base_mip,
+                depth_sr.mip_count,
+                depth_sr.layer_count,
+                depth_sr.base_layer);
+        }
+    }
 
-                // A kept multisampled image retires too, since 0.25, because it
-                // is then readable: target.multisampled_color[i] goes into a
-                // sampler2DMS for a custom resolve. It goes to
-                // SHADER_READ_ONLY_OPTIMAL rather than to final_layout(), and
-                // that difference is the point — a swapchain's final layout is
-                // PRESENT_SRC_KHR, and a multisampled image is never the thing
-                // that gets presented.
-                if (target->keep_samples() && target->color_resolve_image(i) != VK_NULL_HANDLE)
-                {
-                    record_image_transition(
-                        *frame.vk,
-                        cmd,
-                        target->color_image(i),
-                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                        VK_ACCESS_SHADER_READ_BIT,
-                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                        VK_IMAGE_ASPECT_COLOR_BIT,
-                        color_sr.base_mip,
-                        color_sr.mip_count,
-                        color_sr.layer_count,
-                        color_sr.base_layer);
-                }
-            }
-
-            // Depth retires to its own final layout when it will be consumed
-            // (offscreen: SHADER_READ_ONLY, which is what makes `target.depth`
-            // sampleable). The swapchain's depth stays put â€” no barrier.
-            const VkImageAspectFlags depth_aspect = aspect_mask_for(target->depth_format());
-            const VkImageLayout depth_layout = has_stencil(target->depth_format())
-                                                   ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-                                                   : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-            if (target->depth_image() != VK_NULL_HANDLE && target->depth_final_layout() != depth_layout)
-            {
-                // Same as colour: the resolved single-sample depth is what gets
-                // sampled, so it is the one that must reach the final layout.
-                VkImage final_depth = target->depth_resolve_image() != VK_NULL_HANDLE ? target->depth_resolve_image()
-                                                                                      : target->depth_image();
-                record_image_transition(
-                    *frame.vk,
-                    cmd,
-                    final_depth,
-                    depth_layout,
-                    target->depth_final_layout(),
-                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                    VK_ACCESS_SHADER_READ_BIT,
-                    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                    depth_aspect,
-                    depth_sr.base_mip,
-                    depth_sr.mip_count,
-                    depth_sr.layer_count,
-                    depth_sr.base_layer);
-
-                // The multisampled depth follows the multisampled colour, for
-                // the reason the colour comment gives. Symmetric on purpose:
-                // "the colour samples are readable and the depth samples are
-                // not" would be a second rule to remember, and it would show up
-                // as a validation error rather than as a message.
-                if (target->keep_samples() && target->depth_resolve_image() != VK_NULL_HANDLE)
-                {
-                    record_image_transition(
-                        *frame.vk,
-                        cmd,
-                        target->depth_image(),
-                        depth_layout,
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                        VK_ACCESS_SHADER_READ_BIT,
-                        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                        depth_aspect,
-                        depth_sr.base_mip,
-                        depth_sr.mip_count,
-                        depth_sr.layer_count,
-                        depth_sr.base_layer);
-                }
-            }
-
-            // Runs at execute() time, inside a real submit â€” so the target learns
-            // its images have left UNDEFINED exactly when that becomes true, and a
-            // recorded-but-never-submitted command buffer marks nothing.
-            target->on_rendering_recorded();
-            // …then bring anything this pass did NOT write up to the same
-            // final layout, so the promise "the result ends in this layout"
-            // covers the whole image and not just the drawn part. Records
-            // nothing when the pass wrote the image whole, which is the
-            // usual case. Must follow on_rendering_recorded: that is what
-            // makes the per-subresource state true.
-            target->record_even_out(*frame.vk, cmd);
-        });
-    in_rendering_ = false;
-    return *this;
+    // Runs at execute() time, inside a real submit â€” so the target learns
+    // its images have left UNDEFINED exactly when that becomes true, and a
+    // recorded-but-never-submitted command buffer marks nothing.
+    target->on_rendering_recorded();
+    // …then bring anything this pass did NOT write up to the same
+    // final layout, so the promise "the result ends in this layout"
+    // covers the whole image and not just the drawn part. Records
+    // nothing when the pass wrote the image whole, which is the
+    // usual case. Must follow on_rendering_recorded: that is what
+    // makes the per-subresource state true.
+    target->record_even_out(vk, cmd);
 }
 
 CommandBuffer& CommandBuffer::set_viewport(float x, float y, float width, float height)
@@ -714,26 +698,32 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Buffer> buffer
     {
         return std::unexpected(err_resource("barrier: buffer is null"));
     }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.barrier() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
-    }
     const StageAccess s = to_vk(src, context_->all_shader_stages());
     const StageAccess d = to_vk(dst, context_->all_shader_stages());
-    Buffer* buf = buffer.get();
-    record_barrier_(
-        std::move(buffer),
-        {.src_stages = s.stages, .dst_stages = d.stages, .src_access = s.access, .dst_access = d.access});
-    // Keep the auto-tracker in sync, for the reason the image overload below
-    // does it: the caller just expressed this dependency, so the next
-    // automatic use of the buffer must not emit the first-use floor on top of
-    // it. No-op in manual mode (the tracker is never consulted).
-    if (auto_barriers_)
-    {
-        tracker_.note_buffer_access(buf, d.stages, d.access);
-    }
+    // Tell the fold what this barrier just established, for the reason the
+    // image overload below does it: the caller expressed the dependency here,
+    // so a later automatic use must not put its first-use floor on top of it,
+    // and a neighbouring pass must order against the consumers named here.
+    // Reported whatever auto_barriers_ says — a manual pass's barriers are
+    // exactly what the passes around it need to know.
+    note_buffer_state_(buffer, d.stages, d.access);
+    commands_.emplace_back(
+        [buffer = std::move(buffer), s, d](VkCommandBuffer cmd, const FrameContext& frame)
+        {
+            VkBufferMemoryBarrier barrier{
+                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = s.access,
+                .dstAccessMask = d.access,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                // Resolved at replay, never captured: a DynamicBuffer has one
+                // handle per frame in flight.
+                .buffer = buffer->get(),
+                .offset = 0,
+                .size = VK_WHOLE_SIZE};
+            frame.vk->vkCmdPipelineBarrier(cmd, s.stages, d.stages, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+        });
     return {};
 }
 
@@ -742,12 +732,6 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Image> image, 
     if (!image)
     {
         return std::unexpected(err_resource("barrier: image is null"));
-    }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.barrier() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
     }
     const auto old_layout = image_layout_for(src);
     const auto new_layout = image_layout_for(dst);
@@ -759,36 +743,39 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Image> image, 
     }
     const StageAccess s = to_vk(src, context_->all_shader_stages());
     const StageAccess d = to_vk(dst, context_->all_shader_stages());
-    Image* img = image.get();
-    record_image_barrier_(
-        std::move(image),
-        {.old_layout = *old_layout,
-         .new_layout = *new_layout,
-         .src_stages = s.stages,
-         .dst_stages = d.stages,
-         .src_access = s.access,
-         .dst_access = d.access});
-    // Keep the auto-tracker in sync: a later automatic use of this image in
-    // the same recording must see the post-barrier layout, not re-transition
-    // from a stale one. No-op in manual mode (the tracker is never consulted).
-    if (auto_barriers_)
-    {
-        tracker_.note_image_layout(img, *new_layout, d.stages, d.access);
-    }
+    // Tell the fold the layout this leaves the image in, or a later automatic
+    // use would transition it again from a stale one — a validation error plus
+    // a useless barrier.
+    note_image_state_(image, *new_layout, d.stages, d.access);
+    commands_.emplace_back(
+        [image = std::move(image), old = *old_layout, now = *new_layout, s, d](
+            VkCommandBuffer cmd, const FrameContext& frame)
+        {
+            // All mips and all layers together: the fold holds one layout per
+            // image, and a cube or an array is used as a whole.
+            record_image_transition(
+                *frame.vk,
+                cmd,
+                image->vk_image(),
+                old,
+                now,
+                s.access,
+                d.access,
+                s.stages,
+                d.stages,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0,
+                image->mip_levels(),
+                image->barrier_layers(image->array_layers()));
+        });
     return {};
 }
 
-std::expected<void, Error> CommandBuffer::generate_mipmaps(std::shared_ptr<Image> image, Access src)
+std::expected<void, Error> CommandBuffer::generate_mipmaps(const std::shared_ptr<Image>& image, Access src)
 {
     if (!image)
     {
         return std::unexpected(err_resource("generate_mipmaps: image is null"));
-    }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.generate_mipmaps() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
     }
     if (image->mip_levels() <= 1)
     {
@@ -810,34 +797,23 @@ std::expected<void, Error> CommandBuffer::generate_mipmaps(std::shared_ptr<Image
             "SHADER_READ_ONLY) or Access.SHADER_WRITE (mip 0 in GENERAL)"));
     }
     const StageAccess s = to_vk(src, context_->all_shader_stages());
-    Image* img = image.get();
-    commands_.emplace_back(
-        [image = std::move(image), layout = *src_layout, s](VkCommandBuffer cmd, const FrameContext& frame)
-        { image->record_generate_mipmaps(cmd, layout, s.stages, s.access); });
+    commands_.emplace_back([image, layout = *src_layout, s](VkCommandBuffer cmd, const FrameContext& frame)
+                           { image->record_generate_mipmaps(cmd, layout, s.stages, s.access); });
     // The image now rests in SHADER_READ_ONLY across every level; keep the
     // tracker in sync so a later automatic sample emits no extra transition.
-    if (auto_barriers_)
-    {
-        tracker_.note_image_layout(
-            img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, context_->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT);
-    }
+    note_image_state_(
+        image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, context_->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT);
     return {};
 }
 
 std::expected<void, Error> CommandBuffer::copy_image(
-    std::shared_ptr<Image> src,
-    std::shared_ptr<Image> dst,
+    const std::shared_ptr<Image>& src,
+    const std::shared_ptr<Image>& dst,
     Access src_access)
 {
     if (!src || !dst)
     {
         return std::unexpected(err_resource("copy_image: image is null"));
-    }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.copy_image() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
     }
     if (src->width() != dst->width() || src->height() != dst->height() || src->depth() != dst->depth() ||
         src->format() != dst->format() || src->array_layers() != dst->array_layers())
@@ -872,18 +848,15 @@ std::expected<void, Error> CommandBuffer::copy_image(
             "SHADER_READ_ONLY) or Access.SHADER_WRITE (a compute shader just wrote "
             "it, GENERAL)"));
     }
-    Image* src_ptr = src.get();
-    Image* dst_ptr = dst.get();
-    commands_.emplace_back([src = std::move(src), dst = std::move(dst), layout = *src_layout](
-                               VkCommandBuffer cmd, const FrameContext& frame)
+    commands_.emplace_back([src, dst, layout = *src_layout](VkCommandBuffer cmd, const FrameContext& frame)
                            { record_image_copy(*frame.vk, cmd, *src, *dst, layout); });
-    finish_image_transfer_(src_ptr, dst_ptr);
+    finish_image_transfer_(src, dst);
     return {};
 }
 
 std::expected<void, Error> CommandBuffer::blit_image(
-    std::shared_ptr<Image> src,
-    std::shared_ptr<Image> dst,
+    const std::shared_ptr<Image>& src,
+    const std::shared_ptr<Image>& dst,
     Access src_access,
     VkFilter filter)
 {
@@ -896,12 +869,6 @@ std::expected<void, Error> CommandBuffer::blit_image(
         return std::unexpected(err_resource(
             "blit_image: source and destination are the same image. A blit within one "
             "image is what generate_mipmaps does"));
-    }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.blit_image() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
     }
     if (src->samples() != 1 || dst->samples() != 1)
     {
@@ -939,12 +906,9 @@ std::expected<void, Error> CommandBuffer::blit_image(
             "SHADER_READ_ONLY) or Access.SHADER_WRITE (a compute shader just wrote "
             "it, GENERAL)"));
     }
-    Image* src_ptr = src.get();
-    Image* dst_ptr = dst.get();
-    commands_.emplace_back([src = std::move(src), dst = std::move(dst), layout = *src_layout, filter](
-                               VkCommandBuffer cmd, const FrameContext& frame)
+    commands_.emplace_back([src, dst, layout = *src_layout, filter](VkCommandBuffer cmd, const FrameContext& frame)
                            { record_image_blit(*frame.vk, cmd, *src, *dst, layout, filter); });
-    finish_image_transfer_(src_ptr, dst_ptr);
+    finish_image_transfer_(src, dst);
     return {};
 }
 
@@ -958,12 +922,6 @@ std::expected<void, Error> CommandBuffer::copy_buffer(
     if (!src || !dst)
     {
         return std::unexpected(err_resource("copy_buffer: buffer is null"));
-    }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.copy_buffer() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
     }
     const VkDeviceSize length = size != 0 ? size : bytes_after(src->size(), src_offset);
     if (length == 0)
@@ -1009,12 +967,6 @@ std::expected<void, Error> CommandBuffer::fill_buffer(
     {
         return std::unexpected(err_resource("fill_buffer: buffer is null"));
     }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.fill_buffer() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
-    }
     if (offset % 4 != 0 || (size != 0 && size % 4 != 0))
     {
         return std::unexpected(err_resource(
@@ -1043,17 +995,11 @@ std::expected<void, Error> CommandBuffer::fill_buffer(
     return {};
 }
 
-std::expected<void, Error> CommandBuffer::clear_image(std::shared_ptr<Image> image, std::array<float, 4> color)
+std::expected<void, Error> CommandBuffer::clear_image(const std::shared_ptr<Image>& image, std::array<float, 4> color)
 {
     if (!image)
     {
         return std::unexpected(err_resource("clear_image: image is null"));
-    }
-    if (in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.clear_image() is not allowed inside a rendering scope. "
-            "Record it before begin_rendering"));
     }
     if (format_info(image->format()).depth)
     {
@@ -1061,15 +1007,11 @@ std::expected<void, Error> CommandBuffer::clear_image(std::shared_ptr<Image> ima
             "clear_image: a depth image is cleared by the pass that renders into it "
             "(cmd.rendering(target, clear_depth=...))"));
     }
-    Image* img = image.get();
-    commands_.emplace_back([image = std::move(image), color](VkCommandBuffer cmd, const FrameContext& frame)
+    commands_.emplace_back([image, color](VkCommandBuffer cmd, const FrameContext& frame)
                            { record_image_clear(*frame.vk, cmd, *image, color); });
-    img->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    if (auto_barriers_)
-    {
-        tracker_.note_image_layout(
-            img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, context_->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT);
-    }
+    image->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    note_image_state_(
+        image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, context_->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT);
     return {};
 }
 
@@ -1167,12 +1109,11 @@ CommandBuffer& CommandBuffer::end_label()
 
 std::expected<std::size_t, Error> CommandBuffer::start_occlusion_query()
 {
-    if (!in_rendering_)
-    {
-        return std::unexpected(err_state(
-            "cmd.occlusion_query() must be used inside a rendering scope: Vulkan requires an occlusion "
-            "query to begin and end within one render pass. Move it inside `with cmd.rendering(target):`."));
-    }
+    // "Inside a rendering scope" is now the PASS KIND, and the binding checks
+    // it before this runs (VerbScope::Render). The recorder cannot check it
+    // any more and must not try: a pass never sets in_rendering_, because the
+    // graph opens the rendering scope in its executor rather than into the
+    // pass's own command list — so the old guard refused every legal query.
     const std::size_t index = occlusion_count_++;
     commands_.emplace_back(
         [this, index](VkCommandBuffer cmd, const FrameContext& frame)
@@ -1309,26 +1250,12 @@ CommandBuffer& CommandBuffer::bind_descriptor_set(
     return *this;
 }
 
-std::expected<void, Error> CommandBuffer::claim_for_frame(std::uint64_t serial)
-{
-    if (recorded_serial_ == serial)
-    {
-        return std::unexpected(err_state(
-            "This CommandBuffer was already submitted in the current frame. Each "
-            "window needs its own CommandBuffer — one holds a single command "
-            "buffer per frame slot, so replaying it twice would overwrite work "
-            "still in flight."));
-    }
-    recorded_serial_ = serial;
-    return {};
-}
-
-void CommandBuffer::execute(VkCommandBuffer vkCmd, const FrameContext& frame)
+void CommandBuffer::reset_query_pools(VkCommandBuffer vkCmd, const FrameContext& frame)
 {
     // Timer query pool: created/grown here (the scope count is known once
     // recording is done) and reset before any command runs — timestamps
     // must be reset before they are written, and vkCmdResetQueryPool is
-    // illegal inside a render pass, so the top of execute is the one safe
+    // illegal inside a render pass, so the top of a replay is the one safe
     // spot. The timestamp-write lambdas read timer_pool_ at execute, so a
     // grow that recreates the pool is picked up without re-recording.
     if (timer_count_ > 0)
@@ -1341,7 +1268,7 @@ void CommandBuffer::execute(VkCommandBuffer vkCmd, const FrameContext& frame)
     }
     // Occlusion queries reset in the same place and for the same reason: the
     // reset is illegal inside a render pass, and an occlusion query can only
-    // BEGIN inside one, so the top of execute is the only spot that serves
+    // BEGIN inside one, so the top of a replay is the only spot that serves
     // both halves.
     if (occlusion_count_ > 0)
     {
@@ -1351,113 +1278,45 @@ void CommandBuffer::execute(VkCommandBuffer vkCmd, const FrameContext& frame)
             frame.vk->vkCmdResetQueryPool(vkCmd, occlusion_pool_, 0, occlusion_capacity_);
         }
     }
-
-    // Replay wrap-around. In-recording barriers order uses within one
-    // replay, but the same recording ran last frame and may still be in
-    // flight — its trailing reads/writes race with this replay's first
-    // write. One conservative memory barrier at the top covers that.
-    // Emitted only when the recording writes a tracked buffer at all:
-    // read-only recordings race with nothing.
-    if (auto_barriers_ && tracked_writes_)
-    {
-        VkMemoryBarrier barrier{
-            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-            .pNext = nullptr,
-            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-            // INDIRECT_COMMAND_READ is in here for the same reason
-            // VERTEX_ATTRIBUTE_READ is (0.19): the canonical indirect chain has
-            // compute writing the draw arguments, so frame N+1's command
-            // processor reads exactly what frame N's dispatch is still writing.
-            // Missing it is invisible without sync validation.
-            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
-                             VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
-                             VK_ACCESS_INDIRECT_COMMAND_READ_BIT};
-        // Not constexpr any more: the shader-stage half of this mask depends on
-        // which stages the device enabled (see Context::all_shader_stages).
-        const VkPipelineStageFlags stages = context_->all_shader_stages() | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
-                                            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
-        frame.vk->vkCmdPipelineBarrier(vkCmd, stages, stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
-    }
-    for (auto& cmd_func : commands_)
-    {
-        cmd_func(vkCmd, frame);
-    }
 }
 
-void CommandBuffer::finish_image_transfer_(Image* src, Image* dst)
+void CommandBuffer::finish_image_transfer_(const std::shared_ptr<Image>& src, const std::shared_ptr<Image>& dst)
 {
     src->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     dst->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    if (auto_barriers_)
+    for (const std::shared_ptr<Image>& image : {src, dst})
     {
-        for (Image* image : {src, dst})
-        {
-            tracker_.note_image_layout(
-                image,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                context_->all_shader_stages(),
-                VK_ACCESS_SHADER_READ_BIT);
-        }
+        note_image_state_(
+            image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, context_->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT);
     }
 }
 
-void CommandBuffer::record_barrier_(std::shared_ptr<Buffer> buffer, ResourceTracker::Barrier b)
+void CommandBuffer::note_buffer_state_(
+    const std::shared_ptr<Buffer>& buffer,
+    VkPipelineStageFlags dst_stages,
+    VkAccessFlags dst_access)
 {
-    hoist_or_push_(
-        [buffer = std::move(buffer), b](VkCommandBuffer cmd, const FrameContext& frame)
-        {
-            VkBufferMemoryBarrier barrier{
-                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-                .pNext = nullptr,
-                .srcAccessMask = b.src_access,
-                .dstAccessMask = b.dst_access,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                // Resolved at execute time, never captured: a DynamicBuffer
-                // has one handle per frame in flight.
-                .buffer = buffer->get(),
-                .offset = 0,
-                .size = VK_WHOLE_SIZE};
-            frame.vk->vkCmdPipelineBarrier(cmd, b.src_stages, b.dst_stages, 0, 0, nullptr, 1, &barrier, 0, nullptr);
-        });
+    event_sink_->push_back(
+        {.kind = UseEvent::Kind::BufferNote,
+         .buffer = buffer,
+         .stages = dst_stages,
+         .access = dst_access,
+         .position = commands_.size()});
 }
 
-void CommandBuffer::record_image_barrier_(std::shared_ptr<Image> image, ResourceTracker::ImageBarrier b)
+void CommandBuffer::note_image_state_(
+    const std::shared_ptr<Image>& image,
+    VkImageLayout layout,
+    VkPipelineStageFlags dst_stages,
+    VkAccessFlags dst_access)
 {
-    hoist_or_push_(
-        [image = std::move(image), b](VkCommandBuffer cmd, const FrameContext& frame)
-        {
-            // All mips and all layers transition together: the tracker holds
-            // one layout per image, and a cube/array is used as a whole. A
-            // volume spells that VK_REMAINING_ARRAY_LAYERS.
-            record_image_transition(
-                *frame.vk,
-                cmd,
-                image->vk_image(),
-                b.old_layout,
-                b.new_layout,
-                b.src_access,
-                b.dst_access,
-                b.src_stages,
-                b.dst_stages,
-                VK_IMAGE_ASPECT_COLOR_BIT,
-                0,
-                image->mip_levels(),
-                image->barrier_layers(image->array_layers()));
-        });
-}
-
-void CommandBuffer::hoist_or_push_(std::function<void(VkCommandBuffer, const FrameContext&)> lambda)
-{
-    if (in_rendering_)
-    {
-        commands_.insert(commands_.begin() + static_cast<std::ptrdiff_t>(rendering_insert_pos_), std::move(lambda));
-        ++rendering_insert_pos_;
-    }
-    else
-    {
-        commands_.push_back(std::move(lambda));
-    }
+    event_sink_->push_back(
+        {.kind = UseEvent::Kind::ImageNote,
+         .image = image,
+         .layout = layout,
+         .stages = dst_stages,
+         .access = dst_access,
+         .position = commands_.size()});
 }
 
 void CommandBuffer::record_timer_write_(std::uint32_t slot, VkPipelineStageFlagBits stage)
@@ -1704,19 +1563,19 @@ void CommandBuffer::track_use_(
     {
         return;
     }
-    if (writes)
-    {
-        tracked_writes_ = true;
-    }
     // Only a STORAGE buffer carries VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, so it
-    // is the only type a shader can write. The tracker uses that to narrow
-    // its first-use floor rather than to switch it off — every type can be
-    // written by cmd.copy_buffer and cmd.fill_buffer.
+    // is the only type a shader can write. The fold uses that to narrow its
+    // first-use floor rather than to switch it off — every type can be written
+    // by copy_buffer and fill_buffer.
     const bool shader_writable = buffer->buffer_type() == BufferType::STORAGE;
-    if (auto b = tracker_.use(buffer.get(), stages, access, writes, shader_writable))
-    {
-        record_barrier_(buffer, *b);
-    }
+    event_sink_->push_back(
+        {.kind = UseEvent::Kind::BufferUse,
+         .buffer = buffer,
+         .stages = stages,
+         .access = access,
+         .writes = writes,
+         .shader_writable = shader_writable,
+         .position = commands_.size()});
 }
 
 void CommandBuffer::track_image_use_(
@@ -1724,20 +1583,22 @@ void CommandBuffer::track_image_use_(
     VkImageLayout layout,
     VkPipelineStageFlags stages,
     VkAccessFlags access,
-    bool writes)
+    bool writes,
+    bool only_if_tracked)
 {
     if (!auto_barriers_)
     {
         return;
     }
-    if (writes)
-    {
-        tracked_writes_ = true;
-    }
-    if (auto b = tracker_.use_image(image.get(), layout, stages, access, writes))
-    {
-        record_image_barrier_(image, *b);
-    }
+    event_sink_->push_back(
+        {.kind = UseEvent::Kind::ImageUse,
+         .image = image,
+         .layout = layout,
+         .stages = stages,
+         .access = access,
+         .writes = writes,
+         .only_if_tracked = only_if_tracked,
+         .position = commands_.size()});
 }
 
 bool CommandBuffer::pipeline_writes_(
@@ -1798,15 +1659,26 @@ void CommandBuffer::track_descriptor_uses_(
                     writes ? (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT) : VK_ACCESS_SHADER_READ_BIT,
                     writes);
             }
-            else if (bi.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && tracker_.tracks(bi.image.get()))
+            else if (bi.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
             {
-                // A sampled image only needs a barrier if the tracker has
-                // already seen it — i.e. something wrote it earlier in this
-                // recording and it is still in GENERAL. An uploaded texture the
+                // A sampled image only needs a barrier if something wrote it
+                // earlier and it is still in GENERAL. An uploaded texture the
                 // tracker never saw rests in SHADER_READ_ONLY and is left
-                // untouched, so ordinary texturing pays nothing.
+                // untouched, so ordinary texturing pays nothing — and a
+                // transition of it would DISCARD it, since the tracker's
+                // starting layout is UNDEFINED.
+                //
+                // Who answers "was it written" differs by mode, which is what
+                // the flag carries: inline mode asks its own tracker right
+                // here, while in a pass the writer is a DIFFERENT pass, so the
+                // question can only be settled when the graph folds them.
                 track_image_use_(
-                    bi.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, stages, VK_ACCESS_SHADER_READ_BIT, false);
+                    bi.image,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    stages,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    false,
+                    /*only_if_tracked=*/true);
             }
         }
     }

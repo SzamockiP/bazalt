@@ -45,11 +45,10 @@ pool = ctx.create_descriptor_pool()
 desc_set = pool.allocate_set(pipeline)
 desc_set.set_image(0, texture)
 
-# Record commands
-cmd = ctx.create_command_buffer()
-cmd.begin()
-with cmd.rendering(renderer, clear_color=[0.1, 0.2, 0.3, 1.0]) as c:
-    (c.bind_pipeline(pipeline)
+# Build the graph
+g = ctx.graph()
+with g.add_pass(renderer, clear_color=[0.1, 0.2, 0.3, 1.0]) as p:
+    (p.bind_pipeline(pipeline)
       .bind_descriptor_set(desc_set, pipeline)
       .bind_vertex_buffer(vbuf)
       .bind_index_buffer(ibuf)
@@ -60,4 +59,4 @@ while window.is_open():
     bz.poll_events()
     ctx.begin_frame()
     if renderer.acquire():
-        renderer.present(cmd)
+        renderer.present(g)

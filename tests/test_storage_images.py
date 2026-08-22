@@ -56,12 +56,12 @@ def test_dispatch_fills_a_storage_image(ctx):
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_storage_image(0, img)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_descriptor_set(dset, pipeline, set=0)
-    cmd.dispatch(2, 2)  # 16/8 x 16/8
-    ctx.submit(cmd)
+    g = ctx.graph()
+    p = g.add_pass()
+    p.bind_pipeline(pipeline)
+    p.bind_descriptor_set(dset, pipeline, set=0)
+    p.dispatch(2, 2)  # 16/8 x 16/8
+    ctx.submit(g)
 
     pixels = img.read()
     assert pixels.shape == (16, 16, 4)
@@ -84,15 +84,15 @@ def test_compute_to_compute_barrier(ctx):
     scale_set = pool.allocate_set(scale, set=0)
     scale_set.set_storage_image(0, img)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.bind_pipeline(fill)
-    cmd.bind_descriptor_set(fill_set, fill, set=0)
-    cmd.dispatch(2, 2)
-    cmd.bind_pipeline(scale)
-    cmd.bind_descriptor_set(scale_set, scale, set=0)
-    cmd.dispatch(2, 2)  # reads what fill wrote -> needs an auto image barrier
-    ctx.submit(cmd)
+    g = ctx.graph()
+    p = g.add_pass()
+    p.bind_pipeline(fill)
+    p.bind_descriptor_set(fill_set, fill, set=0)
+    p.dispatch(2, 2)
+    p.bind_pipeline(scale)
+    p.bind_descriptor_set(scale_set, scale, set=0)
+    p.dispatch(2, 2)  # reads what fill wrote -> needs an auto image barrier
+    ctx.submit(g)
 
     # RGB halved, alpha untouched: (32, 64, 95, 255).
     assert np.allclose(img.read()[8, 8], [32, 64, 95, 255], atol=2), img.read()[8, 8]
@@ -118,17 +118,16 @@ def test_compute_written_image_sampled_by_graphics(ctx, fullscreen_vert):
     sample_set = pool.allocate_set(gfx, set=0)
     sample_set.set_image(0, img)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.bind_pipeline(fill)
-    cmd.bind_descriptor_set(fill_set, fill, set=0)
-    cmd.dispatch(2, 2)
-    cmd.begin_rendering(target)
-    cmd.bind_pipeline(gfx)
-    cmd.bind_descriptor_set(sample_set, gfx, set=0)
-    cmd.draw(3)  # samples img -> auto GENERAL->SHADER_READ_ONLY, hoisted before begin_rendering
-    cmd.end_rendering(target)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    p = g.add_pass()
+    p.bind_pipeline(fill)
+    p.bind_descriptor_set(fill_set, fill, set=0)
+    p.dispatch(2, 2)
+    with g.add_pass(target) as rp:
+        rp.bind_pipeline(gfx)
+        rp.bind_descriptor_set(sample_set, gfx, set=0)
+        rp.draw(3)  # samples img -> auto GENERAL->SHADER_READ_ONLY at the pass boundary
+    ctx.submit(g)
 
     assert np.allclose(target.color[0].read()[16, 16, :3], [64, 128, 191], atol=2), \
         target.color[0].read()[16, 16]

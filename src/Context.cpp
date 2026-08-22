@@ -95,14 +95,14 @@ Context::~Context()
     }
     sampler_cache_.clear();
 
-    if (submit_timeline_)
+    if (graphics_q_.timeline)
     {
-        vk_.vkDestroySemaphore(vkb_device_.device, submit_timeline_, nullptr);
+        vk_.vkDestroySemaphore(vkb_device_.device, graphics_q_.timeline, nullptr);
     }
 
-    if (command_pool_)
+    if (graphics_q_.pool)
     {
-        vk_.vkDestroyCommandPool(vkb_device_.device, command_pool_, nullptr);
+        vk_.vkDestroyCommandPool(vkb_device_.device, graphics_q_.pool, nullptr);
     }
 
     if (pipeline_cache_)
@@ -200,7 +200,7 @@ void Context::begin_frame()
 std::uint64_t Context::completed_submit_serial() const
 {
     std::uint64_t value = 0;
-    vk_.vkGetSemaphoreCounterValue(vkb_device_.device, submit_timeline_, &value);
+    vk_.vkGetSemaphoreCounterValue(vkb_device_.device, graphics_q_.timeline, &value);
     return value;
 }
 
@@ -232,17 +232,17 @@ std::expected<void, Error> Context::wait_for_submits()
     {
         upload_manager_->wait_all();
     }
-    auto r = wait_for_serial(submit_serial_.load());
+    auto r = wait_for_serial(graphics_q_.serial.load());
     flush_deletion_queue();
     return r;
 }
 
 std::expected<std::uint64_t, Error> Context::submit_one_shot(VkCommandBuffer cmd, std::uint64_t after)
 {
-    std::lock_guard lock(queue_mutex_);
+    std::lock_guard lock(graphics_q_.mutex);
     const std::uint64_t serial = advance_submit_serial();
 
-    VkSemaphore timeline = submit_timeline_;
+    VkSemaphore timeline = graphics_q_.timeline;
     // TRANSFER, not TOP_OF_PIPE: an upload's first real work is a copy, and
     // there is nothing before it worth letting run early.
     const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -274,13 +274,13 @@ std::expected<std::uint64_t, Error> Context::submit_one_shot(VkCommandBuffer cmd
     return serial;
 }
 
-std::expected<void, Error> Context::wait_for_serial(std::uint64_t serial)
+std::expected<void, Error> Context::wait_for_serial(std::uint64_t serial) const
 {
     if (serial == 0)
     {
         return {};
     }
-    VkSemaphore timeline = submit_timeline_;
+    VkSemaphore timeline = graphics_q_.timeline;
     VkSemaphoreWaitInfo waitInfo{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
         .pNext = nullptr,
@@ -301,7 +301,7 @@ std::expected<void, Error> Context::wait_for_serial(std::uint64_t serial)
 void Context::defer_destroy(std::function<void()> fn)
 {
     std::lock_guard lock(deletion_mutex_);
-    deletion_queue_.emplace_back(submit_serial_.load(), std::move(fn));
+    deletion_queue_.emplace_back(retire_key(), std::move(fn));
 }
 
 void Context::flush_deletion_queue()
@@ -1095,8 +1095,8 @@ std::expected<void, Error> Context::create_device_(Context& ctx)
     {
         return std::unexpected(err_init("Vulkan: Failed to get graphics queue"));
     }
-    ctx.graphics_queue_ = gq.value();
-    ctx.graphics_queue_family_ = ctx.vkb_device_.get_queue_index(vkb::QueueType::graphics).value();
+    ctx.graphics_q_.queue = gq.value();
+    ctx.graphics_q_.family = ctx.vkb_device_.get_queue_index(vkb::QueueType::graphics).value();
 
     return {};
 }
@@ -1133,10 +1133,10 @@ std::expected<void, Error> Context::create_allocator_and_pool_(Context& ctx)
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .pNext = nullptr,
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-        .queueFamilyIndex = ctx.graphics_queue_family_};
+        .queueFamilyIndex = ctx.graphics_q_.family};
 
     if (auto e = check(
-            ctx.vk_.vkCreateCommandPool(ctx.vkb_device_.device, &poolInfo, nullptr, &ctx.command_pool_),
+            ctx.vk_.vkCreateCommandPool(ctx.vkb_device_.device, &poolInfo, nullptr, &ctx.graphics_q_.pool),
             "create command pool"))
     {
         return std::unexpected(*e);
@@ -1183,7 +1183,7 @@ std::expected<void, Error> Context::create_allocator_and_pool_(Context& ctx)
     VkSemaphoreCreateInfo timelineInfo{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &timelineType, .flags = 0};
     if (auto e = check(
-            ctx.vk_.vkCreateSemaphore(ctx.vkb_device_.device, &timelineInfo, nullptr, &ctx.submit_timeline_),
+            ctx.vk_.vkCreateSemaphore(ctx.vkb_device_.device, &timelineInfo, nullptr, &ctx.graphics_q_.timeline),
             "create submission timeline semaphore"))
     {
         return std::unexpected(*e);

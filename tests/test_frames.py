@@ -56,20 +56,18 @@ def test_headless_submits_rotate_the_ring(ctx, fullscreen_vert):
     dset = pool.allocate_frame_set(pipeline, set=0)
     dset.set_buffer(0, ubuf)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=CLEAR)
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_descriptor_set(dset, pipeline, set=0)
-    cmd.draw(3)
-    cmd.end_rendering(target)
+    g = ctx.graph()
+    p = g.add_pass(target, clear_color=CLEAR)
+    p.bind_pipeline(pipeline)
+    p.bind_descriptor_set(dset, pipeline, set=0)
+    p.draw(3)
 
     ubuf.update([0.0, 1.0, 0.0, 1.0])
-    ctx.submit(cmd)
+    ctx.submit(g)
     assert np.allclose(target.color[0].read()[32, 32, :3], [0, 255, 0], atol=2), \
         "the submit did not read the slot update() wrote"
 
-    ctx.submit(cmd)
+    ctx.submit(g)
     assert np.allclose(target.color[0].read()[32, 32, :3], [255, 0, 0], atol=2), \
         "the second submit reused the first submit's ring slot"
 
@@ -93,13 +91,11 @@ def test_update_before_each_submit_always_wins(ctx, fullscreen_vert):
     dset = pool.allocate_frame_set(pipeline, set=0)
     dset.set_buffer(0, ubuf)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=CLEAR)
-    cmd.bind_pipeline(pipeline)
-    cmd.bind_descriptor_set(dset, pipeline, set=0)
-    cmd.draw(3)
-    cmd.end_rendering(target)
+    g = ctx.graph()
+    p = g.add_pass(target, clear_color=CLEAR)
+    p.bind_pipeline(pipeline)
+    p.bind_descriptor_set(dset, pipeline, set=0)
+    p.draw(3)
 
     colours = [
         ([1.0, 0.0, 0.0, 1.0], [255, 0, 0]),
@@ -108,5 +104,5 @@ def test_update_before_each_submit_always_wins(ctx, fullscreen_vert):
     ]
     for value, expected in colours:
         ubuf.update(value)
-        ctx.submit(cmd)
+        ctx.submit(g)
         assert np.allclose(target.color[0].read()[32, 32, :3], expected, atol=2), value

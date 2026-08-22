@@ -41,11 +41,9 @@ def render_flat(context, color):
     """A cleared 16x16 target, read back. Enough GPU traffic to catch a command
     recorded through the wrong device's dispatch table."""
     target = context.create_render_target(16, 16)
-    cmd = context.create_command_buffer()
-    cmd.begin()
-    cmd.begin_rendering(target, clear_color=color)
-    cmd.end_rendering(target)
-    context.submit(cmd)
+    g = context.graph()
+    g.add_pass(target, clear_color=color)
+    context.submit(g)
     return target.color[0].read()
 
 
@@ -102,10 +100,9 @@ def test_every_listed_device_can_back_a_context(extra_context):
 def test_foreign_image_in_a_command_buffer_is_refused(pair):
     a, b = pair
     image = a.create_image(np.zeros((4, 4, 4), dtype=np.uint8))
-    cmd = b.create_command_buffer()
-    cmd.begin()
+    g = b.graph()
     with pytest.raises(bz.ResourceError) as info:
-        cmd.barrier(image, bz.Access.SHADER_READ, bz.Access.SHADER_READ)
+        g.add_pass().barrier(image, bz.Access.SHADER_READ, bz.Access.SHADER_READ)
     assert "different Context" in str(info.value)
 
 
@@ -116,19 +113,17 @@ def test_foreign_pipeline_in_a_command_buffer_is_refused(pair):
                 .fragment_shader(a.compile_shader(str(SHADER_DIR / "triangle.frag"), bz.ShaderStage.FRAGMENT))
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                 .build(a.create_render_target(16, 16)))
-    cmd = b.create_command_buffer()
-    cmd.begin()
+    g = b.graph()
     with pytest.raises(bz.ResourceError):
-        cmd.bind_pipeline(pipeline)
+        g.add_pass().bind_pipeline(pipeline)
 
 
 def test_foreign_target_in_begin_rendering_is_refused(pair):
     a, b = pair
     target = a.create_render_target(16, 16)
-    cmd = b.create_command_buffer()
-    cmd.begin()
+    g = b.graph()
     with pytest.raises(bz.ResourceError):
-        cmd.begin_rendering(target)
+        g.add_pass(target)
 
 
 def test_foreign_buffer_in_a_descriptor_set_is_refused(pair):
@@ -164,10 +159,9 @@ def test_transferred_image_is_usable_on_the_target_context(pair):
     source = a.create_image(np.full((4, 4, 4), 200, dtype=np.uint8))
     copy = b.create_image(source)
 
-    cmd = b.create_command_buffer()
-    cmd.begin()
-    cmd.barrier(copy, bz.Access.SHADER_READ, bz.Access.SHADER_READ)
-    b.submit(cmd)
+    g = b.graph()
+    g.add_pass().barrier(copy, bz.Access.SHADER_READ, bz.Access.SHADER_READ)
+    b.submit(g)
 
 
 def test_transfer_carries_layers_and_cubeness(pair):

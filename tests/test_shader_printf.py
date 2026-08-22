@@ -71,9 +71,9 @@ def dispatch_printf(context):
     shader = context.compile_shader(source=PRINTF_COMPUTE, stage=bz.ShaderStage.COMPUTE)
     pipeline = context.compute_pipeline().shader(shader).build()
 
-    cmd = context.create_command_buffer()
-    cmd.begin().bind_pipeline(pipeline).dispatch(1)
-    context.submit(cmd)
+    g = context.graph()
+    g.add_pass().bind_pipeline(pipeline).dispatch(1)
+    context.submit(g)
 
     context.logger.flush()
     return seen
@@ -150,8 +150,8 @@ def test_a_context_with_printf_still_runs_ordinary_shaders(extra_context):
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, buf)
 
-    cmd = context.create_command_buffer()
-    cmd.begin().bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, 0).dispatch(1)
-    context.submit(cmd)
+    g = context.graph()
+    g.add_pass().bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, 0).dispatch(1)
+    context.submit(g)
 
     assert buf.read("uint32")[0] == 7

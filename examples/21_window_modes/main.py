@@ -152,17 +152,17 @@ OPACITIES = [1.0, 0.85, 0.65]
 
 BAR_HEIGHT = 46
 
-cmd = ctx.create_command_buffer()
+g = ctx.graph()
 
 
 def record(scene):
-    """Re-record both passes. Cheap: a recording is lambdas, and it replays every
-    frame until something about it changes (here, the L key)."""
-    cmd.begin()
+    """Build both passes again. Cheap: reset() keeps the GPU objects, and the
+    graph replays every frame until something about it changes (here, the L key)."""
+    g.reset()
 
     # Pass 1 clears and owns the depth.
-    with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.05, 1.0]) as c:
-        (c.bind_pipeline(scene)
+    with g.add_pass(renderer, clear_color=[0.02, 0.02, 0.05, 1.0], name="scene") as p:
+        (p.bind_pipeline(scene)
           .bind_descriptor_set(dset, scene)
           .bind_vertex_buffer(vbuf)
           .bind_index_buffer(ibuf)
@@ -170,20 +170,21 @@ def record(scene):
 
     # Pass 2 preserves it. clear_color=None is the whole difference between a
     # second pass and a second frame.
-    with cmd.rendering(renderer, clear_color=None) as c:
-        # The scissor is read at replay time, so a resize needs no re-record...
-        # except that these numbers are computed now. Recording again on resize
-        # would be the fix if the bar had to track the height exactly; a strip
-        # anchored to the bottom does not need it.
-        c.set_scissor(0, max(renderer.height - BAR_HEIGHT, 0), renderer.width, BAR_HEIGHT)
-        c.bind_pipeline(overlay)
-        c.push_constants(overlay, 0, bar_bytes())
-        c.draw(3)
+    with g.add_pass(renderer, clear_color=None, name="overlay") as p:
+        # The scissor command is issued at replay, so a resize needs no
+        # rebuild... except that these numbers are computed now. Building the
+        # graph again on resize would be the fix if the bar had to track the
+        # height exactly; a strip anchored to the bottom does not need it.
+        p.set_scissor(0, max(renderer.height - BAR_HEIGHT, 0), renderer.width, BAR_HEIGHT)
+        p.bind_pipeline(overlay)
+        p.push_constants(overlay, 0, bar_bytes())
+        p.draw(3)
 
 
 def bar_bytes():
-    """The push constants are read when `record` runs, so the recording carries
-    the bar state. Whatever changes it re-records — the same rule as the L key."""
+    """The push constants are read when `record` runs, so the graph carries the
+    bar state. Whatever changes it builds the graph again — the same rule as the
+    L key."""
     return struct.pack("3f", float(mode_index), float(len(MODES)), glow)
 
 
@@ -301,10 +302,11 @@ while window.is_open():
     if mouse.scroll_dy:
         distance = max(1.5, min(12.0, distance - mouse.scroll_dy * 0.4))
 
-    # The glow breathes and the recording carries it, so this re-records every
-    # frame. That is affordable here — a recording is a handful of lambdas — and
-    # it is also why the push constants live in a function: whatever changes
-    # them re-records, and there is exactly one rule about when that happens.
+    # The glow breathes and the graph carries it, so this builds the graph again
+    # every frame. That is affordable here — reset() keeps the GPU objects and a
+    # pass is a handful of lambdas — and it is also why the push constants live
+    # in a function: whatever changes them builds the graph again, and there is
+    # exactly one rule about when that happens.
     glow = 0.55 + 0.45 * math.sin((time.time() - start) * 2.0)
     record(wireframe if use_wireframe else filled)
 
@@ -323,7 +325,7 @@ while window.is_open():
     view = glm.lookAt(eye, glm.vec3(0, 0, 0), glm.vec3(0, 1, 0))
     ubuf.update(bytes(glm.transpose(proj * view)))
 
-    renderer.present(cmd)
+    renderer.present(g)
 
     frames += 1
     if time.time() - fps_timer >= 1.0:
@@ -337,6 +339,6 @@ while window.is_open():
         fps_timer = time.time()
 
 # The renderer holds a surface made from the window, so it goes first.
-cmd = None
+g = None
 renderer = None
 window = None

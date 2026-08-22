@@ -96,10 +96,10 @@ textures = [make_texture(i) for i in range(TEXTURE_COUNT)]
 for i, image in enumerate(textures):
     desc_set.set_image(0, image, index=i)
 
-cmd = ctx.create_command_buffer()
-cmd.begin()
-with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.05, 1.0]) as c:
-    (c.bind_pipeline(pipeline)
+# Nothing about the draw changes, so the graph is built once and sent every frame.
+g = ctx.graph()
+with g.add_pass(renderer, clear_color=[0.02, 0.02, 0.05, 1.0]) as p:
+    (p.bind_pipeline(pipeline)
       .bind_descriptor_set(desc_set, pipeline)
       .bind_vertex_buffer(vbuf)
       .bind_vertex_buffer(instances, binding=1)
@@ -117,7 +117,7 @@ while window.is_open():
     bz.poll_events()
 
     if window.was_key_pressed(bz.Key.SPACE):
-        # Replaced in place: the recording is not touched and the draw is not
+        # Replaced in place: the graph is not touched and the draw is not
         # re-issued. Legal while earlier frames are still reading the set only
         # because an array binding carries UPDATE_AFTER_BIND.
         swaps += 1
@@ -128,7 +128,7 @@ while window.is_open():
 
     ctx.begin_frame()
     if renderer.acquire():
-        renderer.present(cmd)
+        renderer.present(g)
 
         frames += 1
         if time.time() - fps_timer >= 1.0:

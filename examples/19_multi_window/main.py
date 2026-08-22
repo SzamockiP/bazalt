@@ -8,16 +8,16 @@ The shape of the loop is the point:
 
     ctx.begin_frame()          # the FRAME — once, on the Context
     if renderer.acquire():     # the WINDOW — once per window
-        renderer.present(cmd)
+        renderer.present(g)
 
-`ctx.begin_frame()` advances the ring slot that CommandBuffer, DynamicBuffer and
-the per-frame descriptor sets index — all Context-owned, so a window has no
+`ctx.begin_frame()` advances the ring slot that Graph, DynamicBuffer and the
+per-frame descriptor sets index — all Context-owned, so a window has no
 business advancing it. A window contributes one acquired image and one present.
 With a single window this reads exactly as it does in every other example.
 
 Two things each window needs of its own, because both are per (window, slot):
-its own CommandBuffer (one holds a single command buffer per frame slot) and
-its own DynamicBuffer for the camera.
+its own Graph (one holds a single command buffer per frame slot) and its own
+DynamicBuffer for the camera.
 
 Close either window and it disappears while the other keeps rendering — which
 is why `bz.poll_events()` is a free function and not a Window method: GLFW's
@@ -108,9 +108,9 @@ pool = ctx.create_descriptor_pool()
 
 
 class View:
-    """Everything one window owns. The per-window CommandBuffer and uniform
-    buffer are not a style choice: both hold one copy per ring slot, and both
-    windows now render on the SAME slot."""
+    """Everything one window owns. The per-window Graph and uniform buffer are
+    not a style choice: both hold one copy per ring slot, and both windows now
+    render on the SAME slot."""
 
     def __init__(self, window, renderer, title, tint, clear, orbit_speed):
         self.window = window
@@ -127,10 +127,9 @@ class View:
         self.dset = pool.allocate_frame_set(pipeline)
         self.dset.set_buffer(0, self.ubuf)
 
-        self.cmd = ctx.create_command_buffer()
-        self.cmd.begin()
-        with self.cmd.rendering(renderer, clear_color=clear) as c:
-            (c.bind_pipeline(pipeline)
+        self.graph = ctx.graph()
+        with self.graph.add_pass(renderer, clear_color=clear) as p:
+            (p.bind_pipeline(pipeline)
               .bind_descriptor_set(self.dset, pipeline)
               .push_constants(pipeline, 0, self.tint)
               .bind_vertex_buffer(vbuf)
@@ -155,7 +154,7 @@ class View:
         view = glm.lookAt(eye, glm.vec3(0, 0, 0), glm.vec3(0, 1, 0))
         self.ubuf.update(bytes(glm.transpose(proj * view)))
 
-        self.renderer.present(self.cmd)
+        self.renderer.present(self.graph)
 
         self.frames += 1
         if time.time() - self.fps_timer >= 1.0:
@@ -168,7 +167,7 @@ class View:
         owns a VkSurfaceKHR created from this window's handle. Dropping the
         last reference is what makes the window disappear, so nothing outside
         this object may keep one."""
-        self.cmd = None
+        self.graph = None
         self.dset = None
         self.ubuf = None
         self.renderer = None

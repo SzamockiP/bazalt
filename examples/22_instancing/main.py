@@ -115,24 +115,25 @@ desc_set = pool.allocate_frame_set(solid)
 desc_set.set_buffer(0, ubuf)
 
 
+g = ctx.graph()
+
+
 def record(pipeline, count):
     """One recording per (pipeline, count) pair — the instance count is baked
-    into the recorded draw, so changing it re-records."""
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.05, 1.0]) as c:
-        (c.bind_pipeline(pipeline)
+    into the recorded draw, so changing it resets the graph and records again."""
+    g.reset()
+    with g.add_pass(renderer, clear_color=[0.02, 0.02, 0.05, 1.0]) as p:
+        (p.bind_pipeline(pipeline)
           .bind_descriptor_set(desc_set, pipeline)
           .bind_vertex_buffer(vbuf)
           .bind_vertex_buffer(instances, binding=1)
           .bind_index_buffer(ibuf)
           .draw_indexed(36, instances=count))
-    return cmd
 
 
 count_index = 0
 wire = False
-cmd = record(solid, COUNTS[0])
+record(solid, COUNTS[0])
 
 proj = glm.perspectiveRH_ZO(glm.radians(60.0), 1024.0 / 720.0, 0.1, 400.0)
 proj[1][1] *= -1
@@ -146,10 +147,10 @@ while window.is_open():
 
     if window.was_key_pressed(bz.Key.SPACE):
         count_index = (count_index + 1) % len(COUNTS)
-        cmd = record(wireframe if wire else solid, COUNTS[count_index])
+        record(wireframe if wire else solid, COUNTS[count_index])
     if window.was_key_pressed(bz.Key.W):
         wire = not wire
-        cmd = record(wireframe if wire else solid, COUNTS[count_index])
+        record(wireframe if wire else solid, COUNTS[count_index])
 
     ctx.begin_frame()
     if renderer.acquire():
@@ -157,7 +158,7 @@ while window.is_open():
         eye = glm.vec3(np.sin(t * 0.15) * 60.0, 25.0, np.cos(t * 0.15) * 60.0)
         view_proj = proj * glm.lookAt(eye, glm.vec3(0, 0, 0), glm.vec3(0, 1, 0))
         ubuf.update(bytes(glm.transpose(view_proj)) + struct.pack("4f", t, 0.0, 0.0, 0.0))
-        renderer.present(cmd)
+        renderer.present(g)
 
         frames += 1
         if time.time() - fps_timer >= 1.0:

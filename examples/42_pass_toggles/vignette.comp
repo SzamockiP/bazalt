@@ -1,0 +1,17 @@
+// The other in-place effect. Same one-texel-per-invocation rule as tint.comp.
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, rgba8) uniform image2D img;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(img);
+    if (p.x >= sz.x || p.y >= sz.y) return;
+
+    vec2 uv = vec2(p) / vec2(sz);
+    float d = length(uv - 0.5) * 1.4;
+    float falloff = clamp(1.0 - d * d, 0.0, 1.0);
+
+    vec4 c = imageLoad(img, p);
+    imageStore(img, p, vec4(c.rgb * falloff, c.a));
+}

@@ -21,9 +21,9 @@ def test_copy_buffer_moves_the_bytes(ctx):
     src = uint_buffer(ctx, [1, 2, 3, 4])
     dst = uint_buffer(ctx, [0, 0, 0, 0])
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin().copy_buffer(src, dst)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass().copy_buffer(src, dst)
+    ctx.submit(g)
 
     assert list(dst.read("uint32")) == [1, 2, 3, 4]
 
@@ -33,9 +33,9 @@ def test_copy_buffer_honours_offsets_and_size(ctx):
     dst = uint_buffer(ctx, [0, 0, 0, 0])
 
     # Two uint32s (8 bytes) from index 2 of the source into index 0.
-    cmd = ctx.create_command_buffer()
-    cmd.begin().copy_buffer(src, dst, src_offset=8, dst_offset=0, size=8)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass().copy_buffer(src, dst, src_offset=8, dst_offset=0, size=8)
+    ctx.submit(g)
 
     assert list(dst.read("uint32")) == [30, 40, 0, 0]
 
@@ -44,10 +44,10 @@ def test_copy_buffer_rejects_a_region_that_does_not_fit(ctx):
     src = uint_buffer(ctx, [1, 2, 3, 4])
     dst = uint_buffer(ctx, [0, 0])
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass()
     with pytest.raises(bz.ResourceError):
-        cmd.copy_buffer(src, dst)
+        p.copy_buffer(src, dst)
 
 
 def test_fill_buffer_zeroes(ctx):
@@ -55,9 +55,9 @@ def test_fill_buffer_zeroes(ctx):
     and saying so used to take a dispatch."""
     buf = uint_buffer(ctx, [7, 7, 7, 7])
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin().fill_buffer(buf)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass().fill_buffer(buf)
+    ctx.submit(g)
 
     assert list(buf.read("uint32")) == [0, 0, 0, 0]
 
@@ -66,9 +66,9 @@ def test_fill_buffer_writes_the_given_word(ctx):
     """Two-sided: a fill that always wrote zero would pass the test above."""
     buf = uint_buffer(ctx, [0, 0, 0, 0])
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin().fill_buffer(buf, 0xABCD)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass().fill_buffer(buf, 0xABCD)
+    ctx.submit(g)
 
     assert list(buf.read("uint32")) == [0xABCD] * 4
 
@@ -76,9 +76,9 @@ def test_fill_buffer_writes_the_given_word(ctx):
 def test_fill_buffer_honours_offset_and_size(ctx):
     buf = uint_buffer(ctx, [1, 1, 1, 1])
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin().fill_buffer(buf, 9, offset=8, size=8)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass().fill_buffer(buf, 9, offset=8, size=8)
+    ctx.submit(g)
 
     assert list(buf.read("uint32")) == [1, 1, 9, 9]
 
@@ -88,10 +88,10 @@ def test_fill_buffer_rejects_an_unaligned_region(ctx):
     of 4. Saying so beats a validation message about the same thing."""
     buf = uint_buffer(ctx, [0, 0, 0, 0])
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass()
     with pytest.raises(bz.ResourceError):
-        cmd.fill_buffer(buf, 0, offset=2)
+        p.fill_buffer(buf, 0, offset=2)
 
 
 def test_transfers_work_on_a_dynamic_buffer(ctx):
@@ -108,9 +108,9 @@ def test_transfers_work_on_a_dynamic_buffer(ctx):
                                 bz.MemoryUsage.DYNAMIC, bz.DataType.UINT32)
     out = uint_buffer(ctx, [0, 0, 0, 0])
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin().fill_buffer(dynamic, 5).copy_buffer(dynamic, out)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass().fill_buffer(dynamic, 5).copy_buffer(dynamic, out)
+    ctx.submit(g)
 
     assert list(out.read("uint32")) == [5, 5, 5, 5]
 
@@ -125,9 +125,9 @@ def test_blit_image_downsamples(ctx):
     src = ctx.create_image(big)
     dst = ctx.create_image(8, 8, bz.Format.RGBA8)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin().blit_image(src, dst)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass().blit_image(src, dst)
+    ctx.submit(g)
 
     out = dst.read()
     assert out.shape == (8, 8, 4)
@@ -142,9 +142,9 @@ def test_blit_image_upsamples(ctx):
     src = ctx.create_image(small)
     dst = ctx.create_image(16, 16, bz.Format.RGBA8)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin().blit_image(src, dst, filter=bz.Filter.NEAREST)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass().blit_image(src, dst, filter=bz.Filter.NEAREST)
+    ctx.submit(g)
 
     out = dst.read()
     assert out.shape == (16, 16, 4)
@@ -154,10 +154,10 @@ def test_blit_image_upsamples(ctx):
 def test_blit_image_rejects_the_same_image_twice(ctx):
     img = ctx.create_image(8, 8, bz.Format.RGBA8)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass()
     with pytest.raises(bz.ResourceError):
-        cmd.blit_image(img, img)
+        p.blit_image(img, img)
 
 
 def test_blit_image_is_refused_inside_a_rendering_scope(ctx):
@@ -165,10 +165,10 @@ def test_blit_image_is_refused_inside_a_rendering_scope(ctx):
     dst = ctx.create_image(4, 4, bz.Format.RGBA8)
     target = ctx.create_render_target(8, 8)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin().begin_rendering(target, clear_color=[0, 0, 0, 1])
+    g = ctx.graph()
+    p = g.add_pass(target, clear_color=[0, 0, 0, 1])
     with pytest.raises(bz.StateError):
-        cmd.blit_image(src, dst)
+        p.blit_image(src, dst)
 
 
 def test_copy_image_copies_the_whole_mip_chain(ctx):
@@ -184,9 +184,9 @@ def test_copy_image_copies_the_whole_mip_chain(ctx):
 
     dst = ctx.create_image(16, 16, bz.Format.RGBA8, mip_levels=src.mip_levels)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin().copy_image(src, dst)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass().copy_image(src, dst)
+    ctx.submit(g)
 
     # Sample the smallest level of the destination. Before the change this read
     # a level that was never written.
@@ -207,14 +207,13 @@ def test_copy_image_copies_the_whole_mip_chain(ctx):
     dset = pool.allocate_set(pipe, set=0)
     dset.set_image(0, dst, sampler=ctx.create_sampler(filter=bz.Filter.NEAREST))
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    with cmd.rendering(screen, clear_color=[0, 0, 0, 1]):
-        cmd.bind_pipeline(pipe)
-        cmd.bind_descriptor_set(dset, pipe, 0)
-        cmd.push_constants(pipe, 0, struct.pack("f", 32.0))  # clamps to the smallest mip
-        cmd.draw(3)
-    ctx.submit(cmd)
+    sample = ctx.graph()
+    with sample.add_pass(screen, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipe)
+        p.bind_descriptor_set(dset, pipe, 0)
+        p.push_constants(pipe, 0, struct.pack("f", 32.0))  # clamps to the smallest mip
+        p.draw(3)
+    ctx.submit(sample)
 
     out = screen.color[0].read()
     assert out[4, 4, 0] > 200, "the smallest mip of the destination was not copied"

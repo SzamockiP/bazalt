@@ -134,6 +134,17 @@ struct ContextConfig
     std::vector<std::string> raw_extensions;
 };
 
+// A submit's identity, as the caller holds it: which queue signalled, and the
+// timeline value it signalled. Opaque in Python on purpose — handing out the
+// bare integer would let callers compare serials from different queues, an
+// order that stops existing the day a second queue arrives (0.29). Everything
+// on the graphics queue today, so queue_id is always 0.
+struct Serial
+{
+    std::uint32_t queue_id = 0;
+    std::uint64_t value = 0;
+};
+
 class Context : public std::enable_shared_from_this<Context>
 {
 public:
@@ -218,11 +229,11 @@ public:
     }
     VkQueue graphics_queue() const
     {
-        return graphics_queue_;
+        return graphics_q_.queue;
     }
     std::uint32_t graphics_queue_family() const
     {
-        return graphics_queue_family_;
+        return graphics_q_.family;
     }
     VmaAllocator allocator() const
     {
@@ -230,7 +241,7 @@ public:
     }
     VkCommandPool command_pool() const
     {
-        return command_pool_;
+        return graphics_q_.pool;
     }
     // Shared by every pipeline built on this Context, so a second pipeline that
     // repeats work the first one did (the common case under hot reload, where a
@@ -404,14 +415,23 @@ public:
     // it is what makes async uploads awaitable.
     VkSemaphore submit_timeline() const
     {
-        return submit_timeline_;
+        return graphics_q_.timeline;
     }
 
     // Reserve the serial the next submit will signal. Call while holding
     // queue_mutex(), immediately before the vkQueueSubmit that signals it.
     std::uint64_t advance_submit_serial()
     {
-        return ++submit_serial_;
+        return ++graphics_q_.serial;
+    }
+
+    // The key a resource dropped NOW must retire under: the newest reserved
+    // submit serial. The one place that spells the deletion-queue key, so a
+    // second queue (0.29) changes what a key is here and in
+    // flush_deletion_queue, and nowhere else.
+    std::uint64_t retire_key() const
+    {
+        return graphics_q_.serial.load();
     }
 
     std::uint64_t completed_submit_serial() const;
@@ -470,7 +490,7 @@ public:
     // The one place that blocks on the submission timeline. Everything that
     // waits for GPU work — a frame's ring slot, an image upload, a readback —
     // comes through here, so a wait is never wider than the work it waits for.
-    std::expected<void, Error> wait_for_serial(std::uint64_t serial);
+    std::expected<void, Error> wait_for_serial(std::uint64_t serial) const;
 
     // ── Deferred destruction ──────────────────────────────────────────────────
     //
@@ -595,7 +615,7 @@ public:
     // WaitIdle must hold it from then on.
     std::mutex& queue_mutex()
     {
-        return queue_mutex_;
+        return graphics_q_.mutex;
     }
 
 private:
@@ -647,12 +667,26 @@ private:
     vkb::PhysicalDevice vkb_physical_device_;
     vkb::Device vkb_device_;
 
-    VkQueue graphics_queue_ = VK_NULL_HANDLE;
-    std::uint32_t graphics_queue_family_ = 0;
-    std::mutex queue_mutex_;
+    // Everything a queue needs to be submitted to safely: the handle, its
+    // family, the timeline that counts its submits, the serial counter that
+    // timeline signals, the mutex that externally synchronizes it, and the
+    // command pool on its family. One instance today (graphics). This is the
+    // 0.29 seam: async compute adds a second QueueRuntime — two timelines mean
+    // two queues never co-signal one semaphore, which the spec forbids — and
+    // every accessor above picks a runtime instead of the field.
+    struct QueueRuntime
+    {
+        VkQueue queue = VK_NULL_HANDLE;
+        std::uint32_t family = 0;
+        VkSemaphore timeline = VK_NULL_HANDLE;
+        std::atomic<std::uint64_t> serial{0};
+        std::mutex mutex;
+        VkCommandPool pool = VK_NULL_HANDLE;
+    };
+
+    QueueRuntime graphics_q_;
 
     VmaAllocator allocator_ = VK_NULL_HANDLE;
-    VkCommandPool command_pool_ = VK_NULL_HANDLE;
     VkPipelineCache pipeline_cache_ = VK_NULL_HANDLE;
     VkFormat depth_stencil_format_ = VK_FORMAT_UNDEFINED;
 
@@ -693,9 +727,6 @@ private:
     bool gpu_timing_ = false;
     bool shader_printf_ = false;
     std::uint64_t frame_serial_ = 0;
-
-    VkSemaphore submit_timeline_ = VK_NULL_HANDLE;
-    std::atomic<std::uint64_t> submit_serial_{0};
 
     // Which submit serial last used each ring slot. Only an asynchronous
     // headless submit fills it; a blocking one has already waited.

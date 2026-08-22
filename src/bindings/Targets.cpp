@@ -121,18 +121,18 @@ void bind_targets(py::module_& m)
             })
         .def(
             "present",
-            [](SwapchainRenderer& self, std::shared_ptr<CommandBuffer> cmd, bool capture)
+            [](SwapchainRenderer& self, std::shared_ptr<Graph> graph, bool capture)
             {
-                require_same_context(self.owner(), cmd->owner(), "present");
+                require_same_context(self.owner(), graph->owner(), "present");
                 std::expected<void, Error> r;
                 {
                     // May CPU-wait for an upload still decoding — release the GIL.
                     py::gil_scoped_release release;
-                    r = present_command_buffer(self, std::move(cmd), capture);
+                    r = present_graph(self, std::move(graph), capture);
                 }
                 unwrap(std::move(r), nullptr);
             },
-            py::arg("cmd"),
+            py::arg("graph"),
             py::kw_only(),
             py::arg("capture") = false)
         // float milliseconds, and None means one thing since 0.24: the ring has

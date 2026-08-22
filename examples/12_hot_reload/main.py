@@ -47,6 +47,12 @@ desc_set = pool.allocate_set(pipeline)
 # an image reload re-uploads in place, so this never needs rewriting.
 desc_set.set_image(0, texture)
 
+g = ctx.graph()
+with g.add_pass(renderer, clear_color=[0.02, 0.02, 0.03, 1.0]) as p:
+    (p.bind_pipeline(pipeline)
+      .bind_descriptor_set(desc_set, pipeline)
+      .draw(3))
+
 frames = 0
 last_time = time.time()
 frame_count = 0
@@ -66,13 +72,7 @@ while window.is_open():
             frame_count = 0
             fps_timer = 0.0
 
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        with cmd.rendering(renderer, clear_color=[0.02, 0.02, 0.03, 1.0]) as c:
-            (c.bind_pipeline(pipeline)
-              .bind_descriptor_set(desc_set, pipeline)
-              .draw(3))
-        renderer.present(cmd)
+        renderer.present(g)
 
         frames += 1
         if frames % 120 == 0 and renderer.gpu_time_ms is not None:

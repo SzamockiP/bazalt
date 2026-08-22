@@ -94,6 +94,7 @@ dset.set_image(1, scene_target.multisampled_color[0], sampler=nearest)
 MODES = ["hardware resolve", "sample 0 only", "sample disagreement"]
 mode = 0
 start = time.perf_counter()
+g = ctx.graph()
 
 print(f"{SAMPLES}x MSAA. SPACE cycles the view, ESC quits.")
 
@@ -112,21 +113,21 @@ while window.is_open():
     # bound two lines up, and the set knows which index it was allocated for, so
     # naming either again is a chance to disagree with the truth rather than
     # information.
-    with ctx.record() as cmd:
-        # Pass one: the star, multisampled, resolved AND kept.
-        with cmd.rendering(scene_target, clear_color=[0.02, 0.02, 0.04, 1.0]):
-            cmd.bind_pipeline(star)
-            cmd.push_constants(0, struct.pack("2f", angle, scene_target.width / scene_target.height))
-            cmd.bind_vertex_buffer(star_buffer)
-            cmd.draw(POINTS * 3)
-        # Pass two: look at it three ways. No barrier here — the target contract
-        # leaves both images readable, and the tracker knows it.
-        with cmd.rendering(renderer):
-            cmd.bind_pipeline(resolve)
-            cmd.bind_descriptor_set(dset)
-            cmd.push_constants(0, struct.pack("2i", mode, SAMPLES))
-            cmd.draw(3)
+    g.reset()
+    # Pass one: the star, multisampled, resolved AND kept.
+    with g.add_pass(scene_target, clear_color=[0.02, 0.02, 0.04, 1.0], name="star") as p:
+        p.bind_pipeline(star)
+        p.push_constants(0, struct.pack("2f", angle, scene_target.width / scene_target.height))
+        p.bind_vertex_buffer(star_buffer)
+        p.draw(POINTS * 3)
+    # Pass two: look at it three ways. No barrier here — the target contract
+    # leaves both images readable, and the graph knows it.
+    with g.add_pass(renderer, name="resolve") as p:
+        p.bind_pipeline(resolve)
+        p.bind_descriptor_set(dset)
+        p.push_constants(0, struct.pack("2i", mode, SAMPLES))
+        p.draw(3)
 
     ctx.begin_frame()
     if renderer.acquire():
-        renderer.present(cmd)
+        renderer.present(g)

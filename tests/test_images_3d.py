@@ -152,10 +152,9 @@ def test_copy_image_carries_every_volume_mip(ctx):
     src = ctx.create_image(pixels, mipmaps=True)
     dst = ctx.create_image(4, 4, bz.Format.RGBA8, depth=4, mip_levels=3)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.copy_image(src, dst)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass().copy_image(src, dst)
+    ctx.submit(g)
 
     assert np.array_equal(dst.read(), pixels)
     assert np.allclose(dst.read(mip=2), 120, atol=1)
@@ -164,20 +163,19 @@ def test_copy_image_carries_every_volume_mip(ctx):
 def test_copy_between_2d_and_3d_is_refused(ctx):
     vol = ctx.create_image(volume_rgba8(4, 4, 4))
     img = ctx.create_image(np.zeros((4, 4, 4), dtype=np.uint8))
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass()
     with pytest.raises(bz.ResourceError, match="match in size"):
-        cmd.copy_image(vol, img)
+        p.copy_image(vol, img)
 
 
 def test_blit_scales_a_volume_into_a_volume(ctx):
     src = ctx.create_image(np.full((4, 4, 4, 4), 80, dtype=np.uint8))
     dst = ctx.create_image(2, 2, bz.Format.RGBA8, depth=2)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.blit_image(src, dst)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    g.add_pass().blit_image(src, dst)
+    ctx.submit(g)
 
     assert np.allclose(dst.read(), 80, atol=1)
 
@@ -185,10 +183,10 @@ def test_blit_scales_a_volume_into_a_volume(ctx):
 def test_blit_between_2d_and_3d_is_refused(ctx):
     vol = ctx.create_image(volume_rgba8(4, 4, 4))
     img = ctx.create_image(np.zeros((8, 8, 4), dtype=np.uint8))
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
+    g = ctx.graph()
+    p = g.add_pass()
     with pytest.raises(bz.ResourceError, match="3D"):
-        cmd.blit_image(vol, img)
+        p.blit_image(vol, img)
 
 
 # ── shaders: the pictures the feature exists for ──────────────────────────
@@ -220,15 +218,13 @@ def test_fragment_shader_samples_the_right_slice(ctx):
     dset.set_image(0, vol, sampler)
 
     for z in (0, 3, 7):
-        cmd = ctx.create_command_buffer()
-        cmd.begin()
-        cmd.begin_rendering(target, clear_color=[0, 0, 0, 1])
-        cmd.bind_pipeline(pipe)
-        cmd.bind_descriptor_set(dset, pipe, set=0)
-        cmd.push_constants(pipe, 0, np.float32((z + 0.5) / depth).tobytes())
-        cmd.draw(3)
-        cmd.end_rendering(target)
-        ctx.submit(cmd)
+        g = ctx.graph()
+        with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+            p.bind_pipeline(pipe)
+            p.bind_descriptor_set(dset, pipe, set=0)
+            p.push_constants(pipe, 0, np.float32((z + 0.5) / depth).tobytes())
+            p.draw(3)
+        ctx.submit(g)
         got = target.color[0].read()[4, 4]
         assert np.allclose(got, [z * 30, 0, 0, 255], atol=2), f"slice {z}: {got}"
 
@@ -245,12 +241,12 @@ def test_compute_fills_a_volume_through_image3d(ctx):
     dset = pool.allocate_set(pipe, set=0)
     dset.set_storage_image(0, vol)
 
-    cmd = ctx.create_command_buffer()
-    cmd.begin()
-    cmd.bind_pipeline(pipe)
-    cmd.bind_descriptor_set(dset, pipe, set=0)
-    cmd.dispatch(2, 2, 2)
-    ctx.submit(cmd)
+    g = ctx.graph()
+    p = g.add_pass()
+    p.bind_pipeline(pipe)
+    p.bind_descriptor_set(dset, pipe, set=0)
+    p.dispatch(2, 2, 2)
+    ctx.submit(g)
 
     out = vol.read()
     assert out.shape == (8, 8, 8, 4)

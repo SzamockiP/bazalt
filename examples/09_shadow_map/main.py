@@ -1,9 +1,9 @@
-"""Shadow mapping — two passes, one command buffer, zero shadow-specific API.
+"""Shadow mapping — two passes, one graph, zero shadow-specific API.
 
 Pass 1 renders the scene into a depth-only RenderTarget from the light's view
 (no fragment shader). Pass 2 renders to the window and samples `shadow.depth`
-like any other texture. The command buffer is recorded once and replays both
-passes every frame; only the camera UBO changes.
+like any other texture. The graph is built once and replays both passes every
+frame; only the camera UBO changes.
 """
 
 import math
@@ -109,20 +109,19 @@ light_proj[1][1] *= -1
 light_view = glm.lookAt(glm.vec3(2.0, 4.0, 1.0), glm.vec3(0.0), glm.vec3(0.0, 1.0, 0.0))
 light_mvp = light_proj * light_view
 
-# Record ONCE: both passes in one command buffer. begin_rendering captures its
-# target per call, which is exactly what makes this possible.
-cmd = ctx.create_command_buffer()
-cmd.begin()
+# Build ONCE: both passes in one graph. Each pass carries its own target,
+# which is exactly what makes this possible.
+g = ctx.graph()
 
-with cmd.rendering(shadow) as c:
-    (c.bind_pipeline(shadow_pipe)
+with g.add_pass(shadow, name="shadow") as p:
+    (p.bind_pipeline(shadow_pipe)
       .bind_descriptor_set(shadow_set, shadow_pipe)
       .bind_vertex_buffer(vbuf)
       .bind_index_buffer(ibuf)
       .draw_indexed(index_count))
 
-with cmd.rendering(renderer, clear_color=[0.05, 0.07, 0.1, 1.0]) as c:
-    (c.bind_pipeline(scene_pipe)
+with g.add_pass(renderer, clear_color=[0.05, 0.07, 0.1, 1.0], name="scene") as p:
+    (p.bind_pipeline(scene_pipe)
       .bind_descriptor_set(scene_set, scene_pipe)
       .bind_vertex_buffer(vbuf)
       .bind_index_buffer(ibuf)
@@ -156,4 +155,4 @@ while window.is_open():
         camera_mvp = proj * view
 
         ubuf.update(bytes(glm.transpose(camera_mvp)) + bytes(glm.transpose(light_mvp)))
-        renderer.present(cmd)
+        renderer.present(g)

@@ -5,6 +5,126 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.28.0] — 2026-08-22
+
+"The pass graph". You now describe a frame as passes on a graph. This replaces
+the command buffer, which is gone.
+
+A pass is a piece of work with a boundary. A pass with a render target draws
+into it. A pass without one holds compute and transfer work. You add the passes
+in the order they must run, and each pass records the same verbs the command
+buffer took.
+
+The graph is what the barriers come from. Before this release, bazalt computed
+each barrier while you recorded it. One recording could not see what another
+recording did. So the first use of a resource had to assume the worst, and two
+passes on one render target changed the layout of the attachment back and
+forth.
+
+The graph sees every pass before it writes any command. A use inside the graph
+names the pass that wrote the resource, and gets an exact barrier. All the
+barriers at one pass boundary go into a single command. An attachment that the
+next pass keeps stays in its layout. Only the first touch of a resource still
+uses the safe assumption, because the writer can be another graph or the frame
+before.
+
+Each pass names the queue it runs on. `bz.Queue` has one member today. Async
+compute is the next release. It adds a member to that enum, not a parameter,
+and it does not change the default. A compute pass on the graphics queue stays
+legal after it.
+
+Every submit returns a `bz.Serial`. `ctx.wait(serial)` waits for that one
+submit. `ctx.submit(graph, after=serial)` starts a submit after another submit
+finishes. That wait happens on the GPU, so the CPU does not stop. This is the
+manual control between whole submits. Inside one graph the passes order
+themselves.
+
+### Added
+- **`ctx.graph()`** returns a `Graph`. It replaces `ctx.create_command_buffer()`
+  and `ctx.record()`.
+- **`Graph.add_pass(...)`** adds a pass and returns it. With a render target it
+  is a render pass and takes the clear arguments `cmd.rendering()` took. Without
+  one it is a pass for compute and transfer work, and the clear arguments do not
+  exist. `name=` is a debug label. `auto_barriers=False` makes that one pass
+  manual. `queue=` names the queue.
+- **`Graph.reset()`** drops the passes and keeps the GPU objects, for a program
+  that builds the graph again every frame. **`Graph.remove(pass)`** removes one
+  pass.
+- **`Pass.enabled`** turns one pass off and on. The graph computes the barriers
+  again without it, so an effect can be switched off with one line.
+- **A pass is a handle.** `with` seals it at the end of the block. Without
+  `with`, the pass seals itself when the graph first compiles. A sealed pass
+  refuses new commands.
+- **`bz.Serial`**, returned by `ctx.submit()`. **`ctx.wait(serial)`** waits for
+  one submit. **`ctx.submit(graph, after=...)`** orders one submit after others
+  on the GPU. `after=` takes one Serial or a list.
+- **`bz.Queue`**, with `GRAPHICS`.
+
+### Changed (breaking)
+- **`CommandBuffer` is gone**, together with `ctx.create_command_buffer()`,
+  `ctx.record()`, `RecordScope` and `RenderingScope`. Record into a pass.
+- **`ctx.submit()` takes a graph** and returns a `Serial`.
+  **`renderer.present()` takes a graph.**
+- **`cmd.begin()` is gone.** A new graph is empty, and `graph.reset()` empties
+  one that is not.
+- **`cmd.begin_rendering()`, `cmd.end_rendering()` and `cmd.rendering()` are
+  gone.** The render target moves to `add_pass`, and the pass boundary is the
+  rendering scope.
+- **A verb that does not belong to the kind of pass is refused when you record
+  it.** The message names the fix. A draw needs a render pass. A dispatch, a
+  copy, a blit, a fill, a clear and a barrier need a pass without a target.
+  Vulkan forbids all of those inside a rendering scope. Before this release the
+  report came from the validation layer at submit, and it named neither the
+  call nor the reason.
+- **Timer and occlusion handles come from a pass.** A handle from before a
+  `graph.reset()` reports `StateError`. A handle from before a `cmd.begin()`
+  did the same.
+- **A timer measures one pass.** A command buffer could hold a timer around
+  several rendering scopes. A timer now belongs to the pass that made it. To
+  measure a group of passes, make one timer in each pass and add the results.
+  `examples/34_showcase` does this for its nine post-processing passes.
+
+### Examples
+- **42_pass_toggles** builds the graph one time and never records again. Keys
+  switch two effect passes on and off, and one key takes a pass out of the
+  graph for good. The animation rides a DYNAMIC uniform buffer, which is what
+  lets an animated frame need no rebuild.
+- **43_manual_barriers** puts one `auto_barriers=False` pass between two
+  automatic ones and writes that pass's barriers by hand. It runs headless,
+  builds the same chain both ways, and checks that the numbers agree with
+  sync validation watching.
+- **44_submit_order** shows `Serial`, `after=` and `ctx.wait(serial)`. It runs
+  the same chain blocking and asynchronous, and prints what each costs.
+
+### Fixed
+- **A pass that samples what an earlier pass rendered now gets its barrier.**
+  A render pass writes its attachments, but that write is not a descriptor
+  use, so nothing told the graph about it. The graph then found no earlier
+  writer for the image, and put no barrier before the read. This is what a
+  G-buffer and a post-process chain do, so it is the common case. It also
+  covers the two other faults with the same cause: the retire of a colour
+  attachment named no reader, and a pass that keeps an attachment took its
+  layout from the render target even when another pass had moved the image.
+- **A barrier on a depth image names the depth aspect.** It named the colour
+  aspect, which the validation layers refuse. A pass that samples the depth
+  another pass rendered reaches this.
+
+### Notes
+- **Two passes that render into one target no longer change the layout of the
+  attachment back and forth.** `DESIGN.md` carried this as a cost with a price
+  on it since 0.16. The graph pays that price, because it must look at the whole
+  frame for the barriers anyway.
+- **Every barrier of one pass boundary is one command.** The old recorder
+  emitted one command for each resource.
+- **The manual escape hatch is a pass, not a second API.** A pass with
+  `auto_barriers=False` computes no barrier for itself. The graph still reads
+  the barriers you write there, so the automatic passes around it stay correct.
+- **A graph you keep holds the barriers its passes computed when you recorded
+  them.** A hot reload that changes which resources a shader writes does not
+  make the graph compute them again. Call `graph.reset()` and build the passes
+  again to pick the change up. A kept recording worked the same way before this
+  release.
+
 ## [0.27.0] — 2026-08-21
 
 "clang-tidy, ruff, and the header/cpp split". This release adds no feature. It adds
