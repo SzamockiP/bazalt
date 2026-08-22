@@ -295,12 +295,11 @@ void bind_enums(py::module_& m)
         .value("TRANSFER_WRITE", Access::TRANSFER_WRITE)
         .value("TRANSFER_READ", Access::TRANSFER_READ);
 
-    // Which queue a pass runs on (0.28). One member, and COMPUTE deliberately
-    // absent until 0.29 delivers the queue behind it: a value no path can
-    // reach is untestable surface, and accepted-but-sequential would let 0.29
-    // silently change the scheduling of unedited programs. The parameter
-    // exists now so async compute arrives as a VALUE, never a new parameter.
-    py::enum_<QueueKind>(m, "Queue").value("GRAPHICS", QueueKind::Graphics);
+    // Which queue a pass runs on. The parameter shipped in 0.28 and the second
+    // VALUE in 0.29, which is the whole point of that split: async compute
+    // arrived as a new member rather than a new parameter, and a program
+    // written for 0.28 schedules exactly as it did.
+    py::enum_<QueueKind>(m, "Queue").value("GRAPHICS", QueueKind::Graphics).value("COMPUTE", QueueKind::Compute);
 
     // Pixel formats — the name VertexFormat freed in 0.4.
     py::enum_<Format>(m, "Format")

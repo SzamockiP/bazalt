@@ -36,6 +36,13 @@ void bind_graphs(py::module_& m)
                std::optional<bool> auto_barriers)
             {
                 require_same_context(self->owner(), target->owner(), "add_pass");
+                if (queue == QueueKind::Compute)
+                {
+                    raise_error(err_state(
+                        "add_pass: a pass on Queue.COMPUTE cannot draw, because a compute queue "
+                        "has no rasterizer. Use queue=Queue.GRAPHICS for a pass with a render "
+                        "target."));
+                }
                 require_sliced_when_3d(*target, "add_pass");
                 auto clears = parse_clear_colors(clear_color);
                 require_preservable(*target, !clears.has_value(), "add_pass");

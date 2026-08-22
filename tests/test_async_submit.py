@@ -13,6 +13,7 @@ without blocking the CPU.
 import os
 import pathlib
 
+import numpy as np
 import pytest
 
 import bazalt as bz
@@ -139,6 +140,114 @@ def test_a_serial_is_opaque(ctx):
 
 
 # ── the compute queue (0.29) ──────────────────────────────────────────────
+
+
+def test_a_compute_pass_runs_on_the_compute_queue(ctx):
+    """The whole feature in one call: queue= names the queue, and the numbers
+    come back the same whichever one ran the dispatch."""
+    pipeline, buf, dset = counting_setup(ctx)
+    g = ctx.graph()
+    counting_pass = g.add_pass(name="count", queue=bz.Queue.COMPUTE)
+    counting_pass.bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1)
+    ctx.submit(g)
+    assert buf.read("float32")[0] == 1.0
+
+
+def test_a_submit_on_both_queues_returns_one_serial_that_waits_both(ctx):
+    """One submit, two queues, one Serial. wait(serial) has to cover both, or
+    the readback below reads a buffer the compute queue is still writing."""
+    pipeline, buf, dset = counting_setup(ctx)
+    g = ctx.graph()
+    (g.add_pass(name="on graphics")
+        .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1))
+    (g.add_pass(name="on compute", queue=bz.Queue.COMPUTE)
+        .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1))
+
+    s = ctx.submit(g, wait=False)
+    ctx.wait(s)
+    assert buf.read("float32")[0] == 2.0
+    assert "graphics=" in repr(s) and "compute=" in repr(s)
+
+
+def test_after_orders_submits_across_queues(ctx):
+    """Between two DIFFERENT graphs on different queues nothing is automatic —
+    that is the decision, not an omission — so after= is the order there is.
+    Three submits that must run in sequence to reach 3.0."""
+    pipeline, buf, dset = counting_setup(ctx)
+
+    def one(queue):
+        g = ctx.graph()
+        g.add_pass(name="count", queue=queue) \
+            .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1)
+        return g
+
+    s1 = ctx.submit(one(bz.Queue.GRAPHICS), wait=False)
+    s2 = ctx.submit(one(bz.Queue.COMPUTE), wait=False, after=s1)
+    s3 = ctx.submit(one(bz.Queue.GRAPHICS), wait=False, after=[s1, s2])
+    ctx.wait(s3)
+
+    assert buf.read("float32")[0] == 3.0
+
+
+def test_replaying_a_two_queue_graph_keeps_its_own_order(ctx):
+    """A graph submitted again waits for its own previous submit on the other
+    queue. Five replays of a two-pass graph is ten increments, and a missing
+    edge between replays loses some of them."""
+    pipeline, buf, dset = counting_setup(ctx)
+    g = ctx.graph()
+    (g.add_pass(name="on graphics")
+        .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1))
+    (g.add_pass(name="on compute", queue=bz.Queue.COMPUTE)
+        .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1))
+
+    for _ in range(5):
+        ctx.submit(g, wait=False)
+    ctx.wait()
+
+    assert buf.read("float32")[0] == 10.0
+
+
+def test_forced_single_queue_aliases_the_compute_queue(extra_context, monkeypatch):
+    """On a device with no compute-only family the compute runtime shares the
+    graphics VkQueue and keeps its own timeline, so the program is unchanged
+    and only the overlap is missing. The knob makes that path reachable on a
+    machine that has two families, which is the only way this half gets tested
+    where the hardware is good."""
+    monkeypatch.setenv("BAZALT_FORCE_SINGLE_QUEUE", "1")
+    context = extra_context()
+    assert context.supports(bz.Feature.ASYNC_COMPUTE) is False
+
+    comp = context.compile_shader(str(SHADER_DIR / "add_one.comp"), bz.ShaderStage.COMPUTE)
+    pipeline = context.compute_pipeline().shader(comp).storage_buffer(0).build()
+    buf = context.create_buffer(np.zeros(4, np.float32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    pool = context.create_descriptor_pool(max_sets=4, storage_buffers=4)
+    dset = pool.allocate_set(pipeline, set=0)
+    dset.set_buffer(0, buf)
+
+    g = context.graph()
+    (g.add_pass(name="graphics")
+        .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1))
+    (g.add_pass(name="compute", queue=bz.Queue.COMPUTE)
+        .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1))
+    context.submit(g)
+
+    assert np.allclose(buf.read(np.float32), [2.0] * 4)
+
+
+def test_a_buffer_dropped_after_a_two_queue_submit_is_reclaimed(ctx):
+    """A deletion key is per queue now: a resource dropped while work runs on
+    either queue must outlive both. The referee is the validation layer, which
+    reports a handle freed under running work."""
+    pipeline, buf, dset = counting_setup(ctx)
+    g = ctx.graph()
+    (g.add_pass(name="on compute", queue=bz.Queue.COMPUTE)
+        .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1))
+    ctx.submit(g, wait=False)
+
+    del g, dset, buf, pipeline
+    ctx.wait()
+    for _ in range(ctx.frames_in_flight + 1):
+        ctx.begin_frame()
 
 
 def test_async_compute_is_reported_honestly(ctx):

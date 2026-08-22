@@ -61,6 +61,20 @@ std::expected<void, Error> Pass::guard(VerbScope scope, const char* verb) const
     return {};
 }
 
+std::expected<void, Error> Pass::require_graphics_queue(const char* verb) const
+{
+    if (queue_ == QueueKind::Compute)
+    {
+        return std::unexpected(err_state(
+            std::format(
+                "{}: a pass on Queue.COMPUTE cannot blit — vkCmdBlitImage needs a graphics "
+                "queue. Put this pass on Queue.GRAPHICS, or use copy_image for a copy that "
+                "does not resize.",
+                verb)));
+    }
+    return {};
+}
+
 // ── Graph ───────────────────────────────────────────────────────────────────
 
 std::expected<std::shared_ptr<Graph>, Error> Graph::create(Context& context)
@@ -120,6 +134,9 @@ std::shared_ptr<Pass> Graph::add_pass(
     // The recorder owns no VkCommandBuffer of its own — the graph replays
     // every pass into its per-slot buffer — so creating one cannot fail.
     pass->recorder_ = CommandBuffer::create(*context_, auto_barriers).value();
+    // The recorder needs to know which queue will replay it: the timer pool
+    // asks that family whether its timestamps are usable.
+    pass->recorder_->set_queue(queue);
     pass->recorder_->set_event_sink(&pass->events_);
     passes_.push_back(pass);
     dirty_ = true;
@@ -308,6 +325,30 @@ std::expected<void, Error> Graph::compile_()
     for (CompiledPass& cp : compiled_)
     {
         Pass* pass = cp.pass;
+        Batch& batch = batches_[cp.batch];
+        // Everything the fold learns about this pass is attributed to its
+        // batch: a dependency inside one batch is a pipeline barrier, and one
+        // that crosses batches on different queues is a semaphore wait, which
+        // only the submit can emit.
+        tracker.set_batch(cp.batch, batch.queue);
+        std::vector<std::size_t>& waits = batch.waits;
+
+        // A render pass's attachments are transitioned by the RenderTarget
+        // rather than through the tracker, so a pass on the other queue that
+        // sampled one has no other way to be ordered against the drawing that
+        // is about to overwrite it.
+        if (pass->is_render())
+        {
+            RenderTarget& rt = *pass->target();
+            for (const auto& image : rt.written_color_images())
+            {
+                tracker.cross_queue_touches(image.get(), waits);
+            }
+            if (const auto& depth = rt.written_depth_image())
+            {
+                tracker.cross_queue_touches(depth.get(), waits);
+            }
+        }
 
         // A render pass builds its entry transition from the RenderTarget, not
         // from any state: preserving means "come from final_layout()". That is
@@ -318,7 +359,7 @@ std::expected<void, Error> Graph::compile_()
         // un-elided case, which is the only one where a predecessor exists.
         if (pass->is_render() && pass->preserve() && !cp.elide_entry)
         {
-            correct_preserve_entry_(cp, tracker);
+            correct_preserve_entry_(cp, tracker, waits);
         }
 
         for (const UseEvent& e : pass->events())
@@ -328,7 +369,7 @@ std::expected<void, Error> Graph::compile_()
                 case UseEvent::Kind::BufferUse:
                 {
                     tracked_writes_ |= e.writes;
-                    if (auto b = tracker.use(e.buffer.get(), e.stages, e.access, e.writes, e.shader_writable))
+                    if (auto b = tracker.use(e.buffer.get(), e.stages, e.access, e.writes, e.shader_writable, waits))
                     {
                         batch_at_(cp, e.position).buffers.emplace_back(e.buffer, *b);
                     }
@@ -345,17 +386,17 @@ std::expected<void, Error> Graph::compile_()
                         break;
                     }
                     tracked_writes_ |= e.writes;
-                    if (auto b = tracker.use_image(e.image.get(), e.layout, e.stages, e.access, e.writes))
+                    if (auto b = tracker.use_image(e.image.get(), e.layout, e.stages, e.access, e.writes, waits))
                     {
                         batch_at_(cp, e.position).images.emplace_back(e.image, *b);
                     }
                     break;
                 }
                 case UseEvent::Kind::BufferNote:
-                    tracker.note_buffer_access(e.buffer.get(), e.stages, e.access);
+                    tracker.note_buffer_access(e.buffer.get(), e.stages, e.access, waits);
                     break;
                 case UseEvent::Kind::ImageNote:
-                    tracker.note_image_layout(e.image.get(), e.layout, e.stages, e.access);
+                    tracker.note_image_layout(e.image.get(), e.layout, e.stages, e.access, &waits);
                     break;
             }
         }
@@ -376,11 +417,20 @@ std::expected<void, Error> Graph::compile_()
         }
     }
 
+    // A batch may have collected the same producer several times, and the
+    // submit compares each entry against its own index.
+    for (Batch& batch : batches_)
+    {
+        std::ranges::sort(batch.waits);
+        const auto duplicates = std::ranges::unique(batch.waits);
+        batch.waits.erase(duplicates.begin(), duplicates.end());
+    }
+
     dirty_ = false;
     return ensure_command_buffers_();
 }
 
-void Graph::correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker)
+void Graph::correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, std::vector<std::size_t>& waits)
 {
     RenderTarget& rt = *cp.pass->target();
     const VkImageLayout wanted = rt.final_layout();
@@ -391,15 +441,21 @@ void Graph::correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker)
         {
             continue;
         }
-        cp.entry.images.emplace_back(
-            image,
-            ResourceTracker::ImageBarrier{
-                .old_layout = *known,
-                .new_layout = wanted,
-                .src_stages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                .dst_stages = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                .src_access = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                .dst_access = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT});
+        // Through the tracker rather than hand-built since 0.29: the old
+        // ALL_COMMANDS source scope covers everything on THIS queue and nothing
+        // on the other, and a compute pass that moved the attachment is exactly
+        // the case this correction exists for. use_image answers both halves —
+        // a barrier for the local predecessor, a wait for the remote one.
+        if (auto b = tracker.use_image(
+                image.get(),
+                wanted,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                /*writes=*/true,
+                waits))
+        {
+            cp.entry.images.emplace_back(image, *b);
+        }
         // The pass's own entry transition now starts where it says it does.
         tracker.note_image_layout(
             image.get(), wanted, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT);

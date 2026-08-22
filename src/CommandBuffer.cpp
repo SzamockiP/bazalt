@@ -1368,7 +1368,11 @@ void CommandBuffer::ensure_timer_pool_(std::size_t needed)
         vkGetPhysicalDeviceQueueFamilyProperties(context_->physical_device(), &family_count, nullptr);
         std::vector<VkQueueFamilyProperties> families(family_count);
         vkGetPhysicalDeviceQueueFamilyProperties(context_->physical_device(), &family_count, families.data());
-        const std::uint32_t gf = context_->graphics_queue_family();
+        // The family that will REPLAY this pass, not the graphics one:
+        // timestampValidBits is per family, and a compute family may report a
+        // different number or none at all (0.29). Memoized safely because a
+        // pass names its queue once, at add_pass.
+        const std::uint32_t gf = context_->queue_family(queue_);
         const bool ok = props.limits.timestampPeriod > 0.0f && gf < family_count &&
                         families[gf].timestampValidBits != 0;
         timer_supported_ = ok;

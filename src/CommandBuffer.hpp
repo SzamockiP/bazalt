@@ -92,6 +92,14 @@ public:
 
     // Where resource uses are reported. The Pass owns both the recorder and
     // the sink, and sets this immediately after create().
+    // Which queue will replay this recording. The timer pool asks it, because
+    // timestampValidBits is per queue family and a pass on the compute queue
+    // must be measured against the family that runs it (0.29).
+    void set_queue(QueueKind queue)
+    {
+        queue_ = queue;
+    }
+
     void set_event_sink(std::vector<UseEvent>* sink)
     {
         event_sink_ = sink;
@@ -599,6 +607,10 @@ private:
     // Where resource uses are reported, for the graph to fold. Owned by the
     // Pass that owns this recorder, and set before anything is recorded.
     std::vector<UseEvent>* event_sink_ = nullptr;
+    // The queue this recording's pass runs on. One value for its whole life —
+    // a Pass names its queue at add_pass and never moves — which is why the
+    // timer's memoized answer below stays valid.
+    QueueKind queue_ = QueueKind::Graphics;
 
     // ── record-time state (reset by begin(), never touched at replay) ──
     bool auto_barriers_ = true;

@@ -497,6 +497,81 @@ def run_cross_graph_case(auto):
     return hazards
 
 
+def run_two_queue_replay_case(auto):
+    """One graph whose producer runs on the compute queue and whose consumer
+    runs on the graphics queue, replayed twice without waiting.
+
+    Two claims in one shape. Inside a replay, the consumer's read of what the
+    producer wrote crosses a queue, so a pipeline barrier cannot express it and
+    the fold has to turn it into a semaphore wait. Between replays, the second
+    producer overwrites the buffer the first consumer is still reading — the
+    wrap-around barrier's hazard, one level up, and again out of a barrier's
+    reach because the two run on different queues.
+
+    Manual mode is the negative control and it is exact: a manual pass emits no
+    UseEvents at all, so the fold sees nothing to wait for and the hazard is
+    real. Returns the hazards and the numbers, because the value is the second
+    referee where sync validation cannot see across queues.
+    """
+    context, log, hazards, pipeline, sbuf, dset = sync_setup(auto)
+
+    g = context.graph()
+    (g.add_pass(name="produce", queue=bz.Queue.COMPUTE)
+        .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1))
+    (g.add_pass(name="consume", queue=bz.Queue.GRAPHICS)
+        .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1))
+
+    context.submit(g, wait=False)
+    context.submit(g, wait=False)
+    context.wait()
+
+    log.flush()
+    return hazards, sbuf.read(np.float32)
+
+
+def run_compute_image_then_draw_case(queue):
+    """A pass writes a storage image, a render pass samples it. On the compute
+    queue the layout move (GENERAL to SHADER_READ_ONLY) is the interesting
+    half: the semaphore carries the memory dependency, so the transition has an
+    empty source scope and only the layout to change."""
+    hazards = []
+    log = bz.Logger(min_severity=bz.Severity.INFO)
+
+    @log.on_message
+    def _(msg):
+        if msg.source == bz.Source.VALIDATION and "hazard" in msg.text.lower():
+            hazards.append(msg.text)
+
+    context = bz.Context(log, validation="sync")
+    pattern = context.compile_shader(str(SHADER_DIR / "pattern.comp"), bz.ShaderStage.COMPUTE)
+    write = (context.compute_pipeline().shader(pattern).storage_image(0)
+             .push_constant(4).build())
+    vert = context.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+    frag = context.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
+    target = context.create_render_target(64, 64)
+    read = (context.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
+            .texture(0, bz.ShaderStage.FRAGMENT).build(target))
+
+    image = context.create_image(64, 64, bz.Format.RGBA8)
+    pool = context.create_descriptor_pool()
+    write_set = pool.allocate_set(write)
+    write_set.set_storage_image(0, image)
+    read_set = pool.allocate_set(read)
+    read_set.set_image(0, image)
+
+    g = context.graph()
+    (g.add_pass(name="write", queue=queue)
+        .bind_pipeline(write).bind_descriptor_set(write_set, write)
+        .push_constants(write, 0, struct.pack("<f", 0.5))
+        .dispatch(8, 8))
+    with g.add_pass(target, name="sample") as p:
+        p.bind_pipeline(read).bind_descriptor_set(read_set, read).draw(3)
+    context.submit(g)
+
+    log.flush()
+    return hazards, target.color[0].read()
+
+
 def run_preserve_chain_case():
     """Two render passes on one target, the second preserving — the look-ahead.
 
@@ -559,6 +634,39 @@ def test_auto_barriers_satisfy_sync_validation(ctx):
     """The fold's barriers hold up under the same referee that catches the
     missing ones — not just under core validation, which is blind here."""
     assert run_sync_case("auto") == []
+
+
+@pytest.mark.skipif(
+    os.environ.get("BAZALT_SYNCVAL_UNSUPPORTED") == "1",
+    reason="the installed validation layer does not report shader hazards (see debt #4)")
+def test_a_two_queue_graph_races_in_manual_mode(ctx):
+    """The negative control for the two claims below, and it is what makes them
+    mean anything: with the barriers off, a producer on one queue and a
+    consumer on the other really do race, on this machine, in this build."""
+    hazards, _ = run_two_queue_replay_case(auto=False)
+    assert hazards, "no hazard reported — sync validation is not watching the queues"
+
+
+def test_a_two_queue_graph_orders_itself(ctx):
+    """A use whose producer sits in another batch on another queue becomes a
+    semaphore wait, and a graph replayed again waits for its own previous
+    submit on the other queues. The value is the second referee: doubling twice
+    per replay over two replays is x16, and any missed edge gives a smaller
+    number."""
+    hazards, values = run_two_queue_replay_case(auto=True)
+    assert hazards == []
+    assert np.allclose(values, np.arange(64, dtype=np.float32) * 16)
+
+
+@pytest.mark.parametrize("queue", ["graphics", "compute"])
+def test_a_storage_image_written_on_either_queue_is_sampled_safely(ctx, queue):
+    """The image half of the same claim. GENERAL to SHADER_READ_ONLY across a
+    queue keeps the transition and drops its source scope, because the
+    semaphore already made the write available."""
+    kind = bz.Queue.COMPUTE if queue == "compute" else bz.Queue.GRAPHICS
+    hazards, pixels = run_compute_image_then_draw_case(kind)
+    assert hazards == []
+    assert pixels[32, 32, :3].sum() > 0, "the sampled image was black"
 
 
 def test_a_preserve_chain_satisfies_sync_validation(ctx):

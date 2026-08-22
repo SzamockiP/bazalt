@@ -98,6 +98,14 @@ public:
     // and the right kind of pass for the verb.
     std::expected<void, Error> guard(VerbScope scope, const char* verb) const;
 
+    // The verbs a compute queue cannot run whatever the pass kind: a blit is
+    // graphics-only work, and generate_mipmaps is a chain of blits.
+    //
+    // Refused by QueueKind rather than by the family the queue happens to sit
+    // on, so the contract reads the same on a device whose compute runtime
+    // aliases the graphics queue. One rule, not one per driver.
+    std::expected<void, Error> require_graphics_queue(const char* verb) const;
+
     // Marks the owning graph dirty, surviving the graph's death (a Python
     // handle may outlive it).
     void mark_graph_dirty();
@@ -306,7 +314,7 @@ private:
 
     // Bring a preserving pass's attachments to the layout its own entry
     // transition assumes, when something in this graph moved them since.
-    static void correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker);
+    static void correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, std::vector<std::size_t>& waits);
 
     // Report a render pass's attachment writes to the fold, so a later pass
     // that samples one is ordered against the drawing.

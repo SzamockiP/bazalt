@@ -1373,12 +1373,26 @@ class ComputePipelineBuilder:
 class Queue(IntEnum):
     """Which queue a pass runs on.
 
-    One member today. Async compute arrives as a new member, not as a new
-    parameter, and the choice always stays with you: after it arrives, a
-    compute pass on Queue.GRAPHICS stays legal.
+    GRAPHICS is the default and runs everything. COMPUTE (0.29) runs a pass
+    without a render target on the device's compute queue, beside the graphics
+    work. A pass on COMPUTE cannot draw, blit or generate mipmaps, and each
+    refusal names the fix.
+
+    What the graph waits for by itself: inside one graph the passes order
+    themselves across both queues, and a graph you submit again waits for its
+    own previous submit. What it does not: two DIFFERENT graphs on different
+    queues have no order between them. Use submit(after=...) there.
+
+    Without Feature.ASYNC_COMPUTE the device has no compute-only queue family,
+    so a COMPUTE pass runs on the graphics queue under its own timeline. The
+    program and the ordering are the same; only the overlap is missing.
+
+    The choice is always yours: a compute pass on GRAPHICS stays legal, and
+    bazalt never moves a pass between queues on its own.
     """
 
     GRAPHICS = 0
+    COMPUTE = 1
 
 class Serial:
     """The identity of one submit, returned by Context.submit().
@@ -1386,6 +1400,10 @@ class Serial:
     Pass it to ctx.wait(serial) to block until that submit finished, or to
     submit(after=...) to order one submit after another on the GPU. The handle
     is opaque on purpose: it has no attributes and no ordering.
+
+    One Serial covers every queue the submit used, so wait() and after= reach
+    both. It belongs to the Context that returned it; another Context refuses
+    it with ResourceError.
     """
 
 class Pass:
@@ -1553,6 +1571,9 @@ class Pass:
         making a thumbnail all sat in that gap, and each one used to be a full
         graphics pass with a fullscreen shader.
 
+        Raises StateError on a Queue.COMPUTE pass: a blit is graphics work.
+        copy_image is legal there, and so are the clears and the fills.
+
         Mip 0 of every shared layer. Call generate_mipmaps on the destination if
         it needs a chain.
 
@@ -1612,6 +1633,9 @@ class Pass:
         names mip 0's current layout in p.barrier's vocabulary — SHADER_READ
         (SHADER_READ_ONLY, an uploaded or already-baked image; the default) or
         SHADER_WRITE (GENERAL, mip 0 fresh from compute).
+
+        Raises StateError on a Queue.COMPUTE pass: the chain is built out of
+        blits, and a blit needs a graphics queue.
 
         Raises ResourceError if the image has a single level (create it with
         mip_levels>1 or mipmaps=True), UnsupportedError if the format can't be
@@ -1803,6 +1827,9 @@ class Graph:
                  auto_barriers: Optional[bool] = None) -> Pass:
         """Add a render pass: one rendering scope into `target`.
 
+        queue= names the queue. A render pass refuses Queue.COMPUTE with
+        StateError, because a compute queue has no rasterizer.
+
         clear_color is either a single [r, g, b, a] applied to every attachment
         (the common case) or, for MRT, a list of them ([[r,g,b,a], …]) clearing
         each attachment independently.
@@ -1837,6 +1864,10 @@ class Graph:
 
         The clear arguments do not exist on this overload: they answer what
         happens to the attachments, and there are none.
+
+        queue=Queue.COMPUTE runs this pass on the compute queue, beside the
+        graphics work rather than through it. See Queue for what the graph
+        then orders by itself and what it leaves to you.
         """
         ...
 
@@ -2854,7 +2885,11 @@ class Context:
         after= orders this submit on the GPU: it starts after the named
         submits complete, and the CPU does not block. That is the manual
         control between whole submits; inside one graph the passes order
-        themselves.
+        themselves, across both queues.
+
+        It is also the ONLY order between two different graphs on different
+        queues: bazalt adds none there, deliberately, so that two graphs may
+        overlap. The returned Serial covers every queue this submit used.
 
         Reusing one Graph asynchronously is safe: the ring paces it, so a
         submit into a slot whose previous submit is still running waits for
@@ -3006,6 +3041,10 @@ class SwapchainRenderer(RenderTargetBase):
 
         None means one thing: the ring has not cycled once yet, so read it every
         frame and use it when it arrives.
+
+        It measures the GRAPHICS part of the frame — from the first graphics
+        pass to the last. Work on the compute queue overlaps it rather than
+        adding to it, so use p.timer() to measure a compute pass.
 
         Raises StateError when the Context was built without gpu_timing=True, and
         UnsupportedError when the GPU reports no usable timestamps. Same split
