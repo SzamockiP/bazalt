@@ -979,7 +979,7 @@ void bind_context(py::module_& m)
                     // Checked before the GIL goes: a Serial from another
                     // Context names a value on a timeline this one does not
                     // own, and waiting for it is a hang rather than an error.
-                    const Serial& handle = py::cast<const Serial&>(serial);
+                    const auto& handle = py::cast<const Serial&>(serial);
                     require_same_context(&self, handle.owner, "wait");
                     const QueueSerials values = handle.values;
                     py::gil_scoped_release release;

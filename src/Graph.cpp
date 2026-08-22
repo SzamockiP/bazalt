@@ -506,8 +506,8 @@ void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame)
     bufs.reserve(buffers.size());
     for (const auto& [buffer, b] : buffers)
     {
-        const StageAccess s = narrow_src({b.src_stages, b.src_access}, legal);
-        const StageAccess d = narrow_dst({b.dst_stages, b.dst_access}, legal);
+        const StageAccess s = narrow_src({.stages = b.src_stages, .access = b.src_access}, legal);
+        const StageAccess d = narrow_dst({.stages = b.dst_stages, .access = b.dst_access}, legal);
         src |= s.stages;
         dst |= d.stages;
         bufs.push_back(
@@ -526,8 +526,8 @@ void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame)
     imgs.reserve(images.size());
     for (const auto& [image, b] : images)
     {
-        const StageAccess s = narrow_src({b.src_stages, b.src_access}, legal);
-        const StageAccess d = narrow_dst({b.dst_stages, b.dst_access}, legal);
+        const StageAccess s = narrow_src({.stages = b.src_stages, .access = b.src_access}, legal);
+        const StageAccess d = narrow_dst({.stages = b.dst_stages, .access = b.dst_access}, legal);
         src |= s.stages;
         dst |= d.stages;
         // All mips and all layers: the fold holds one layout per image. The
@@ -647,11 +647,12 @@ void Graph::execute_batch(const Batch& batch, VkCommandBuffer vkCmd, const Frame
     {
         const VkPipelineStageFlags wide = context_->all_shader_stages() | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
                                           VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
-        const StageAccess s = narrow_src({wide, VK_ACCESS_SHADER_WRITE_BIT}, frame.legal_stages);
+        const StageAccess s = narrow_src({.stages = wide, .access = VK_ACCESS_SHADER_WRITE_BIT}, frame.legal_stages);
         const StageAccess d = narrow_dst(
-            {wide,
-             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
-                 VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT},
+            {.stages = wide,
+             .access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
+                       VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
+                       VK_ACCESS_INDIRECT_COMMAND_READ_BIT},
             frame.legal_stages);
         VkMemoryBarrier barrier{
             .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,

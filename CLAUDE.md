@@ -69,8 +69,13 @@ parenthesis in three `modernize-use-integer-sign-comparison` rewrites and a vari
 `give_me_a_name` four times. Build and run the suite after every `--fix`, and read the diff.
 Running `--fix` twice over the same file also duplicates the includes it inserts.
 
-A local Windows run reports two findings CI does not: MSVC deprecates `getenv` (glibc does
-not), and the two call sites in `Context.cpp` are the negotiation knobs. `std::getenv` is
+A local Windows run needs the MSVC environment, or every file fails to parse with
+`'array' file not found`: the compile database is clang-cl's and the STL include paths come
+from `vcvars64.bat`. Run it through a batch file that calls vcvars first, or the 5000
+warnings you get are all from a broken parse.
+
+Such a run reports findings CI does not: MSVC deprecates `getenv` (glibc does
+not), and the three call sites in `Context.cpp` are the negotiation knobs. `std::getenv` is
 the portable spelling and stays; `_dupenv_s` is a Microsoft extension.
 **ruff** checks the Python side with an explicit rule set (its defaults move between
 versions). Locally:
