@@ -231,11 +231,16 @@ public:
     // waits the other queues' values before it starts, which is the
     // wrap-around barrier's argument one level up: frame N+1 of a graph races
     // its own frame N, and a pipeline barrier cannot reach across a queue.
-    // Empty when no enabled pass writes anything the tracker sees, exactly as
-    // the wrap-around barrier is skipped then.
+    //
+    // Ungated, unlike the wrap-around barrier. That flag counts descriptor
+    // writes only, and the writes that matter most here are the ones it cannot
+    // see: an attachment a render pass draws into, and a copy_image or a
+    // clear_image, which reach the fold as notes. A wait on a value the other
+    // queue has already passed costs one semaphore entry and nothing else, so
+    // the cheap answer is also the correct one.
     QueueSerials replay_wait() const
     {
-        return tracked_writes_ ? last_replay_ : QueueSerials{};
+        return last_replay_;
     }
 
     // Merged rather than assigned: a submit that failed halfway still put work

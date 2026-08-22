@@ -477,7 +477,7 @@ public:
     }
 
     // Bounds-checked slices. Returned as a RenderTargetBase (the view is a
-    // RenderTarget), so it passes straight into cmd.rendering(...). `layer(i, mip)`
+    // RenderTarget), so it passes straight into graph.add_pass(target, ...). `layer(i, mip)`
     // is the general form (both axes); `mip(m)` is sugar for layer 0. A layered
     // AND mipped target (e.g. a mipped cube for prefiltered reflections) needs the
     // combined form.

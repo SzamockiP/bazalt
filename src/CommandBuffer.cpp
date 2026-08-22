@@ -1028,7 +1028,7 @@ std::expected<void, Error> CommandBuffer::clear_image(const std::shared_ptr<Imag
     {
         return std::unexpected(err_resource(
             "clear_image: a depth image is cleared by the pass that renders into it "
-            "(cmd.rendering(target, clear_depth=...))"));
+            "(graph.add_pass(target, clear_depth=...))"));
     }
     commands_.emplace_back([image, color](VkCommandBuffer cmd, const FrameContext& frame)
                            { record_image_clear(*frame.vk, cmd, *image, color, frame.legal_stages); });

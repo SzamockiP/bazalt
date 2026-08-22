@@ -310,7 +310,13 @@ private:
     // wait_acquire: whether the acquire semaphore is still unconsumed. A submit
     // that succeeded already waited it, and waiting a binary semaphore twice
     // is a deadlock rather than an error.
-    void abandon_frame_(bool wait_acquire = true);
+    //
+    // signal_fence: whether the slot's fence still needs signalling. A partial
+    // submit failure can leave it already handed to a batch that WAS accepted,
+    // and signalling one fence from two submits is a validation error — the
+    // accepted batch will signal it, so the next acquire cannot hang either
+    // way.
+    void abandon_frame_(bool wait_acquire = true, bool signal_fence = true);
 
     // image_acquired_ with the Context's counter kept in step — the counter is
     // what refuses a headless ctx.submit() while a window holds an image.

@@ -381,8 +381,16 @@ std::expected<void, Error> Graph::compile_()
                     // graph has written alone. It rests in SHADER_READ_ONLY
                     // already, and the fold's starting layout is UNDEFINED, so
                     // a transition here would discard an uploaded texture.
+                    //
+                    // Recorded as a completed read rather than dropped, though:
+                    // it emits nothing (the layout it names is the layout the
+                    // image is in), and without it a later pass that RENDERS
+                    // into this image has no way to know somebody was reading
+                    // it — which across queues is a write-after-read nothing
+                    // else would catch.
                     if (e.only_if_tracked && !tracker.tracks(e.image.get()))
                     {
+                        tracker.note_image_read(e.image.get(), e.layout, e.stages, e.access);
                         break;
                     }
                     tracked_writes_ |= e.writes;
@@ -426,8 +434,15 @@ std::expected<void, Error> Graph::compile_()
         batch.waits.erase(duplicates.begin(), duplicates.end());
     }
 
+    // Only once the command buffers really exist: a failed allocation used to
+    // leave the graph clean AND short a row, so the next submit indexed past
+    // the end of it rather than retrying the compile.
+    if (auto r = ensure_command_buffers_(); !r)
+    {
+        return r;
+    }
     dirty_ = false;
-    return ensure_command_buffers_();
+    return {};
 }
 
 void Graph::correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, std::vector<std::size_t>& waits)

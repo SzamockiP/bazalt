@@ -85,7 +85,9 @@ void bind_commands(py::module_& m)
                 unwrap(self->recorder().bind_index_buffer(buffer), nullptr);
                 return self;
             },
-            py::arg("buffer"))
+            // none(false): require_same_context reads buffer->owner() before
+            // the recorder's own null check could fire.
+            py::arg("buffer").none(false))
         .def(
             "draw",
             [](std::shared_ptr<Pass> self, uint32_t vertex_count, uint32_t instances)

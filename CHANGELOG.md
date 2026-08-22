@@ -72,6 +72,9 @@ image waits for it.
   silence, which makes every resource look unfinished.
 - A `uint16` NumPy array used as an index buffer is read as 16-bit indices. The
   list form always was; the array form was read as 32-bit and drew garbage.
+- `p.bind_index_buffer(None)` raises instead of stopping the process.
+- Four docstrings and one error message named `cmd.rendering()`, which 0.28
+  removed. They name `graph.add_pass()` now.
 
 ### Notes
 

@@ -91,7 +91,7 @@ enum class Feature
     // beside the graphics work rather than through it. A device without one
     // still runs the same program — the compute runtime aliases the graphics
     // queue and keeps its own timeline — so this row answers "is the overlap
-    // real", and required=[ASYNC_COMPUTE] is how a caller refuses the device
+    // real", and features=[ASYNC_COMPUTE] is how a caller refuses the device
     // that cannot give it. Hence the seventh column below.
     ASYNC_COMPUTE
 };

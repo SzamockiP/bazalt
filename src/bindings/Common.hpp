@@ -605,7 +605,7 @@ inline void require_sliced_when_3d(const RenderTarget& target, const char* what)
         raise_error(err_resource(
             std::format(
                 "{}: a 3D target is rendered one slice at a time. Use target.layer(z) — "
-                "cmd.begin_rendering(target.layer(z)) — instead of the whole target.",
+                "graph.add_pass(target.layer(z)) — instead of the whole target.",
                 what)));
     }
 }

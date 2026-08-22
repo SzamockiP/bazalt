@@ -2098,6 +2098,34 @@ unchanged, and a program written against 0.28 schedules exactly as it did — wh
   stays; what the test pins is that the added wait is not itself illegal. The docstring says
   so, because a regression guard filed as a proof is how a suite starts lying.
 
+- **The release review found the hole the tests were shaped away from, and it is the sharpest
+  lesson here.** A NOTE — what a manual `p.barrier()`, a `copy_image` and a `clear_image`
+  report to the fold — used to be modelled as a completed READ. That is right about what it
+  does for its own queue (the caller already made the write available, so no second barrier)
+  and wrong about what it says to another queue: **a reader waits for a writer and never for
+  another reader**, so a consumer on the other queue got neither a barrier (one cannot cross a
+  queue) nor a semaphore wait (nothing asked for one). A compute pass clearing an image and a
+  render pass sampling it read while the clear was still running.
+
+  Both cross-queue tests written for the release drive the fold through descriptor USES, so
+  every verb that reports a note was outside their shape. The general form is not "write more
+  tests": it is that **a fold with two input paths needs a test per path**, and the second path
+  here is the one that exists precisely because the first cannot express it.
+
+  A note is recorded as a write this queue has already made available now. The visible mask is
+  what keeps the same-queue barrier suppressed; `written` is what the other queue trips on.
+
+- **Three smaller ones from the same review, each a consequence of two queues rather than a
+  slip.** A one-shot readback copies on the graphics queue, and neither submission order nor a
+  pipeline barrier there reaches a compute batch still writing the resource — so
+  `immediate_submit` waits the other queue first, and an upload deliberately does not (it must
+  not stall behind compute work it has nothing to do with). A failed `vkQueueSubmit` used to
+  leave its reservation stranded above the timeline forever, which with the per-queue deletion
+  key means the queue never drains again — the reservation is given back now, under the lock
+  that made it. And `acquire()` waits only the COMPUTE half of its ring slot: the fence is the
+  graphics half, and that half can hold a submit from the SAME frame — another window that
+  presented first — so waiting it would serialize the windows against each other.
+
 - **The negative control worked, and it decided a question the plan had left open.** Whether
   sync validation reports a hazard ACROSS two real queues was unknown when the plan was
   written; the manual-mode run (`auto_barriers=False`, which emits no use events at all, so

@@ -482,9 +482,13 @@ std::expected<bool, Error> SwapchainRenderer::acquire()
 
     context_->vk().vkWaitForFences(context_->device(), 1, &in_flight_fences_[current_frame()], VK_TRUE, UINT64_MAX);
     // The fence rides the last GRAPHICS batch, so it says nothing about a
-    // compute batch of the same frame. The per-queue slot serials do, and
-    // waiting them is free once the fence has passed.
-    context_->wait_for_slot();
+    // compute batch that shared the slot. The per-queue slot serials do.
+    //
+    // The COMPUTE half only: the fence above is the graphics half, and the
+    // slot's graphics serial may belong to this very frame — another window on
+    // this Context that presented first — so waiting it would serialize the
+    // windows against each other.
+    context_->wait_for_slot(QueueKind::Compute);
 
     // The fence proves this slot's previous submission finished, so its
     // timestamp pair is ready to read (frames_in_flight frames of latency).
@@ -612,7 +616,7 @@ QueueSerials SwapchainRenderer::end_frame(
         // it would not satisfy is a wait for the dropped number itself, which is
         // why ctx.wait() waits the last SUBMITTED value rather than the reserved
         // one.
-        abandon_frame_(!binaries.wait_consumed);
+        abandon_frame_(!binaries.wait_consumed, !binaries.fence_consumed);
         return signalled;
     }
 
@@ -632,7 +636,7 @@ QueueSerials SwapchainRenderer::end_frame(
     return signalled;
 }
 
-void SwapchainRenderer::abandon_frame_(bool wait_acquire)
+void SwapchainRenderer::abandon_frame_(bool wait_acquire, bool signal_fence)
 {
     set_acquired_(false);
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -650,7 +654,8 @@ void SwapchainRenderer::abandon_frame_(bool wait_acquire)
         // Released before recreate_swapchain: that path takes the device idle,
         // which must not happen while holding the queue mutex.
         std::lock_guard lock(context_->queue_mutex());
-        context_->vk().vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
+        const VkFence fence = signal_fence ? in_flight_fences_[current_frame()] : VK_NULL_HANDLE;
+        context_->vk().vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, fence);
     }
     recreate_swapchain();
 }

@@ -241,15 +241,31 @@ void Context::note_slot_submit(const QueueSerials& serials)
     max_merge(slot_serial_[frame_serial_ % frames_in_flight_], serials);
 }
 
-void Context::wait_for_slot()
+void Context::wait_for_slot(std::optional<QueueKind> only)
 {
     if (slot_serial_.size() != frames_in_flight_)
     {
         return;
     }
+    QueueSerials wanted = slot_serial_[frame_serial_ % frames_in_flight_];
+    if (only)
+    {
+        // Keep one queue's half and drop the rest. A window asks for the
+        // compute half alone: its in-flight fence has already covered the
+        // graphics one, and that half may hold a submit from THIS frame — the
+        // window that presented before this one.
+        const std::size_t keep = queue_index(*only);
+        for (std::size_t i = 0; i < kQueueCount; ++i)
+        {
+            if (i != keep)
+            {
+                wanted[i] = 0;
+            }
+        }
+    }
     // Frame pacing: a failure here surfaces at the next submit, which is
     // where a caller can be told about it.
-    static_cast<void>(wait_for_serials(slot_serial_[frame_serial_ % frames_in_flight_]));
+    static_cast<void>(wait_for_serials(wanted));
 }
 
 std::expected<void, Error> Context::wait_for_submits()
@@ -302,6 +318,9 @@ std::expected<std::uint64_t, Error> Context::submit_one_shot(VkCommandBuffer cmd
             "submit one-shot command buffer",
             ErrorCode::Resource))
     {
+        // Same reason as submit_batches: an unreachable reservation stops the
+        // deletion queue for good.
+        graphics_q_.serial.store(serial - 1);
         return std::unexpected(*e);
     }
     graphics_q_.submitted.store(serial);
@@ -438,11 +457,14 @@ std::expected<void, Error> Context::submit_batches(
 
         if (auto e = check(vk_.vkQueueSubmit(rt.queue, 1, &submitInfo, fence), "submit command buffer"))
         {
-            // The reservation is dropped on purpose: a timeline signal only has
-            // to be GREATER than the current value, and every wait is ">=", so
-            // the next submit satisfies anything that was waiting for this one.
-            // What must not be dropped is `signalled` — the earlier batches are
-            // still running.
+            // The reservation goes back. Nothing will ever signal it, and the
+            // deletion queue keys on the RESERVED value: a permanently
+            // unreachable key means every resource dropped afterwards waits
+            // forever and the queue stops draining. Safe under the lock we
+            // still hold — every reservation takes it, so this is provably the
+            // top one.
+            rt.serial.store(serial - 1);
+            // `signalled` is not rolled back: the earlier batches are running.
             return std::unexpected(*e);
         }
         rt.submitted.store(serial);
@@ -451,6 +473,10 @@ std::expected<void, Error> Context::submit_batches(
         if (binaries != nullptr && i == first_graphics)
         {
             binaries->wait_consumed = true;
+        }
+        if (last_graphics_batch)
+        {
+            binaries->fence_consumed = true;
         }
     }
     return {};

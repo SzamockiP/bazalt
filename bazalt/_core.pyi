@@ -217,7 +217,7 @@ class Feature(IntEnum):
     #: pass on `Queue.COMPUTE` runs on its own queue, beside the graphics work.
     #: False means it runs on the graphics queue under its own timeline: the
     #: same program with the same ordering rules, without the overlap.
-    #: `Context(required=[Feature.ASYNC_COMPUTE])` refuses a device that has
+    #: `Context(features=[Feature.ASYNC_COMPUTE])` refuses a device that has
     #: none.
     ASYNC_COMPUTE = 25
 
@@ -1052,7 +1052,7 @@ class RenderTarget(RenderTargetBase):
 
     def layer(self, index: int, *, mip: int = 0) -> SubresourceTarget:
         """A view of one array layer / cube face (and optionally one mip) of this
-        target, to render into with cmd.rendering(target.layer(i)). `mip=` selects
+        target, to render into with graph.add_pass(target.layer(i)). `mip=` selects
         a level for a layered AND mipped target (e.g. a mipped cube for prefiltered
         reflections). Cube face i == layer i, Vulkan order +X, -X, +Y, -Y, +Z, -Z.
         Render every layer you intend to sample before sampling target.color /
@@ -1069,7 +1069,7 @@ class RenderTarget(RenderTargetBase):
         ...
 
     def all_layers(self) -> MultiviewTarget:
-        """A multiview view of the whole target: cmd.rendering(target.all_layers())
+        """A multiview view of the whole target: graph.add_pass(target.all_layers())
         renders into EVERY layer in ONE pass instead of a pass per layer. The
         shader selects per-layer work with gl_ViewIndex (e.g. a per-face matrix
         for cube capture). Needs a layered target and
@@ -1083,13 +1083,13 @@ class RenderTarget(RenderTargetBase):
 class SubresourceTarget(RenderTargetBase):
     """One (layer, mip) of a RenderTarget — or one Z slice of a 3D one — as a
     drawable view. Comes from target.layer(); owns nothing; hand it straight to
-    cmd.rendering(...). The parent keeps every attachment and knob (0.23:
+    graph.add_pass(...). The parent keeps every attachment and knob (0.23:
     named, so the stub can say so — it used to come back as RenderTargetBase)."""
     ...
 
 class MultiviewTarget(RenderTargetBase):
     """Every layer of a RenderTarget as one multiview drawable. Comes from
-    target.all_layers(); owns nothing; hand it straight to cmd.rendering(...)."""
+    target.all_layers(); owns nothing; hand it straight to graph.add_pass(...)."""
     ...
 
 class GraphicsPipelineBuilder:

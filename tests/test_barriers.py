@@ -629,6 +629,81 @@ def run_attachment_read_then_redraw_case():
     return hazards
 
 
+def run_note_then_cross_queue_read_case(kind):
+    """A pass on the compute queue leaves a resource in a state the fold learns
+    from a NOTE rather than from a descriptor use, and a graphics pass then
+    reads it.
+
+    A note is what a manual p.barrier() and the transfer verbs (copy_image,
+    clear_image) report. It used to be modelled as a completed READ, and a read
+    is not something a later reader waits for — so the graphics pass got
+    neither a barrier nor a semaphore wait, and read a resource the compute
+    queue was still writing.
+
+    `kind` picks which half: "image" goes through clear_image, "buffer" through
+    a manual barrier after a dispatch.
+    """
+    hazards = []
+    log = bz.Logger(min_severity=bz.Severity.INFO)
+
+    @log.on_message
+    def _(msg):
+        if msg.source == bz.Source.VALIDATION and "hazard" in msg.text.lower():
+            hazards.append(msg.text)
+
+    context = bz.Context(log, validation="sync")
+    vert = context.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+    target = context.create_render_target(64, 64)
+
+    if kind == "image":
+        frag = context.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
+        read = (context.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
+                .texture(0, bz.ShaderStage.FRAGMENT).build(target))
+        image = context.create_image(256, 256, bz.Format.RGBA8)
+        pool = context.create_descriptor_pool()
+        read_set = pool.allocate_set(read)
+        read_set.set_image(0, image)
+
+        g = context.graph()
+        # A transfer verb reports its result as a note, not as a use.
+        g.add_pass(name="clear on compute", queue=bz.Queue.COMPUTE).clear_image(image, [0.2, 0.4, 0.6, 1.0])
+        with g.add_pass(target, name="sample") as p:
+            p.bind_pipeline(read).bind_descriptor_set(read_set, read).draw(3)
+        context.submit(g)
+        log.flush()
+        return hazards
+
+    comp = context.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
+    write = context.compute_pipeline().shader(comp).storage_buffer(0).build()
+    sbuf = context.create_buffer(np.arange(64, dtype=np.float32),
+                                 bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    pool = context.create_descriptor_pool(max_sets=8, storage_buffers=8)
+    write_set = pool.allocate_set(write, set=0)
+    write_set.set_buffer(0, sbuf)
+
+    # The consumer only READS, and that is the whole point: a reader waits for
+    # a writer and never for another reader, so a note that models the write as
+    # a read leaves exactly this shape unordered. A consumer that WRITES is
+    # ordered anyway, through the reads the note does record.
+    tri_vert = context.compile_shader(str(SHADER_DIR / "triangle.vert"), bz.ShaderStage.VERTEX)
+    tri_frag = context.compile_shader(str(SHADER_DIR / "triangle.frag"), bz.ShaderStage.FRAGMENT)
+    draw = (context.graphics_pipeline().vertex_shader(tri_vert).fragment_shader(tri_frag)
+            .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+            .build(target))
+
+    g = context.graph()
+    producer = g.add_pass(name="double on compute", queue=bz.Queue.COMPUTE)
+    producer.bind_pipeline(write).bind_descriptor_set(write_set, write, set=0).dispatch(1)
+    # The manual barrier covers the compute queue and can reach no further. It
+    # must not DELETE the dependency for the queue it cannot reach.
+    producer.barrier(sbuf, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
+    with g.add_pass(target, name="read on graphics") as p:
+        p.bind_pipeline(draw).bind_vertex_buffer(sbuf).draw(3)
+    context.submit(g)
+    log.flush()
+    return hazards
+
+
 def run_preserve_chain_case():
     """Two render passes on one target, the second preserving — the look-ahead.
 
@@ -743,6 +818,23 @@ def test_a_pass_that_redraws_an_attachment_waits_for_a_compute_reader(ctx):
     On a device whose compute queue aliases the graphics one it proves even
     less: one queue orders the two passes anyway."""
     assert run_attachment_read_then_redraw_case() == []
+
+
+@pytest.mark.skipif(
+    os.environ.get("BAZALT_SYNCVAL_UNSUPPORTED") == "1",
+    reason="the installed validation layer does not report shader hazards (see debt #4)")
+@pytest.mark.parametrize("kind", ["image", "buffer"])
+def test_a_note_on_one_queue_still_orders_the_other_queue(ctx, kind):
+    """The transfer verbs and a manual p.barrier() reach the fold as notes, and
+    a note used to say "somebody read this". A reader waits for a writer, never
+    for another reader, so the consumer on the other queue was left completely
+    unordered — no barrier, because a barrier cannot cross a queue, and no
+    semaphore wait, because nothing asked for one.
+
+    Found by review rather than by the suite, which is the interesting part: the
+    two cross-queue tests above both drive the fold through descriptor USES, and
+    every verb that reports a note was outside their shape."""
+    assert run_note_then_cross_queue_read_case(kind) == []
 
 
 def test_a_preserve_chain_satisfies_sync_validation(ctx):

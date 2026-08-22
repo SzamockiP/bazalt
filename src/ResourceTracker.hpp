@@ -512,6 +512,21 @@ public:
         // is still the fold's to add.
         static_cast<void>(predecessors_(st, /*include_reads=*/true, waits));
         st = {};
+        // Recorded as a WRITE this queue has already made available, not as a
+        // bare read. The visible mask is what stops a redundant barrier on this
+        // queue — a use covered by the caller's own barrier asks for nothing
+        // more — while `written` is what a use on the OTHER queue trips on, so
+        // it gets the semaphore wait a pipeline barrier could never give it.
+        //
+        // Leaving `written` false modelled this as "somebody read it", and a
+        // read is not something a later reader has to wait for: a manual
+        // barrier, a copy_image or a clear_image on one queue then left the
+        // other queue's reader completely unordered.
+        st.written = true;
+        st.write_stages = dst_stages;
+        st.write_access = dst_access;
+        st.write_batch = batch_;
+        st.write_queue = queue_;
         st.read_stages = dst_stages;
         st.read_access = dst_access;
         st.visible_stages[queue_slot_] = dst_stages;
@@ -558,6 +573,22 @@ public:
         st.visible_access[queue_slot_] = visible_access;
     }
 
+    // An image this fold will not touch, read by this batch. Records the read
+    // and nothing else: no layout is claimed and no barrier is implied, because
+    // the image is already in the layout the read names — it is only here so a
+    // later pass that WRITES the image (a render pass drawing into it) can be
+    // ordered against the read, which across queues has no other way to happen.
+    void note_image_read(Image* image, VkImageLayout layout, VkPipelineStageFlags stages, VkAccessFlags access)
+    {
+        ImageState& st = image_states_[image];
+        st.layout = layout;
+        st.read_stages |= stages;
+        st.read_access |= access;
+        st.visible_stages[queue_slot_] |= stages;
+        st.visible_access[queue_slot_] |= access;
+        st.read_batch[queue_slot_] = batch_;
+    }
+
     void note_image_layout(
         Image* image,
         VkImageLayout layout,
@@ -576,6 +607,13 @@ public:
         }
         st = {};
         st.layout = layout;
+        // A write this queue has already made available — see
+        // note_buffer_access for why it is not modelled as a read.
+        st.written = true;
+        st.write_stages = dst_stages;
+        st.write_access = dst_access;
+        st.write_batch = batch_;
+        st.write_queue = queue_;
         st.read_stages = dst_stages;
         st.read_access = dst_access;
         st.visible_stages[queue_slot_] = dst_stages;

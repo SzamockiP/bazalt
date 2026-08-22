@@ -506,6 +506,13 @@ public:
         return {graphics_q_.serial.load(), compute_q_.serial.load()};
     }
 
+    // The newest serial each queue has really been given, for a caller that
+    // has to order itself behind everything already in flight.
+    QueueSerials submitted_serials() const
+    {
+        return {graphics_q_.submitted.load(), compute_q_.submitted.load()};
+    }
+
     std::uint64_t completed_submit_serial(QueueKind kind) const;
     std::uint64_t completed_submit_serial() const
     {
@@ -536,7 +543,12 @@ public:
     // Blocks until the submit that last used the current ring slot has finished.
     // Cheap when the slot is free: a timeline wait on a value already reached
     // returns immediately, and 0 is always reached.
-    void wait_for_slot();
+    //
+    // `only` narrows it to one queue, which is what a window needs: its fence
+    // already covers the graphics half, and waiting that half again would make
+    // each window's acquire block on whatever the windows before it submitted
+    // in the SAME frame.
+    void wait_for_slot(std::optional<QueueKind> only = std::nullopt);
 
     // Blocks until everything this Context started has finished — the uploads
     // still decoding on the worker as well as every submit — then reclaims what
@@ -591,6 +603,10 @@ public:
         // Out: whether the submit that carries `wait` was accepted. A binary
         // semaphore already consumed must not be waited a second time.
         bool wait_consumed = false;
+        // Out: whether the submit that carries `fence` was accepted. A fence
+        // already handed to a running submit must not be given to a second
+        // one — that is two signals of one fence.
+        bool fence_consumed = false;
     };
 
     // Submits a graph's batches, in order, one vkQueueSubmit each.

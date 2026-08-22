@@ -171,6 +171,19 @@ std::expected<std::uint64_t, Error> deferred_submit(Context& context, F&& record
 template <typename F>
 std::expected<void, Error> immediate_submit(Context& context, F&& record)
 {
+    // A readback copies on the graphics queue, and neither submission order nor
+    // a pipeline barrier there reaches work the COMPUTE queue may still be
+    // doing to the same resource (0.29). A read blocks by contract, so waiting
+    // for what the other queue already has in flight is the cheap answer; an
+    // upload does not do this, because it must not stall behind compute work it
+    // has nothing to do with.
+    QueueSerials others = context.submitted_serials();
+    others[queue_index(QueueKind::Graphics)] = 0;
+    if (auto r = context.wait_for_serials(others); !r)
+    {
+        return std::unexpected(r.error());
+    }
+
     auto serial = deferred_submit(context, std::forward<F>(record));
     if (!serial)
     {
