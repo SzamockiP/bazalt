@@ -5,7 +5,7 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
-## [0.30.0] — 2026-08-23
+## [0.30.0] — 2026-08-24
 
 "Transfer queue". Uploads and copies can run on a third queue.
 
