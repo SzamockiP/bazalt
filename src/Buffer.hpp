@@ -196,12 +196,13 @@ public:
     // command buffer remembers which buffers a recording touches), read_bytes
     // waits on it CPU-side, and ready/wait are the explicit-control verbs.
     //
-    // 0 means "nothing pending", which is the honest answer for a DYNAMIC
-    // buffer (host-visible, written by mapping, never staged) and for a STATIC
-    // one whose copy is already complete.
-    virtual std::uint64_t upload_serial() const
+    // All zeros means "nothing pending", which is the honest answer for a
+    // DYNAMIC buffer (host-visible, written by mapping, never staged) and for
+    // a STATIC one whose copy is already complete. One value per queue since
+    // 0.30: the staging copy signals the transfer timeline.
+    virtual QueueSerials upload_serial() const
     {
-        return 0;
+        return {};
     }
     virtual bool ready() const
     {
@@ -281,21 +282,28 @@ public:
         return size_;
     }
 
-    std::uint64_t upload_serial() const override
+    QueueSerials upload_serial() const override
     {
         return upload_serial_;
     }
     bool ready() const override
     {
-        return context_->completed_submit_serial() >= upload_serial_;
+        for (std::size_t i = 0; i < kQueueCount; ++i)
+        {
+            if (context_->completed_submit_serial(static_cast<QueueKind>(i)) < upload_serial_[i])
+            {
+                return false;
+            }
+        }
+        return true;
     }
     void wait() override
     {
-        static_cast<void>(context_->wait_for_serial(upload_serial_));
+        static_cast<void>(context_->wait_for_serials(upload_serial_));
     }
-    void set_upload_serial(std::uint64_t serial)
+    void set_upload_serial(const QueueSerials& serials)
     {
-        upload_serial_ = serial;
+        upload_serial_ = serials;
     }
 
     // Blocking round trip through a readback staging buffer — device-local
@@ -337,9 +345,10 @@ private:
     VkBuffer buffer_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
     size_t size_ = 0;
-    // Which submit fills this buffer. Plain, not atomic: it is written once by
-    // create() before the shared_ptr escapes, and only read afterwards.
-    std::uint64_t upload_serial_ = 0;
+    // Which submit fills this buffer, per queue. Plain, not atomic: it is
+    // written once by create() before the shared_ptr escapes, and only read
+    // afterwards.
+    QueueSerials upload_serial_{};
 };
 
 class DynamicBuffer : public Buffer

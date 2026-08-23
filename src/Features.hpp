@@ -93,7 +93,14 @@ enum class Feature
     // queue and keeps its own timeline — so this row answers "is the overlap
     // real", and features=[ASYNC_COMPUTE] is how a caller refuses the device
     // that cannot give it. Hence the seventh column below.
-    ASYNC_COMPUTE
+    ASYNC_COMPUTE,
+    // The same fact about the transfer-only family (0.30): TRANSFER and
+    // neither GRAPHICS nor COMPUTE, which on a discrete GPU is the DMA engine
+    // that copies over PCIe beside the graphics and compute work. Uploads and
+    // Queue.TRANSFER passes run on it when it exists; without it the transfer
+    // runtime aliases the graphics queue, so the same program runs with no
+    // overlap, and this row says which you got.
+    ASYNC_TRANSFER
 };
 
 // The feature structs bazalt reads, as one value with no pNext links between the
@@ -132,6 +139,8 @@ struct DeviceFeatures
     // "separate compute queue" test, spelled here because bazalt asks it of a
     // Device too, and a Device holds no VkPhysicalDevice to ask later.
     bool separate_compute_family = false;
+    // A queue family with TRANSFER and neither GRAPHICS nor COMPUTE (0.30).
+    bool separate_transfer_family = false;
 };
 
 // One query for all three structs. Both callers used to build this chain by hand
@@ -179,6 +188,13 @@ inline DeviceFeatures query_device_features(
                 {
                     return (family.queueFlags & VK_QUEUE_COMPUTE_BIT) != 0 &&
                            (family.queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0;
+                });
+            features.separate_transfer_family = std::ranges::any_of(
+                families,
+                [](const VkQueueFamilyProperties& family)
+                {
+                    return (family.queueFlags & VK_QUEUE_TRANSFER_BIT) != 0 &&
+                           (family.queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) == 0;
                 });
         }
     }
@@ -415,6 +431,7 @@ inline constexpr auto kFeatureTable = std::to_array<FeatureInfo>({
     // The first row whose capability is a fact about the device rather than a
     // bit it may be asked to turn on.
     {.feature = Feature::ASYNC_COMPUTE, .name = "ASYNC_COMPUTE", .fact = &DeviceFeatures::separate_compute_family},
+    {.feature = Feature::ASYNC_TRANSFER, .name = "ASYNC_TRANSFER", .fact = &DeviceFeatures::separate_transfer_family},
 });
 
 inline constexpr const FeatureInfo& feature_info(Feature feature)

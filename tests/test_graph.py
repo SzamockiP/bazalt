@@ -277,19 +277,58 @@ def test_the_queue_enum_gained_compute_as_a_value(ctx):
     async compute additive: a program written against 0.28 schedules exactly as
     it did, and the new queue is one more thing to pass rather than a new way
     to say anything."""
-    assert list(bz.Queue.__members__) == ["GRAPHICS", "COMPUTE"]
+    assert list(bz.Queue.__members__) == ["GRAPHICS", "COMPUTE", "TRANSFER"]
     assert int(bz.Queue.COMPUTE) == 1
+    assert int(bz.Queue.TRANSFER) == 2
     assert ctx.graph().add_pass(queue=bz.Queue.COMPUTE) is not None
 
 
 def test_a_render_pass_refuses_the_compute_queue(ctx):
-    """A compute queue has no rasterizer, so a pass with a target cannot run
-    there. Refused where the pass is made rather than at submit, because the
-    target is what says it draws."""
+    """Only the graphics queue has a rasterizer, so a pass with a target cannot
+    run anywhere else. Refused where the pass is made rather than at submit,
+    because the target is what says it draws."""
     target = ctx.create_render_target(16, 16)
     g = ctx.graph()
     with pytest.raises(bz.StateError, match="cannot draw"):
         g.add_pass(target, queue=bz.Queue.COMPUTE)
+    with pytest.raises(bz.StateError, match="cannot draw"):
+        g.add_pass(target, queue=bz.Queue.TRANSFER)
+
+
+def test_a_transfer_queue_pass_refuses_shader_and_blit_verbs(ctx):
+    """A transfer family runs copies only, so every verb that needs a shader —
+    a dispatch, a bound pipeline, a descriptor set, a clear — is refused by
+    Queue.TRANSFER, the same way Queue.COMPUTE refuses a blit: by the enum,
+    not by the family the device happens to have. What remains is exactly the
+    copy vocabulary, and the pass submits clean."""
+    comp = ctx.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
+    pipeline = ctx.compute_pipeline().shader(comp).storage_buffer(0).build()
+    src = ctx.create_image(np.zeros((16, 16, 4), np.uint8))
+    dst = ctx.create_image(16, 16, bz.Format.RGBA8)
+    mipped = ctx.create_image(32, 32, bz.Format.RGBA8, mip_levels=4)
+    a = ctx.create_buffer(np.arange(16, dtype=np.uint32), bz.BufferUsage.STORAGE,
+                          bz.MemoryUsage.STATIC)
+    b = ctx.create_buffer(64, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    g = ctx.graph()
+    with g.add_pass(name="transfer", queue=bz.Queue.TRANSFER) as p:
+        for verb in (lambda: p.bind_pipeline(pipeline),
+                     lambda: p.dispatch(1),
+                     lambda: p.clear_image(dst),
+                     # vkCmdResetQueryPool needs graphics or compute, so a
+                     # transfer pass cannot be timed. Accepted ceiling.
+                     lambda: p.timer()):
+            with pytest.raises(bz.StateError, match="Queue.GRAPHICS or Queue.COMPUTE"):
+                verb()
+        with pytest.raises(bz.StateError, match="Queue.GRAPHICS"):
+            p.blit_image(src, dst)
+        with pytest.raises(bz.StateError, match="Queue.GRAPHICS"):
+            p.generate_mipmaps(mipped)
+        # The copy vocabulary works, and validation is the referee.
+        with p.label("copies"):
+            p.copy_buffer(a, b)
+            p.fill_buffer(b, 7, offset=0, size=4)
+            p.copy_image(src, dst)
+    ctx.submit(g)
 
 
 def test_a_compute_queue_pass_refuses_the_blit_verbs(ctx):

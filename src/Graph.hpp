@@ -38,6 +38,23 @@ public:
         Any
     };
 
+    // What a verb needs from the queue its pass runs on. Refused by QueueKind
+    // rather than by the family the queue happens to sit on, so the contract
+    // reads the same on a device whose compute or transfer runtime aliases
+    // the graphics queue. One rule, not one per driver.
+    //
+    // Graphics: a blit (and generate_mipmaps, a chain of blits) needs a
+    // graphics family and always will. Shader: a dispatch, a bound pipeline,
+    // a descriptor set or a clear (vkCmdClearColorImage) need GRAPHICS or
+    // COMPUTE — a transfer family runs copies only. Any: copies, fills,
+    // barriers, labels, timers.
+    enum class QueueNeeds
+    {
+        Any,
+        Shader,
+        Graphics
+    };
+
     bool is_render() const
     {
         return target_ != nullptr;
@@ -95,16 +112,8 @@ public:
     }
 
     // The gate every recording verb passes first: not removed, not sealed,
-    // and the right kind of pass for the verb.
-    std::expected<void, Error> guard(VerbScope scope, const char* verb) const;
-
-    // The verbs a compute queue cannot run whatever the pass kind: a blit is
-    // graphics-only work, and generate_mipmaps is a chain of blits.
-    //
-    // Refused by QueueKind rather than by the family the queue happens to sit
-    // on, so the contract reads the same on a device whose compute runtime
-    // aliases the graphics queue. One rule, not one per driver.
-    std::expected<void, Error> require_graphics_queue(const char* verb) const;
+    // the right kind of pass for the verb, and a queue that can run it.
+    std::expected<void, Error> guard(VerbScope scope, const char* verb, QueueNeeds needs = QueueNeeds::Any) const;
 
     // Marks the owning graph dirty, surviving the graph's death (a Python
     // handle may outlive it).

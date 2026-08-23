@@ -232,7 +232,7 @@ public:
     // and the recording it drives can fail on a lost device.
     std::expected<void, Error> present(
         std::shared_ptr<Graph> graph,
-        std::uint64_t upload_wait_serial = 0,
+        const QueueSerials& upload_wait = {},
         bool capture = false);
 
     // What the last present signalled, per queue. The caller hands it back to
@@ -281,15 +281,15 @@ public:
     // only once — the semaphores and the in-flight fence are per (window, slot).
     std::expected<void, Error> check_presentable() const;
 
-    // upload_wait_serial: the highest submission-timeline value this frame's
-    // resources depend on (async uploads). 0 waits for nothing — a timeline
-    // wait for 0 is trivially satisfied, so no branching is needed.
+    // upload_wait: per queue, the highest submission-timeline value this
+    // frame's resources depend on (async uploads). 0 waits for nothing — a
+    // timeline wait for 0 is trivially satisfied, so no branching is needed.
     // previous_replay: what this graph's own previous submit left running on
     // each queue, so a batch waits for the other queues' half of it.
     // Returns what this submit signalled, valid even when it failed halfway.
     QueueSerials end_frame(
         std::span<const Context::SubmitBatch> batches,
-        std::uint64_t upload_wait_serial,
+        const QueueSerials& upload_wait,
         const QueueSerials& previous_replay);
 
 private:

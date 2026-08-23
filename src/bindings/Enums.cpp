@@ -52,7 +52,8 @@ void bind_enums(py::module_& m)
         .value("WORKGROUP_SIZE", Feature::WORKGROUP_SIZE)
         // The first row that names a fact about the device's queues rather
         // than a bit it can be asked to turn on.
-        .value("ASYNC_COMPUTE", Feature::ASYNC_COMPUTE);
+        .value("ASYNC_COMPUTE", Feature::ASYNC_COMPUTE)
+        .value("ASYNC_TRANSFER", Feature::ASYNC_TRANSFER);
 
     // The gamepad layout GLFW maps every known pad onto, renamed rather than
     // translated: the values ARE the GLFW ones, so the two cannot drift.
@@ -300,7 +301,10 @@ void bind_enums(py::module_& m)
     // VALUE in 0.29, which is the whole point of that split: async compute
     // arrived as a new member rather than a new parameter, and a program
     // written for 0.28 schedules exactly as it did.
-    py::enum_<QueueKind>(m, "Queue").value("GRAPHICS", QueueKind::Graphics).value("COMPUTE", QueueKind::Compute);
+    py::enum_<QueueKind>(m, "Queue")
+        .value("GRAPHICS", QueueKind::Graphics)
+        .value("COMPUTE", QueueKind::Compute)
+        .value("TRANSFER", QueueKind::Transfer);
 
     // Pixel formats — the name VertexFormat freed in 0.4.
     py::enum_<Format>(m, "Format")

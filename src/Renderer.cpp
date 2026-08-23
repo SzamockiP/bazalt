@@ -484,11 +484,11 @@ std::expected<bool, Error> SwapchainRenderer::acquire()
     // The fence rides the last GRAPHICS batch, so it says nothing about a
     // compute batch that shared the slot. The per-queue slot serials do.
     //
-    // The COMPUTE half only: the fence above is the graphics half, and the
-    // slot's graphics serial may belong to this very frame — another window on
-    // this Context that presented first — so waiting it would serialize the
-    // windows against each other.
-    context_->wait_for_slot(QueueKind::Compute);
+    // Every half but the graphics one: the fence above is the graphics half,
+    // and the slot's graphics serial may belong to this very frame — another
+    // window on this Context that presented first — so waiting it would
+    // serialize the windows against each other.
+    context_->wait_for_slot(QueueKind::Graphics);
 
     // The fence proves this slot's previous submission finished, so its
     // timestamp pair is ready to read (frames_in_flight frames of latency).
@@ -552,7 +552,7 @@ std::expected<void, Error> SwapchainRenderer::check_presentable() const
 
 QueueSerials SwapchainRenderer::end_frame(
     std::span<const Context::SubmitBatch> batches,
-    std::uint64_t upload_wait_serial,
+    const QueueSerials& upload_wait,
     const QueueSerials& previous_replay)
 {
     // The image is consumed here; a second present() on it would submit
@@ -586,7 +586,7 @@ QueueSerials SwapchainRenderer::end_frame(
 
     QueueSerials signalled{};
     auto submitted =
-        context_->submit_batches(batches, upload_wait_serial, QueueSerials{}, previous_replay, signalled, &binaries);
+        context_->submit_batches(batches, upload_wait, QueueSerials{}, previous_replay, signalled, &binaries);
     // Recorded whatever happened: a partial failure still left work running,
     // and both the ring slot and the graph's next replay have to know about it.
     // The windowed path records its slot serials since 0.29 — before it only

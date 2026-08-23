@@ -66,6 +66,24 @@ class Image;
 // legal_stages: the stage bits the replaying queue family supports (0.29).
 // Both helpers name all_shader_stages() as one side of their transitions, and
 // on a compute-only family most of those bits are illegal in a barrier.
+// One (layer, mip) between a tightly packed buffer and an image, with the
+// transitions on both sides — the engine behind cmd.copy_buffer_to_image and
+// its mirror, shaped like record_image_copy below: self-contained, narrowed to
+// the replaying family, both directions leave the subresource in
+// SHADER_READ_ONLY. to_image discards the old level (UNDEFINED — the copy
+// overwrites all of it); from_image starts from src_layout.
+void record_buffer_image_copy(
+    const VolkDeviceTable& vk,
+    VkCommandBuffer cmd,
+    Image& image,
+    VkBuffer buffer,
+    VkDeviceSize buffer_offset,
+    std::uint32_t layer,
+    std::uint32_t mip,
+    bool to_image,
+    VkImageLayout src_layout,
+    VkPipelineStageFlags legal_stages);
+
 void record_image_copy(
     const VolkDeviceTable& vk,
     VkCommandBuffer cmd,
@@ -403,18 +421,26 @@ public:
     std::expected<void, Error> wait();
 
     // Called at submit time for every image a command buffer references.
-    // Returns the timeline serial the frame's GPU work must wait for (0 when
-    // nothing is pending — RTT attachments and synchronously uploaded images
-    // short-circuit here). CPU-blocks only while the worker is still decoding.
-    std::expected<std::uint64_t, Error> require_resident();
+    // Returns the timeline serials the frame's GPU work must wait for, one per
+    // queue (all zero when nothing is pending — RTT attachments and
+    // synchronously uploaded images short-circuit here). CPU-blocks only while
+    // the worker is still decoding.
+    std::expected<QueueSerials, Error> require_resident();
 
-    // The last upload submitted for this image, or 0. Read by the upload worker
-    // so a queued job can be ordered behind an upload some OTHER thread made:
-    // create_image(array) submits inline on the calling thread, so the worker's
-    // own chain does not know about it.
-    std::uint64_t upload_serial() const
+    // The last upload submitted for this image, per queue, or zeros. Read by
+    // the upload worker so a queued job can be ordered behind an upload some
+    // OTHER thread made: create_image(array) submits inline on the calling
+    // thread, so the worker's own chain does not know about it. Two values
+    // can be set at once since 0.30: the copy signals the transfer timeline
+    // and the mip cascade the graphics one.
+    QueueSerials upload_serial() const
     {
-        return upload_serial_.load();
+        QueueSerials out{};
+        for (std::size_t i = 0; i < kQueueCount; ++i)
+        {
+            out[i] = upload_serial_[i].load();
+        }
+        return out;
     }
 
     // Upload state transitions. Pending/Failed are worker-side; Submitted is
@@ -435,8 +461,14 @@ public:
     // and be wrong for a partial update — claiming every layer sampleable when
     // one was written. Whoever queues the job records the layout instead, on the
     // main thread, where the rest of that state already lives.
-    void set_upload_submitted(std::uint64_t serial);
+    // Max-merged rather than assigned: the two halves of a mipped upload name
+    // two timelines, and create_image(array) followed by update() may too.
+    void set_upload_submitted(const QueueSerials& serials);
     void set_upload_failed(std::string message);
+    // A queued job that produced no submit and changed nothing — a hot reload
+    // the worker refused (wrong size, bad file). Balances set_upload_pending
+    // and restores Submitted, because the previous contents still render.
+    void abandon_upload();
 
     // ── Creation ──────────────────────────────────────────────────────────────
 
@@ -562,12 +594,19 @@ public:
         std::uint32_t layer = 0,
         std::uint32_t mip = 0);
 
-    // Records the whole first upload: transition all mips to TRANSFER_DST from
-    // UNDEFINED (there are no contents to preserve), copy the staging buffer into
-    // mip 0, then either blit the chain or transition to SHADER_READ_ONLY. The
-    // main thread replays this through deferred_submit; the upload worker records
-    // it into a command buffer from its own pool.
-    void record_upload_commands(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips);
+    // Records the copy half of the first upload: transition all mips to
+    // TRANSFER_DST from UNDEFINED (there are no contents to preserve), copy the
+    // staging buffer into mip 0, then transition to SHADER_READ_ONLY — or,
+    // when mips > 1, leave every level in TRANSFER_DST for record_upload_mips
+    // on the graphics queue. The main thread replays this through
+    // deferred_submit; the upload worker records it into a command buffer from
+    // its own pool.
+    //
+    // `legal` is the replaying family's stage mask (0.30): the copy runs on
+    // the transfer runtime, and on a transfer-only family a barrier may not
+    // name a shader stage, so the retire narrows to BOTTOM_OF_PIPE and the
+    // consumer's timeline wait is what makes the write visible.
+    void record_upload_commands(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips, VkPipelineStageFlags legal);
 
     // Hot reload: the image already holds contents that in-flight frames may
     // still be sampling. Transition from SHADER_READ_ONLY with a fragment-shader
@@ -575,7 +614,16 @@ public:
     // dependency against every frame already submitted on this queue, no CPU
     // sync needed. UNDEFINED (as in the first upload) would instead let the
     // driver discard the live contents mid-frame, which sync validation flags.
-    void record_reload_commands(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips);
+    // On a transfer-only family that source scope narrows to nothing, and the
+    // worker waits the graphics timeline for those frames instead (0.30).
+    void record_reload_commands(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips, VkPipelineStageFlags legal);
+
+    // The blit half of a mipped upload (0.30): every level is in TRANSFER_DST
+    // after record_upload_commands, and this generates levels 1..N from level
+    // 0 and retires the chain to SHADER_READ_ONLY. Graphics only — a blit
+    // needs a graphics family and always will — so the worker submits it on
+    // the graphics runtime, waiting the copy's transfer serial.
+    void record_upload_mips(VkCommandBuffer cmd, std::uint32_t mips);
 
     // A partial upload into an existing image: `extent` pixels at `offset` of
     // one (layer, mip), from a staging buffer holding exactly that rectangle.
@@ -600,7 +648,8 @@ public:
         std::uint32_t mip,
         VkOffset3D offset,
         VkExtent3D extent,
-        VkImageLayout from);
+        VkImageLayout from,
+        VkPipelineStageFlags legal);
 
     // Standalone mip generation for cmd.generate_mipmaps(): mip 0 already holds
     // its final contents (in `src_layout` — GENERAL from a compute write, or
@@ -652,10 +701,11 @@ private:
     // load_image one, with no second state machine and no second failure mode.
     std::expected<void, Error> upload_pixels(Context& context, const void* pixels, std::uint32_t mips);
 
-    // Copy staging into mip 0, then either blit the mip chain or transition mip 0
-    // to SHADER_READ_ONLY. Shared by the first upload and hot reload — the image
-    // must already be in TRANSFER_DST across all mips when this runs.
-    void record_copy_and_finalize_(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips);
+    // Copy staging into mip 0, then transition mip 0 to SHADER_READ_ONLY when
+    // there is no chain to generate. Shared by the first upload and hot reload
+    // — the image must already be in TRANSFER_DST across all mips when this
+    // runs, and it stays there when mips > 1.
+    void record_copy_(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips, VkPipelineStageFlags legal);
 
     // The classic blit cascade: level i-1 (TRANSFER_DST after the copy above)
     // becomes TRANSFER_SRC, blits into level i, and retires to
@@ -702,7 +752,7 @@ private:
     // thread. The cv/mutex pair backs the CPU-side waits; the timeline serial
     // backs the GPU-side ones.
     std::atomic<UploadState> upload_state_{UploadState::None};
-    std::atomic<std::uint64_t> upload_serial_{0};
+    std::array<std::atomic<std::uint64_t>, kQueueCount> upload_serial_{};
     // How many queued uploads have not been submitted yet. Guarded by
     // upload_mutex_, which is also what the condition variable waits on.
     std::uint32_t pending_uploads_ = 0;

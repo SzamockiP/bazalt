@@ -27,7 +27,7 @@ void Pass::mark_graph_dirty()
     }
 }
 
-std::expected<void, Error> Pass::guard(VerbScope scope, const char* verb) const
+std::expected<void, Error> Pass::guard(VerbScope scope, const char* verb, QueueNeeds needs) const
 {
     if (removed_)
     {
@@ -58,18 +58,22 @@ std::expected<void, Error> Pass::guard(VerbScope scope, const char* verb) const
                 "inside one. Record it in a pass without a target: graph.add_pass()",
                 verb)));
     }
-    return {};
-}
-
-std::expected<void, Error> Pass::require_graphics_queue(const char* verb) const
-{
-    if (queue_ == QueueKind::Compute)
+    if (needs == QueueNeeds::Graphics && queue_ != QueueKind::Graphics)
     {
         return std::unexpected(err_state(
             std::format(
-                "{}: a pass on Queue.COMPUTE cannot blit — vkCmdBlitImage needs a graphics "
+                "{}: a pass on Queue.{} cannot blit — vkCmdBlitImage needs a graphics "
                 "queue. Put this pass on Queue.GRAPHICS, or use copy_image for a copy that "
                 "does not resize.",
+                verb,
+                queue_name(queue_))));
+    }
+    if (needs == QueueNeeds::Shader && queue_ == QueueKind::Transfer)
+    {
+        return std::unexpected(err_state(
+            std::format(
+                "{}: a pass on Queue.TRANSFER cannot run shaders — a transfer family runs "
+                "copies only. Put this pass on Queue.GRAPHICS or Queue.COMPUTE.",
                 verb)));
     }
     return {};

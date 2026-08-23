@@ -984,7 +984,7 @@ inline std::expected<std::vector<Context::SubmitBatch>, Error> record_frame(
 
 inline std::expected<void, Error> SwapchainRenderer::present(
     std::shared_ptr<Graph> graph,
-    std::uint64_t upload_wait_serial,
+    const QueueSerials& upload_wait,
     bool capture)
 {
     TimestampRange ts{};
@@ -1012,7 +1012,7 @@ inline std::expected<void, Error> SwapchainRenderer::present(
             "can draw into a window. Add the pass that renders into the window, or run the "
             "graph with ctx.submit()."));
     }
-    const QueueSerials signalled = end_frame(*batches, upload_wait_serial, graph->replay_wait());
+    const QueueSerials signalled = end_frame(*batches, upload_wait, graph->replay_wait());
     graph->note_replay_serials(signalled);
     if (timestamps_supported())
     {
@@ -1033,9 +1033,12 @@ inline std::expected<void, Error> SwapchainRenderer::present(
 // own staging copy. A buffer has no decode, so it needs no CPU-side half: the
 // serial is known the moment create_buffer returns, and one timeline wait
 // covers both kinds of upload.
-inline std::expected<std::uint64_t, Error> require_uploads_resident(Graph& graph)
+//
+// One value per queue since 0.30: a copy signals the transfer timeline and a
+// mip cascade the graphics one, so a mipped upload names two.
+inline std::expected<QueueSerials, Error> require_uploads_resident(Graph& graph)
 {
-    std::uint64_t wait_serial = 0;
+    QueueSerials wait_serial{};
     for (const auto& pass : graph.passes())
     {
         if (!pass->enabled())
@@ -1052,18 +1055,18 @@ inline std::expected<std::uint64_t, Error> require_uploads_resident(Graph& graph
                 {
                     return std::unexpected(serial.error());
                 }
-                wait_serial = (std::max)(wait_serial, *serial);
+                max_merge(wait_serial, *serial);
             }
             for (const auto& bb : set->buffers())
             {
-                wait_serial = (std::max)(wait_serial, bb.buffer->upload_serial());
+                max_merge(wait_serial, bb.buffer->upload_serial());
             }
         }
         // Vertex, index and transfer uses: bound directly rather than through
         // a set.
         for (const auto& buffer : cmd.used_buffers())
         {
-            wait_serial = (std::max)(wait_serial, buffer->upload_serial());
+            max_merge(wait_serial, buffer->upload_serial());
         }
     }
     return wait_serial;

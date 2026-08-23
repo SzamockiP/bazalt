@@ -136,10 +136,12 @@ std::expected<std::shared_ptr<StaticBuffer>, Error> StaticBuffer::create(
     }
 
     auto result = std::make_shared<StaticBuffer>(context.shared_from_this(), buffer, allocation, data_size);
-    result->set_upload_serial(*serial);
     if (*serial != 0)
     {
-        context.note_upload_serial(*serial);
+        QueueSerials serials{};
+        serials[queue_index(QueueKind::Transfer)] = *serial;
+        result->set_upload_serial(serials);
+        context.note_upload_serial(serials);
     }
     return result;
 }
@@ -175,13 +177,16 @@ std::expected<std::uint64_t, Error> StaticBuffer::fill_from_host(
         // cost of the old blocking path — and 30 meshes meant 30 full queue
         // drains at startup. The copy is submitted here, so every failure is
         // still raised at the create_buffer call; only the wait is gone.
+        // On the transfer runtime since 0.30: a staging copy is DMA, and on a
+        // discrete GPU the transfer-only family runs it beside the frame.
         auto piece = deferred_submit(
             context,
             [&](VkCommandBuffer cmd)
             {
                 VkBufferCopy region{.srcOffset = 0, .dstOffset = offset, .size = span};
                 context.vk().vkCmdCopyBuffer(cmd, staging, buffer, 1, &region);
-            });
+            },
+            QueueKind::Transfer);
         if (!piece)
         {
             vmaDestroyBuffer(context.allocator(), staging, staging_allocation);
@@ -196,7 +201,7 @@ std::expected<std::uint64_t, Error> StaticBuffer::fill_from_host(
             context.defer_destroy([allocator = context.allocator(), staging, staging_allocation]
                                   { vmaDestroyBuffer(allocator, staging, staging_allocation); });
         }
-        else if (auto r = context.wait_for_serial(serial); !r)
+        else if (auto r = context.wait_for_serial(QueueKind::Transfer, serial); !r)
         {
             vmaDestroyBuffer(context.allocator(), staging, staging_allocation);
             return std::unexpected(r.error());

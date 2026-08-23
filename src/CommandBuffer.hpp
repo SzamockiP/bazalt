@@ -305,6 +305,38 @@ public:
         VkDeviceSize offset = 0,
         VkDeviceSize size = 0);
 
+    // Writes up to 65536 bytes into a buffer from the command stream itself
+    // (vkCmdUpdateBuffer) — no staging buffer, no second submit, so a small
+    // patch (a counter, a few uniforms) lands inside the frame that needs it.
+    // Legal on every queue, including Queue.TRANSFER. Size and offset must be
+    // multiples of 4; anything larger is copy_buffer's job.
+    std::expected<void, Error> update_buffer(
+        std::shared_ptr<Buffer> buffer,
+        std::vector<std::byte> data,
+        VkDeviceSize offset = 0);
+
+    // Copies one (layer, mip) of an image out of a buffer, tightly packed —
+    // the whole level, so the old contents are discarded rather than waited
+    // for. The buffer bytes start at buffer_offset. Legal on every queue,
+    // including Queue.TRANSFER; the subresource ends in SHADER_READ_ONLY.
+    std::expected<void, Error> copy_buffer_to_image(
+        std::shared_ptr<Buffer> buffer,
+        const std::shared_ptr<Image>& image,
+        std::uint32_t layer = 0,
+        std::uint32_t mip = 0,
+        VkDeviceSize buffer_offset = 0);
+
+    // The mirror: one (layer, mip) into a buffer at buffer_offset, tightly
+    // packed. src_access names the image's resting state exactly as
+    // copy_image's does; the subresource ends in SHADER_READ_ONLY.
+    std::expected<void, Error> copy_image_to_buffer(
+        const std::shared_ptr<Image>& image,
+        std::shared_ptr<Buffer> buffer,
+        std::uint32_t layer = 0,
+        std::uint32_t mip = 0,
+        VkDeviceSize buffer_offset = 0,
+        Access src_access = Access::SHADER_READ);
+
     // Fill an image with one colour, with no pipeline and no pass. Resetting an
     // accumulation or history buffer, or clearing a storage image a compute
     // shader only writes part of. A depth image is refused: clearing depth is

@@ -94,15 +94,24 @@ inline std::expected<std::pair<VkBuffer, VmaAllocation>, Error> create_staging_b
 // The command buffer retires through the deletion queue, which is keyed on
 // exactly this serial. Whatever else the recording borrowed (a staging
 // buffer) is the caller's to defer the same way.
+//
+// `kind` picks the queue (0.30): an upload copies on the transfer runtime, a
+// mip cascade blits on graphics, and a readback stays on graphics. The command
+// buffer comes from that queue's pool, and `after` is handed to the submit.
 template <typename F>
-std::expected<std::uint64_t, Error> deferred_submit(Context& context, F&& record)
+std::expected<std::uint64_t, Error> deferred_submit(
+    Context& context,
+    F&& record,
+    QueueKind kind = QueueKind::Graphics,
+    const QueueSerials& after = {})
 {
     const VolkDeviceTable& vk = context.vk();
+    const VkCommandPool pool = context.command_pool(kind);
 
     VkCommandBufferAllocateInfo allocInfo{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .pNext = nullptr,
-        .commandPool = context.command_pool(),
+        .commandPool = pool,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = 1};
 
@@ -119,7 +128,7 @@ std::expected<std::uint64_t, Error> deferred_submit(Context& context, F&& record
     // here frees it inline rather than through the deletion queue.
     const auto fail = [&](Error error) -> std::expected<std::uint64_t, Error>
     {
-        vk.vkFreeCommandBuffers(context.device(), context.command_pool(), 1, &cmd);
+        vk.vkFreeCommandBuffers(context.device(), pool, 1, &cmd);
         return std::unexpected(std::move(error));
     };
 
@@ -142,7 +151,7 @@ std::expected<std::uint64_t, Error> deferred_submit(Context& context, F&& record
 
     // One-shot submits count on the submission timeline too, so the deletion
     // queue keeps draining even on frame-less workloads.
-    auto submitted = context.submit_one_shot(cmd);
+    auto submitted = context.submit_one_shot(cmd, kind, after);
     if (!submitted)
     {
         return fail(std::move(submitted.error()));
@@ -155,7 +164,7 @@ std::expected<std::uint64_t, Error> deferred_submit(Context& context, F&& record
     // Raw handles plus a pointer to the dispatch table, never a
     // shared_ptr<Context> — the table lives in the Context, which outlives
     // every drain of its own deletion queue.
-    context.defer_destroy([device = context.device(), pool = context.command_pool(), table = &vk, cmd]
+    context.defer_destroy([device = context.device(), pool, table = &vk, cmd]
                           { table->vkFreeCommandBuffers(device, pool, 1, &cmd); });
     return serial;
 }

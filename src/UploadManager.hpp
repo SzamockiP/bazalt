@@ -23,12 +23,15 @@
 
 // The async transport behind ctx.load_image().
 //
-// One worker thread decodes files, fills staging buffers and submits copy +
-// mipgen work to the *graphics* queue (variant A: no dedicated transfer queue,
-// no ownership-transfer barriers — the Python API would be identical either
-// way, and this removes 100% of the actual pain, the vkQueueWaitIdle per
-// upload). Every submit signals the Context's submission timeline, which is
-// how frames wait for their textures GPU-side with zero CPU stalls.
+// One worker thread decodes files, fills staging buffers and submits the copy
+// on the TRANSFER runtime (0.30) — a dedicated DMA family on a discrete GPU,
+// the graphics queue under another name everywhere else. A mipped upload is
+// two submits: the copy on transfer, then the blit cascade on GRAPHICS
+// waiting the copy's serial, because vkCmdBlitImage needs a graphics family
+// and always will. No ownership-transfer barriers: every resource is
+// CONCURRENT across the families (0.29). Every submit signals its queue's
+// timeline, which is how frames wait for their textures GPU-side with zero
+// CPU stalls.
 //
 // The worker NEVER touches the GIL — the deadlock class this rules out is why
 // the invariant is stated here. One thread on purpose: stbi_failure_reason()
@@ -102,7 +105,7 @@ public:
     // create_buffer / create_image(array) submitted on the calling thread. It is
     // started and submitted in the same breath, so both counters move together
     // and the CPU-side predicate in wait_all() stays balanced.
-    void note_direct_upload(std::uint64_t serial);
+    void note_direct_upload(const QueueSerials& serials);
 
     // Progress of the current batch, 0.0 .. 1.0 (1.0 when idle). The batch
     // resets once fully done, so a second loading screen starts from 0 again.
@@ -165,11 +168,11 @@ private:
     // balanced, or upload_progress would never reach 1.0 again.
     void fail_update_(Job& job, std::string_view reason);
 
-    // One-shot command buffer from the worker's own pool.
+    // One-shot command buffer from the worker's own pool on `kind`'s family.
     // Returns the VkResult rather than a bool, because the caller puts it in the
     // message. "failed to allocate an upload command buffer" told a Python user
     // nothing they could act on and threw away the one fact worth reporting.
-    VkResult allocate_cmd_(VkCommandBuffer& cmd);
+    VkResult allocate_cmd_(QueueKind kind, VkCommandBuffer& cmd);
 
     // The worker's half of a one-shot submit, and the only place this thread
     // submits from. Context::submit_one_shot does the Vulkan part; the worker
@@ -194,15 +197,26 @@ private:
     // image races the copy that created it, and losing that race leaves the
     // image holding what it was created with — the first test in
     // test_streaming.py, passing on every driver that happens to serialize.
-    bool submit_(VkCommandBuffer cmd, std::uint64_t& serial, std::uint64_t after = 0);
+    // One chain per queue since 0.30: `kind` says which, and the previous
+    // upload on that queue is merged into `after`.
+    bool submit_(QueueKind kind, VkCommandBuffer cmd, std::uint64_t& serial, QueueSerials after);
 
     // The tail every job shares once its staging buffer is filled: one-shot
-    // command buffer, record, submit ordered behind the image's own chain,
-    // retire the staging buffer, point the image at the new serial. The callers
-    // differ only in what they record and how they report a failure — `record`
-    // fills the command buffer, `on_alloc_fail(reason)` reports an allocation
-    // failure, `on_submit_fail()` reports a refused submit (its message and its
-    // reload handling are the caller's).
+    // command buffer from the transfer pool, record, submit ordered behind the
+    // image's own chain, retire the staging buffer, then — when the job has a
+    // mip chain — a second command buffer from the graphics pool that blits
+    // the chain, waiting the copy. The image is pointed at both serials. The
+    // callers differ only in what they record and how they report a failure —
+    // `record` fills the transfer command buffer, `on_alloc_fail(reason)`
+    // reports an allocation failure, `on_submit_fail()` reports a refused
+    // submit (its message and its reload handling are the caller's).
+    //
+    // A job that overwrites live contents (a reload or an update) also waits
+    // the graphics queue's newest submitted serial: frames on that queue may
+    // still be sampling the image, and the barrier that used to order the
+    // copy behind them (a fragment-shader source scope) cannot be named on a
+    // transfer-only family. A first upload waits nothing but its own chain —
+    // nothing can be reading an image that has no contents yet.
     //
     // The staging buffer retires through the shared deletion queue (VMA is
     // internally synchronized, so the main thread may free it). The command
@@ -237,22 +251,31 @@ private:
     void warn_reload_(Job& job, std::string_view reason);
 
     Context& context_;
-    VkCommandPool pool_ = VK_NULL_HANDLE;
+    // One pool per queue the worker submits to: transfer for every copy,
+    // graphics for the mip cascades. Indexed by queue_index().
+    std::array<VkCommandPool, kQueueCount> pools_{};
 
-    // Worker-thread-only: submitted one-shot cmds awaiting GPU completion.
-    std::vector<std::pair<std::uint64_t, VkCommandBuffer>> retired_;
+    // Worker-thread-only: submitted one-shot cmds awaiting GPU completion,
+    // each with the queue whose serial retires it.
+    struct Retired
+    {
+        QueueKind queue;
+        std::uint64_t serial;
+        VkCommandBuffer cmd;
+    };
+    std::vector<Retired> retired_;
 
     std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<Job> jobs_;
     std::uint64_t batch_started_ = 0;
     std::uint64_t failed_count_ = 0;
-    std::vector<std::uint64_t> submitted_serials_;
+    std::vector<QueueSerials> submitted_serials_;
 
-    // The serial of the last upload this worker submitted, so the next one can be
-    // ordered behind it. Touched only by the worker thread, which is the same
-    // thread that owns retired_ and pool_.
-    std::uint64_t last_upload_serial_ = 0;
+    // The serials of the last uploads this worker submitted, per queue, so the
+    // next one can be ordered behind them. Touched only by the worker thread,
+    // which is the same thread that owns retired_ and pools_.
+    QueueSerials last_upload_serial_{};
 
     std::jthread worker_; // last member: joins before the rest tears down
 };

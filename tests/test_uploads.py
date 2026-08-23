@@ -221,3 +221,37 @@ def fullscreen_and_textured(ctx):
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
     return vert, frag
+
+
+def test_a_mipped_upload_is_sampled_after_the_split(ctx, tmp_path):
+    """A mipped upload is TWO submits since 0.30 — the copy on the transfer
+    queue, the blit cascade on graphics waiting for it — and the image carries
+    a serial on each timeline. Reading a generated level proves the cascade
+    ran and the split stayed ordered; the validation fixture is the referee
+    for the layouts."""
+    png_path = tmp_path / "mipped.png"
+    write_png(png_path, [[(64, 128, 192, 255)] * 64] * 64)
+    img = ctx.load_image(str(png_path), mipmaps=True)
+    assert img.mip_levels >= 3
+    img.wait()
+    assert img.ready
+    top = img.read(mip=0)
+    low = img.read(mip=2)
+    # A constant image box-filters to itself, so every level holds the colour.
+    assert tuple(top[0, 0]) == (64, 128, 192, 255)
+    assert tuple(low[0, 0]) == (64, 128, 192, 255)
+
+
+def test_uploads_ride_the_transfer_timeline(ctx):
+    """create_buffer's staging copy submits on the transfer runtime since
+    0.30, so a graph that binds the buffer waits that timeline through
+    require_uploads_resident. Validation-clean is the whole assertion; a
+    missing wait is a hazard the fixture reports."""
+    buf = ctx.create_buffer(np.arange(4096, dtype=np.float32),
+                            bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    out = ctx.create_buffer(4096 * 4, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    g = ctx.graph()
+    g.add_pass(name="copy").copy_buffer(buf, out)
+    ctx.submit(g)
+    assert out.read(np.float32)[-1] == 4095.0
+    assert buf.ready

@@ -220,6 +220,14 @@ class Feature(IntEnum):
     #: `Context(features=[Feature.ASYNC_COMPUTE])` refuses a device that has
     #: none.
     ASYNC_COMPUTE = 25
+    #: A queue family that does transfer and neither graphics nor compute
+    #: (0.30) — the DMA engine of a discrete GPU. True means uploads and
+    #: `Queue.TRANSFER` passes copy beside the graphics and compute work.
+    #: False means the transfer queue is the graphics queue under its own
+    #: timeline: the same program, without the overlap.
+    #: `Context(features=[Feature.ASYNC_TRANSFER])` refuses a device that has
+    #: none.
+    ASYNC_TRANSFER = 26
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -1380,17 +1388,24 @@ class Queue(IntEnum):
 
     GRAPHICS is the default and runs everything. COMPUTE (0.29) runs a pass
     without a render target on the device's compute queue, beside the graphics
-    work. A pass on COMPUTE cannot draw, blit or generate mipmaps, and each
-    refusal names the fix.
+    work. TRANSFER (0.30) runs a pass of copies on the device's transfer
+    queue — the DMA engine of a discrete GPU — which is also where bazalt's
+    own uploads go. A pass on COMPUTE cannot draw, blit or generate mipmaps;
+    a pass on TRANSFER additionally cannot dispatch, bind a pipeline or clear
+    an image. Each refusal names the fix. What a TRANSFER pass runs:
+    copy_buffer, copy_image, fill_buffer, update_buffer, copy_buffer_to_image,
+    copy_image_to_buffer, barrier and label. A timer is refused too: the
+    query-pool reset it records needs a shader queue.
 
     What the graph waits for by itself: inside one graph the passes order
-    themselves across both queues, and a graph you submit again waits for its
+    themselves across every queue, and a graph you submit again waits for its
     own previous submit. What it does not: two DIFFERENT graphs on different
     queues have no order between them. Use submit(after=...) there.
 
     Without Feature.ASYNC_COMPUTE the device has no compute-only queue family,
     so a COMPUTE pass runs on the graphics queue under its own timeline. The
     program and the ordering are the same; only the overlap is missing.
+    Feature.ASYNC_TRANSFER answers the same question for TRANSFER.
 
     The choice is always yours: a compute pass on GRAPHICS stays legal, and
     bazalt never moves a pass between queues on its own.
@@ -1398,6 +1413,7 @@ class Queue(IntEnum):
 
     GRAPHICS = 0
     COMPUTE = 1
+    TRANSFER = 2
 
 class Serial:
     """The identity of one submit, returned by Context.submit().
@@ -1407,8 +1423,8 @@ class Serial:
     is opaque on purpose: it has no attributes and no ordering.
 
     One Serial covers every queue the submit used, so wait() and after= reach
-    both. It belongs to the Context that returned it; another Context refuses
-    it with ResourceError.
+    all of them. It belongs to the Context that returned it; another Context
+    refuses it with ResourceError.
     """
 
 class Pass:
@@ -1619,12 +1635,57 @@ class Pass:
         """
         ...
 
+    def update_buffer(self, buffer: Buffer, data: Any, *, offset: int = 0) -> Pass:
+        """Write up to 65536 bytes into a buffer from the command stream itself.
+
+        No staging buffer and no second submit, so a small patch — a counter,
+        a few uniforms — lands inside the frame that needs it. `data` is bytes
+        or any C-contiguous array. Legal on every queue, including
+        Queue.TRANSFER.
+
+        The size and offset must be multiples of 4, and 65536 bytes is the
+        command's own limit. Anything larger is copy_buffer from a staging
+        buffer, or buffer.update(). Only in a pass without a target.
+        """
+        ...
+
+    def copy_buffer_to_image(self, buffer: Buffer, image: Image, *,
+                             layer: int = 0, mip: int = 0,
+                             buffer_offset: int = 0) -> Pass:
+        """Copy one (layer, mip) of an image out of a buffer, tightly packed.
+
+        The whole level is written, so the old contents are discarded rather
+        than waited for, and the level ends in its sampleable layout. The
+        bytes start at buffer_offset. Legal on every queue, including
+        Queue.TRANSFER — this is how a texture atlas streams beside the frame.
+
+        A missing subresource or a buffer too short for the level is refused
+        with the counts. Only in a pass without a target.
+        """
+        ...
+
+    def copy_image_to_buffer(self, image: Image, buffer: Buffer, *,
+                             layer: int = 0, mip: int = 0,
+                             buffer_offset: int = 0,
+                             src_access: Access = Access.SHADER_READ) -> Pass:
+        """The mirror: one (layer, mip) into a buffer, tightly packed.
+
+        A readback that rides the graph instead of blocking the CPU the way
+        image.read() does. src_access names where the image rests, exactly as
+        copy_image's does; the level ends in its sampleable layout. Legal on
+        every queue, including Queue.TRANSFER. Only in a pass without a
+        target.
+        """
+        ...
+
     def clear_image(self, image: Image,
                     color: Sequence[float] = (0.0, 0.0, 0.0, 1.0)) -> Pass:
         """Fill a colour image with one value, with no pipeline and no pass.
 
         Resets an accumulation or history buffer. A depth image is refused: its
-        clear belongs to the pass that renders into it (clear_depth=).
+        clear belongs to the pass that renders into it (clear_depth=). Needs a
+        queue that runs shaders (GRAPHICS or COMPUTE), because the command
+        does.
         """
         ...
 

@@ -1,6 +1,7 @@
 #pragma once
 #include <volk.h>
 #include <array>
+#include <algorithm>
 #include <cstddef>
 #include <optional>
 #include <unordered_map>
@@ -386,7 +387,8 @@ public:
         // Whether anything anywhere in this fold has touched the image yet:
         // what tells a genuine first use (the floor applies) from one whose
         // predecessor simply ran on the other queue (the semaphore applies).
-        const bool touched = st.written || st.read_batch[0] != kNoBatch || st.read_batch[1] != kNoBatch;
+        const bool touched = st.written ||
+                             std::ranges::any_of(st.read_batch, [](std::size_t b) { return b != kNoBatch; });
 
         if (writes)
         {
@@ -647,7 +649,7 @@ private:
         // The latest batch that read it since the last write, per queue. Only
         // the latest is needed: a timeline signal covers everything submitted
         // earlier on its queue, and a wait is ">=".
-        std::array<std::size_t, kQueueCount> read_batch{kNoBatch, kNoBatch};
+        std::array<std::size_t, kQueueCount> read_batch = per_queue(kNoBatch);
         // Reads since the last write (what a future write must wait for).
         VkPipelineStageFlags read_stages = 0;
         VkAccessFlags read_access = 0;
@@ -664,7 +666,7 @@ private:
         QueueKind write_queue = QueueKind::Graphics;
         std::array<VkPipelineStageFlags, kQueueCount> visible_stages{};
         std::array<VkAccessFlags, kQueueCount> visible_access{};
-        std::array<std::size_t, kQueueCount> read_batch{kNoBatch, kNoBatch};
+        std::array<std::size_t, kQueueCount> read_batch = per_queue(kNoBatch);
         VkPipelineStageFlags read_stages = 0;
         VkAccessFlags read_access = 0;
     };

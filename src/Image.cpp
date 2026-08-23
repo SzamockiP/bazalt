@@ -128,7 +128,14 @@ bool Image::ready() const
         case UploadState::Failed:
             return false;
         case UploadState::Submitted:
-            return context_->completed_submit_serial() >= upload_serial_.load();
+            for (std::size_t i = 0; i < kQueueCount; ++i)
+            {
+                if (context_->completed_submit_serial(static_cast<QueueKind>(i)) < upload_serial_[i].load())
+                {
+                    return false;
+                }
+            }
+            return true;
     }
     return false;
 }
@@ -141,22 +148,22 @@ std::expected<void, Error> Image::wait()
     }
     if (upload_state_.load() == UploadState::Submitted)
     {
-        return context_->wait_for_serial(upload_serial_.load());
+        return context_->wait_for_serials(upload_serial());
     }
     return {};
 }
 
-std::expected<std::uint64_t, Error> Image::require_resident()
+std::expected<QueueSerials, Error> Image::require_resident()
 {
     if (upload_state_.load() == UploadState::None)
     {
-        return 0;
+        return QueueSerials{};
     }
     if (auto r = wait_submitted_(); !r)
     {
         return std::unexpected(r.error());
     }
-    return upload_serial_.load();
+    return upload_serial();
 }
 
 void Image::set_upload_pending()
@@ -169,11 +176,17 @@ void Image::set_upload_pending()
     upload_cv_.notify_all();
 }
 
-void Image::set_upload_submitted(std::uint64_t serial)
+void Image::set_upload_submitted(const QueueSerials& serials)
 {
     {
         std::lock_guard lock(upload_mutex_);
-        upload_serial_.store(serial);
+        for (std::size_t i = 0; i < kQueueCount; ++i)
+        {
+            if (serials[i] > upload_serial_[i].load())
+            {
+                upload_serial_[i].store(serials[i]);
+            }
+        }
         has_contents_.store(true);
         // Zero already, and legitimately so, for create_image(array): that
         // path submits inline on the calling thread and never queues a job,
@@ -186,6 +199,22 @@ void Image::set_upload_submitted(std::uint64_t serial)
         // above is the newest submitted, so a waiter that gets through waits
         // for the last job rather than for whichever finished first.
         if (pending_uploads_ == 0 && upload_state_.load() != UploadState::Failed)
+        {
+            upload_state_.store(UploadState::Submitted);
+        }
+    }
+    upload_cv_.notify_all();
+}
+
+void Image::abandon_upload()
+{
+    {
+        std::lock_guard lock(upload_mutex_);
+        if (pending_uploads_ > 0)
+        {
+            --pending_uploads_;
+        }
+        if (pending_uploads_ == 0 && upload_state_.load() == UploadState::Pending)
         {
             upload_state_.store(UploadState::Submitted);
         }
@@ -658,7 +687,11 @@ std::expected<std::vector<std::byte>, Error> Image::read(bool all_layers, std::u
 
 // ── Recorded uploads and mip generation ───────────────────────────────────────
 
-void Image::record_upload_commands(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips)
+void Image::record_upload_commands(
+    VkCommandBuffer cmd,
+    VkBuffer staging,
+    std::uint32_t mips,
+    VkPipelineStageFlags legal)
 {
     record_image_transition(
         context_->vk(),
@@ -675,27 +708,37 @@ void Image::record_upload_commands(VkCommandBuffer cmd, VkBuffer staging, std::u
         mips,
         barrier_layers(array_layers_));
 
-    record_copy_and_finalize_(cmd, staging, mips);
+    record_copy_(cmd, staging, mips, legal);
 }
 
-void Image::record_reload_commands(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips)
+void Image::record_reload_commands(
+    VkCommandBuffer cmd,
+    VkBuffer staging,
+    std::uint32_t mips,
+    VkPipelineStageFlags legal)
 {
+    const StageAccess src = narrow_src({VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT}, legal);
     record_image_transition(
         context_->vk(),
         cmd,
         image_,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_ACCESS_SHADER_READ_BIT,
+        src.access,
         VK_ACCESS_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        src.stages,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT,
         0,
         mips,
         barrier_layers(array_layers_));
 
-    record_copy_and_finalize_(cmd, staging, mips);
+    record_copy_(cmd, staging, mips, legal);
+}
+
+void Image::record_upload_mips(VkCommandBuffer cmd, std::uint32_t mips)
+{
+    record_mip_generation(context_->vk(), cmd, image_, width_, height_, mips, array_layers_, depth_);
 }
 
 void Image::record_update_commands(
@@ -705,19 +748,24 @@ void Image::record_update_commands(
     std::uint32_t mip,
     VkOffset3D offset,
     VkExtent3D extent,
-    VkImageLayout from)
+    VkImageLayout from,
+    VkPipelineStageFlags legal)
 {
     const VkImageAspectFlags aspect = aspect_mask_for(vk_format());
-    const VkPipelineStageFlags shader_stages = context_->all_shader_stages();
+    // Narrowed to the replaying family (0.30): on a transfer-only family no
+    // shader stage may be named, and the cross-queue WAR those scopes carried
+    // is the worker's graphics-timeline wait instead.
+    const StageAccess src = narrow_src({context_->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT}, legal);
+    const StageAccess dst = narrow_dst({context_->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT}, legal);
     record_image_transition(
         context_->vk(),
         cmd,
         image_,
         from,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_ACCESS_SHADER_READ_BIT,
+        src.access,
         VK_ACCESS_TRANSFER_WRITE_BIT,
-        shader_stages,
+        src.stages,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         aspect,
         mip,
@@ -744,9 +792,9 @@ void Image::record_update_commands(
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_ACCESS_TRANSFER_WRITE_BIT,
-        VK_ACCESS_SHADER_READ_BIT,
+        dst.access,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
-        shader_stages,
+        dst.stages,
         aspect,
         mip,
         1,
@@ -920,24 +968,44 @@ std::expected<void, Error> Image::upload_pixels(Context& context, const void* pi
     }
     auto [buffer, allocation] = *staging;
 
-    auto serial = deferred_submit(context, [&](VkCommandBuffer cmd) { record_upload_commands(cmd, buffer, mips); });
-    if (!serial)
+    // The copy on the transfer runtime, the mip cascade (if any) on graphics
+    // behind it — the same split the upload worker makes, so an inline upload
+    // and a decoded one leave the same serials on the image.
+    QueueSerials serials{};
+    const VkPipelineStageFlags transfer_legal = context.queue_stages(QueueKind::Transfer);
+    auto copied = deferred_submit(
+        context,
+        [&](VkCommandBuffer cmd) { record_upload_commands(cmd, buffer, mips, transfer_legal); },
+        QueueKind::Transfer);
+    if (!copied)
     {
         vmaDestroyBuffer(context.allocator(), buffer, allocation);
-        return std::unexpected(serial.error());
+        return std::unexpected(copied.error());
     }
+    serials[queue_index(QueueKind::Transfer)] = *copied;
     // The GPU reads the staging buffer after this returns, so it retires on
     // the serial rather than here.
     context.defer_destroy([allocator = context.allocator(), buffer, allocation]
                           { vmaDestroyBuffer(allocator, buffer, allocation); });
 
+    if (mips > 1)
+    {
+        auto blitted = deferred_submit(
+            context, [&](VkCommandBuffer cmd) { record_upload_mips(cmd, mips); }, QueueKind::Graphics, serials);
+        if (!blitted)
+        {
+            return std::unexpected(blitted.error());
+        }
+        serials[queue_index(QueueKind::Graphics)] = *blitted;
+    }
+
     mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    set_upload_submitted(*serial);
-    context.note_upload_serial(*serial);
+    set_upload_submitted(serials);
+    context.note_upload_serial(serials);
     return {};
 }
 
-void Image::record_copy_and_finalize_(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips)
+void Image::record_copy_(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mips, VkPipelineStageFlags legal)
 {
     // One region with layerCount = array_layers_ copies every layer: the
     // staging buffer holds them consecutively, exactly what a layered copy
@@ -951,12 +1019,11 @@ void Image::record_copy_and_finalize_(VkCommandBuffer cmd, VkBuffer staging, std
         .imageExtent = {width_, height_, depth_}};
     context_->vk().vkCmdCopyBufferToImage(cmd, staging, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-    if (mips > 1)
+    // A chain stays in TRANSFER_DST for record_upload_mips on the graphics
+    // queue — that is the layout the cascade starts from.
+    if (mips == 1)
     {
-        record_mip_generation(context_->vk(), cmd, image_, width_, height_, mips, array_layers_, depth_);
-    }
-    else
-    {
+        const StageAccess dst = narrow_dst({VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT}, legal);
         record_image_transition(
             context_->vk(),
             cmd,
@@ -964,9 +1031,9 @@ void Image::record_copy_and_finalize_(VkCommandBuffer cmd, VkBuffer staging, std
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_ACCESS_TRANSFER_WRITE_BIT,
-            VK_ACCESS_SHADER_READ_BIT,
+            dst.access,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            dst.stages,
             VK_IMAGE_ASPECT_COLOR_BIT,
             0,
             1,
@@ -1066,6 +1133,77 @@ void Image::record_mip_generation(
 
 // ── Image-to-image recorders ──────────────────────────────────────────────────
 
+void record_buffer_image_copy(
+    const VolkDeviceTable& vk,
+    VkCommandBuffer cmd,
+    Image& image,
+    VkBuffer buffer,
+    VkDeviceSize buffer_offset,
+    std::uint32_t layer,
+    std::uint32_t mip,
+    bool to_image,
+    VkImageLayout src_layout,
+    VkPipelineStageFlags legal_stages)
+{
+    const StageAccess shader_src = narrow_src(
+        {image.owner()->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT}, legal_stages);
+    const StageAccess shader_dst =
+        narrow_dst({image.owner()->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT}, legal_stages);
+    const std::uint32_t w = (std::ranges::max)(image.width() >> mip, 1u);
+    const std::uint32_t h = (std::ranges::max)(image.height() >> mip, 1u);
+    const std::uint32_t d = (std::ranges::max)(image.depth() >> mip, 1u);
+
+    record_image_transition(
+        vk,
+        cmd,
+        image.vk_image(),
+        to_image ? VK_IMAGE_LAYOUT_UNDEFINED : src_layout,
+        to_image ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        to_image ? VkAccessFlags{0} : shader_src.access,
+        to_image ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT,
+        to_image ? shader_src.stages : shader_src.stages,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        image.aspect(),
+        mip,
+        1,
+        1,
+        layer);
+
+    VkBufferImageCopy region{
+        .bufferOffset = buffer_offset,
+        // Zero means "tightly packed to imageExtent" — the contract the verb
+        // documents.
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource = {image.aspect(), mip, layer, 1},
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {w, h, d}};
+    if (to_image)
+    {
+        vk.vkCmdCopyBufferToImage(cmd, buffer, image.vk_image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    }
+    else
+    {
+        vk.vkCmdCopyImageToBuffer(cmd, image.vk_image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &region);
+    }
+
+    record_image_transition(
+        vk,
+        cmd,
+        image.vk_image(),
+        to_image ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        to_image ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT,
+        shader_dst.access,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        shader_dst.stages,
+        image.aspect(),
+        mip,
+        1,
+        1,
+        layer);
+}
+
 void record_image_copy(
     const VolkDeviceTable& vk,
     VkCommandBuffer cmd,
@@ -1078,10 +1216,14 @@ void record_image_copy(
     // already belong to this Context (the binding layer compares owners), so the
     // fact is here, and record_image_transition takes `vk` for the same reason.
     //
-    // Masked by the replaying family's legal set (0.29). Never empty: the
-    // compute stage is in both, so the transition keeps a real source scope on
-    // a compute queue as well.
-    const VkPipelineStageFlags shader_stages = src.owner()->all_shader_stages() & legal_stages;
+    // Narrowed to the replaying family's legal set (0.29). On a compute queue
+    // the compute stage survives; on a transfer-only family (0.30) nothing
+    // does, and narrow_* hands back the empty scopes — the pipe ends with no
+    // access — rather than a zero mask, which is a validation error.
+    const StageAccess shader_src = narrow_src(
+        {src.owner()->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT}, legal_stages);
+    const StageAccess shader_dst =
+        narrow_dst({src.owner()->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT}, legal_stages);
     const std::uint32_t layers = src.array_layers();
     const std::uint32_t barrier_span = src.barrier_layers(layers);
     // Every level the two images share. 0.17 copied mip 0 only and called the
@@ -1098,9 +1240,9 @@ void record_image_copy(
         src.vk_image(),
         src_layout,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        shader_src.access,
         VK_ACCESS_TRANSFER_READ_BIT,
-        shader_stages,
+        shader_src.stages,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         src.aspect(),
         0,
@@ -1116,7 +1258,7 @@ void record_image_copy(
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         0,
         VK_ACCESS_TRANSFER_WRITE_BIT,
-        shader_stages,
+        shader_src.stages,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         dst.aspect(),
         0,
@@ -1161,9 +1303,9 @@ void record_image_copy(
             image == &src ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             image == &src ? VK_ACCESS_TRANSFER_READ_BIT : VK_ACCESS_TRANSFER_WRITE_BIT,
-            VK_ACCESS_SHADER_READ_BIT,
+            shader_dst.access,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
-            shader_stages,
+            shader_dst.stages,
             image->aspect(),
             0,
             mips,

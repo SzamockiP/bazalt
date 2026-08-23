@@ -14,9 +14,10 @@ void bind_graphs(py::module_& m)
             [](const Serial& self)
             {
                 return std::format(
-                    "<bazalt.Serial graphics={} compute={}>",
+                    "<bazalt.Serial graphics={} compute={} transfer={}>",
                     self.values[queue_index(QueueKind::Graphics)],
-                    self.values[queue_index(QueueKind::Compute)]);
+                    self.values[queue_index(QueueKind::Compute)],
+                    self.values[queue_index(QueueKind::Transfer)]);
             });
 
     py::class_<Graph, std::shared_ptr<Graph>>(m, "Graph")
@@ -36,12 +37,14 @@ void bind_graphs(py::module_& m)
                std::optional<bool> auto_barriers)
             {
                 require_same_context(self->owner(), target->owner(), "add_pass");
-                if (queue == QueueKind::Compute)
+                if (queue != QueueKind::Graphics)
                 {
                     raise_error(err_state(
-                        "add_pass: a pass on Queue.COMPUTE cannot draw, because a compute queue "
-                        "has no rasterizer. Use queue=Queue.GRAPHICS for a pass with a render "
-                        "target."));
+                        std::format(
+                            "add_pass: a pass on Queue.{} cannot draw, because only the graphics "
+                            "queue has a rasterizer. Use queue=Queue.GRAPHICS for a pass with a "
+                            "render target.",
+                            queue_name(queue))));
                 }
                 require_sliced_when_3d(*target, "add_pass");
                 auto clears = parse_clear_colors(clear_color);

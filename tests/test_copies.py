@@ -218,3 +218,73 @@ def test_copy_image_copies_the_whole_mip_chain(ctx):
     out = screen.color[0].read()
     assert out[4, 4, 0] > 200, "the smallest mip of the destination was not copied"
     assert out[4, 4, 1] < 50
+
+
+def test_update_buffer_writes_the_bytes(ctx):
+    """The command-stream patch: bytes and arrays land at their offset with no
+    staging buffer and no second submit."""
+    buf = ctx.create_buffer(8 * 4, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    g = ctx.graph()
+    with g.add_pass(name="patch") as p:
+        p.fill_buffer(buf, 0)
+        p.update_buffer(buf, np.arange(2, dtype=np.uint32))
+        p.update_buffer(buf, b"\x07\x00\x00\x00", offset=8)
+    ctx.submit(g)
+    assert buf.read(np.uint32).tolist() == [0, 1, 7, 0, 0, 0, 0, 0]
+
+
+def test_update_buffer_refuses_too_much_or_unaligned(ctx):
+    """vkCmdUpdateBuffer's own limits, named at the call with the fix."""
+    big = ctx.create_buffer(1 << 20, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    g = ctx.graph()
+    with g.add_pass() as p:
+        with pytest.raises(bz.ResourceError, match="65536"):
+            p.update_buffer(big, bytes(65540))
+        with pytest.raises(bz.ResourceError, match="multiples of 4"):
+            p.update_buffer(big, bytes(6))
+        with pytest.raises(bz.ResourceError, match="multiples of 4"):
+            p.update_buffer(big, bytes(8), offset=2)
+
+
+def test_copy_buffer_to_image_fills_a_mip_and_the_mirror_reads_it_back(ctx):
+    """One (layer, mip) each way, tightly packed. The round trip through a
+    second buffer and image.read(mip=1) must agree byte for byte."""
+    img = ctx.create_image(32, 32, bz.Format.RGBA8, mip_levels=2)
+    pattern = np.arange(16 * 16 * 4, dtype=np.uint8)
+    src = ctx.create_buffer(pattern, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    dst = ctx.create_buffer(16 * 16 * 4, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    g = ctx.graph()
+    with g.add_pass(name="roundtrip") as p:
+        p.copy_buffer_to_image(src, img, mip=1)
+        p.copy_image_to_buffer(img, dst, mip=1)
+    ctx.submit(g)
+    assert np.array_equal(dst.read(np.uint8), pattern)
+    assert np.array_equal(img.read(mip=1).ravel(), pattern)
+
+
+def test_copy_buffer_to_image_refuses_a_missing_subresource_or_a_short_buffer(ctx):
+    img = ctx.create_image(16, 16, bz.Format.RGBA8)
+    buf = ctx.create_buffer(8, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    g = ctx.graph()
+    with g.add_pass() as p:
+        with pytest.raises(bz.ResourceError, match="does not exist"):
+            p.copy_buffer_to_image(buf, img, layer=3)
+        with pytest.raises(bz.ResourceError, match="cannot hold"):
+            p.copy_buffer_to_image(buf, img)
+        with pytest.raises(bz.ResourceError, match="does not exist"):
+            p.copy_image_to_buffer(img, buf, mip=1)
+
+
+def test_the_buffer_image_copies_work_in_a_manual_pass(ctx):
+    """The image side records its own transitions (the copy_image shape), so
+    auto_barriers=False changes nothing about these verbs."""
+    img = ctx.create_image(8, 8, bz.Format.RGBA8)
+    src = ctx.create_buffer(np.full(8 * 8 * 4, 9, np.uint8),
+                            bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    dst = ctx.create_buffer(8 * 8 * 4, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    g = ctx.graph()
+    with g.add_pass(name="manual", auto_barriers=False) as p:
+        p.copy_buffer_to_image(src, img)
+        p.copy_image_to_buffer(img, dst)
+    ctx.submit(g)
+    assert (dst.read(np.uint8) == 9).all()
