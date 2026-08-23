@@ -764,10 +764,18 @@ entry. The release is a label, not the organizing axis.
   slice marks the whole mip, which is the granularity a volume's layout actually has, so a
   partial render followed by a sample is legal.
 
-- **One layout for a whole image** (0.13, and it holds today). `on_rendering_recorded` marks
-  the WHOLE image, because an `Image` holds one `layout_`. Render every layer and every mip
-  before you sample. A partial render followed by a sample fires validation on purpose. The
-  same model is why `read()` transitions `array_layers_` in both directions.
+- **One layout for a whole image** (0.13; narrowed in 0.18 and again in 0.30).
+  `on_rendering_recorded` marks the WHOLE image, because an `Image` held one `layout_`.
+  Render every layer and every mip before you sample. A partial render followed by a sample
+  fires validation on purpose. The same model is why `read()` transitions `array_layers_` in
+  both directions.
+
+  **What is left of it.** 0.18 gave `Image` per-`(layer, mip)` LAYOUT state
+  (`SubresourceLayouts`) and 0.30 gave the tracker per-`(layer, mip)` HAZARD state, so the
+  claim now holds only for the two verbs that still speak for a whole image: a render pass's
+  attachment note and a manual `p.barrier(image, ...)`. Both are accepted ceilings with the
+  same reason — the caller named an image, not a subresource — and both are listed under the
+  0.30 decision below.
 
 - **MSAA composes with layers and with multiview, but not with mips** (0.13). A layered
   multisampled attachment resolves per layer, and a multiview one resolves per view. Only
@@ -2079,14 +2087,19 @@ unchanged, and a program written against 0.28 schedules exactly as it did — wh
   This was silent before, and it is the sibling of the `set_present_mode` refusal that has
   been guarded since 0.16 — the ring audit found the asymmetry, not a bug report.
 
-- **Uploads stay on the graphics queue, permanently, and a compute batch waits for them
-  there.** Not a simplification: `generate_mipmaps` is a blit cascade, a blit needs a graphics
-  queue, and the upload worker runs mipgen. So the upload serial is a graphics-timeline value
-  whatever reads it, which is why `submit_batches` puts that one wait on every batch. It is
-  also why the upload wait and `after=` are waited on their OWN queue as well, where the
-  previous-replay wait is not: those name other submitters, and only a barrier inside this
-  graph's own command buffers reaches back over its own queue. Sync validation caught the
-  version that got this wrong, in one line, the first time the suite ran.
+- **Uploads stay on the graphics queue, and a compute batch waits for them there** — true in
+  0.29, and **"permanently" was wrong**: 0.30 moved them to the transfer queue by splitting
+  the one thing that held them, the mip cascade (see "Transfer queue (0.30)" below). The
+  reasoning that survives is the shape of the wait, not its timeline: the upload wait and
+  `after=` are waited on their OWN queue as well, where the previous-replay wait is not,
+  because those name other SUBMITTERS and only a barrier inside this graph's own command
+  buffers reaches back over its own queue. Sync validation caught the version that got that
+  wrong, in one line, the first time the suite ran.
+
+  The lesson is about the word rather than the decision. "Permanently" was reasoning from one
+  fact — a blit needs a graphics family — to a conclusion about the whole workload, and the
+  workload was two things that could be submitted separately. **A constraint on one half of a
+  job is not a constraint on the job.**
 
 - **One of the two cross-queue holes is argued rather than shown, and the difference was
   measured.** A clearing render pass builds its entry transition from the RenderTarget and
@@ -2226,6 +2239,292 @@ with it.
   is one vendor's, and DATA_GRAPH is newer than this file. So `Queue` ends with three members,
   and it ends there for a reason rather than for now — which is worth writing down, because an
   enum that looks open invites a fourth member nobody has a use for.
+
+### Transfer queue (0.30)
+
+The third and last `QueueRuntime`. What 0.29's entry promised and what it cost.
+
+- **The estimate was right about the machinery and wrong about where the work is.** The
+  priced entry said ~450 lines plus ~250 for the two verbs, and the C++ came in near that.
+  What it did not price is that a third queue is not "two, plus one": every place that says
+  "the other queue" in the singular has to be re-read, and three of them were wrong in a way
+  no test would have shown. The list is below, because that is the transferable part.
+
+- **`read_batch{kNoBatch, kNoBatch}` was a bug the third queue armed.** A brace list shorter
+  than the array value-initializes the rest, so the transfer slot started at **0 — a valid
+  batch index**, and every buffer and image looked like batch 0 had read it. The result is
+  an extra timeline wait, which is legal, correct-looking and invisible to validation: the
+  suite would have stayed green while every graph serialized itself against its first batch.
+  `per_queue(kNoBatch)` replaces the brace list, and it is a function rather than a longer
+  brace list so the same mistake cannot come back with a fourth queue. **A sentinel written
+  as a brace list is a sentinel with a hole in it.**
+
+- **`wait_for_slot(only)` had to flip from keep-one to drop-one.** A window waited "the
+  compute half" of its ring slot, because its own fence covers the graphics half. With three
+  queues "everything but graphics" stopped being one half, and keep-one silently kept
+  waiting the compute one alone — a ring-slot reuse race against a transfer pass, which sync
+  validation may or may not report depending on what else is in flight. The parameter is
+  `except` now, which is the question the caller was actually asking. **When a set grows past
+  two, every "the other one" in the code is a bug report.**
+
+- **A transfer-only family may not name a shader stage in a barrier**, and the upload path
+  named several. `legal_stages_for` already had the transfer branch (0.29 wrote it for
+  completeness), but `record_reload_commands`, `record_update_commands` and
+  `record_image_copy` hand-picked `FRAGMENT_SHADER` or `all_shader_stages()` and would have
+  produced a zero mask — a validation error, not a conservative barrier. Every one of them
+  goes through `narrow_src`/`narrow_dst` now. The comment in `record_image_copy` that said
+  the mask is "never empty: the compute stage is in both" was true for two queues and false
+  for three, which is the same shape as the `permanently` above. **Do not hand-pick a stage
+  mask on a path a second family can replay.**
+
+- **The dependency those scopes carried had to go somewhere.** A reload's source scope was a
+  fragment-shader read: it ordered the copy behind the frames still sampling the image, as a
+  WAR execution dependency, with no CPU sync. On the transfer queue that barrier cannot be
+  written, so the worker waits the graphics queue's newest SUBMITTED serial instead — for a
+  reload or an `image.update` only. A first upload waits nothing but its own chain, because
+  nothing can be reading an image that has no contents yet. That asymmetry is the whole
+  reason uploads were allowed to move at all: the common case pays nothing.
+
+- **A mipped upload is two submits, and the split is at the layout.** `record_upload_commands`
+  leaves every level in `TRANSFER_DST` when `mips > 1`, which is exactly the precondition
+  `record_mip_generation` states, so the cascade needs no re-transition when it runs on the
+  graphics queue behind a semaphore. Cutting anywhere else would have meant a layout the two
+  halves disagree about. The image then carries a serial on both timelines, which is why
+  `upload_serial_` became a `QueueSerials` on both `Buffer` and `Image` and why
+  `require_uploads_resident` returns one — the priced entry called this "the real cost" and
+  it was right.
+
+- **A reload marks the image PENDING now, and that is a consequence of the split rather than
+  a fix for it.** Between the copy and the cascade the image sits in `TRANSFER_DST` with the
+  OLD serials still published, so a reader that only waited those serials would submit into
+  that window. Marking it pending makes every reader block CPU-side until both halves are
+  submitted. The wrong-size and corrupt-file branches then have to balance the counter
+  (`abandon_upload`), which is the kind of bookkeeping a state machine grows the moment one
+  of its states becomes two.
+
+- **`get_dedicated_queue` is trusted no more than `QueueType::compute` was.** vk-bootstrap's
+  "dedicated" transfer queue is the right question — transfer and neither graphics nor
+  compute — but the index is still compared against BOTH other families before a runtime is
+  built on it, for the 0.29 reason: a library that falls back answers a different question
+  and the answer looks identical. The transfer runtime never borrows the COMPUTE family
+  either, even where one exists and the graphics family is busy: a staging copy is
+  bandwidth-bound DMA, and putting it on the compute queue is the wrong home for the same
+  reason 0.29 refused to move it there.
+
+- **`CONCURRENT` needs a deduplicated family list now.** Two runtimes made the test
+  `compute.family != graphics.family`; three make it a set, because a device may give a
+  separate transfer family and no separate compute one (or the reverse). The list is built by
+  linear dedup over three entries and `CONCURRENT` is set only when two or more remain —
+  `CONCURRENT` with one index repeated is invalid, and that is unchanged.
+
+- **`Queue.TRANSFER` refuses by verb, not by pass kind, and the gate grew an axis.** 0.29 had
+  one refusal (`require_graphics_queue`) written as `== QueueKind::Compute`, which a TRANSFER
+  pass would have walked straight through. It is now `QueueNeeds` on the same `guard()` every
+  verb already calls: `Graphics` for the blits, `Shader` for anything needing a pipeline, a
+  descriptor set, a dispatch or a clear, `Any` for the copy vocabulary. One gate, one message
+  shape, and a new verb picks its answer at the call site rather than by being remembered.
+
+  **`p.timer()` is `Shader`, and that is a real ceiling rather than a strictness.**
+  `vkCmdWriteTimestamp` is legal on a transfer family, but the `vkCmdResetQueryPool` the
+  timer records is not (VUID-vkCmdResetQueryPool-commandBuffer-cmdpool). So a transfer pass
+  cannot be timed from inside, and measuring one means timing the submit around it. Found by
+  the test that tried, not by reading the spec.
+
+- **The two image copy verbs record like `copy_image`, not as tracker uses**, and this is
+  the one place the plan changed while it was being written. Reporting them as
+  `track_image_use_` reads better and is wrong: the fold's starting layout is `UNDEFINED`, so
+  a `copy_image_to_buffer` of an uploaded texture nothing in the graph wrote would be
+  transitioned from `UNDEFINED` — a discard of the source, by the verb that came to read it.
+  Self-contained transitions plus an `ImageNote` avoid it, they work in a manual pass (a note
+  bypasses `auto_barriers_`), and since 0.29 a note is folded as "a write this queue has made
+  available", so a later sample on another queue still gets its semaphore wait. The buffer
+  side of both verbs is a real tracked use, because a buffer has no layout to discard.
+
+- **What the release did NOT do.** Nothing was measured. The priced entry's argument is that
+  the win is the copy leaving the graphics queue's execution slots, which is a real number on
+  a discrete GPU and zero on an iGPU, and `examples/47_transfer_queue` says so in its
+  docstring rather than claiming a speed-up. 0.29's measurement discipline applies here: a
+  second queue costs a second submit, and an upload is the one customer that already paid it.
+
+**And the queues are finished.** The 0.29 entry's argument stands unchanged: of Vulkan's
+eight capability bits only GRAPHICS, COMPUTE and TRANSFER describe work a pass records.
+`kQueueCount` is 3 and `Queue` has three members, for a reason rather than for now.
+
+### The 0.30 API review, and the four things it asked for
+
+An outside reading of the API — someone using it, not writing it — raised four points while
+0.30 was being planned. Two were accepted as asked, one was accepted in a different shape,
+one was rejected and replaced by the thing it was really pointing at. The owner's rule
+settled the breaks: **break before 1.0 only where the user understands the API better
+afterwards.** A rename that changes nothing in understanding does not get made.
+
+The four are recorded with the answer, because a rejected proposal with no reason gets
+proposed again.
+
+#### 1. A declarative binding table — REJECTED, and what shipped instead
+
+The proposal was a second spelling of a pipeline layout:
+
+    .bindings({0: bz.storage_image(), 1: bz.texture(stage="fragment")})
+
+beside the chained `.texture(0, FRAGMENT)` declarators. It is a fork, by rule 1 and by the
+0.18 audit's definition: every knob a declarator has (`set`, `count`, `update_after_bind`)
+would have to exist in both spellings and stay equal forever, and the dict form's objects
+would be a third vocabulary for what the declarator names positionally. `stage="fragment"`
+is the 0.9 "no string keys" lesson pointed the other way — a string where an enum already
+exists, so a typo becomes a runtime message rather than a name error.
+
+**What the proposal was actually pointing at is real**, and it is ergonomics #6, which had
+been priced since 0.22: a binding read by two stages had to be declared twice. That shipped:
+`stage=` takes one `ShaderStage` or a sequence. The sequence loops the existing C++ merge
+rather than merging in C++, so the two spellings cannot disagree — a second merge would be
+two places to keep equal, which is the same fork the dict form is.
+
+**And reading the merge for #6 found a hole:** re-declaring one `(set, binding)` with a
+different DESCRIPTOR TYPE kept the first type and said nothing, so
+`.texture(0, VERTEX).storage_buffer(0, FRAGMENT)` built a layout the second call never
+described. The count mismatch beside it had been diagnosed since 0.21. It is the same class
+of error and it now gets the same channel. **A merge that accepts two of something should be
+read for what else it silently accepts.**
+
+#### 2. Clearer names on `create_buffer` — PARTLY ACCEPTED
+
+The proposal was `usage=BufferUsage.VERTEX, memory=Memory.STATIC, dtype=bz.Float32` in place
+of three positional enums. Judged one name at a time, against the owner's rule:
+
+- **`BufferType` → `BufferUsage`, and the keyword `type=` → `usage=`: taken.** `type`
+  shadows a builtin, which is the 0.23 `list` → `data` argument unchanged, and the thing
+  being chosen IS the `VkBufferUsageFlags` — the old name said "kind of buffer" about a
+  parameter that means "what it may be bound as".
+- **The old `usage=` → `memory=`: forced by the first.** One keyword cannot mean two things
+  in one signature, and `usage` meaning the memory placement was the half that contradicted
+  Vulkan.
+- **`MemoryUsage` keeps its name: rejected.** `Memory` reads shorter and says less. And
+  `STATIC`/`DYNAMIC` is an UPDATE PATTERN rather than a placement — the ReBAR and
+  host-cached-readback entry in the ceiling audit is the release that gets to redesign this
+  enum, and renaming it first would freeze the wrong noun.
+- **`DataType` → numpy dtypes: taken, and it is a removal rather than a rename.** Python
+  already had one spelling for an element type — `Buffer.read(np.uint16)` — and `DataType`
+  was a second one for the same four words. The C++ enum stays as the index-type carrier and
+  the packing key, where it is one enum doing one job that Python never sees.
+
+**The bits were not in the proposal and are the reason it happened now.** `test_stubs.py`
+asserts every enum member's exact int and 1.0 freezes them, so `VERTEX = 0` can never become
+a bit afterwards. Making the members flags costs about fifteen lines on top of the rename and
+closes the "buffer usage is not choosable" ceiling: `VERTEX | STORAGE` is one buffer a
+compute shader writes and a draw binds. **A rename that has to happen anyway is the cheapest
+moment to fix the shape underneath it.**
+
+The corollary the plan did not see: with bits, "the declared type is what gets written" stops
+being sound. A `UNIFORM|STORAGE` buffer is the first one for which a binding cannot infer
+what the caller meant, so `set_buffer`, `bind_vertex_buffer` and `bind_index_buffer` now
+check the BIT the use needs. That check did not exist before and had to.
+
+#### 3. `image.as_texture()` / `image.as_storage()` — REJECTED, and what shipped instead
+
+The proposal was a view object between the resource and the descriptor, so a binding says how
+the image is used. Bazalt already says it twice: the DECLARATOR types the binding
+(`.texture()` vs `.storage_image()`), the VERB names the use (`set_image` vs
+`set_storage_image`), and the verb refuses a binding of the other type with a message naming
+the declarator to fix. A view object would carry no information those two do not, and it
+would add a lifetime — a handle that can outlive its image, or keep it alive, and either
+answer is a new rule.
+
+**What the proposal was pointing at is features #7**, priced since 0.22 and shipped here:
+a descriptor could not name ONE layer or ONE mip. `set_image(..., layer=, mip=)` and its
+storage twin, kwargs on the existing verb rather than a new object, because
+`image.update(layer=, mip=)`, `image.read(layer=, mip=)` and `target.layer(i, mip=)` already
+spell a subresource with exactly these two words. One vocabulary, four verbs.
+
+**The estimate said ~300 lines and it is ~600**, and the missing half is named in the entry
+it came from: "the expensive half already exists" counted `Image`'s per-`(layer, mip)` LAYOUT
+state from 0.18 and forgot that the TRACKER holds hazard state too, one entry per image. The
+pyramid case is what makes that not optional — a pass samples mip N-1 while it writes mip N,
+so the image is in two layouts at once, which one state per image cannot express in either
+direction (barrier the chain and you discard the source; leave it and the layers reject the
+descriptor).
+
+**The model is 0.18's, applied one level up:** one state while the image is uniform, a split
+into layers x mips on the first narrowed use, a collapse back when every entry compares equal
+again. An image nobody narrows takes the same path it always did, byte for byte, which is
+what keeps the common case free. A whole-image use over a split image reconciles it by
+emitting one barrier per differing subresource and collapsing; two barriers on one image with
+disjoint ranges are legal in one `vkCmdPipelineBarrier`, which is what makes the pyramid pass
+cost one barrier call.
+
+**`tracks(image, range)` is load-bearing and it is the trap in this feature.** The
+sampled-image rule leaves an image no pass has written alone, because transitioning it from
+the fold's `UNDEFINED` would discard an uploaded texture. Asked per IMAGE, the pyramid's own
+storage write of mip N makes the image tracked, so the sample of the uploaded mip 0 in the
+SAME pass stops being left alone and gets discarded by its own pass. Asked per RANGE, mip 0
+is untouched and the rule holds. **A "has anything touched this" question has to be asked at
+the granularity the answer is used at.**
+
+**Two things stay whole-image, on purpose.** A manual `p.barrier(image, ...)` names an image,
+so it covers the image and collapses the split — the escape hatch is not the place to invent
+a subresource vocabulary. And a render pass's attachment note claims the whole image, so
+rendering into `target.layer(i)` and then sampling another layer in the same graph barriers
+more than it must. Both are correct and neither is narrow; narrowing the attachment half
+means `RenderTarget::written_*` carrying the subresource, which is a second feature.
+
+#### 4. A render-graph debugger — ACCEPTED, in a different shape
+
+The proposal was an error like this:
+
+    Graph error in pass "present"
+      resource: image "hdr_color"
+      previous state: STORAGE_WRITE @ COMPUTE
+      requested state: SAMPLED_READ @ FRAGMENT
+      suggested fix: declare the image as a dependency of the present pass
+
+**The scenario it describes cannot happen, and finding that out is what shaped the answer.**
+Bazalt never refuses a hazard. In automatic mode the fold inserts the barrier — there is
+nothing to report, because the thing the message would ask for is what the graph just did.
+In `auto_barriers=False` mode the recorder dropped every use at record time, so the graph
+knew nothing to report either, and a missing `p.barrier()` was silent until the sync
+validation layer saw it (and only where the layer is watching). So the report had no
+occasion to exist in either mode.
+
+What shipped is the same four facts, in the three places they can be true:
+
+- **Names live on the object.** `create_image(name=)` handed the string to the debug-utils
+  layer and dropped it, and the layer's name is write-only from bazalt's side — nothing can
+  ask Vulkan for it back. `Image::name_` / `Buffer::name_` keep it, `.name` reads it, and the
+  contract is `Pass::name_`'s: a label, never a key.
+- **`graph.explain()` prints what the compile decided** — every pass with its queue, batch
+  and timeline waits, every barrier with its layouts and scopes, every cross-queue wait, and
+  the pass that produced each dependency. The entries are appended beside the real emission
+  in `compile_`, so the report cannot drift from what the executor replays; a report built by
+  re-deriving the answer would be a second implementation of the fold. The text is explicitly
+  not API.
+- **A manual pass gets the review's message as a WARNING.** The uses now travel to the fold
+  flagged `manual`, and the compile PEEKS each one: would the automatic path emit a barrier
+  or a wait here that the pass's own notes do not cover? If so, one warning per (pass,
+  resource) naming the pass, the resource, the previous state, its producer and the
+  `p.barrier()` call that fixes it.
+
+**A warning and never an exception**, which is the one decision in this piece. A manual pass
+exists because the caller may know better: a buffer reached through its device address is
+invisible to the tracker by construction (an accepted HARD ceiling), and so is any hazard the
+caller has decided to accept. Raising would close the escape hatch rule 2 requires, and it
+would do it on a heuristic. The warning changes nothing the GPU does.
+
+**A manual use is peeked and never committed**, which is the second. Committing it would
+change how the AUTOMATIC passes around the manual one order against it — silently, and in a
+direction the caller never asked for. What a manual pass tells the fold stays exactly what it
+told it before: its notes. The peek runs the real `use()` on a copy of the tracker rather
+than reimplementing the answer, so the lint cannot disagree with the path it is linting.
+
+**First-use floors do not warn.** The floor answers for writers OUTSIDE the graph, so there
+is no producer to name, and a warning that says "something, somewhere, maybe" is noise in
+front of the real ones.
+
+**And the lint found a bug in the tracker before it found one in a program.** Two
+`p.barrier()` calls on one resource in one pass kept only the LAST one's destination mask,
+because a note resets the state. A W→R barrier followed by a W→W barrier is how a
+read-modify-write dispatch is spelled by hand, and the lint warned about it — correctly, from
+the state it could see. Same-pass notes now accumulate their visible masks. **A lint that
+reports correct code has usually found the model's mistake, not the caller's.**
 
 ### Asynchronous submits
 
@@ -2900,9 +3199,9 @@ its price stops belonging here and becomes backlog.
   and a decision about what `t.ms` means when the slot has not cycled (the `gpu_time_ms`
   answer, presumably: None until it has). **Estimate: ~200 lines.**
 
-- **Uploads on a TRANSFER queue, not on the compute one** (asked during 0.29, priced here,
-  and ASSIGNED TO 0.30 — see "The queues after 0.29, and where they end" above for why it is
-  a release rather than an entry). The question was whether the upload worker could move to
+- ✅ **Uploads on a TRANSFER queue, not on the compute one** (asked during 0.29, priced here,
+  DONE in 0.30 — see "Transfer queue (0.30)" above for what it cost against this estimate).
+  The question was whether the upload worker could move to
   the compute queue now that one exists, and hand the finished resource to graphics. It could,
   for part of its work, and it is the wrong queue.
 
@@ -3251,7 +3550,17 @@ Ordered by how often the friction shows up, not by effort.
    `MouseButton` and `CursorMode` as `IntEnum`s are backward-compatible by construction; the
    `bz.KEY_W` names stay as aliases. The api-coverage report's "124 of 127 key constants
    untouched" is the same fact seen from the test side.
-6. **A binding read by two stages is declared twice.** A camera UBO read in vertex and
+6. ✅ **A binding read by two stages is declared twice.** DONE in 0.30 — `stage=` takes one
+   `ShaderStage` or a sequence, in the binding layer only, because the C++ merge IS the
+   feature and a second merge would be two places to keep equal. `constant()` is excluded on
+   purpose: a specialization constant is per module, so a sequence there would be a different
+   feature. **~95 lines against the ~180 priced**, and the estimate was high for the reason
+   the entry itself gave — the documentation half had already shipped in 0.24, and what was
+   left is one loop reused by five verbs. Reading the merge to write it found the silent
+   descriptor-type mismatch beside it (see "The 0.30 API review" above), which is the entry's
+   real yield.
+
+   A camera UBO read in vertex and
    fragment is `.uniform_buffer(0, VERTEX, set=0).uniform_buffer(0, FRAGMENT, set=0)`. The
    merge is real and deliberate (`src/Pipeline.hpp:591`) but appears nowhere in the stub, so a
    user cannot know it is allowed. Accept a sequence, and document the merge either way — the
@@ -3335,7 +3644,17 @@ Ordered by rule 4 — what makes pictures goes first.
    `FrontFace` and `CullMode` two meanings. And the line it wanted to remove belongs to GLM
    rather than to Vulkan, which nobody had checked. The escape hatch already exists
    (`cmd.set_viewport(0, h, w, -h)`), so what shipped is the explanation.
-7. **Sub-resource sampling: `set_image(..., layer=, mip=)`.** A descriptor takes a whole
+7. ✅ **Sub-resource sampling: `set_image(..., layer=, mip=)`.** DONE in 0.30, in the shape
+   this entry gave, **and the estimate was half of it: ~600 lines against ~300.** The entry
+   said "the expensive half already exists" and counted `Image`'s per-`(layer, mip)` layout
+   state from 0.18 — while the TRACKER still held one hazard state per image, which is the
+   half that had to be built. See "The 0.30 API review" above for the split/collapse model,
+   for why `tracks()` had to become ranged, and for the two verbs that stay whole-image.
+   **The lesson is the 0.19 corollary in a new place:** "the expensive half already exists"
+   is a claim about ONE piece of state, and it is worth asking which OTHER state answers the
+   same question one layer up.
+
+   A descriptor takes a whole
    Image, so nothing can bind ONE mip or ONE layer as a texture. The render side has spelled
    exactly this since 0.13 (`target.layer(i, mip=)`) and the sampling side never grew the
    twin, which leaves a pass unable to read level N of a chain it is writing level N-1 of —
@@ -3635,7 +3954,15 @@ uninteresting in parts. The second is the root entry: a library whose escape hat
 Defects small enough that each is a line, plus one thing the review raised that turned out to
 be fine — recorded so it does not get re-raised.
 
-- **The automatic descriptor pool warns on every bindless program.** `create_descriptor_pool()`
+- ✅ **The automatic descriptor pool warns on every bindless program.** DONE in 0.26, and
+  this entry outlived the fix — found while planning 0.30, which is its own small lesson
+  about a debt register nobody re-reads. `DescriptorSet.cpp` compares the request against the
+  newest block's declared capacity before it allocates ("Ask before trying, since 0.26"), and
+  `tests/test_descriptor_pool_auto.py::test_a_request_larger_than_a_block_warns_about_nothing`
+  is the referee, capturing a private `Logger` exactly as this entry predicted it would have
+  to. The original text follows.
+
+  `create_descriptor_pool()`
   with no arguments is documented to size itself, and it does — REACTIVELY. `allocate_` takes
   the newest block, and only when `vkAllocateDescriptorSets` answers
   `VK_ERROR_OUT_OF_POOL_MEMORY` does `grow_for_` build a block sized for the request and
@@ -4021,6 +4348,27 @@ ceiling to raise, so there is nothing for the five verdicts to grade.
   a later release wants to quote 0.28 as precedent for breaking after the pre-1.0 batch was
   called closed, the test is the one this release met: is the break forced by a feature
   that cannot be built additively, and does it buy the NEXT release its additivity?
+
+  **0.30 broke it again, and it did NOT meet 0.28's test — it met a different one.** The
+  rename batch (`BufferUsage`, `usage=`/`memory=`, `DataType` gone) is forced by no feature
+  at all: `create_buffer` would have kept working forever. What forced it is the owner's
+  rule, stated when the 0.30 API review was judged: *break before 1.0 only where the user
+  understands the API better afterwards, and never for cosmetics*. Two of the four renames
+  the review proposed were taken and two were refused by that one question.
+
+  The scheduling half is the interesting part, and it is why this is written down rather
+  than filed as a fourth entry above. `test_stubs.py` asserts each enum member's exact int
+  and 1.0 freezes them, so making `BufferUsage` a set of BITS is possible only while a
+  release is already renaming it — after the freeze, `VERTEX = 0` is `VERTEX = 0` forever.
+  So the deadline was not "before 1.0" in the usual sense of a deprecation cycle; it was
+  "before or never". **When a name and a representation are frozen by the same gate, the
+  rename is the last chance to fix the representation** — and the corollary is to look, at
+  every pre-1.0 rename, for the shape underneath it.
+
+  Three entries above say the pre-1.0 break batch was closed, twice. It has now re-opened
+  three times (0.24, 0.28, 0.30). The honest general statement is the one 0.23's entry 5
+  reached and this release confirms: there is no batch, there is a rule, and the rule is
+  applied per release until the freeze.
 - **Every public symbol from `_core.pyi` is touched by a test.** An unexercised binding is
   an unimplemented binding. 0.22 made this measurable rather than aspirational:
   `pytest --api-coverage` writes `api_coverage.md`, and the answer on the day it was

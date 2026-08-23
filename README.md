@@ -300,10 +300,22 @@ GPU as a calculator.
 - **Compute beside graphics.** One graph holds a compute pass and a render pass. A
   dispatch writes the vertices and the draw reads them. Results come back as NumPy arrays.
   Each pass names the queue it runs on: `queue=bz.Queue.COMPUTE` puts a pass on the
-  compute queue, where it runs beside the graphics work. Bazalt puts the waits between
-  the two queues for you, and it does that for the passes of one graph and for a graph
-  you send again. Between two different graphs you say it with `submit(after=...)`.
+  compute queue and `queue=bz.Queue.TRANSFER` puts a pass of copies on the transfer
+  queue, where each runs beside the graphics work. Bazalt puts the waits between the
+  queues for you, and it does that for the passes of one graph and for a graph you send
+  again. Between two different graphs you say it with `submit(after=...)`.
   The graphics queue stays the default, and the choice stays yours.
+- **Uploads copy on their own queue.** A discrete GPU has a transfer-only queue family
+  that copies while the graphics and compute queues work. `create_buffer`, `load_image`
+  and `image.update` submit there, so a texture that loads during a frame competes with
+  nothing. `ctx.supports(bz.Feature.ASYNC_TRANSFER)` says whether the family is real; a
+  device without one runs the same program with the same order.
+- **The graph explains itself.** `graph.explain()` prints what the compile decided: each
+  pass, its queue, and every barrier and wait, with the pass that produced it. Resources
+  keep the `name=` you gave them, so the report and the validation layer both name your
+  image rather than a handle. A pass with `auto_barriers=False` gets a warning when it
+  uses a resource no barrier in it covers, and the warning names the `p.barrier()` call
+  that fixes it.
 - **Images in every shape.** 2D textures, texture arrays, cubemaps and 3D volumes come from
   one function: `create_image(w, h, cube=True)` or `create_image(w, h, depth=n)`. A volume
   is a `sampler3D` in the shader — colour-grading LUTs, volumetric noise, raymarched

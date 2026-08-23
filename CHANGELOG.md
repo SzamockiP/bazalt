@@ -5,6 +5,137 @@ All notable changes to **bazalt** are documented here. The format follows
 [SemVer](https://semver.org/) (pre-1.0: minor versions may break the API,
 patch versions never do).
 
+## [0.30.0] — 2026-08-23
+
+"Transfer queue". Uploads and copies can run on a third queue.
+
+A discrete GPU has a transfer-only queue family — a DMA engine that copies over
+PCIe while the graphics and compute queues keep working. Bazalt's own uploads
+go there now: `create_buffer`, `load_image` and `image.update` submit their
+staging copies on the transfer queue. `bz.Feature.ASYNC_TRANSFER` says whether
+the family is real. Without it the transfer queue is the graphics queue under
+its own timeline, so the program and its order do not change and only the
+overlap is missing.
+
+`graph.add_pass(queue=bz.Queue.TRANSFER)` puts your own copies there. A
+transfer family runs copies only, so a pass on it refuses shaders, blits,
+clears and timers, and each refusal names the fix. Three verbs travel with the
+queue: `p.update_buffer`, `p.copy_buffer_to_image` and `p.copy_image_to_buffer`.
+
+A mipped upload is two submits now. The copy runs on the transfer queue, then
+the mip cascade runs on the graphics queue and waits for the copy, because
+`vkCmdBlitImage` needs a graphics family. An image carries one upload serial
+per queue, and a frame that samples it waits for both.
+
+The release also answers an API review. `BufferType` is `BufferUsage` and its
+members are bits, so one buffer can be a vertex buffer and a storage buffer.
+`create_buffer` takes `usage=` and `memory=` instead of `type=` and `usage=`.
+`DataType` leaves the Python API for numpy types. A binding read by two stages
+takes both stages in one call.
+
+And the graph explains itself. Every resource keeps its `name=`, every named
+pass replays inside a debug label, `graph.explain()` prints what the compile
+decided, and a pass with `auto_barriers=False` gets a warning when it uses a
+resource no barrier in it covers.
+
+### Added
+
+- **`bz.Queue.TRANSFER`** runs a pass of copies on the transfer queue. The
+  verbs it accepts are `copy_buffer`, `copy_image`, `fill_buffer`,
+  `update_buffer`, `copy_buffer_to_image`, `copy_image_to_buffer`, `barrier`
+  and `label`. It refuses `bind_pipeline`, `dispatch`, `clear_image` and
+  `timer` (they need a queue that runs shaders), and `blit_image` and
+  `generate_mipmaps` (they need the graphics queue). A render target refuses
+  every queue but `GRAPHICS`.
+- **`bz.Feature.ASYNC_TRANSFER`** on `ctx.supports()` and `device.supports()`.
+  True means the device has a family with transfer and neither graphics nor
+  compute. `bz.Context(features=[bz.Feature.ASYNC_TRANSFER])` refuses a device
+  without one.
+- **`p.update_buffer(buffer, data, *, offset=0)`** writes up to 65536 bytes
+  into a buffer from the command stream. There is no staging buffer and no
+  second submit, so a small patch lands inside the frame that needs it. The
+  size and the offset must be multiples of 4.
+- **`p.copy_buffer_to_image(buffer, image, *, layer=0, mip=0, buffer_offset=0)`**
+  and **`p.copy_image_to_buffer(image, buffer, ...)`** copy one (layer, mip)
+  between an image and tightly packed bytes. This is how a texture atlas
+  streams beside the frame.
+- **`set_image` and `set_storage_image` take `layer=` and `mip=`.** They bind
+  one layer or one mip level, the sampling twin of `target.layer(i, mip=)`. A
+  named layer gives a 2D view, so one face of a cubemap samples as a
+  `sampler2D`. One pass can sample level N-1 while it writes level N as a
+  storage image, which is a bloom pyramid. A 3D image refuses `layer=`.
+- **The graphics declarators and `push_constant` take a stage sequence.**
+  `.uniform_buffer(0, [bz.ShaderStage.VERTEX, bz.ShaderStage.FRAGMENT])`
+  declares a binding both stages read. Declaring it twice, once per stage,
+  still merges.
+- **`image.name` and `buffer.name`** report the `name=` the resource was
+  created with, or `""`. It is a debug label, never a key.
+- **`graph.explain()`** returns a report of what the compile decided: each
+  pass with its queue, batch and timeline waits, and every barrier, wait and
+  attachment transition, with the pass that produced each dependency. It
+  compiles the graph first when it changed. The text is a debugging aid, not
+  API.
+- **A pass with `auto_barriers=False` warns about a use no barrier covers.**
+  The warning names the pass, the resource, the previous state, the pass that
+  produced it, and the `p.barrier()` call that fixes it. It is a warning and
+  never an error, because a manual pass can know better than the graph.
+- **Each named pass replays inside a debug label**, so a validation message
+  about it names the pass.
+
+### Changed (breaking)
+
+- **`BufferType` is `BufferUsage`, and its members are bits.**
+  `BufferUsage.VERTEX | BufferUsage.STORAGE` is one buffer a compute shader
+  writes and a draw then binds as vertices. `STORAGE` still carries the
+  vertex, index and indirect bits. `set_buffer`, `bind_vertex_buffer` and
+  `bind_index_buffer` refuse a buffer without the bit the use needs, and the
+  message names it.
+- **`create_buffer(data, usage, memory, *, dtype=None, name="")`.** The
+  keyword `type=` is now `usage=`, and the keyword `usage=` is now `memory=`.
+  `type` shadowed a builtin, and `usage` meaning the memory placement said the
+  opposite of what Vulkan calls a usage. `MemoryUsage` keeps its name.
+- **`DataType` is removed.** The list overloads of `create_buffer` and
+  `Buffer.update` take `dtype=` as a numpy type: `np.float32`, `np.uint32`,
+  `np.uint16` or `np.int32`. Inference from the first list element is
+  unchanged, and `Buffer.read(dtype)` already used numpy types.
+- **`p.bind_vertex_buffer` raises.** A buffer whose usage has neither `VERTEX`
+  nor `STORAGE` is refused where the call is written, the way
+  `bind_index_buffer` has been since 0.29.
+
+### Examples
+
+- **`examples/47_transfer_queue`** streams a tile through a `Queue.TRANSFER`
+  pass and samples it in a graphics pass. It prints whether the device gave it
+  a separate transfer family, and its docstring says what the graph orders by
+  itself and what it does not.
+
+### Fixed
+
+- **A binding declared twice with two descriptor types raises at `build()`.**
+  Before, the second type was ignored and the layout held what the first call
+  said.
+- **A hot reload marks the image pending while it runs.** A mipped upload is
+  two submits now, and a reader between them could see the image half built.
+
+### Notes
+
+- A transfer runtime that aliases the graphics queue keeps its own timeline
+  and its own command pool, exactly like the compute runtime since 0.29.
+  `BAZALT_FORCE_SINGLE_QUEUE=1` forces both aliases, so the same program runs
+  on a machine that has the real families.
+- `VK_SHARING_MODE_CONCURRENT` now covers every distinct family, and the list
+  is deduplicated: a device may give a separate transfer family and no
+  separate compute one.
+- A reload or an `image.update` waits for the frames that may still sample the
+  image. The barrier that used to order them cannot be recorded on a
+  transfer-only family, because it names a shader stage.
+- A `Serial` carries one value per queue, and its `repr` shows all three.
+- The tracker holds image hazard state per (layer, mip) since this release.
+  An image nobody narrows costs what it cost before: the state splits on the
+  first narrowed use and collapses again when every subresource agrees.
+- A manual `p.barrier(image, ...)` still covers the whole image, and a render
+  pass still reports its attachment writes for the whole image.
+
 ## [0.29.0] — 2026-08-22
 
 "Async compute". A pass can run on the compute queue.
