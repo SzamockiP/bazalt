@@ -171,8 +171,17 @@ void bind_pipelines(py::module_& m)
             py::arg("min_fraction") = 1.0f)
         .def(
             "push_constant",
-            [](GraphicsPipelineBuilder& self, uint32_t size, ShaderStage stage) -> GraphicsPipelineBuilder&
-            { return self.push_constant(size, stage); },
+            [](GraphicsPipelineBuilder& self, uint32_t size, const py::object& stage) -> GraphicsPipelineBuilder&
+            {
+                // One VkPushConstantRange per stage at offset 0 — the same
+                // bytes both stages read, which is what users write today as
+                // two calls.
+                for (const ShaderStage s : stages_of(stage, "push_constant"))
+                {
+                    self.push_constant(size, s);
+                }
+                return self;
+            },
             py::arg("size"),
             py::arg("stage"))
         // Takes any RenderTarget. A SwapchainRenderer *is* one, so windowed code
@@ -213,9 +222,25 @@ void bind_pipelines(py::module_& m)
              {"texture", &GraphicsPipelineBuilder::texture},
              {"storage_image", &GraphicsPipelineBuilder::storage_image}})
     {
+        // stage= takes one ShaderStage or a sequence (0.30): a binding read
+        // by two stages is one call. The loop reuses the C++ merge, so the
+        // sequence and the two-call spelling cannot disagree.
         graphics.def(
             name,
-            declarator,
+            [declarator, name](
+                GraphicsPipelineBuilder& self,
+                uint32_t binding,
+                const py::object& stage,
+                uint32_t set,
+                uint32_t count,
+                std::optional<bool> update_after_bind) -> GraphicsPipelineBuilder&
+            {
+                for (const ShaderStage s : stages_of(stage, name))
+                {
+                    (self.*declarator)(binding, s, set, count, update_after_bind);
+                }
+                return self;
+            },
             py::arg("binding"),
             py::arg("stage"),
             py::arg("set") = 0,

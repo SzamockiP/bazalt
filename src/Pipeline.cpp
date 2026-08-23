@@ -143,6 +143,27 @@ void Pipeline::destroy()
 
 // ── PipelineLayoutBuilder ─────────────────────────────────────────────────────
 
+namespace
+{
+    // The declarator a descriptor type came from, for the mismatch message.
+    const char* declarator_name(VkDescriptorType type)
+    {
+        switch (type)
+        {
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+                return "uniform_buffer";
+            case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+                return "storage_buffer";
+            case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+                return "texture";
+            case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+                return "storage_image";
+            default:
+                return "?";
+        }
+    }
+} // namespace
+
 void PipelineLayoutBuilder::add_binding(
     uint32_t binding,
     VkShaderStageFlags stageFlags,
@@ -165,6 +186,21 @@ void PipelineLayoutBuilder::add_binding(
         // one of the two numbers is wrong and the layout can only hold one, so
         // it is a user error rather than something to merge. The builder verbs
         // chain and have no error channel, so the diagnosis waits for build().
+        // A different TYPE is the count mismatch's twin and gets the same
+        // channel (0.30). The first declaration used to win silently, so
+        // .texture(0, VERTEX).storage_buffer(0, FRAGMENT) built a layout the
+        // second call never described.
+        if (it->descriptorType != descriptorType)
+        {
+            error_ = err_shader(
+                std::format(
+                    "binding {} of set {} is declared as .{}() and again as .{}(). "
+                    "Use one declarator for a binding, or two bindings.",
+                    binding,
+                    setIndex,
+                    declarator_name(it->descriptorType),
+                    declarator_name(descriptorType)));
+        }
         if (it->descriptorCount != count)
         {
             error_ = err_shader(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import IntEnum, IntFlag
-from typing import Any, Callable, Optional, Sequence, overload
+from typing import Any, Callable, Optional, Sequence, Union, overload
 
 import numpy as np
 
@@ -1281,20 +1281,20 @@ class GraphicsPipelineBuilder:
         comes from the target build() is called with — there is no samples knob
         here."""
         ...
-    def push_constant(self, size: int, stage: ShaderStage) -> GraphicsPipelineBuilder: ...
-    # Declaring the same (set, binding) twice MERGES the stages rather than
-    # conflicting, so a camera UBO that both stages read is spelled:
+    def push_constant(self, size: int, stage: Union[ShaderStage, Sequence[ShaderStage]]) -> GraphicsPipelineBuilder: ...
+    # A binding read by two stages takes both in one call (0.30):
     #
-    #     .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
-    #     .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
+    #     .uniform_buffer(0, [bz.ShaderStage.VERTEX, bz.ShaderStage.FRAGMENT])
     #
-    # This has always worked and the stub never said so, which made it look like
-    # a mistake (0.24). It applies to every declarator below, not only this one.
-    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
+    # Declaring the same (set, binding) twice, once per stage, still MERGES the
+    # stages rather than conflicting — the sequence is the same merge, spelled
+    # once. Re-declaring with a DIFFERENT declarator or count raises at
+    # build(). This applies to every declarator below and to push_constant.
+    def uniform_buffer(self, binding: int, stage: Union[ShaderStage, Sequence[ShaderStage]], set: int = 0, count: int = 1,
                        update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder: ...
-    def storage_buffer(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
+    def storage_buffer(self, binding: int, stage: Union[ShaderStage, Sequence[ShaderStage]], set: int = 0, count: int = 1,
                        update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder: ...
-    def texture(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
+    def texture(self, binding: int, stage: Union[ShaderStage, Sequence[ShaderStage]], set: int = 0, count: int = 1,
                 update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder:
         """A sampled image binding.
 
@@ -1324,7 +1324,7 @@ class GraphicsPipelineBuilder:
         budget, so off is the cheaper side.
         """
         ...
-    def storage_image(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
+    def storage_image(self, binding: int, stage: Union[ShaderStage, Sequence[ShaderStage]], set: int = 0, count: int = 1,
                       update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder:
         """A read/write image addressed by coordinate (imageLoad/imageStore) in a
         graphics shader.

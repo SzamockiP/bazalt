@@ -611,6 +611,32 @@ inline void require_sliced_when_3d(const RenderTarget& target, const char* what)
     }
 }
 
+// One stage or a sequence of them, for the declarators and push_constant
+// (ergonomics #6, 0.30). The C++ merge is the feature — the binding layer
+// loops the declarator once per stage and add_binding ORs the flags — so a
+// second merge in C++ would be two places to keep equal.
+inline std::vector<ShaderStage> stages_of(const py::object& stage, const char* what)
+{
+    if (py::isinstance<ShaderStage>(stage))
+    {
+        return {py::cast<ShaderStage>(stage)};
+    }
+    std::vector<ShaderStage> out;
+    for (const auto& item : py::cast<py::sequence>(stage))
+    {
+        out.push_back(py::cast<ShaderStage>(item));
+    }
+    if (out.empty())
+    {
+        raise_error(err_resource(
+            std::format(
+                "{}: stage= is an empty sequence. Pass one ShaderStage, or a sequence of them, "
+                "for example stage=[bz.ShaderStage.VERTEX, bz.ShaderStage.FRAGMENT].",
+                what)));
+    }
+    return out;
+}
+
 // Resolves a list's element type from the explicit numpy dtype or the first
 // element. `int_default` is the caller's policy: create_buffer infers UINT32
 // for integers going into an INDEX buffer, update infers INT32 — a deliberate
