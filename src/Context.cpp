@@ -1485,8 +1485,11 @@ std::expected<void, Error> Context::create_device_(Context& ctx)
     std::uint32_t distinct = 0;
     for (const QueueRuntime* q : ctx.runtimes_)
     {
-        const auto end = ctx.sharing_families_.begin() + distinct;
-        if (std::find(ctx.sharing_families_.begin(), end, q->family) == end)
+        // A span over what has been kept so far: std::array's begin() is a
+        // pointer in libstdc++ and a class iterator in MSVC's STL, and only
+        // this spelling reads the same to both.
+        const std::span seen(ctx.sharing_families_.data(), distinct);
+        if (std::ranges::find(seen, q->family) == seen.end())
         {
             ctx.sharing_families_[distinct++] = q->family;
         }

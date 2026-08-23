@@ -1145,7 +1145,7 @@ std::expected<void, Error> CommandBuffer::update_buffer(
 }
 
 std::expected<void, Error> CommandBuffer::copy_buffer_to_image(
-    std::shared_ptr<Buffer> buffer,
+    const std::shared_ptr<Buffer>& buffer,
     const std::shared_ptr<Image>& image,
     std::uint32_t layer,
     std::uint32_t mip,
@@ -1190,7 +1190,7 @@ std::expected<void, Error> CommandBuffer::copy_buffer_to_image(
 
 std::expected<void, Error> CommandBuffer::copy_image_to_buffer(
     const std::shared_ptr<Image>& image,
-    std::shared_ptr<Buffer> buffer,
+    const std::shared_ptr<Buffer>& buffer,
     std::uint32_t layer,
     std::uint32_t mip,
     VkDeviceSize buffer_offset,

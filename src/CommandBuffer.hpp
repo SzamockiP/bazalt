@@ -357,7 +357,7 @@ public:
     // for. The buffer bytes start at buffer_offset. Legal on every queue,
     // including Queue.TRANSFER; the subresource ends in SHADER_READ_ONLY.
     std::expected<void, Error> copy_buffer_to_image(
-        std::shared_ptr<Buffer> buffer,
+        const std::shared_ptr<Buffer>& buffer,
         const std::shared_ptr<Image>& image,
         std::uint32_t layer = 0,
         std::uint32_t mip = 0,
@@ -368,7 +368,7 @@ public:
     // copy_image's does; the subresource ends in SHADER_READ_ONLY.
     std::expected<void, Error> copy_image_to_buffer(
         const std::shared_ptr<Image>& image,
-        std::shared_ptr<Buffer> buffer,
+        const std::shared_ptr<Buffer>& buffer,
         std::uint32_t layer = 0,
         std::uint32_t mip = 0,
         VkDeviceSize buffer_offset = 0,

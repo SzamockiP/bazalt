@@ -615,7 +615,13 @@ private:
                 {
                     auto [ss, sa] =
                         with_first_use_floor(st.write_stages | st.read_stages, st.write_access | st.read_access);
-                    result = ImageBarrier{old, layout, ss, stages, sa, access};
+                    result = ImageBarrier{
+                        .old_layout = old,
+                        .new_layout = layout,
+                        .src_stages = ss,
+                        .dst_stages = stages,
+                        .src_access = sa,
+                        .dst_access = access};
                 }
             }
             else if (layout_change)
@@ -623,7 +629,12 @@ private:
                 // The other queue's work is already complete and visible by the
                 // time this batch runs (the semaphore wait says so), so the
                 // transition needs no source scope — only the layout move.
-                result = ImageBarrier{old, layout, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, stages, 0, access};
+                result = ImageBarrier{
+                    .old_layout = old,
+                    .new_layout = layout,
+                    .src_stages = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    .dst_stages = stages,
+                    .dst_access = access};
             }
             st = {};
             st.layout = layout;
@@ -647,11 +658,22 @@ private:
                 {
                     auto [ss, sa] = with_first_use_floor(
                         st.written ? st.write_stages : st.read_stages, st.written ? st.write_access : st.read_access);
-                    result = ImageBarrier{old, layout, ss, stages, sa, access};
+                    result = ImageBarrier{
+                        .old_layout = old,
+                        .new_layout = layout,
+                        .src_stages = ss,
+                        .dst_stages = stages,
+                        .src_access = sa,
+                        .dst_access = access};
                 }
                 else if (layout_change)
                 {
-                    result = ImageBarrier{old, layout, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, stages, 0, access};
+                    result = ImageBarrier{
+                        .old_layout = old,
+                        .new_layout = layout,
+                        .src_stages = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        .dst_stages = stages,
+                        .dst_access = access};
                 }
                 if (st.written && st.write_queue == queue_)
                 {

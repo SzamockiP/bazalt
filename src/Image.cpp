@@ -121,11 +121,22 @@ VkImageView Image::subresource_view(std::optional<std::uint32_t> layer, std::opt
     // A narrowed layer is a 2D view; a mip-only narrowing keeps the image's
     // own type, which for a 3D image is 3D and for a cube is CUBE (or
     // 2D_ARRAY when it is bound as storage — a CUBE view is illegal there).
-    const VkImageViewType type = layer               ? VK_IMAGE_VIEW_TYPE_2D
-                                 : depth_ > 1        ? VK_IMAGE_VIEW_TYPE_3D
-                                 : cube_             ? (storage ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_CUBE)
-                                 : array_layers_ > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
-                                                     : VK_IMAGE_VIEW_TYPE_2D;
+    const VkImageViewType type = [&]
+    {
+        if (layer)
+        {
+            return VK_IMAGE_VIEW_TYPE_2D;
+        }
+        if (depth_ > 1)
+        {
+            return VK_IMAGE_VIEW_TYPE_3D;
+        }
+        if (cube_)
+        {
+            return storage ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_CUBE;
+        }
+        return array_layers_ > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    }();
 
     const auto key = std::tuple{type, base_layer, layer_count, base_mip, mip_count};
     if (const auto it = subresource_views_.find(key); it != subresource_views_.end())
@@ -774,7 +785,8 @@ void Image::record_reload_commands(
     std::uint32_t mips,
     VkPipelineStageFlags legal)
 {
-    const StageAccess src = narrow_src({VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT}, legal);
+    const StageAccess src =
+        narrow_src({.stages = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, .access = VK_ACCESS_SHADER_READ_BIT}, legal);
     record_image_transition(
         context_->vk(),
         cmd,
@@ -812,8 +824,10 @@ void Image::record_update_commands(
     // Narrowed to the replaying family (0.30): on a transfer-only family no
     // shader stage may be named, and the cross-queue WAR those scopes carried
     // is the worker's graphics-timeline wait instead.
-    const StageAccess src = narrow_src({context_->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT}, legal);
-    const StageAccess dst = narrow_dst({context_->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT}, legal);
+    const StageAccess src =
+        narrow_src({.stages = context_->all_shader_stages(), .access = VK_ACCESS_SHADER_READ_BIT}, legal);
+    const StageAccess dst =
+        narrow_dst({.stages = context_->all_shader_stages(), .access = VK_ACCESS_SHADER_READ_BIT}, legal);
     record_image_transition(
         context_->vk(),
         cmd,
@@ -1080,7 +1094,8 @@ void Image::record_copy_(VkCommandBuffer cmd, VkBuffer staging, std::uint32_t mi
     // queue — that is the layout the cascade starts from.
     if (mips == 1)
     {
-        const StageAccess dst = narrow_dst({VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT}, legal);
+        const StageAccess dst =
+            narrow_dst({.stages = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, .access = VK_ACCESS_SHADER_READ_BIT}, legal);
         record_image_transition(
             context_->vk(),
             cmd,
@@ -1203,9 +1218,11 @@ void record_buffer_image_copy(
     VkPipelineStageFlags legal_stages)
 {
     const StageAccess shader_src = narrow_src(
-        {image.owner()->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT}, legal_stages);
+        {.stages = image.owner()->all_shader_stages(),
+         .access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT},
+        legal_stages);
     const StageAccess shader_dst =
-        narrow_dst({image.owner()->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT}, legal_stages);
+        narrow_dst({.stages = image.owner()->all_shader_stages(), .access = VK_ACCESS_SHADER_READ_BIT}, legal_stages);
     const std::uint32_t w = (std::ranges::max)(image.width() >> mip, 1u);
     const std::uint32_t h = (std::ranges::max)(image.height() >> mip, 1u);
     const std::uint32_t d = (std::ranges::max)(image.depth() >> mip, 1u);
@@ -1218,7 +1235,10 @@ void record_buffer_image_copy(
         to_image ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         to_image ? VkAccessFlags{0} : shader_src.access,
         to_image ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT,
-        to_image ? shader_src.stages : shader_src.stages,
+        // The same scope either way: a to_image copy discards from UNDEFINED
+        // and names no access, so only the destination half of the pair
+        // differs above.
+        shader_src.stages,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         image.aspect(),
         mip,
@@ -1278,9 +1298,10 @@ void record_image_copy(
     // does, and narrow_* hands back the empty scopes — the pipe ends with no
     // access — rather than a zero mask, which is a validation error.
     const StageAccess shader_src = narrow_src(
-        {src.owner()->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT}, legal_stages);
+        {.stages = src.owner()->all_shader_stages(), .access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT},
+        legal_stages);
     const StageAccess shader_dst =
-        narrow_dst({src.owner()->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT}, legal_stages);
+        narrow_dst({.stages = src.owner()->all_shader_stages(), .access = VK_ACCESS_SHADER_READ_BIT}, legal_stages);
     const std::uint32_t layers = src.array_layers();
     const std::uint32_t barrier_span = src.barrier_layers(layers);
     // Every level the two images share. 0.17 copied mip 0 only and called the

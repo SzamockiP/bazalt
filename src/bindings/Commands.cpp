@@ -437,7 +437,7 @@ void bind_commands(py::module_& m)
         .def(
             "copy_buffer_to_image",
             [](std::shared_ptr<Pass> self,
-               std::shared_ptr<Buffer> buffer,
+               const std::shared_ptr<Buffer>& buffer,
                const std::shared_ptr<Image>& image,
                std::uint32_t layer,
                std::uint32_t mip,
@@ -446,9 +446,7 @@ void bind_commands(py::module_& m)
                 guard(*self, Pass::VerbScope::General, "copy_buffer_to_image");
                 require_same_context(self->recorder().owner(), buffer->owner(), "copy_buffer_to_image");
                 require_same_context(self->recorder().owner(), image->owner(), "copy_buffer_to_image");
-                unwrap(
-                    self->recorder().copy_buffer_to_image(std::move(buffer), image, layer, mip, buffer_offset),
-                    nullptr);
+                unwrap(self->recorder().copy_buffer_to_image(buffer, image, layer, mip, buffer_offset), nullptr);
                 return self;
             },
             py::arg("buffer").none(false),
@@ -461,7 +459,7 @@ void bind_commands(py::module_& m)
             "copy_image_to_buffer",
             [](std::shared_ptr<Pass> self,
                const std::shared_ptr<Image>& image,
-               std::shared_ptr<Buffer> buffer,
+               const std::shared_ptr<Buffer>& buffer,
                std::uint32_t layer,
                std::uint32_t mip,
                VkDeviceSize buffer_offset,
@@ -471,8 +469,7 @@ void bind_commands(py::module_& m)
                 require_same_context(self->recorder().owner(), buffer->owner(), "copy_image_to_buffer");
                 require_same_context(self->recorder().owner(), image->owner(), "copy_image_to_buffer");
                 unwrap(
-                    self->recorder().copy_image_to_buffer(
-                        image, std::move(buffer), layer, mip, buffer_offset, src_access),
+                    self->recorder().copy_image_to_buffer(image, buffer, layer, mip, buffer_offset, src_access),
                     nullptr);
                 return self;
             },

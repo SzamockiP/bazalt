@@ -266,7 +266,7 @@ namespace
         {
             return "ALL_COMMANDS";
         }
-        static constexpr std::pair<VkPipelineStageFlags, const char*> kNames[] = {
+        static constexpr std::array<std::pair<VkPipelineStageFlags, const char*>, 17> kNames = {{
             {VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, "TOP_OF_PIPE"},
             {VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, "DRAW_INDIRECT"},
             {VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, "VERTEX_INPUT"},
@@ -284,7 +284,7 @@ namespace
             {VK_PIPELINE_STAGE_HOST_BIT, "HOST"},
             {VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, "ALL_GRAPHICS"},
             {VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, "ALL_COMMANDS"},
-        };
+        }};
         std::string out;
         VkPipelineStageFlags rest = stages;
         for (const auto& [bit, name] : kNames)
@@ -312,7 +312,7 @@ namespace
         {
             return "ANY";
         }
-        static constexpr std::pair<VkAccessFlags, const char*> kNames[] = {
+        static constexpr std::array<std::pair<VkAccessFlags, const char*>, 17> kNames = {{
             {VK_ACCESS_INDIRECT_COMMAND_READ_BIT, "INDIRECT_COMMAND_READ"},
             {VK_ACCESS_INDEX_READ_BIT, "INDEX_READ"},
             {VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT, "VERTEX_ATTRIBUTE_READ"},
@@ -330,7 +330,7 @@ namespace
             {VK_ACCESS_HOST_WRITE_BIT, "HOST_WRITE"},
             {VK_ACCESS_MEMORY_READ_BIT, "MEMORY_READ"},
             {VK_ACCESS_MEMORY_WRITE_BIT, "MEMORY_WRITE"},
-        };
+        }};
         std::string out;
         VkAccessFlags rest = access;
         for (const auto& [bit, name] : kNames)
@@ -585,9 +585,18 @@ std::expected<std::string, Error> Graph::explain()
             {
                 continue;
             }
-            const std::string what = e.image    ? describe(*e.image)
-                                     : e.buffer ? describe(*e.buffer)
-                                                : std::string("attachment");
+            const std::string what = [&]
+            {
+                if (e.image)
+                {
+                    return describe(*e.image);
+                }
+                if (e.buffer)
+                {
+                    return describe(*e.buffer);
+                }
+                return std::string("attachment");
+            }();
             const std::string producer = e.producer == ResourceTracker::kNoPass
                                              ? std::string("outside this graph or a previous replay (first use)")
                                              : std::format(
@@ -738,9 +747,15 @@ void Graph::warn_manual_hazard_(
     {
         const auto src = access_for(prev_stages, prev_access, std::nullopt, all_shaders);
         const auto dst = access_for(e.stages, e.access, is_image ? std::optional(e.layout) : std::nullopt, all_shaders);
-        const std::string handle = is_image
-                                       ? (e.image->name().empty() ? std::string("<the image>") : e.image->name())
-                                       : (e.buffer->name().empty() ? std::string("<the buffer>") : e.buffer->name());
+        const std::string handle = [&]
+        {
+            const std::string& named = is_image ? e.image->name() : e.buffer->name();
+            if (!named.empty())
+            {
+                return named;
+            }
+            return std::string(is_image ? "<the image>" : "<the buffer>");
+        }();
         if (src.has_value() && dst.has_value())
         {
             text += std::format(
@@ -867,7 +882,7 @@ std::expected<void, Error> Graph::compile_()
         // batch: a dependency inside one batch is a pipeline barrier, and one
         // that crosses batches on different queues is a semaphore wait, which
         // only the submit can emit.
-        const std::size_t pass_index = static_cast<std::size_t>(&cp - compiled_.data());
+        const auto pass_index = static_cast<std::size_t>(&cp - compiled_.data());
         tracker.set_batch(cp.batch, batch.queue, pass_index);
         std::vector<std::size_t>& waits = batch.waits;
 
@@ -942,12 +957,12 @@ std::expected<void, Error> Graph::compile_()
                     if (b)
                     {
                         as_image = ResourceTracker::ImageBarrier{
-                            VK_IMAGE_LAYOUT_UNDEFINED,
-                            VK_IMAGE_LAYOUT_UNDEFINED,
-                            b->src_stages,
-                            b->dst_stages,
-                            b->src_access,
-                            b->dst_access};
+                            .old_layout = VK_IMAGE_LAYOUT_UNDEFINED,
+                            .new_layout = VK_IMAGE_LAYOUT_UNDEFINED,
+                            .src_stages = b->src_stages,
+                            .dst_stages = b->dst_stages,
+                            .src_access = b->src_access,
+                            .dst_access = b->dst_access};
                     }
                     record_explain_(
                         pass_index,
@@ -1088,19 +1103,15 @@ std::expected<void, Error> Graph::compile_()
                     .pass = pass_index,
                     .image = image,
                     .b =
-                        {clears ? VK_IMAGE_LAYOUT_UNDEFINED : rt.final_layout(),
-                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                         0,
-                         0,
-                         0,
-                         0},
+                        {.old_layout = clears ? VK_IMAGE_LAYOUT_UNDEFINED : rt.final_layout(),
+                         .new_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                     .note = std::format("color[{}]{}", index, clears ? " (clear)" : " (preserve)")};
                 explain_.push_back(std::move(entry));
                 ExplainEntry exit{
                     .kind = cp.elide_exit ? ExplainEntry::Kind::Elided : ExplainEntry::Kind::Retire,
                     .pass = pass_index,
                     .image = image,
-                    .b = {VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, rt.final_layout(), 0, 0, 0, 0},
+                    .b = {.old_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .new_layout = rt.final_layout()},
                     .note = std::format("color[{}]", index)};
                 explain_.push_back(std::move(exit));
                 ++index;
@@ -1132,7 +1143,7 @@ void Graph::correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, 
 {
     RenderTarget& rt = *cp.pass->target();
     const VkImageLayout wanted = rt.final_layout();
-    const std::size_t pass_index = static_cast<std::size_t>(&cp - compiled_.data());
+    const auto pass_index = static_cast<std::size_t>(&cp - compiled_.data());
     for (const auto& image : rt.written_color_images())
     {
         if (!tracker.layouts_differ(image.get(), wanted))
