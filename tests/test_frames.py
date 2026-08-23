@@ -50,7 +50,7 @@ def test_headless_submits_rotate_the_ring(ctx, fullscreen_vert):
                 .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(target))
 
-    ubuf = ctx.create_buffer([1.0, 0.0, 0.0, 1.0], bz.BufferType.UNIFORM,
+    ubuf = ctx.create_buffer([1.0, 0.0, 0.0, 1.0], bz.BufferUsage.UNIFORM,
                              bz.MemoryUsage.DYNAMIC)
     pool = ctx.create_descriptor_pool(max_sets=8, uniform_buffers=8)
     dset = pool.allocate_frame_set(pipeline, set=0)
@@ -86,7 +86,7 @@ def test_update_before_each_submit_always_wins(ctx, fullscreen_vert):
                 .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(target))
 
-    ubuf = ctx.create_buffer(16, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+    ubuf = ctx.create_buffer(16, bz.BufferUsage.UNIFORM, bz.MemoryUsage.DYNAMIC)
     pool = ctx.create_descriptor_pool(max_sets=8, uniform_buffers=8)
     dset = pool.allocate_frame_set(pipeline, set=0)
     dset.set_buffer(0, ubuf)

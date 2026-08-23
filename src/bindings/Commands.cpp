@@ -71,10 +71,10 @@ void bind_commands(py::module_& m)
             {
                 guard(*self, Pass::VerbScope::Render, "bind_vertex_buffer");
                 require_same_context(self->recorder().owner(), buffer->owner(), "bind_vertex_buffer");
-                self->recorder().bind_vertex_buffer(buffer, binding);
+                unwrap(self->recorder().bind_vertex_buffer(buffer, binding), nullptr);
                 return self;
             },
-            py::arg("buffer"),
+            py::arg("buffer").none(false),
             py::arg("binding") = 0)
         .def(
             "bind_index_buffer",

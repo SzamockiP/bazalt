@@ -165,13 +165,13 @@ def cube(s):
 
 
 room_v, room_i = room(8.0)
-room_vbuf = ctx.create_buffer(np.array(room_v, np.float32), bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
-room_ibuf = ctx.create_buffer(np.array(room_i, np.uint32), bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
+room_vbuf = ctx.create_buffer(np.array(room_v, np.float32), bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
+room_ibuf = ctx.create_buffer(np.array(room_i, np.uint32), bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 room_count = len(room_i)
 
 cube_v, cube_i = cube(1.0)
-cube_vbuf = ctx.create_buffer(np.array(cube_v, np.float32), bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
-cube_ibuf = ctx.create_buffer(np.array(cube_i, np.uint32), bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
+cube_vbuf = ctx.create_buffer(np.array(cube_v, np.float32), bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
+cube_ibuf = ctx.create_buffer(np.array(cube_i, np.uint32), bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 cube_count = len(cube_i)
 
 

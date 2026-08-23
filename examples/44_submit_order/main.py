@@ -97,7 +97,7 @@ def expected_value():
 
 def run(mode):
     values = ctx.create_buffer(np.zeros(N, dtype=np.uint32),
-                               bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                               bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     graphs = make_step_graphs(values)
 
     start = time.perf_counter()

@@ -98,7 +98,7 @@ std::expected<std::shared_ptr<StaticBuffer>, Error> StaticBuffer::create(
     Context& context,
     const void* data,
     size_t data_size,
-    BufferType type)
+    BufferUsage type)
 {
     const VkBufferUsageFlags usage = buffer_usage_for(type, context.supports(Feature::BUFFER_ADDRESS));
 
@@ -216,7 +216,7 @@ DynamicBuffer::DynamicBuffer(
     std::vector<VkBuffer> buffers,
     std::vector<VmaAllocation> allocations,
     size_t size,
-    BufferType type)
+    BufferUsage type)
     : context_(std::move(context)),
       buffers_(std::move(buffers)),
       allocations_(std::move(allocations)),
@@ -286,7 +286,7 @@ std::expected<std::shared_ptr<DynamicBuffer>, Error> DynamicBuffer::create(
     Context& context,
     const void* data,
     size_t data_size,
-    BufferType type)
+    BufferUsage type)
 {
     const VkBufferUsageFlags usage = buffer_usage_for(type, context.supports(Feature::BUFFER_ADDRESS));
 
@@ -312,7 +312,7 @@ std::expected<std::shared_ptr<DynamicBuffer>, Error> DynamicBuffer::create(
     {
         if (auto e = check(
                 vmaCreateBuffer(context.allocator(), &bufferInfo, &allocInfo, &buffers[i], &allocations[i], nullptr),
-                std::string("create dynamic ") + buffer_type_name(type) + " buffer",
+                std::string("create dynamic ") + buffer_usage_name(type) + " buffer",
                 ErrorCode::Resource))
         {
             for (size_t j = 0; j < i; ++j)
@@ -340,7 +340,7 @@ std::expected<std::shared_ptr<Buffer>, Error> Buffer::create(
     Context& context,
     const void* data,
     size_t data_size,
-    BufferType type,
+    BufferUsage type,
     MemoryUsage usage)
 {
     // The single funnel for both kinds, which is why the type is recorded here and
@@ -364,6 +364,6 @@ std::expected<std::shared_ptr<Buffer>, Error> Buffer::create(
         }
         buffer = *made;
     }
-    (*buffer)->set_buffer_type(type);
+    (*buffer)->set_buffer_usage(type);
     return buffer;
 }

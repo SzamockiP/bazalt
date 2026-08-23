@@ -158,8 +158,6 @@ std::expected<void, Error> DescriptorSet::set_buffer(uint32_t binding, std::shar
     // No silent fallback: an unknown binding used to be *assumed* to be a
     // UNIFORM_BUFFER, so a typo'd index produced a descriptor write the
     // layout never declared — garbage diagnosed (at best) at submit time.
-    // Either buffer type is accepted here, so the declared one is what gets
-    // written and only a sampler binding is refused.
     auto decl = check_binding(binding, index, "set_buffer");
     if (!decl)
     {
@@ -170,6 +168,25 @@ std::expected<void, Error> DescriptorSet::set_buffer(uint32_t binding, std::shar
     {
         return std::unexpected(
             err_resource(std::format("Binding {} is a sampler binding. Use set_image() for image bindings", binding)));
+    }
+    // The buffer must carry the bit the binding declares (0.30). Before usages
+    // were bits "the declared type is what gets written" was the whole rule,
+    // and a VERTEX buffer on a uniform binding reached the layers as
+    // VUID-VkWriteDescriptorSet-descriptorType-00327. With unions the rule has
+    // to be per bit, or UNIFORM|STORAGE would be the first buffer for which the
+    // old rule is silently wrong.
+    const bool storageBinding = descType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    const BufferUsage needed = storageBinding ? BufferUsage::STORAGE : BufferUsage::UNIFORM;
+    if (!has(buffer->buffer_usage(), needed))
+    {
+        return std::unexpected(err_resource(
+            std::format(
+                "set_buffer: binding {} is a {} binding and this buffer was created with usage={}. "
+                "Create the buffer with BufferUsage.{} in its usage.",
+                binding,
+                storageBinding ? "storage" : "uniform",
+                buffer_usage_name(buffer->buffer_usage()),
+                buffer_usage_name(needed))));
     }
 
     for (size_t i = 0; i < sets_.size(); i++)

@@ -44,7 +44,7 @@ def test_every_recording_method_returns_the_same_object(ctx, triangle_shaders, t
 
     q = g.add_pass()
     assert q.dispatch is not None  # a verb, not a value — the identity check:
-    assert q.fill_buffer(ctx.create_buffer(16, bz.BufferType.STORAGE,
+    assert q.fill_buffer(ctx.create_buffer(16, bz.BufferUsage.STORAGE,
                                            bz.MemoryUsage.STATIC), 0) is q
 
 

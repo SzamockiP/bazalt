@@ -49,7 +49,7 @@ def test_dispatch_to_dispatch_gets_a_barrier(ctx, double_pipeline, add_one_pipel
     """(x * 2) + 1 requires the second dispatch to see the first one's writes —
     inside one pass, scheduled at the recorded position."""
     data = np.arange(64, dtype=np.float32)
-    sbuf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    sbuf = ctx.create_buffer(data, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool_a, dset_a = make_set(ctx, double_pipeline, sbuf)
     pool_b, dset_b = make_set(ctx, add_one_pipeline, sbuf)
 
@@ -71,7 +71,7 @@ def test_dispatch_pass_to_dispatch_pass_gets_a_barrier(ctx, double_pipeline, add
     write as the second pass's named predecessor, so the barrier is the precise
     cross-pass edge — not a floor."""
     data = np.arange(64, dtype=np.float32)
-    sbuf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    sbuf = ctx.create_buffer(data, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool_a, dset_a = make_set(ctx, double_pipeline, sbuf)
     pool_b, dset_b = make_set(ctx, add_one_pipeline, sbuf)
 
@@ -98,7 +98,7 @@ def test_dispatch_to_draw_via_descriptor_read(ctx, fullscreen_vert, double_pipel
 
     # double.comp turns (0, 0, 0.5, 0.5) into the (0, 0, 1, 1) ssbo.frag paints.
     sbuf = ctx.create_buffer(np.array([0.0, 0.0, 0.5, 0.5], dtype=np.float32),
-                             bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                             bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     comp_pool, comp_set = make_set(ctx, double_pipeline, sbuf)
     gfx_pool, gfx_set = make_set(ctx, gfx, sbuf)
 
@@ -136,7 +136,7 @@ def test_dispatch_to_vertex_fetch_lands_in_the_entry_batch(ctx, double_pipeline)
     # Garbage in: the triangle only covers the screen if the dispatch's writes
     # actually reached the vertex fetch.
     verts = ctx.create_buffer(np.zeros(6, dtype=np.float32),
-                              bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                              bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool, dset = make_set(ctx, write_verts, verts)
 
     g = ctx.graph()
@@ -164,7 +164,7 @@ def test_draw_then_dispatch_is_write_after_read(ctx, double_pipeline):
            .build(target))
 
     tri = np.array([-1.0, -1.0, -1.0, 3.0, 3.0, -1.0], dtype=np.float32)
-    verts = ctx.create_buffer(tri, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    verts = ctx.create_buffer(tri, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool, dset = make_set(ctx, write_verts, verts)
 
     g = ctx.graph()
@@ -216,7 +216,7 @@ def run_render_then_sample_case(reader):
         [0.9, 0.9, 0.2, 0.0, 1.0, 0.0],
         [0.0, -0.9, 0.2, 0.0, 0.0, 1.0],
     ], dtype=np.float32)
-    vbuf = ctx.create_buffer(tri, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+    vbuf = ctx.create_buffer(tri, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
     offscreen = ctx.create_render_target(32, 32)
     drawn = (ctx.graphics_pipeline()
              .vertex_shader(vert)
@@ -327,7 +327,7 @@ def test_manual_mode_with_explicit_barriers_is_clean(ctx, double_pipeline, add_o
     """Same dispatch chain as the auto test, barriers spelled by hand in a
     manual pass."""
     data = np.arange(64, dtype=np.float32)
-    sbuf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    sbuf = ctx.create_buffer(data, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool_a, dset_a = make_set(ctx, double_pipeline, sbuf)
     pool_b, dset_b = make_set(ctx, add_one_pipeline, sbuf)
 
@@ -353,7 +353,7 @@ def test_a_manual_pass_seeds_its_auto_neighbours(ctx, double_pipeline, add_one_p
     referee is the fixture: a stale-layout double transition would be a
     validation error."""
     data = np.arange(64, dtype=np.float32)
-    sbuf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    sbuf = ctx.create_buffer(data, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool_a, dset_a = make_set(ctx, double_pipeline, sbuf)
     pool_b, dset_b = make_set(ctx, add_one_pipeline, sbuf)
 
@@ -375,7 +375,7 @@ def test_a_manual_pass_seeds_its_auto_neighbours(ctx, double_pipeline, add_one_p
 def test_barrier_in_a_render_pass_is_refused(ctx, triangle_shaders, triangle_buffers):
     target = ctx.create_render_target(16, 16)
     sbuf = ctx.create_buffer(np.zeros(4, dtype=np.float32),
-                             bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                             bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     g = ctx.graph()
     p = g.add_pass(target, auto_barriers=False)
@@ -424,7 +424,7 @@ def sync_setup(auto):
     comp = context.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
     pipeline = context.compute_pipeline().shader(comp).storage_buffer(0).build()
     sbuf = context.create_buffer(np.arange(64, dtype=np.float32),
-                                 bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                                 bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = context.create_descriptor_pool(max_sets=8, storage_buffers=8)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, sbuf)
@@ -472,7 +472,7 @@ def run_cross_graph_case(auto):
     writer.add_pass().bind_pipeline(pipeline) \
         .bind_descriptor_set(dset, pipeline, set=0).dispatch(1)
 
-    # The reader draws straight out of the storage buffer: BufferType.STORAGE
+    # The reader draws straight out of the storage buffer: BufferUsage.STORAGE
     # carries VERTEX_BUFFER_BIT, so no second resource is needed to express
     # "compute produced these vertices".
     vert = context.compile_shader(str(SHADER_DIR / "triangle.vert"), bz.ShaderStage.VERTEX)
@@ -604,7 +604,7 @@ def run_attachment_read_then_redraw_case():
         [0.0, -0.5, 0.0, 1.0, 0.0, 0.0,
          -0.5, 0.5, 0.0, 0.0, 1.0, 0.0,
          0.5, 0.5, 0.0, 0.0, 0.0, 1.0],
-        bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+        bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
     # The compute half samples the attachment into a storage image, so its read
     # of the attachment is a descriptor use the fold can see.
@@ -676,7 +676,7 @@ def run_note_then_cross_queue_read_case(kind):
     comp = context.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
     write = context.compute_pipeline().shader(comp).storage_buffer(0).build()
     sbuf = context.create_buffer(np.arange(64, dtype=np.float32),
-                                 bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                                 bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = context.create_descriptor_pool(max_sets=8, storage_buffers=8)
     write_set = pool.allocate_set(write, set=0)
     write_set.set_buffer(0, sbuf)
@@ -726,7 +726,7 @@ def run_preserve_chain_case():
         [0.5, -0.5, 0.0, 0.0, 1.0, 0.0],
         [0.0, 0.5, 0.0, 0.0, 0.0, 1.0],
     ], dtype=np.float32)
-    vbuf = context.create_buffer(tri, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+    vbuf = context.create_buffer(tri, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
     g = context.graph()
     with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
@@ -899,7 +899,7 @@ def test_a_transfer_write_can_be_named_by_hand(extra_context):
                 .build())
 
     buf = context.create_buffer(
-        np.full(4, 99, dtype=np.uint32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+        np.full(4, 99, dtype=np.uint32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     g = context.graph()
     p = g.add_pass()
@@ -918,9 +918,9 @@ def test_transfer_read_is_spelled_too(extra_context):
     """The other half: a shader writes, a copy reads."""
     context = extra_context()
     src = context.create_buffer(
-        np.arange(8, dtype=np.uint32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+        np.arange(8, dtype=np.uint32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     dst = context.create_buffer(
-        np.zeros(8, dtype=np.uint32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+        np.zeros(8, dtype=np.uint32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     g = context.graph()
     p = g.add_pass()

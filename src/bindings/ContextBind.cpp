@@ -197,9 +197,9 @@ void bind_context(py::module_& m)
             "create_buffer",
             [](Context& self,
                const py::list& list,
-               BufferType type,
-               MemoryUsage usage,
-               std::optional<DataType> dataType,
+               BufferUsage usage,
+               MemoryUsage memory,
+               const py::object& dtype,
                const std::string& name) -> py::object
             {
                 require_open(self, "create_buffer");
@@ -208,14 +208,16 @@ void bind_context(py::module_& m)
                     raise_error(err_resource("Cannot create buffer from empty list"));
                 }
 
+                // An int list into an INDEX buffer is indices, whatever else the
+                // usage carries.
                 DataType actualType =
-                    resolve_data_type(list, dataType, type == BufferType::INDEX ? DataType::UINT32 : DataType::INT32);
+                    resolve_dtype(list, dtype, has(usage, BufferUsage::INDEX) ? DataType::UINT32 : DataType::INT32);
 
                 auto buffer = with_list_bytes(
                     list,
                     actualType,
                     [&](const void* data, size_t nbytes)
-                    { return unwrap(Buffer::create(self, data, nbytes, type, usage), self.logger().get()); });
+                    { return unwrap(Buffer::create(self, data, nbytes, usage, memory), self.logger().get()); });
                 // Recorded so bind_index_buffer can pick VK_INDEX_TYPE_UINT16 vs UINT32
                 // instead of assuming.
                 buffer->set_data_type(actualType);
@@ -224,21 +226,23 @@ void bind_context(py::module_& m)
             },
             // One name across the three overloads, so the keyword spelling works
             // whichever body the argument picks — and `list` shadowed a builtin (0.23).
+            // `usage`/`memory` since 0.30: `type` shadowed a builtin too, and
+            // `usage` meaning the memory placement contradicted Vulkan's word.
             py::arg("data"),
-            py::arg("type"),
             py::arg("usage"),
-            py::arg("data_type") = py::none(),
+            py::arg("memory"),
             py::kw_only(),
+            py::arg("dtype") = py::none(),
             py::arg("name") = "")
         .def(
             "create_buffer",
-            [](Context& self, const py::buffer& b, BufferType type, MemoryUsage usage, const std::string& name)
+            [](Context& self, const py::buffer& b, BufferUsage usage, MemoryUsage memory, const std::string& name)
                 -> py::object
             {
                 require_open(self, "create_buffer");
                 py::buffer_info info = b.request();
                 auto buffer = unwrap(
-                    Buffer::create(self, info.ptr, contiguous_nbytes(info, "create_buffer"), type, usage),
+                    Buffer::create(self, info.ptr, contiguous_nbytes(info, "create_buffer"), usage, memory),
                     self.logger().get());
                 // The list overload above records the data type so
                 // bind_index_buffer can pick UINT16; this one never did, so a
@@ -253,23 +257,23 @@ void bind_context(py::module_& m)
                 return py::cast(buffer);
             },
             py::arg("data"),
-            py::arg("type"),
             py::arg("usage"),
+            py::arg("memory"),
             py::kw_only(),
             py::arg("name") = "")
         .def(
             "create_buffer",
-            [](Context& self, size_t size_in_bytes, BufferType type, MemoryUsage usage, const std::string& name)
+            [](Context& self, size_t size_in_bytes, BufferUsage usage, MemoryUsage memory, const std::string& name)
                 -> py::object
             {
                 require_open(self, "create_buffer");
-                auto buffer = unwrap(Buffer::create(self, nullptr, size_in_bytes, type, usage), self.logger().get());
+                auto buffer = unwrap(Buffer::create(self, nullptr, size_in_bytes, usage, memory), self.logger().get());
                 name_buffer(self, buffer, name);
                 return py::cast(buffer);
             },
             py::arg("data"),
-            py::arg("type"),
             py::arg("usage"),
+            py::arg("memory"),
             py::kw_only(),
             py::arg("name") = "")
         .def(

@@ -71,9 +71,9 @@ def run(manual_middle):
     between the second scaling and everything around it.
     """
     values = ctx.create_buffer(np.ones(N, dtype=np.float32),
-                               bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                               bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     accumulator = ctx.create_buffer(np.zeros(1, dtype=np.uint32),
-                                    bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                                    bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     pool = ctx.create_descriptor_pool()
     scale_set = pool.allocate_set(scale)

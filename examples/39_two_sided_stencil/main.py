@@ -60,8 +60,8 @@ indices = np.array([
     0, 1, 5, 0, 5, 4,   3, 7, 6, 3, 6, 2,
     0, 4, 7, 0, 7, 3,   1, 2, 6, 1, 6, 5,
 ], dtype=np.uint32)
-vbuf = ctx.create_buffer(positions, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
-ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
+vbuf = ctx.create_buffer(positions, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
+ibuf = ctx.create_buffer(indices, bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 
 
 def cube_pipeline(**stencil):

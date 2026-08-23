@@ -449,11 +449,11 @@ class SceneLoader:
     def build_geometry(self, data):
         self.vertices = self.ctx.create_buffer(
             data["verts"].reshape(-1),
-            type=bz.BufferType.VERTEX, usage=bz.MemoryUsage.STATIC,
+            usage=bz.BufferUsage.VERTEX, memory=bz.MemoryUsage.STATIC,
             name="scene vertices")
         self.indices = self.ctx.create_buffer(
             data["indices"],
-            type=bz.BufferType.INDEX, usage=bz.MemoryUsage.STATIC,
+            usage=bz.BufferUsage.INDEX, memory=bz.MemoryUsage.STATIC,
             name="scene indices")
 
         # Per-submesh AABBs for the culling compute: {centre.xyzw, extents.xyzw}.
@@ -462,7 +462,7 @@ class SceneLoader:
         boxes[:, 4:7] = (data["aabb_max"] - data["aabb_min"]) * 0.5
         self.submesh_boxes = self.ctx.create_buffer(
             boxes.reshape(-1),
-            type=bz.BufferType.STORAGE, usage=bz.MemoryUsage.STATIC,
+            usage=bz.BufferUsage.STORAGE, memory=bz.MemoryUsage.STATIC,
             name="submesh AABBs")
 
     def build_draw_commands(self, data):
@@ -492,7 +492,7 @@ class SceneLoader:
         opaque["index_count"][transparent] = 0
         self.cull_args = self.ctx.create_buffer(
             as_bytes(opaque),
-            type=bz.BufferType.STORAGE, usage=bz.MemoryUsage.STATIC,
+            usage=bz.BufferUsage.STORAGE, memory=bz.MemoryUsage.STATIC,
             name="culled draw args")
 
         glass = cmds[transparent].copy()
@@ -500,7 +500,7 @@ class SceneLoader:
         self.glass_count = len(glass)
         self.glass_args = self.ctx.create_buffer(
             as_bytes(glass) if self.glass_count else 20,
-            type=bz.BufferType.STORAGE, usage=bz.MemoryUsage.STATIC,
+            usage=bz.BufferUsage.STORAGE, memory=bz.MemoryUsage.STATIC,
             name="glass draw args")
 
         # The shadow pass draws everything: the light window's depth range
@@ -509,11 +509,11 @@ class SceneLoader:
         cmds["instance_count"] = 1
         self.shadow_args = self.ctx.create_buffer(
             as_bytes(cmds),
-            type=bz.BufferType.STORAGE, usage=bz.MemoryUsage.STATIC,
+            usage=bz.BufferUsage.STORAGE, memory=bz.MemoryUsage.STATIC,
             name="shadow draw args")
 
         self.visible_counter = self.ctx.create_buffer(
-            4, type=bz.BufferType.STORAGE, usage=bz.MemoryUsage.STATIC,
+            4, usage=bz.BufferUsage.STORAGE, memory=bz.MemoryUsage.STATIC,
             name="visible counter")
 
     def build_materials(self, obj_dir, data):
@@ -696,7 +696,7 @@ class Fireflies:
         flies[:, 7] = rng.uniform(0.0, 100.0, FIREFLY_COUNT)      # seed
         self.buffer = ctx.create_buffer(
             flies.reshape(-1),
-            type=bz.BufferType.STORAGE, usage=bz.MemoryUsage.STATIC,
+            usage=bz.BufferUsage.STORAGE, memory=bz.MemoryUsage.STATIC,
             name="fireflies")
 
         self.sim_pipeline = (ctx.compute_pipeline()
@@ -914,7 +914,7 @@ class DemoApp:
         self.scene = SceneLoader(self.ctx, obj_path)
         self.create_targets()
         self.frame_ubo = self.ctx.create_buffer(
-            208, type=bz.BufferType.UNIFORM, usage=bz.MemoryUsage.DYNAMIC,
+            208, usage=bz.BufferUsage.UNIFORM, memory=bz.MemoryUsage.DYNAMIC,
             name="frame UBO")
         self.create_pool()
         self.create_scene_pipelines(shader)

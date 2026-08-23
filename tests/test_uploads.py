@@ -149,7 +149,7 @@ def test_wait_and_progress_endpoints(ctx, tmp_path):
 
 def test_static_buffer_upload_is_async_and_wait_settles_it(ctx):
     data = np.arange(1024, dtype=np.float32)
-    buf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = ctx.create_buffer(data, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     buf.wait()
     assert buf.ready
 
@@ -157,7 +157,7 @@ def test_static_buffer_upload_is_async_and_wait_settles_it(ctx):
 def test_dynamic_buffers_are_never_pending(ctx):
     """Host-visible memory is written by mapping, so there is no copy to wait
     for and `ready` is the honest constant it looks like."""
-    buf = ctx.create_buffer(np.zeros(16, dtype=np.float32), bz.BufferType.UNIFORM,
+    buf = ctx.create_buffer(np.zeros(16, dtype=np.float32), bz.BufferUsage.UNIFORM,
                             bz.MemoryUsage.DYNAMIC)
     assert buf.ready
 
@@ -167,7 +167,7 @@ def test_reading_a_fresh_static_buffer_needs_no_wait(ctx):
     itself. Without that wait this is a race that returns uninitialized memory
     on any driver that overlaps two submits."""
     data = np.arange(256, dtype=np.float32)
-    buf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = ctx.create_buffer(data, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     np.testing.assert_array_equal(buf.read(np.float32), data)
 
 
@@ -179,8 +179,8 @@ def test_drawing_from_a_fresh_buffer_needs_no_wait(ctx, triangle_shaders):
         -0.5, +0.5, 0.0, 1.0, 0.0, 0.0,
         +0.5, +0.5, 0.0, 1.0, 0.0, 0.0,
     ], dtype=np.float32)
-    vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
-    ibuf = ctx.create_buffer(np.array([0, 1, 2], dtype=np.uint32), bz.BufferType.INDEX,
+    vbuf = ctx.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
+    ibuf = ctx.create_buffer(np.array([0, 1, 2], dtype=np.uint32), bz.BufferUsage.INDEX,
                              bz.MemoryUsage.STATIC)
 
     vert, frag = triangle_shaders
@@ -206,7 +206,7 @@ def test_wait_covers_one_shot_uploads(ctx):
     both be a lie otherwise."""
     ctx.wait()
 
-    buf = ctx.create_buffer(np.zeros(4096, dtype=np.float32), bz.BufferType.STORAGE,
+    buf = ctx.create_buffer(np.zeros(4096, dtype=np.float32), bz.BufferUsage.STORAGE,
                             bz.MemoryUsage.STATIC)
     img = ctx.create_image(np.zeros((256, 256, 4), dtype=np.uint8))
 

@@ -100,9 +100,9 @@ vertices = [
      0.8,  0.8,  1.0, 1.0,
     -0.8,  0.8,  0.0, 1.0,
 ]
-vbuf = viewer.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
-ibuf = viewer.create_buffer([0, 3, 2, 2, 1, 0], bz.BufferType.INDEX,
-                            bz.MemoryUsage.STATIC, bz.DataType.UINT32)
+vbuf = viewer.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
+ibuf = viewer.create_buffer([0, 3, 2, 2, 1, 0], bz.BufferUsage.INDEX,
+                            bz.MemoryUsage.STATIC, dtype=np.uint32)
 
 pool = viewer.create_descriptor_pool()
 dset = pool.allocate_set(pipeline)

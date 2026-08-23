@@ -128,7 +128,7 @@ cascade_blob = (b"".join(bytes(glm.transpose(vp)) for vp in LIGHT_VP)
                 + struct.pack("4f", *CASCADE_EXTENT, 0.0)
                 + struct.pack("4f", LIGHT_DIR.x, LIGHT_DIR.y, LIGHT_DIR.z, 0.0))
 cascade_ubo = ctx.create_buffer(np.frombuffer(cascade_blob, np.float32).copy(),
-                                bz.BufferType.UNIFORM, bz.MemoryUsage.STATIC)
+                                bz.BufferUsage.UNIFORM, bz.MemoryUsage.STATIC)
 
 pool = ctx.create_descriptor_pool()
 scene_set = pool.allocate_set(scene_pipe)
@@ -169,8 +169,8 @@ for (bx, bz_, s) in [(0, 1, 1.0), (5, 1.5, 1.5), (-4, 1, 1.0), (10, 2, 2.0), (-1
     verts += bv
     idx += [base + i for i in bi]
 
-vbuf = ctx.create_buffer(np.array(verts, np.float32), bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
-ibuf = ctx.create_buffer(np.array(idx, np.uint32), bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
+vbuf = ctx.create_buffer(np.array(verts, np.float32), bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
+ibuf = ctx.create_buffer(np.array(idx, np.uint32), bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 index_count = len(idx)
 
 

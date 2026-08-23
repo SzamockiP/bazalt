@@ -25,7 +25,7 @@ def test_auto_pool_takes_no_arguments(ctx):
     pool = ctx.create_descriptor_pool()
     pipe = buffer_pipeline(ctx)
     dset = pool.allocate_set(pipe, set=0)
-    buf = ctx.create_buffer(64, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = ctx.create_buffer(64, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     dset.set_buffer(0, buf)
 
 

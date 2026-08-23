@@ -1,4 +1,5 @@
 import bazalt as bz
+import numpy as np
 
 # Create window, logger, and renderer
 logger = bz.Logger()
@@ -32,12 +33,12 @@ vertices = [
      0.5,  0.5,  1.0, 1.0,
     -0.5,  0.5,  0.0, 1.0,
 ]
-vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+vbuf = ctx.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
 # Counter-clockwise on screen (Vulkan's y points down), so the quad is
 # front-facing under the pipeline's default back-face culling.
 indices = [0, 3, 2, 2, 1, 0]
-ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
+ibuf = ctx.create_buffer(indices, bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC, dtype=np.uint32)
 
 # Descriptors. No sizes on the pool: it reads the layouts it serves and grows a
 # new block whenever one fills. Pass explicit counts only to hand-budget it.

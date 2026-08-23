@@ -90,10 +90,10 @@ for iz in range(GRID):
         ]
 
 vertices = np.array(corners, dtype=np.float32)
-vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+vbuf = ctx.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 patch_vertices = GRID * GRID * 4
 
-ubuf = ctx.create_buffer(16 * 4, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+ubuf = ctx.create_buffer(16 * 4, bz.BufferUsage.UNIFORM, bz.MemoryUsage.DYNAMIC)
 pool = ctx.create_descriptor_pool()
 desc_set = pool.allocate_frame_set(solid)
 desc_set.set_buffer(0, ubuf)

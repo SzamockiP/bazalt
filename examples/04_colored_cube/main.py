@@ -102,7 +102,7 @@ vertices = np.array([
      0.5,  0.5,  0.5,   0.0, 1.0, 0.0,
     -0.5,  0.5,  0.5,   0.0, 1.0, 0.0,
 ], dtype=np.float32)
-vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+vbuf = ctx.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
 indices = np.array([
     0, 1, 2, 2, 3, 0,       # Front
@@ -112,9 +112,9 @@ indices = np.array([
     16, 17, 18, 18, 19, 16, # Top
     23, 22, 21, 21, 20, 23  # Bottom
 ], dtype=np.uint32)
-ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
+ibuf = ctx.create_buffer(indices, bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 
-ubuf = ctx.create_buffer(np.zeros(16, dtype=np.float32), bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+ubuf = ctx.create_buffer(np.zeros(16, dtype=np.float32), bz.BufferUsage.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
 # Descriptors
 pool = ctx.create_descriptor_pool()

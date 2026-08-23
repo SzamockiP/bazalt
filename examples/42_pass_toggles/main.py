@@ -79,7 +79,7 @@ present = (ctx.graphics_pipeline()
 # One image for the whole chain. Every effect reads it and writes it back, so
 # what orders the passes is what they touch rather than what they are.
 image = ctx.create_image(W, H, bz.Format.RGBA8)
-frame_buf = ctx.create_buffer(16, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+frame_buf = ctx.create_buffer(16, bz.BufferUsage.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
 pool = ctx.create_descriptor_pool()
 # allocate_frame_set, not allocate_set: a DYNAMIC buffer has one copy per

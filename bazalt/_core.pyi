@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from enum import IntEnum
+from enum import IntEnum, IntFlag
 from typing import Any, Callable, Optional, Sequence, overload
 
 import numpy as np
@@ -223,17 +223,19 @@ class Feature(IntEnum):
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
-class BufferType(IntEnum):
-    VERTEX = 0
-    INDEX = 1
-    UNIFORM = 2
-    STORAGE = 3
+class BufferUsage(IntFlag):
+    """What a buffer can be bound as. Members combine with `|`, so one buffer
+    can be a vertex buffer and a storage buffer:
 
-class DataType(IntEnum):
-    FLOAT = 0
-    UINT32 = 1
-    UINT16 = 2
-    INT32 = 3
+        BufferUsage.VERTEX | BufferUsage.STORAGE
+
+    STORAGE also carries the vertex, index and indirect bits, so a compute
+    shader can write vertices, indices or draw arguments into one buffer.
+    Bits since 0.30; the name was `BufferType` before."""
+    VERTEX = 1
+    INDEX = 2
+    UNIFORM = 4
+    STORAGE = 8
 
 class ShaderStage(IntEnum):
     """Which stage a shader is compiled for.
@@ -743,8 +745,11 @@ class Buffer:
         """
         ...
     @overload
-    def update(self, data: list, data_type: Optional[DataType] = None, *,
-               offset: int = 0) -> None: ...
+    def update(self, data: list, *, dtype: Any = None, offset: int = 0) -> None:
+        """From a list, packed as `dtype`: np.float32, np.uint32, np.uint16 or
+        np.int32. Without `dtype` the first element decides: a float packs as
+        float32, an int as int32."""
+        ...
 
     def read(self, dtype: Any) -> Any:
         """Copy the buffer back to host memory as a 1-D numpy array.
@@ -1452,12 +1457,12 @@ class Pass:
     def bind_index_buffer(self, buffer: Buffer) -> Pass:
         """Bind the index buffer.
 
-        Takes a `BufferType.INDEX` buffer, or a `BufferType.STORAGE` one when a
-        compute shader writes the indices (0.29). Any other type raises
-        `ResourceError`.
+        Takes a buffer whose usage has `BufferUsage.INDEX`, or
+        `BufferUsage.STORAGE` when a compute shader writes the indices (0.29).
+        Any other usage raises `ResourceError`.
 
         The indices are 32-bit unless the buffer was made with
-        `DataType.UINT16` or from a uint16 array."""
+        `dtype=np.uint16` or from a uint16 array."""
         ...
     def draw(self, vertex_count: int, instances: int = 1) -> Pass: ...
     def draw_indexed(self, index_count: int, first_index: int = 0,
@@ -1478,14 +1483,14 @@ class Pass:
         """Draw with arguments read out of a buffer, so a compute pass decides what
         gets drawn and the CPU never learns the answer (0.19).
 
-        `buffer` must be BufferType.STORAGE — the only type carrying the indirect
-        usage flag, and what a compute shader needs anyway. bazalt declares no
+        `buffer` must have BufferUsage.STORAGE — the only usage carrying the
+        indirect flag, and what a compute shader needs anyway. bazalt declares no
         struct type: the layout is VkDrawIndirectCommand, four uint32s, and numpy
         writes it directly.
 
             args = ctx.create_buffer(
                 np.array([vertex_count, instances, 0, 0], dtype=np.uint32),
-                bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
             p.draw_indirect(args)
 
         A std430 GLSL struct of four uints is byte-identical, so a compute shader
@@ -1495,7 +1500,7 @@ class Pass:
 
         `count_buffer` moves the number of draws onto the GPU too (0.21): `count`
         becomes the maximum, and the 4 bytes at `count_offset` say how many of
-        those commands to issue. It must also be a BufferType.STORAGE buffer, and
+        those commands to issue. It must also have BufferUsage.STORAGE, and
         it needs Feature.DRAW_INDIRECT_COUNT. Without a count buffer the way to
         draw nothing is to write 0 into instanceCount — count=0 is refused,
         because only one of the two can be decided on the GPU.
@@ -2503,15 +2508,22 @@ class Context:
         ...
 
     @overload
-    def create_buffer(self, data: list, type: BufferType, usage: MemoryUsage,
-                      data_type: Optional[DataType] = None, *, name: str = "") -> Buffer: ...
+    def create_buffer(self, data: list, usage: BufferUsage, memory: MemoryUsage,
+                      *, dtype: Any = None, name: str = "") -> Buffer: ...
     @overload
-    def create_buffer(self, data: Any, type: BufferType, usage: MemoryUsage,
+    def create_buffer(self, data: Any, usage: BufferUsage, memory: MemoryUsage,
                       *, name: str = "") -> Buffer: ...
     @overload
-    def create_buffer(self, data: int, type: BufferType,
-                      usage: MemoryUsage, *, name: str = "") -> Buffer:
+    def create_buffer(self, data: int, usage: BufferUsage,
+                      memory: MemoryUsage, *, name: str = "") -> Buffer:
         """A GPU buffer from a list, any C-contiguous array, or a size in bytes.
+
+        `usage` says what the buffer can be bound as and `memory` how it is
+        filled (0.30; the keywords were `type=` and `usage=` before). A list
+        is packed as `dtype` — np.float32, np.uint32, np.uint16 or np.int32 —
+        or, without one, as float32 for a float list and int32 for an int list
+        (uint32 when the usage has INDEX). An array is uploaded as its own
+        bytes.
 
         A STATIC buffer is device-local and filled by a staging copy. That copy
         is ASYNCHRONOUS since 0.18.0: it is submitted here — so a failure still

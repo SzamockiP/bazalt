@@ -236,7 +236,7 @@ public:
     //
     // `shader_writable` says whether a shader can write this buffer at all, which
     // is what narrows the first-use floor below. The caller answers it from the
-    // BufferType, because this file knows Buffer by identity only, on purpose.
+    // BufferUsage, because this file knows Buffer by identity only, on purpose.
     std::optional<Barrier> use(
         Buffer* buffer,
         VkPipelineStageFlags stages,

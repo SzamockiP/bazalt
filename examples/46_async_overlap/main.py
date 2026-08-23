@@ -109,7 +109,7 @@ def seed_points(rng):
 rng = np.random.default_rng(3)
 # Two buffers, and the ping-pong between them is what makes the dispatch and the
 # draw independent inside one frame.
-points_state = [ctx.create_buffer(seed_points(rng), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+points_state = [ctx.create_buffer(seed_points(rng), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
                 for _ in range(2)]
 
 simulate = (ctx.compute_pipeline()

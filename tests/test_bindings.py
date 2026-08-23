@@ -128,7 +128,7 @@ def test_uniform_buffer_via_frame_descriptor_set(ctx, fullscreen_vert):
                 .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(target))
 
-    ubuf = ctx.create_buffer([0.0, 1.0, 0.0, 1.0], bz.BufferType.UNIFORM,
+    ubuf = ctx.create_buffer([0.0, 1.0, 0.0, 1.0], bz.BufferUsage.UNIFORM,
                              bz.MemoryUsage.DYNAMIC)
     pool = ctx.create_descriptor_pool(max_sets=8, uniform_buffers=8)
     dset = pool.allocate_frame_set(pipeline, set=0)
@@ -162,7 +162,7 @@ def test_static_uniform_buffer_binds_and_reads(ctx, fullscreen_vert):
                 .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(target))
 
-    ubuf = ctx.create_buffer([0.0, 0.5, 1.0, 1.0], bz.BufferType.UNIFORM,
+    ubuf = ctx.create_buffer([0.0, 0.5, 1.0, 1.0], bz.BufferUsage.UNIFORM,
                              bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4)
     dset = pool.allocate_set(pipeline, set=0)  # static set for a static buffer
@@ -190,7 +190,7 @@ def test_storage_buffer_read_in_fragment_shader(ctx, fullscreen_vert, usage):
                 .storage_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(target))
 
-    sbuf = ctx.create_buffer([0.0, 0.0, 1.0, 1.0], bz.BufferType.STORAGE, usage)
+    sbuf = ctx.create_buffer([0.0, 0.0, 1.0, 1.0], bz.BufferUsage.STORAGE, usage)
     pool = ctx.create_descriptor_pool(max_sets=8, storage_buffers=8)
     if usage == bz.MemoryUsage.DYNAMIC:
         dset = pool.allocate_frame_set(pipeline, set=0)

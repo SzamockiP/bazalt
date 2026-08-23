@@ -51,8 +51,7 @@ for _ in range(N):
     speed = random.uniform(0.05, 0.6)
     state += [random.uniform(-1.0, 1.0), random.uniform(-1.0, 1.0),
               math.cos(angle) * speed, math.sin(angle) * speed]
-particles = ctx.create_buffer(state, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC,
-                              bz.DataType.FLOAT)
+particles = ctx.create_buffer(state, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
 pool = ctx.create_descriptor_pool()
 sim_set = pool.allocate_set(sim)

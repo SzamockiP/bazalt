@@ -18,6 +18,7 @@
 #include <pybind11/functional.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <pybind11/native_enum.h>
 
 #include <volk.h>
 #include <vk_mem_alloc.h>

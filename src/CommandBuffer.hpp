@@ -134,7 +134,10 @@ public:
     // feeds: 0 is vertex_format (per vertex), 1 is instance_format (per
     // instance). A kwarg on the existing verb rather than a second method —
     // binding one buffer and binding the other are the same operation.
-    CommandBuffer& bind_vertex_buffer(const std::shared_ptr<Buffer>& buffer, std::uint32_t binding = 0);
+    // Returns expected since 0.30, for the reason bind_index_buffer gives: a
+    // usage is a set of bits now, and a buffer without VERTEX or STORAGE used
+    // to reach the layers as VUID-vkCmdBindVertexBuffers-pBuffers-00627.
+    std::expected<void, Error> bind_vertex_buffer(const std::shared_ptr<Buffer>& buffer, std::uint32_t binding = 0);
 
     // Returns expected since 0.29: a STORAGE buffer is a legitimate index
     // buffer now (a compute shader that rewrites an index list), so the verb

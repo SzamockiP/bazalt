@@ -17,6 +17,7 @@
 #include <pybind11/functional.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <pybind11/native_enum.h>
 #include <atomic>
 #include <cstddef>
 #include <cstring>
@@ -610,15 +611,43 @@ inline void require_sliced_when_3d(const RenderTarget& target, const char* what)
     }
 }
 
-// Resolves a list's element type from the explicit argument or the first
+// Resolves a list's element type from the explicit numpy dtype or the first
 // element. `int_default` is the caller's policy: create_buffer infers UINT32
 // for integers going into an INDEX buffer, update infers INT32 — a deliberate
 // difference, not drift.
-inline DataType resolve_data_type(const py::list& list, std::optional<DataType> requested, DataType int_default)
+//
+// A numpy dtype rather than a bazalt enum (0.30): Buffer.read(np.uint16)
+// already spelled an element type the numpy way, and DataType was a second
+// vocabulary for the same four words. DataType stays in C++ as the packing
+// key and the index-type carrier; Python never sees it.
+inline DataType resolve_dtype(const py::list& list, const py::object& dtype, DataType int_default)
 {
-    if (requested.has_value())
+    if (!dtype.is_none())
     {
-        return requested.value();
+        const py::dtype dt = py::dtype::from_args(dtype);
+        const char kind = dt.kind();
+        const auto size = dt.itemsize();
+        if (kind == 'f' && size == 4)
+        {
+            return DataType::FLOAT;
+        }
+        if (kind == 'u' && size == 4)
+        {
+            return DataType::UINT32;
+        }
+        if (kind == 'u' && size == 2)
+        {
+            return DataType::UINT16;
+        }
+        if (kind == 'i' && size == 4)
+        {
+            return DataType::INT32;
+        }
+        raise_error(err_resource(
+            std::format(
+                "dtype={} is not a list element type bazalt can pack. Use np.float32, "
+                "np.uint32, np.uint16 or np.int32, or pass a numpy array.",
+                py::str(dt).cast<std::string>())));
     }
     if (py::isinstance<py::float_>(list[0]))
     {
@@ -630,9 +659,9 @@ inline DataType resolve_data_type(const py::list& list, std::optional<DataType> 
     }
     raise_error(err_resource(
         std::format(
-            "Bazalt cannot infer the data type from a list of {}. It reads the first "
-            "element, and it recognises bool, int and float. Pass data_type= to say it, "
-            "for example data_type=bz.DataType.FLOAT.",
+            "Bazalt cannot infer the element type from a list of {}. It reads the first "
+            "element, and it recognises int and float. Pass dtype= to say it, "
+            "for example dtype=np.float32.",
             py::str(py::type::of(list[0])).cast<std::string>())));
 }
 

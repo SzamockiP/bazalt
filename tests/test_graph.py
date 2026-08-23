@@ -19,7 +19,7 @@ def add_one(ctx):
     comp = ctx.compile_shader(str(SHADER_DIR / "add_one.comp"), bz.ShaderStage.COMPUTE)
     pipeline = ctx.compute_pipeline().shader(comp).storage_buffer(0).build()
     buf = ctx.create_buffer(np.zeros(4, dtype=np.float32),
-                            bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                            bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=8, storage_buffers=8)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, buf)
@@ -75,7 +75,7 @@ def test_passes_run_in_add_order(ctx):
     adder = ctx.compute_pipeline().shader(comp_add).storage_buffer(0).build()
 
     buf = ctx.create_buffer(np.full(4, 3.0, dtype=np.float32),
-                            bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                            bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=8, storage_buffers=8)
     d_double = pool.allocate_set(doubler, set=0)
     d_double.set_buffer(0, buf)
@@ -199,7 +199,7 @@ def test_a_disabled_pass_is_not_a_hazard_for_the_ones_after_it(ctx, fullscreen_v
            .build(target))
 
     sbuf = ctx.create_buffer(np.array([0.0, 0.0, 1.0, 1.0], dtype=np.float32),
-                             bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                             bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=8, storage_buffers=8)
     comp_set = pool.allocate_set(doubler, set=0)
     comp_set.set_buffer(0, sbuf)
@@ -236,7 +236,7 @@ def test_a_pass_without_a_target_refuses_the_draw_verbs(ctx):
 def test_a_render_pass_refuses_the_compute_and_transfer_verbs(ctx):
     target = ctx.create_render_target(16, 16)
     buf = ctx.create_buffer(np.zeros(4, dtype=np.float32),
-                            bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                            bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     g = ctx.graph()
     p = g.add_pass(target)
     for call in (lambda: p.dispatch(1),
@@ -315,7 +315,7 @@ def test_a_compute_queue_pass_refuses_the_blit_verbs(ctx):
         # What a compute pass CAN do: copies, clears and fills are legal on a
         # compute family, and the suite's referee is the validation layers.
         p.copy_image(src, ctx.create_image(32, 32, bz.Format.RGBA8))
-        p.fill_buffer(ctx.create_buffer(16, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC), 0)
+        p.fill_buffer(ctx.create_buffer(16, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC), 0)
         p.clear_image(dst, [0, 0, 0, 1])
     ctx.submit(g)
 
@@ -325,7 +325,7 @@ def test_passes_on_two_queues_run_in_add_order(ctx):
     passes are not commutative, so a reordered or unsynchronized run gives a
     different number: (3*2)+1 then *2 is 14, any other order is not."""
     pipeline, _, _, pool = add_one(ctx)
-    buf = ctx.create_buffer(np.full(4, 3.0, np.float32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = ctx.create_buffer(np.full(4, 3.0, np.float32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     dset = pool.allocate_set(pipeline)
     dset.set_buffer(0, buf)
     double = (ctx.compute_pipeline()
@@ -357,7 +357,7 @@ def test_toggling_a_pass_recomputes_the_batches(ctx):
               .build())
 
     def fresh_buffer():
-        buf = ctx.create_buffer(np.full(4, 3.0, np.float32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+        buf = ctx.create_buffer(np.full(4, 3.0, np.float32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
         add_set = pool.allocate_set(pipeline)
         add_set.set_buffer(0, buf)
         double_set = pool.allocate_set(double)

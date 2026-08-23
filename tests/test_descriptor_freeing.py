@@ -50,7 +50,7 @@ def test_pool_dropped_before_its_sets_is_safe(ctx, triangle_shaders):
     gc.collect()
 
     # The set still works: it holds the pool internally.
-    ubuf = ctx.create_buffer([0.0] * 4, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+    ubuf = ctx.create_buffer([0.0] * 4, bz.BufferUsage.UNIFORM, bz.MemoryUsage.DYNAMIC)
     # (binding a DYNAMIC buffer to a static set raises — just poke the set to
     # prove it is alive and validated, then drop everything)
     try:

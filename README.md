@@ -45,7 +45,7 @@ vbuf = ctx.create_buffer([
      0.0, -0.5, 0.0,   1.0, 0.0, 0.0,
     -0.5,  0.5, 0.0,   0.0, 1.0, 0.0,
      0.5,  0.5, 0.0,   0.0, 0.0, 1.0,
-], bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+], bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
 # You describe a frame as passes on a graph. A pass with a render target draws
 # into it. The triangle does not change, so build the graph one time and send

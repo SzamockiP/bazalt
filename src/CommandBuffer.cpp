@@ -512,8 +512,26 @@ CommandBuffer& CommandBuffer::bind_pipeline(const std::shared_ptr<Pipeline>& pip
     return *this;
 }
 
-CommandBuffer& CommandBuffer::bind_vertex_buffer(const std::shared_ptr<Buffer>& buffer, std::uint32_t binding)
+std::expected<void, Error> CommandBuffer::bind_vertex_buffer(
+    const std::shared_ptr<Buffer>& buffer,
+    std::uint32_t binding)
 {
+    if (!buffer)
+    {
+        return std::unexpected(err_resource("bind_vertex_buffer: buffer is null"));
+    }
+    // STORAGE carries VERTEX_BUFFER_BIT (the compute->graphics hand-off), so
+    // both bits are accepted; INDEX and UNIFORM are not.
+    if (const BufferUsage usage = buffer->buffer_usage();
+        !has(usage, BufferUsage::VERTEX) && !has(usage, BufferUsage::STORAGE))
+    {
+        return std::unexpected(err_resource(
+            std::format(
+                "bind_vertex_buffer: the vertices must live in a buffer whose usage has "
+                "BufferUsage.VERTEX, or BufferUsage.STORAGE when a compute shader writes them. "
+                "This buffer has usage {}.",
+                buffer_usage_name(usage))));
+    }
     // The read truly happens at draw, but a barrier placed before the bind
     // is still before the draw — sound, and simpler than deferring it.
     track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT, false);
@@ -525,7 +543,7 @@ CommandBuffer& CommandBuffer::bind_vertex_buffer(const std::shared_ptr<Buffer>& 
             const std::array<VkDeviceSize, 1> offsets = {0};
             frame.vk->vkCmdBindVertexBuffers(cmd, binding, 1, vertexBuffers.data(), offsets.data());
         });
-    return *this;
+    return {};
 }
 
 std::expected<void, Error> CommandBuffer::bind_index_buffer(const std::shared_ptr<Buffer>& buffer)
@@ -537,13 +555,15 @@ std::expected<void, Error> CommandBuffer::bind_index_buffer(const std::shared_pt
     // STORAGE is accepted because it carries INDEX_BUFFER_BIT since 0.29, for
     // the reason buffer_usage_for gives. VERTEX and UNIFORM do not, and binding
     // one used to fail inside the layers instead of here.
-    if (const BufferType type = buffer->buffer_type(); type != BufferType::INDEX && type != BufferType::STORAGE)
+    if (const BufferUsage usage = buffer->buffer_usage();
+        !has(usage, BufferUsage::INDEX) && !has(usage, BufferUsage::STORAGE))
     {
         return std::unexpected(err_resource(
             std::format(
-                "bind_index_buffer: indices must live in a BufferType.INDEX buffer, or in a "
-                "BufferType.STORAGE one when a compute shader writes them. This is a {} buffer.",
-                buffer_type_name(type))));
+                "bind_index_buffer: the indices must live in a buffer whose usage has "
+                "BufferUsage.INDEX, or BufferUsage.STORAGE when a compute shader writes them. "
+                "This buffer has usage {}.",
+                buffer_usage_name(usage))));
     }
     track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_INDEX_READ_BIT, false);
     record_buffer_use_(buffer);
@@ -1470,16 +1490,18 @@ std::expected<void, Error> CommandBuffer::check_indirect_(
     {
         return std::unexpected(err_resource(std::format("{}: buffer is null", what)));
     }
-    // Only BufferType::STORAGE carries VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, so
+    // Only BufferUsage::STORAGE carries VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, so
     // this names the fix instead of leaving the layers to report a usage flag.
-    if (buffer->buffer_type() != BufferType::STORAGE)
+    if (!has(buffer->buffer_usage(), BufferUsage::STORAGE))
     {
         return std::unexpected(err_resource(
             std::format(
-                "{}: the arguments must live in a BufferType.STORAGE buffer, which is the "
-                "one that carries the indirect usage flag. A compute shader writing the "
-                "draw arguments needs it to be a storage buffer anyway.",
-                what)));
+                "{}: the arguments must live in a buffer whose usage has BufferUsage.STORAGE, "
+                "which is the one that carries the indirect usage flag. A compute shader "
+                "writing the draw arguments needs a storage buffer anyway. This buffer has "
+                "usage {}.",
+                what,
+                buffer_usage_name(buffer->buffer_usage()))));
     }
     // The spec requires a 4-byte-aligned offset, and every argument struct is a
     // run of 32-bit words, so an unaligned one is always a mistake.
@@ -1548,14 +1570,15 @@ std::expected<void, Error> CommandBuffer::check_count_buffer_(
                 "the instanceCount of the commands you do not want.",
                 what)));
     }
-    if (count_buffer->buffer_type() != BufferType::STORAGE)
+    if (!has(count_buffer->buffer_usage(), BufferUsage::STORAGE))
     {
         return std::unexpected(err_resource(
             std::format(
-                "{}: the count must live in a BufferType.STORAGE buffer, which is the one "
-                "that carries the indirect usage flag. A compute shader writing the count "
-                "needs it to be a storage buffer anyway.",
-                what)));
+                "{}: the count must live in a buffer whose usage has BufferUsage.STORAGE, "
+                "which is the one that carries the indirect usage flag. A compute shader "
+                "writing the count needs a storage buffer anyway. This buffer has usage {}.",
+                what,
+                buffer_usage_name(count_buffer->buffer_usage()))));
     }
     if (count_offset % 4 != 0)
     {
@@ -1591,10 +1614,11 @@ void CommandBuffer::track_use_(
         return;
     }
     // Only a STORAGE buffer carries VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, so it
-    // is the only type a shader can write. The fold uses that to narrow its
-    // first-use floor rather than to switch it off — every type can be written
-    // by copy_buffer and fill_buffer.
-    const bool shader_writable = buffer->buffer_type() == BufferType::STORAGE;
+    // is the only usage a shader can write. The fold uses that to narrow its
+    // first-use floor rather than to switch it off — every usage can be written
+    // by copy_buffer and fill_buffer. A bit test, so a VERTEX|STORAGE union
+    // cannot fool it.
+    const bool shader_writable = has(buffer->buffer_usage(), BufferUsage::STORAGE);
     event_sink_->push_back(
         {.kind = UseEvent::Kind::BufferUse,
          .buffer = buffer,

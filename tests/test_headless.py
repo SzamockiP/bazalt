@@ -117,8 +117,8 @@ def test_uint16_indices_draw_correctly(ctx, triangle_shaders, triangle_buffers):
     drew nothing or garbage, silently.
     """
     vbuf, _ = triangle_buffers
-    ibuf16 = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC,
-                               bz.DataType.UINT16)
+    ibuf16 = ctx.create_buffer([0, 1, 2], bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC,
+                               dtype=np.uint16)
     target = ctx.create_render_target(64, 64)
     pixels = draw_triangle(ctx, target, triangle_shaders, (vbuf, ibuf16))
     assert not np.allclose(pixels[32, 32, :3], CLEAR_RGB, atol=2)
@@ -129,7 +129,7 @@ def test_uint16_numpy_indices_are_read_as_uint16(ctx, triangle_shaders, triangle
     uint16 index ARRAY was read back as UINT32 at half the count — the same
     silent bug the test above pins for the list form (0.29)."""
     vbuf, _ = triangle_buffers
-    ibuf16 = ctx.create_buffer(np.array([0, 1, 2], np.uint16), bz.BufferType.INDEX,
+    ibuf16 = ctx.create_buffer(np.array([0, 1, 2], np.uint16), bz.BufferUsage.INDEX,
                                bz.MemoryUsage.STATIC)
     target = ctx.create_render_target(64, 64)
     pixels = draw_triangle(ctx, target, triangle_shaders, (vbuf, ibuf16))
@@ -138,11 +138,11 @@ def test_uint16_numpy_indices_are_read_as_uint16(ctx, triangle_shaders, triangle
 
 def test_a_storage_buffer_binds_as_indices(ctx, triangle_shaders, triangle_buffers):
     """A compute shader that rewrites an index list writes a STORAGE buffer, and
-    until 0.29 that buffer could not be bound as indices at all: BufferType.STORAGE
+    until 0.29 that buffer could not be bound as indices at all: BufferUsage.STORAGE
     carried VERTEX and INDIRECT but not INDEX. Here the indices are written from
     the host, which is the same buffer with the same usage."""
     vbuf, _ = triangle_buffers
-    indices = ctx.create_buffer(np.array([0, 1, 2], np.uint32), bz.BufferType.STORAGE,
+    indices = ctx.create_buffer(np.array([0, 1, 2], np.uint32), bz.BufferUsage.STORAGE,
                                 bz.MemoryUsage.STATIC)
     target = ctx.create_render_target(64, 64)
     pixels = draw_triangle(ctx, target, triangle_shaders, (vbuf, indices))
@@ -155,7 +155,7 @@ def test_bind_index_buffer_refuses_a_vertex_buffer(ctx, triangle_buffers):
     vbuf, _ = triangle_buffers
     g = ctx.graph()
     target = ctx.create_render_target(16, 16)
-    with pytest.raises(bz.ResourceError, match="BufferType.INDEX"):
+    with pytest.raises(bz.ResourceError, match="BufferUsage.INDEX"):
         with g.add_pass(target) as p:
             p.bind_index_buffer(vbuf)
 
@@ -220,10 +220,9 @@ def test_a_headless_instance_still_renders_and_reads_back(headless_context):
         -0.5, +0.5, 0.0, 0.0, 1.0, 0.0,
         +0.5, +0.5, 0.0, 0.0, 0.0, 1.0,
     ]
-    buffers = (context.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC,
-                                     bz.DataType.FLOAT),
-               context.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC,
-                                     bz.DataType.UINT32))
+    buffers = (context.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC),
+               context.create_buffer([0, 1, 2], bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC,
+                                     dtype=np.uint32))
 
     target = context.create_render_target(64, 64)
     pixels = draw_triangle(context, target, shaders, buffers)

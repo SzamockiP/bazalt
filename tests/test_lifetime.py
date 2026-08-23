@@ -33,10 +33,10 @@ def test_dropping_everything_between_submits_is_safe(ctx, triangle_shaders):
             -0.5, +0.5, 0.0, 0.0, 1.0, 0.0,
             +0.5, +0.5, 0.0, 0.0, 0.0, 1.0,
         ]
-        vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX,
-                                 bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
-        ibuf = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX,
-                                 bz.MemoryUsage.STATIC, bz.DataType.UINT32)
+        vbuf = ctx.create_buffer(vertices, bz.BufferUsage.VERTEX,
+                                 bz.MemoryUsage.STATIC)
+        ibuf = ctx.create_buffer([0, 1, 2], bz.BufferUsage.INDEX,
+                                 bz.MemoryUsage.STATIC, dtype=np.uint32)
         pipeline = (ctx.graphics_pipeline()
                     .vertex_shader(vert)
                     .fragment_shader(frag)
@@ -182,7 +182,7 @@ def test_resources_may_outlive_a_closed_context(extra_context):
     with context:
         target = context.create_render_target(32, 32)
         buffer = context.create_buffer(np.zeros(16, dtype=np.float32),
-                                       bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                                       bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
         image = context.create_image(np.zeros((8, 8, 4), dtype=np.uint8))
 
     assert context.closed is True
@@ -195,7 +195,7 @@ def test_using_a_closed_context_raises_state_error(extra_context):
     context.close()
 
     with pytest.raises(bz.StateError, match="closed"):
-        context.create_buffer(64, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+        context.create_buffer(64, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     with pytest.raises(bz.StateError, match="closed"):
         context.create_render_target(8, 8)
     with pytest.raises(bz.StateError, match="closed"):
@@ -216,7 +216,7 @@ def test_reading_a_resource_after_its_context_closed_raises(extra_context):
     with context:
         target = context.create_render_target(16, 16)
         buffer = context.create_buffer(np.zeros(4, dtype=np.float32),
-                                       bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                                       bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     with pytest.raises(bz.StateError, match="closed"):
         target.color[0].read()

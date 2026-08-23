@@ -33,7 +33,7 @@ def test_the_three_recoverable_kinds_are_siblings(ctx):
 def test_a_sequencing_error_is_a_state_error(ctx):
     """The same mistake spelled two ways gets the same type: a barrier inside
     a render pass is 'right call, wrong moment', not a resource fault."""
-    buf = ctx.create_buffer(1024, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = ctx.create_buffer(1024, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     target = ctx.create_render_target(8, 8)
     g = ctx.graph()
     p = g.add_pass(target, clear_color=[0, 0, 0, 1])
@@ -48,7 +48,7 @@ def test_index_is_keyword_only_on_the_set_verbs(ctx):
     pipe = ctx.compute_pipeline().shader(comp).storage_buffer(0).build()
     pool = ctx.create_descriptor_pool(max_sets=1, storage_buffers=1)
     dset = pool.allocate_set(pipe, set=0)
-    buf = ctx.create_buffer(64, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = ctx.create_buffer(64, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     dset.set_buffer(0, buf, index=0)
     with pytest.raises(TypeError):
         dset.set_buffer(0, buf, 0)
@@ -57,15 +57,25 @@ def test_index_is_keyword_only_on_the_set_verbs(ctx):
 def test_create_buffer_takes_data_as_a_keyword(ctx):
     """The first parameter is `data` on all three overloads since 0.23, so the
     keyword spelling works whichever body the argument picks."""
-    by_list = ctx.create_buffer(data=[1.0, 2.0], type=bz.BufferType.VERTEX,
-                                usage=bz.MemoryUsage.STATIC)
+    by_list = ctx.create_buffer(data=[1.0, 2.0], usage=bz.BufferUsage.VERTEX,
+                                memory=bz.MemoryUsage.STATIC)
     by_array = ctx.create_buffer(data=np.zeros(4, np.float32),
-                                 type=bz.BufferType.VERTEX,
-                                 usage=bz.MemoryUsage.STATIC)
-    by_size = ctx.create_buffer(data=64, type=bz.BufferType.STORAGE,
-                                usage=bz.MemoryUsage.STATIC)
+                                 usage=bz.BufferUsage.VERTEX,
+                                 memory=bz.MemoryUsage.STATIC)
+    by_size = ctx.create_buffer(data=64, usage=bz.BufferUsage.STORAGE,
+                                memory=bz.MemoryUsage.STATIC)
     assert np.array_equal(by_array.read(np.float32), np.zeros(4, np.float32))
     assert by_list is not None and by_size is not None
+
+
+def test_the_old_buffer_keywords_fail_on_their_first_line(ctx):
+    """0.30 renamed `type=` to `usage=` and `usage=` to `memory=`. Rule 6: the
+    old spelling fails where it is written rather than deprecating quietly, and
+    an old `usage=` carries an enum the new parameter refuses."""
+    with pytest.raises(TypeError):
+        ctx.create_buffer([1.0], type=bz.BufferUsage.VERTEX, memory=bz.MemoryUsage.STATIC)
+    with pytest.raises(TypeError):
+        ctx.create_buffer([1.0], bz.BufferUsage.VERTEX, usage=bz.MemoryUsage.STATIC)
 
 
 def test_shader_error_carries_path_and_line(ctx, tmp_path):
@@ -130,7 +140,7 @@ def test_second_live_context_is_allowed(ctx, extra_context):
 
 def test_empty_buffer_list_is_rejected(ctx):
     with pytest.raises(bz.ResourceError):
-        ctx.create_buffer([], bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+        ctx.create_buffer([], bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
 
 def test_descriptor_pool_needs_at_least_one_descriptor(ctx):
@@ -147,7 +157,7 @@ def test_pipeline_without_shaders_is_a_shader_error(ctx):
 def test_static_buffer_update_is_a_resource_error(ctx):
     """update() on a STATIC buffer used to raise a bare RuntimeError, invisible
     to `except bz.BazaltError`."""
-    buf = ctx.create_buffer([1.0, 2.0, 3.0], bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+    buf = ctx.create_buffer([1.0, 2.0, 3.0], bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
     with pytest.raises(bz.ResourceError) as info:
         buf.update([4.0, 5.0, 6.0])
     assert "DYNAMIC" in str(info.value)
@@ -155,7 +165,7 @@ def test_static_buffer_update_is_a_resource_error(ctx):
 
 def test_oversized_dynamic_update_is_a_resource_error(ctx):
     """The message must name both sizes, or the user is left guessing."""
-    buf = ctx.create_buffer([0.0, 0.0, 0.0, 0.0], bz.BufferType.UNIFORM,
+    buf = ctx.create_buffer([0.0, 0.0, 0.0, 0.0], bz.BufferUsage.UNIFORM,
                             bz.MemoryUsage.DYNAMIC)  # 16 bytes
     with pytest.raises(bz.ResourceError) as info:
         buf.update([0.0] * 16)  # 64 bytes
@@ -175,7 +185,7 @@ def test_set_buffer_on_nonexistent_binding_is_a_resource_error(ctx, triangle_sha
                 .build(target))
     pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4)
     dset = pool.allocate_set(pipeline, set=0)
-    ubuf = ctx.create_buffer([0.0] * 4, bz.BufferType.UNIFORM, bz.MemoryUsage.STATIC)
+    ubuf = ctx.create_buffer([0.0] * 4, bz.BufferUsage.UNIFORM, bz.MemoryUsage.STATIC)
 
     with pytest.raises(bz.ResourceError) as info:
         dset.set_buffer(5, ubuf)
@@ -193,7 +203,7 @@ def test_set_buffer_on_image_binding_points_to_set_image(ctx, triangle_shaders):
                 .build(target))
     pool = ctx.create_descriptor_pool(max_sets=4, textures=4)
     dset = pool.allocate_set(pipeline, set=0)
-    ubuf = ctx.create_buffer([0.0] * 4, bz.BufferType.UNIFORM, bz.MemoryUsage.STATIC)
+    ubuf = ctx.create_buffer([0.0] * 4, bz.BufferUsage.UNIFORM, bz.MemoryUsage.STATIC)
 
     with pytest.raises(bz.ResourceError) as info:
         dset.set_buffer(0, ubuf)
@@ -213,7 +223,7 @@ def test_dynamic_buffer_in_static_set_is_a_resource_error(ctx, triangle_shaders)
                 .build(target))
     pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4)
     static_set = pool.allocate_set(pipeline, set=0)
-    dynamic = ctx.create_buffer([0.0] * 4, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+    dynamic = ctx.create_buffer([0.0] * 4, bz.BufferUsage.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
     with pytest.raises(bz.ResourceError) as info:
         static_set.set_buffer(0, dynamic)
@@ -237,7 +247,7 @@ def test_read_and_update_agree_on_the_exception_type(ctx):
     strided = np.zeros((4, 8, 4), dtype=np.uint8)[:, ::2]
     with pytest.raises(bz.ResourceError):
         img.update(strided)
-    buf = ctx.create_buffer([0.0] * 8, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+    buf = ctx.create_buffer([0.0] * 8, bz.BufferUsage.UNIFORM, bz.MemoryUsage.DYNAMIC)
     with pytest.raises(bz.ResourceError):
         buf.update(np.zeros((2, 4), dtype=np.float32)[:, ::2])
 

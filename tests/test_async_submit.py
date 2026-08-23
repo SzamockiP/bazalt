@@ -28,8 +28,8 @@ def add_one_pipeline(ctx):
 
 def counting_setup(ctx):
     pipeline = add_one_pipeline(ctx)
-    buf = ctx.create_buffer([0.0, 0.0, 0.0, 0.0], bz.BufferType.STORAGE,
-                            bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    buf = ctx.create_buffer([0.0, 0.0, 0.0, 0.0], bz.BufferUsage.STORAGE,
+                            bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=1, storage_buffers=1)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, buf)
@@ -219,7 +219,7 @@ def test_forced_single_queue_aliases_the_compute_queue(extra_context, monkeypatc
 
     comp = context.compile_shader(str(SHADER_DIR / "add_one.comp"), bz.ShaderStage.COMPUTE)
     pipeline = context.compute_pipeline().shader(comp).storage_buffer(0).build()
-    buf = context.create_buffer(np.zeros(4, np.float32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = context.create_buffer(np.zeros(4, np.float32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = context.create_descriptor_pool(max_sets=4, storage_buffers=4)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, buf)
@@ -247,7 +247,7 @@ def test_a_buffer_dropped_after_a_two_queue_submit_is_reclaimed(ctx):
     comp = ctx.compile_shader(str(SHADER_DIR / "add_one.comp"), bz.ShaderStage.COMPUTE)
     pipeline = ctx.compute_pipeline().shader(comp).storage_buffer(0).build()
     buf = ctx.create_buffer(np.zeros(1 << 20, np.float32),
-                            bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                            bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=4, storage_buffers=4)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, buf)

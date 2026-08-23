@@ -236,17 +236,18 @@ void bind_enums(py::module_& m)
         .value("RESIZE_ALL", Cursor::RESIZE_ALL)
         .value("NOT_ALLOWED", Cursor::NOT_ALLOWED);
 
-    py::enum_<BufferType>(m, "BufferType")
-        .value("VERTEX", BufferType::VERTEX)
-        .value("INDEX", BufferType::INDEX)
-        .value("UNIFORM", BufferType::UNIFORM)
-        .value("STORAGE", BufferType::STORAGE);
-
-    py::enum_<DataType>(m, "DataType")
-        .value("FLOAT", DataType::FLOAT)
-        .value("UINT32", DataType::UINT32)
-        .value("UINT16", DataType::UINT16)
-        .value("INT32", DataType::INT32);
+    // A real enum.IntFlag (pybind11 3's native_enum) rather than a py::enum_:
+    // `BufferUsage.VERTEX | BufferUsage.STORAGE` has to be a BufferUsage, and
+    // py::enum_ gives a scoped enum no `|` at all (its arithmetic operators
+    // exist only for enums convertible to int). The stub says IntFlag, and it
+    // is one. DataType is not bound since 0.30: the list overloads take a
+    // numpy dtype, which is the spelling Buffer.read already used.
+    py::native_enum<BufferUsage>(m, "BufferUsage", "enum.IntFlag")
+        .value("VERTEX", BufferUsage::VERTEX)
+        .value("INDEX", BufferUsage::INDEX)
+        .value("UNIFORM", BufferUsage::UNIFORM)
+        .value("STORAGE", BufferUsage::STORAGE)
+        .finalize();
 
     py::enum_<ShaderStage>(m, "ShaderStage")
         .value("VERTEX", ShaderStage::VERTEX)

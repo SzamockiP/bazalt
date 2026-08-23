@@ -233,16 +233,16 @@ def test_read_rejects_a_mip_that_does_not_exist(ctx):
 
 
 def test_buffer_update_at_an_offset(ctx):
-    buf = ctx.create_buffer([1.0, 2.0, 3.0, 4.0], bz.BufferType.STORAGE,
-                            bz.MemoryUsage.DYNAMIC, bz.DataType.FLOAT)
+    buf = ctx.create_buffer([1.0, 2.0, 3.0, 4.0], bz.BufferUsage.STORAGE,
+                            bz.MemoryUsage.DYNAMIC)
     buf.update(struct.pack("ff", 9.0, 9.0), offset=8)
 
     assert list(buf.read("float32")) == [1.0, 2.0, 9.0, 9.0]
 
 
 def test_buffer_update_offset_rejects_an_overrun(ctx):
-    buf = ctx.create_buffer([1.0, 2.0], bz.BufferType.STORAGE,
-                            bz.MemoryUsage.DYNAMIC, bz.DataType.FLOAT)
+    buf = ctx.create_buffer([1.0, 2.0], bz.BufferUsage.STORAGE,
+                            bz.MemoryUsage.DYNAMIC)
     with pytest.raises(bz.ResourceError):
         buf.update(struct.pack("ff", 9.0, 9.0), offset=4)
 

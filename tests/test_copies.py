@@ -13,8 +13,8 @@ import pytest
 import bazalt as bz
 
 
-def uint_buffer(ctx, values, usage=bz.BufferType.STORAGE):
-    return ctx.create_buffer(list(values), usage, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
+def uint_buffer(ctx, values, usage=bz.BufferUsage.STORAGE):
+    return ctx.create_buffer(list(values), usage, bz.MemoryUsage.STATIC, dtype=np.uint32)
 
 
 def test_copy_buffer_moves_the_bytes(ctx):
@@ -104,8 +104,8 @@ def test_transfers_work_on_a_dynamic_buffer(ctx):
     current one, while the headless submit advances the ring — so which slot a
     later read sees is a question about the ring, not about the fill.
     """
-    dynamic = ctx.create_buffer([1, 1, 1, 1], bz.BufferType.STORAGE,
-                                bz.MemoryUsage.DYNAMIC, bz.DataType.UINT32)
+    dynamic = ctx.create_buffer([1, 1, 1, 1], bz.BufferUsage.STORAGE,
+                                bz.MemoryUsage.DYNAMIC, dtype=np.uint32)
     out = uint_buffer(ctx, [0, 0, 0, 0])
 
     g = ctx.graph()

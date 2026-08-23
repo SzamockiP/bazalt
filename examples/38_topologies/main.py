@@ -59,7 +59,7 @@ for blade in range(3):
         positions += [(base_x - half_width, y), (base_x + half_width, y)]
 
 vbuf = ctx.create_buffer(np.array(positions, dtype=np.float32),
-                         bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+                         bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
 
 # Local vertex numbering inside one blade: row r is 2r (left) and 2r+1 (right).
@@ -93,7 +93,7 @@ def indexed(local, blade):
     """The same local pattern, shifted onto blade `blade`'s vertices."""
     offset = blade * 2 * ROWS
     data = np.array([i + offset for i in local], dtype=np.uint32)
-    return ctx.create_buffer(data, bz.BufferType.INDEX, bz.MemoryUsage.STATIC), len(data)
+    return ctx.create_buffer(data, bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC), len(data)
 
 
 def pipeline(topology, polygon_mode):

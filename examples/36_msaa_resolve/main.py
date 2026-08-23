@@ -58,7 +58,7 @@ for i in range(POINTS):
                  math.cos(a0) * 0.9, math.sin(a0) * 0.9,
                  math.cos(a1) * 0.9, math.sin(a1) * 0.9]
 star_buffer = ctx.create_buffer(np.array(vertices, dtype=np.float32),
-                                bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+                                bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
 star = (ctx.graphics_pipeline()
         .vertex_shader(ctx.compile_shader("star.vert", bz.ShaderStage.VERTEX))
