@@ -929,3 +929,76 @@ def test_transfer_read_is_spelled_too(extra_context):
     context.submit(g)
 
     assert np.array_equal(dst.read(np.uint32), np.arange(8, dtype=np.uint32))
+
+
+def _hazard_warnings(messages, start=0):
+    return [m for m in messages()[start:]
+            if m.severity == bz.Severity.WARNING and "possible hazard" in m.text]
+
+
+def _writer_then_manual_reader(ctx, barriers=()):
+    comp = ctx.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
+    pipeline = ctx.compute_pipeline().shader(comp).storage_buffer(0).build()
+    sbuf = ctx.create_buffer(np.arange(64, dtype=np.float32),
+                             bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC, name="counts")
+    dset = ctx.create_descriptor_pool().allocate_set(pipeline)
+    dset.set_buffer(0, sbuf)
+    g = ctx.graph()
+    g.add_pass(name="writer").bind_pipeline(pipeline).bind_descriptor_set(dset).dispatch(1)
+    with g.add_pass(name="reader", auto_barriers=False) as p:
+        for src, dst in barriers:
+            p.barrier(sbuf, src, dst)
+        p.bind_pipeline(pipeline).bind_descriptor_set(dset).dispatch(1)
+    return g
+
+
+def test_manual_pass_without_barrier_warns_once(ctx, messages):
+    """The reviewer's report, as a WARNING: pass, resource, previous state,
+    requested state, and the p.barrier() that fixes it. Once per compile, so
+    a second submit of the unchanged graph adds nothing. Never an exception —
+    a manual pass may know better (an address-written buffer is invisible to
+    the tracker), and an exception would close the escape hatch."""
+    start = len(messages())
+    g = _writer_then_manual_reader(ctx)
+    ctx.submit(g)
+    ctx.submit(g)
+    warnings = _hazard_warnings(messages, start)
+    assert len(warnings) == 1
+    text = warnings[0].text
+    assert 'pass "reader"' in text
+    assert 'buffer "counts"' in text
+    assert 'in pass "writer"' in text
+    assert "auto_barriers=True" in text
+    assert "src=bz.Access.SHADER_WRITE" in text
+    assert "UNORDERED" in g.explain()
+
+
+def test_manual_pass_with_the_right_barriers_does_not_warn(ctx, messages):
+    """The covered case, including the accumulation rule: a W->R and a W->W
+    barrier in one pass together cover an RMW dispatch, and keeping only the
+    last note's mask used to make exactly this correct code warn."""
+    start = len(messages())
+    g = _writer_then_manual_reader(
+        ctx,
+        barriers=[(bz.Access.SHADER_WRITE, bz.Access.SHADER_READ),
+                  (bz.Access.SHADER_WRITE, bz.Access.SHADER_WRITE)])
+    ctx.submit(g)
+    assert _hazard_warnings(messages, start) == []
+    assert "UNORDERED" not in g.explain()
+
+
+def test_auto_passes_never_warn(ctx, messages):
+    """The lint is the manual pass's referee only; the automatic path emits
+    its barrier and says nothing."""
+    start = len(messages())
+    comp = ctx.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
+    pipeline = ctx.compute_pipeline().shader(comp).storage_buffer(0).build()
+    sbuf = ctx.create_buffer(np.arange(64, dtype=np.float32),
+                             bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    dset = ctx.create_descriptor_pool().allocate_set(pipeline)
+    dset.set_buffer(0, sbuf)
+    g = ctx.graph()
+    g.add_pass(name="a").bind_pipeline(pipeline).bind_descriptor_set(dset).dispatch(1)
+    g.add_pass(name="b").bind_pipeline(pipeline).bind_descriptor_set(dset).dispatch(1)
+    ctx.submit(g)
+    assert _hazard_warnings(messages, start) == []

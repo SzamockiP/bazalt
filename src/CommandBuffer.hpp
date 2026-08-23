@@ -38,6 +38,11 @@ struct UseEvent
     VkAccessFlags access = 0;
     bool writes = false;
     bool shader_writable = false;
+    // Recorded by a pass with auto_barriers=False (0.30). The fold never
+    // commits such a use — the pass's notes are all it tells the fold — but
+    // it PEEKS it: a use the notes do not cover is a possible hazard, and
+    // the compile logs one warning naming the fix.
+    bool manual = false;
     // "Only if something already wrote this image" — the sampled-image rule.
     // An uploaded texture the tracker never saw rests in SHADER_READ_ONLY
     // already, and transitioning it from a tracker's UNDEFINED would DISCARD

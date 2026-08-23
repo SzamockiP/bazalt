@@ -1777,10 +1777,6 @@ void CommandBuffer::track_use_(
     VkAccessFlags access,
     bool writes)
 {
-    if (!auto_barriers_)
-    {
-        return;
-    }
     // Only a STORAGE buffer carries VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, so it
     // is the only usage a shader can write. The fold uses that to narrow its
     // first-use floor rather than to switch it off — every usage can be written
@@ -1794,6 +1790,7 @@ void CommandBuffer::track_use_(
          .access = access,
          .writes = writes,
          .shader_writable = shader_writable,
+         .manual = !auto_barriers_,
          .position = commands_.size()});
 }
 
@@ -1805,10 +1802,6 @@ void CommandBuffer::track_image_use_(
     bool writes,
     bool only_if_tracked)
 {
-    if (!auto_barriers_)
-    {
-        return;
-    }
     event_sink_->push_back(
         {.kind = UseEvent::Kind::ImageUse,
          .image = image,
@@ -1816,6 +1809,7 @@ void CommandBuffer::track_image_use_(
          .stages = stages,
          .access = access,
          .writes = writes,
+         .manual = !auto_barriers_,
          .only_if_tracked = only_if_tracked,
          .position = commands_.size()});
 }
@@ -1839,10 +1833,6 @@ void CommandBuffer::track_descriptor_uses_(
     const std::shared_ptr<Pipeline>& pipeline,
     VkPipelineStageFlags stages)
 {
-    if (!auto_barriers_)
-    {
-        return;
-    }
     for (const auto& [set_index, set] : sets)
     {
         for (const auto& bb : set->buffers())

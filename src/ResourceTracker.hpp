@@ -521,6 +521,16 @@ public:
         // a pipeline barrier cannot express — a producer on the other queue —
         // is still the fold's to add.
         static_cast<void>(predecessors_(st, /*include_reads=*/true, waits));
+        // Two p.barrier() calls in one pass both made memory available, so
+        // same-pass notes accumulate their visible masks (0.30). Keeping only
+        // the last dst mask made correct manual code trip the lint.
+        VkPipelineStageFlags carried_stages = 0;
+        VkAccessFlags carried_access = 0;
+        if (st.written && st.write_pass == pass_)
+        {
+            carried_stages = st.visible_stages[queue_slot_];
+            carried_access = st.visible_access[queue_slot_];
+        }
         st = {};
         // Recorded as a WRITE this queue has already made available, not as a
         // bare read. The visible mask is what stops a redundant barrier on this
@@ -540,8 +550,8 @@ public:
         st.write_pass = pass_;
         st.read_stages = dst_stages;
         st.read_access = dst_access;
-        st.visible_stages[queue_slot_] = dst_stages;
-        st.visible_access[queue_slot_] = dst_access;
+        st.visible_stages[queue_slot_] = dst_stages | carried_stages;
+        st.visible_access[queue_slot_] = dst_access | carried_access;
         st.read_batch[queue_slot_] = batch_;
         st.read_pass[queue_slot_] = pass_;
     }
@@ -619,6 +629,15 @@ public:
         {
             static_cast<void>(predecessors_(st, /*include_reads=*/true, *waits));
         }
+        // Same-pass accumulation, as note_buffer_access — the layout has to
+        // agree, because a note that MOVED the image did supersede the last.
+        VkPipelineStageFlags carried_stages = 0;
+        VkAccessFlags carried_access = 0;
+        if (st.written && st.write_pass == pass_ && st.layout == layout)
+        {
+            carried_stages = st.visible_stages[queue_slot_];
+            carried_access = st.visible_access[queue_slot_];
+        }
         st = {};
         st.layout = layout;
         // A write this queue has already made available — see
@@ -631,8 +650,8 @@ public:
         st.write_pass = pass_;
         st.read_stages = dst_stages;
         st.read_access = dst_access;
-        st.visible_stages[queue_slot_] = dst_stages;
-        st.visible_access[queue_slot_] = dst_access;
+        st.visible_stages[queue_slot_] = dst_stages | carried_stages;
+        st.visible_access[queue_slot_] = dst_access | carried_access;
         st.read_batch[queue_slot_] = batch_;
         st.read_pass[queue_slot_] = pass_;
     }
@@ -695,6 +714,56 @@ public:
         std::array<std::size_t, kQueueCount> read_pass = per_queue(kNoPass);
     };
 
+    // The manual-pass lint's question (0.30): would the automatic path emit a
+    // barrier or a cross-queue wait for this use that the pass's own notes do
+    // not already cover? Answered on a COPY, so it cannot drift from use() /
+    // use_image(); a manual use is peeked, never committed. An untracked
+    // resource answers no — the first-use floor covers writers outside the
+    // graph, and a warning with no producer to name is noise.
+    //
+    // The covered test is applied to writes too, which the automatic path
+    // does not do (it always barriers a WAW): the lint asks whether the
+    // caller ordered the use, not whether the fold would emit its
+    // belt-and-braces barrier.
+    // ponytail: each peek copies both state maps; manual passes are rare and
+    // a compile runs once — split use() into compute/commit halves if a
+    // profile ever cares.
+    struct Peek
+    {
+        bool barrier = false;
+        bool cross_queue = false;
+    };
+    Peek peek_use(Buffer* buffer, VkPipelineStageFlags stages, VkAccessFlags access, bool writes, bool shader_writable)
+        const
+    {
+        const auto it = states_.find(buffer);
+        if (it == states_.end() || covered_(it->second, stages, access))
+        {
+            return {};
+        }
+        ResourceTracker copy(*this);
+        std::vector<std::size_t> waits;
+        const auto b = copy.use(buffer, stages, access, writes, shader_writable, waits);
+        return {.barrier = b.has_value(), .cross_queue = !waits.empty()};
+    }
+    Peek peek_use_image(
+        Image* image,
+        VkImageLayout layout,
+        VkPipelineStageFlags stages,
+        VkAccessFlags access,
+        bool writes) const
+    {
+        const auto it = image_states_.find(image);
+        if (it == image_states_.end() || (it->second.layout == layout && covered_(it->second, stages, access)))
+        {
+            return {};
+        }
+        ResourceTracker copy(*this);
+        std::vector<std::size_t> waits;
+        const auto b = copy.use_image(image, layout, stages, access, writes, waits);
+        return {.barrier = b.has_value(), .cross_queue = !waits.empty()};
+    }
+
     const BufferState* state(Buffer* buffer) const
     {
         const auto it = states_.find(buffer);
@@ -707,6 +776,15 @@ public:
     }
 
 private:
+    // What a p.barrier() note in this pass established: the write is on this
+    // queue and the requested scopes sit inside the visible masks.
+    template <typename State>
+    bool covered_(const State& st, VkPipelineStageFlags stages, VkAccessFlags access) const
+    {
+        return st.written && st.write_queue == queue_ && (stages & ~st.visible_stages[queue_slot_]) == 0 &&
+               (access & ~st.visible_access[queue_slot_]) == 0;
+    }
+
     // Whichever touches of `st` happened on ANOTHER queue become semaphore
     // waits; returns whether anything touched it on THIS one, which is what
     // still needs a pipeline barrier.

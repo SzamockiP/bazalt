@@ -392,6 +392,82 @@ namespace
         }
         return std::format("buffer {} B", buffer.size());
     }
+
+    const char* access_member_name(Access access)
+    {
+        switch (access)
+        {
+            case Access::SHADER_READ:
+                return "SHADER_READ";
+            case Access::SHADER_WRITE:
+                return "SHADER_WRITE";
+            case Access::VERTEX_READ:
+                return "VERTEX_READ";
+            case Access::INDEX_READ:
+                return "INDEX_READ";
+            case Access::UNIFORM_READ:
+                return "UNIFORM_READ";
+            case Access::INDIRECT_READ:
+                return "INDIRECT_READ";
+            case Access::TRANSFER_WRITE:
+                return "TRANSFER_WRITE";
+            case Access::TRANSFER_READ:
+                return "TRANSFER_READ";
+        }
+        return "SHADER_READ";
+    }
+
+    // The bz.Access member that names a (stages, access, layout) triple, for
+    // the lint's fix line. Exact subset first; then, for the descriptor walk's
+    // READ|WRITE, the member that carries the write bit. nullopt when no
+    // member fits — a render-pass access, a depth aspect — and the fix line
+    // says auto_barriers=True instead of guessing.
+    std::optional<Access> access_for(
+        VkPipelineStageFlags stages,
+        VkAccessFlags access,
+        std::optional<VkImageLayout> layout,
+        VkPipelineStageFlags all_shader_stages)
+    {
+        constexpr std::array kMembers = {
+            Access::SHADER_READ,
+            Access::SHADER_WRITE,
+            Access::VERTEX_READ,
+            Access::INDEX_READ,
+            Access::UNIFORM_READ,
+            Access::INDIRECT_READ,
+            Access::TRANSFER_WRITE,
+            Access::TRANSFER_READ};
+        for (const Access member : kMembers)
+        {
+            const StageAccess sa = to_vk(member, all_shader_stages);
+            if (layout.has_value() && image_layout_for(member) != layout)
+            {
+                continue;
+            }
+            if ((stages & ~sa.stages) == 0 && (access & ~sa.access) == 0 && access != 0)
+            {
+                return member;
+            }
+        }
+        for (const Access member : kMembers)
+        {
+            const StageAccess sa = to_vk(member, all_shader_stages);
+            if (layout.has_value() && image_layout_for(member) != layout)
+            {
+                continue;
+            }
+            if ((stages & ~sa.stages) == 0 && (sa.access & access & VK_ACCESS_SHADER_WRITE_BIT) != 0)
+            {
+                return member;
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::string pass_label(const Pass& pass, std::size_t index)
+    {
+        return pass.name().empty() ? std::format("pass [{}]", index) : std::format("pass \"{}\"", pass.name());
+    }
 } // namespace
 
 template <typename State>
@@ -581,6 +657,119 @@ std::expected<std::string, Error> Graph::explain()
     return out;
 }
 
+void Graph::warn_manual_hazard_(
+    std::size_t pass_index,
+    const UseEvent& e,
+    const ResourceTracker::BufferState* buffer_state,
+    const ResourceTracker::ImageState* image_state,
+    ResourceTracker::Peek peek)
+{
+    const Pass& pass = *compiled_[pass_index].pass;
+    const bool is_image = e.image != nullptr;
+    const std::string what = is_image ? describe(*e.image) : describe(*e.buffer);
+    const VkPipelineStageFlags all_shaders = context_->all_shader_stages();
+
+    // The previous state and its producer, from whichever state struct holds
+    // them (the two only differ by the layout field).
+    bool prev_wrote = false;
+    VkPipelineStageFlags prev_stages = 0;
+    VkAccessFlags prev_access = 0;
+    std::size_t producer = ResourceTracker::kNoPass;
+    std::optional<VkImageLayout> prev_layout;
+    const auto read_state = [&](const auto* st)
+    {
+        if (st == nullptr)
+        {
+            return;
+        }
+        prev_wrote = st->written;
+        prev_stages = st->written ? st->write_stages : st->read_stages;
+        prev_access = st->written ? st->write_access : st->read_access;
+        producer = st->write_pass;
+        if (producer == ResourceTracker::kNoPass)
+        {
+            for (std::size_t q = 0; q < kQueueCount; ++q)
+            {
+                if (st->read_pass[q] != ResourceTracker::kNoPass)
+                {
+                    producer = st->read_pass[q];
+                    break;
+                }
+            }
+        }
+    };
+    read_state(buffer_state);
+    read_state(image_state);
+    if (image_state != nullptr)
+    {
+        prev_layout = image_state->layout;
+    }
+
+    const std::string in_pass = producer == ResourceTracker::kNoPass
+                                    ? std::string("outside this pass")
+                                    : std::format("in {}", pass_label(*compiled_[producer].pass, producer));
+
+    // First multi-line bazalt-authored message, kept on purpose: a hazard has
+    // four facts, and one line of them does not read.
+    std::string text = std::format("Graph: possible hazard in {}\n", pass_label(pass, pass_index));
+    text += std::format("  resource: {}\n", what);
+    if (is_image)
+    {
+        text += std::format(
+            "  previous: {}, {} / {}, {}\n",
+            layout_name(prev_layout.value_or(VK_IMAGE_LAYOUT_UNDEFINED)),
+            stage_names(prev_stages),
+            access_names(prev_access),
+            in_pass);
+        text += std::format(
+            "  requested: {}, {} / {}\n", layout_name(e.layout), stage_names(e.stages), access_names(e.access));
+    }
+    else
+    {
+        text += std::format("  previous: {} / {}, {}\n", stage_names(prev_stages), access_names(prev_access), in_pass);
+        text += std::format("  requested: {} / {}\n", stage_names(e.stages), access_names(e.access));
+    }
+    if (peek.cross_queue)
+    {
+        text += "  cross-queue: the producer ran on another queue, and a pipeline barrier cannot reach "
+                "it — add the pass with auto_barriers=True\n";
+    }
+    else
+    {
+        const auto src = access_for(prev_stages, prev_access, std::nullopt, all_shaders);
+        const auto dst = access_for(e.stages, e.access, is_image ? std::optional(e.layout) : std::nullopt, all_shaders);
+        const std::string handle = is_image
+                                       ? (e.image->name().empty() ? std::string("<the image>") : e.image->name())
+                                       : (e.buffer->name().empty() ? std::string("<the buffer>") : e.buffer->name());
+        if (src.has_value() && dst.has_value())
+        {
+            text += std::format(
+                "  fix: p.barrier({}, src=bz.Access.{}, dst=bz.Access.{}) in {}, or add the pass "
+                "with auto_barriers=True\n",
+                handle,
+                access_member_name(*src),
+                access_member_name(*dst),
+                pass_label(pass, pass_index));
+        }
+        else
+        {
+            text += "  fix: no bz.Access names this use, so add the pass with auto_barriers=True\n";
+        }
+    }
+
+    if (auto logger = context_->logger())
+    {
+        logger->log(Severity::Warning, Source::General, text);
+    }
+    explain_.push_back(
+        {.kind = ExplainEntry::Kind::Unordered,
+         .pass = pass_index,
+         .buffer = e.buffer,
+         .image = e.image,
+         .producer = producer,
+         .producer_wrote = prev_wrote});
+}
+
 std::expected<void, Error> Graph::compile_()
 {
     compiled_.clear();
@@ -656,6 +845,20 @@ std::expected<void, Error> Graph::compile_()
         }
     }
 
+    // One warning per (pass, resource) per compile: a manual pass repeats a
+    // use per draw, and the second line would add nothing.
+    std::vector<std::pair<std::size_t, const void*>> warned;
+    const auto warn_once = [&](std::size_t pass_idx, const void* resource)
+    {
+        const auto key = std::make_pair(pass_idx, resource);
+        if (std::ranges::find(warned, key) != warned.end())
+        {
+            return false;
+        }
+        warned.push_back(key);
+        return true;
+    };
+
     for (CompiledPass& cp : compiled_)
     {
         Pass* pass = cp.pass;
@@ -709,6 +912,23 @@ std::expected<void, Error> Graph::compile_()
             {
                 case UseEvent::Kind::BufferUse:
                 {
+                    if (e.manual)
+                    {
+                        // A manual pass tells the fold only what its notes
+                        // say; a use is peeked, never committed — committing
+                        // would silently change how the automatic neighbours
+                        // order against this pass. The warning changes
+                        // nothing the GPU does (rule 2: the pass may know
+                        // better — an address-written buffer is invisible
+                        // here).
+                        const auto peek =
+                            tracker.peek_use(e.buffer.get(), e.stages, e.access, e.writes, e.shader_writable);
+                        if ((peek.barrier || peek.cross_queue) && warn_once(pass_index, e.buffer.get()))
+                        {
+                            warn_manual_hazard_(pass_index, e, tracker.state(e.buffer.get()), nullptr, peek);
+                        }
+                        break;
+                    }
                     tracked_writes_ |= e.writes;
                     const auto* prev_state = tracker.state(e.buffer.get());
                     const auto prev = prev_state != nullptr ? std::optional(*prev_state) : std::nullopt;
@@ -757,6 +977,15 @@ std::expected<void, Error> Graph::compile_()
                     if (e.only_if_tracked && !tracker.tracks(e.image.get()))
                     {
                         tracker.note_image_read(e.image.get(), e.layout, e.stages, e.access);
+                        break;
+                    }
+                    if (e.manual)
+                    {
+                        const auto peek = tracker.peek_use_image(e.image.get(), e.layout, e.stages, e.access, e.writes);
+                        if ((peek.barrier || peek.cross_queue) && warn_once(pass_index, e.image.get()))
+                        {
+                            warn_manual_hazard_(pass_index, e, nullptr, tracker.image_state(e.image.get()), peek);
+                        }
                         break;
                     }
                     tracked_writes_ |= e.writes;

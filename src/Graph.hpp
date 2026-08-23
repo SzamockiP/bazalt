@@ -350,6 +350,18 @@ private:
 
     // Classify what one tracker call did and append the entries. `prev` is
     // the state snapshot from before the call (null on a true first use).
+    // The manual-pass lint (0.30): one WARNING per (pass, resource) per
+    // compile when a manual use needs a barrier or a wait no p.barrier() in
+    // the pass established. Never an exception — a manual pass exists because
+    // it may know better, and an exception would close the escape hatch rule
+    // 2 requires.
+    void warn_manual_hazard_(
+        std::size_t pass_index,
+        const UseEvent& e,
+        const ResourceTracker::BufferState* buffer_state,
+        const ResourceTracker::ImageState* image_state,
+        ResourceTracker::Peek peek);
+
     template <typename State>
     void record_explain_(
         std::size_t pass,
