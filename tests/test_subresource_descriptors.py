@@ -112,8 +112,11 @@ def test_write_one_layer_as_storage_then_sample_it(ctx):
         p.bind_pipeline(reader).bind_descriptor_set(rset).draw(3)
     ctx.submit(g)
 
-    # 0.25 / 0.5 / 0.75 of store_const.comp, in 8-bit.
-    assert tuple(int(v) for v in target.color[0].read()[8, 8]) == (64, 127, 191, 255)
+    # 0.25 / 0.5 / 0.75 of store_const.comp, in 8-bit. Within one: the exact
+    # rounding of 0.5 is the driver's (127 here, 128 there), and a test may
+    # only assert what bazalt promises.
+    written = target.color[0].read()[8, 8]
+    assert all(abs(int(got) - want) <= 1 for got, want in zip(written, (64, 128, 191, 255))), written
     # The other layers kept the upload: a narrowed write claims only its own.
     assert tuple(int(v) for v in image.read(layer=0)[8, 8]) == (9, 9, 9, 255)
 
