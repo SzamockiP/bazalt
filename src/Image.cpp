@@ -81,6 +81,7 @@ Image::~Image()
              allocator = context_->allocator(),
              view = view_,
              storage_view = storage_view_,
+             subresource_views = std::move(subresource_views_),
              image = image_,
              allocation = allocation_]
             {
@@ -94,12 +95,68 @@ Image::~Image()
                 {
                     vk->vkDestroyImageView(device, storage_view, nullptr);
                 }
+                // The narrowed views a descriptor asked for (0.30).
+                for (const auto& [key, narrowed] : subresource_views)
+                {
+                    vk->vkDestroyImageView(device, narrowed, nullptr);
+                }
                 if (image != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE)
                 {
                     vmaDestroyImage(allocator, image, allocation);
                 }
             });
     }
+}
+
+VkImageView Image::subresource_view(std::optional<std::uint32_t> layer, std::optional<std::uint32_t> mip, bool storage)
+{
+    if (!layer && !mip)
+    {
+        return storage ? storage_view() : view_;
+    }
+    const std::uint32_t base_layer = layer.value_or(0);
+    const std::uint32_t layer_count = layer ? 1 : array_layers_;
+    const std::uint32_t base_mip = mip.value_or(0);
+    const std::uint32_t mip_count = mip ? 1 : mip_levels_;
+    // A narrowed layer is a 2D view; a mip-only narrowing keeps the image's
+    // own type, which for a 3D image is 3D and for a cube is CUBE (or
+    // 2D_ARRAY when it is bound as storage — a CUBE view is illegal there).
+    const VkImageViewType type = layer               ? VK_IMAGE_VIEW_TYPE_2D
+                                 : depth_ > 1        ? VK_IMAGE_VIEW_TYPE_3D
+                                 : cube_             ? (storage ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_CUBE)
+                                 : array_layers_ > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                                                     : VK_IMAGE_VIEW_TYPE_2D;
+
+    const auto key = std::tuple{type, base_layer, layer_count, base_mip, mip_count};
+    if (const auto it = subresource_views_.find(key); it != subresource_views_.end())
+    {
+        return it->second;
+    }
+
+    VkImageViewCreateInfo info{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .image = image_,
+        .viewType = type,
+        .format = vk_format(),
+        .components = {},
+        .subresourceRange = {
+            .aspectMask = aspect(),
+            .baseMipLevel = base_mip,
+            .levelCount = mip_count,
+            .baseArrayLayer = base_layer,
+            .layerCount = layer_count}};
+    VkImageView view = VK_NULL_HANDLE;
+    if (context_->vk().vkCreateImageView(context_->device(), &info, nullptr, &view) != VK_SUCCESS)
+    {
+        // The caller checked the range, so this is a driver refusal. Falling
+        // back to the whole-image view keeps the descriptor valid rather than
+        // writing a null one; the pixels are wrong, the program is not.
+        return storage ? storage_view() : view_;
+    }
+    subresource_views_.emplace(key, view);
+    return view;
 }
 
 void Image::mark_subresource_contents(

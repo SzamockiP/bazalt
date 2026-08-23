@@ -43,6 +43,13 @@ struct UseEvent
     // it PEEKS it: a use the notes do not cover is a possible hazard, and
     // the compile logs one warning naming the fix.
     bool manual = false;
+    // Which subresources the use touches (0.30). layer_count == 0 means the
+    // whole image, which is what every verb but a narrowed descriptor says.
+    // `layers`/`mips` are the image's own counts, so the fold can size a
+    // split without dereferencing the Image.
+    ImageRange range{};
+    std::uint32_t layers = 1;
+    std::uint32_t mips = 1;
     // "Only if something already wrote this image" — the sampled-image rule.
     // An uploaded texture the tracker never saw rests in SHADER_READ_ONLY
     // already, and transitioning it from a tracker's UNDEFINED would DISCARD
@@ -617,7 +624,8 @@ private:
         VkPipelineStageFlags stages,
         VkAccessFlags access,
         bool writes,
-        bool only_if_tracked = false);
+        bool only_if_tracked = false,
+        const ImageRange& range = {});
 
     // Does the pipeline bound at this bind point write (set, binding)?
     //

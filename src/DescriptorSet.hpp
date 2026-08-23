@@ -46,6 +46,11 @@ public:
         // Kept here rather than in a parallel vector: it belongs to this
         // descriptor, so it is replaced when the descriptor is.
         std::shared_ptr<Sampler> sampler;
+        // The subresource this descriptor narrows to (0.30), or nullopt for
+        // the whole image. The tracker reads them to barrier exactly what the
+        // shader touches.
+        std::optional<std::uint32_t> layer;
+        std::optional<std::uint32_t> mip;
     };
 
     // sets: 1 element (static) or frames_in_flight elements (frame). `block` is
@@ -99,11 +104,17 @@ public:
     //
     // index selects the element of a count>1 array binding. It defaults to 0, so
     // a plain binding is the one-element case of the same call.
+    // layer=/mip= bind ONE layer or ONE mip level (0.30). A narrowed layer
+    // is a 2D view, so one face of a cubemap samples as a sampler2D; a
+    // mip-only narrowing keeps the image's view type. A 3D image refuses
+    // layer= — a volume has depth, not layers.
     std::expected<void, Error> set_image(
         uint32_t binding,
         std::shared_ptr<Image> image,
         std::shared_ptr<Sampler> sampler = nullptr,
-        uint32_t index = 0);
+        uint32_t index = 0,
+        std::optional<std::uint32_t> layer = std::nullopt,
+        std::optional<std::uint32_t> mip = std::nullopt);
 
     // Write a storage image to this descriptor set (all copies). No sampler:
     // a storage image is read/written by coordinate (imageLoad/imageStore), and
@@ -111,7 +122,12 @@ public:
     // accessed in. The auto-barrier tracker transitions the image to GENERAL
     // before the dispatch, so the recorded layout here is always what the GPU
     // finds at execute time.
-    std::expected<void, Error> set_storage_image(uint32_t binding, std::shared_ptr<Image> image, uint32_t index = 0);
+    std::expected<void, Error> set_storage_image(
+        uint32_t binding,
+        std::shared_ptr<Image> image,
+        uint32_t index = 0,
+        std::optional<std::uint32_t> layer = std::nullopt,
+        std::optional<std::uint32_t> mip = std::nullopt);
 
     // Write a buffer to this descriptor set
     // For frame descriptor sets + DynamicBuffer: writes per-frame buffer to each copy
@@ -173,12 +189,22 @@ private:
         entries.push_back(std::move(entry));
     }
 
+    // The shared refusals of a narrowed descriptor: no layers on a volume,
+    // and the counts named where a range runs off the end.
+    static std::expected<void, Error> check_subresource_(
+        const Image& image,
+        std::optional<std::uint32_t> layer,
+        std::optional<std::uint32_t> mip,
+        const char* what);
+
     void record_image_(
         uint32_t binding,
         uint32_t index,
         VkDescriptorType type,
         std::shared_ptr<Image> image,
-        std::shared_ptr<Sampler> sampler);
+        std::shared_ptr<Sampler> sampler,
+        std::optional<std::uint32_t> layer = std::nullopt,
+        std::optional<std::uint32_t> mip = std::nullopt);
 
     std::shared_ptr<Context> context_;
     std::shared_ptr<DescriptorPool> pool_;    // sets must not outlive their pool

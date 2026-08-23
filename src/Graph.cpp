@@ -974,14 +974,20 @@ std::expected<void, Error> Graph::compile_()
                     // into this image has no way to know somebody was reading
                     // it — which across queues is a write-after-read nothing
                     // else would catch.
-                    if (e.only_if_tracked && !tracker.tracks(e.image.get()))
+                    // Per range since 0.30, and load-bearing for a pyramid
+                    // pass: the storage write of mip N makes the IMAGE
+                    // tracked, so a whole-image question would transition the
+                    // uploaded mip 0 this pass also samples — a discard of
+                    // the source, by its own pass.
+                    if (e.only_if_tracked && !tracker.tracks(e.image.get(), e.range))
                     {
-                        tracker.note_image_read(e.image.get(), e.layout, e.stages, e.access);
+                        tracker.note_image_read(e.image.get(), e.layout, e.stages, e.access, e.range, e.layers, e.mips);
                         break;
                     }
                     if (e.manual)
                     {
-                        const auto peek = tracker.peek_use_image(e.image.get(), e.layout, e.stages, e.access, e.writes);
+                        const auto peek = tracker.peek_use_image(
+                            e.image.get(), e.layout, e.stages, e.access, e.writes, e.range, e.layers, e.mips);
                         if ((peek.barrier || peek.cross_queue) && warn_once(pass_index, e.image.get()))
                         {
                             warn_manual_hazard_(pass_index, e, nullptr, tracker.image_state(e.image.get()), peek);
@@ -993,10 +999,11 @@ std::expected<void, Error> Graph::compile_()
                         const auto* prev_state = tracker.image_state(e.image.get());
                         const auto prev = prev_state != nullptr ? std::optional(*prev_state) : std::nullopt;
                         const std::size_t before = waits.size();
-                        auto b = tracker.use_image(e.image.get(), e.layout, e.stages, e.access, e.writes, waits);
-                        if (b)
+                        auto barriers = tracker.use_image(
+                            e.image.get(), e.layout, e.stages, e.access, e.writes, waits, e.range, e.layers, e.mips);
+                        for (const auto& b : barriers)
                         {
-                            batch_at_(cp, e.position).images.emplace_back(e.image, *b);
+                            batch_at_(cp, e.position).images.emplace_back(e.image, b);
                         }
                         record_explain_(
                             pass_index,
@@ -1007,7 +1014,7 @@ std::expected<void, Error> Graph::compile_()
                             batch.queue,
                             before,
                             waits,
-                            b);
+                            barriers.empty() ? std::nullopt : std::optional(barriers.front()));
                     }
                     break;
                 }
@@ -1128,8 +1135,7 @@ void Graph::correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, 
     const std::size_t pass_index = static_cast<std::size_t>(&cp - compiled_.data());
     for (const auto& image : rt.written_color_images())
     {
-        const auto known = tracker.layout_of(image.get());
-        if (!known || *known == wanted)
+        if (!tracker.layouts_differ(image.get(), wanted))
         {
             continue;
         }
@@ -1141,19 +1147,32 @@ void Graph::correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, 
         // on the other, and a compute pass that moved the attachment is exactly
         // the case this correction exists for. use_image answers both halves —
         // a barrier for the local predecessor, a wait for the remote one.
-        auto b = tracker.use_image(
+        // A whole-image use: it reconciles a split by emitting one barrier
+        // per differing subresource, and the note below then collapses it.
+        auto barriers = tracker.use_image(
             image.get(),
             wanted,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
             /*writes=*/true,
-            waits);
-        if (b)
+            waits,
+            {},
+            image->array_layers(),
+            image->mip_levels());
+        for (const auto& b : barriers)
         {
-            cp.entry.images.emplace_back(image, *b);
+            cp.entry.images.emplace_back(image, b);
         }
         record_explain_(
-            pass_index, nullptr, image, prev ? &*prev : nullptr, prev.has_value(), cp.pass->queue(), before, waits, b);
+            pass_index,
+            nullptr,
+            image,
+            prev ? &*prev : nullptr,
+            prev.has_value(),
+            cp.pass->queue(),
+            before,
+            waits,
+            barriers.empty() ? std::nullopt : std::optional(barriers.front()));
         // The pass's own entry transition now starts where it says it does.
         tracker.note_image_layout(
             image.get(), wanted, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT);
@@ -1228,11 +1247,13 @@ void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame)
         const StageAccess d = narrow_dst({.stages = b.dst_stages, .access = b.dst_access}, legal);
         src |= s.stages;
         dst |= d.stages;
-        // All mips and all layers: the fold holds one layout per image. The
+        // The subresources the fold decided (0.30): the whole image for an
+        // ordinary use, one (layer, mip) where a descriptor narrowed it. The
         // aspect comes from the FORMAT rather than being COLOR — a depth
         // image reaches this path as soon as a pass samples the depth another
         // pass rendered, and naming COLOR on it is a barrier the layers
         // reject outright.
+        const bool whole = b.range.layer_count == 0;
         imgs.push_back(
             {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
              .pNext = nullptr,
@@ -1245,10 +1266,10 @@ void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame)
              .image = image->vk_image(),
              .subresourceRange = {
                  .aspectMask = image->aspect(),
-                 .baseMipLevel = 0,
-                 .levelCount = image->mip_levels(),
-                 .baseArrayLayer = 0,
-                 .layerCount = image->barrier_layers(image->array_layers())}});
+                 .baseMipLevel = whole ? 0 : b.range.base_mip,
+                 .levelCount = whole ? image->mip_levels() : b.range.mip_count,
+                 .baseArrayLayer = whole ? 0 : b.range.base_layer,
+                 .layerCount = image->barrier_layers(whole ? image->array_layers() : b.range.layer_count)}});
     }
 
     if (bufs.empty() && imgs.empty())

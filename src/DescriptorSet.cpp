@@ -16,11 +16,42 @@ DescriptorSet::~DescriptorSet()
     }
 }
 
+std::expected<void, Error> DescriptorSet::check_subresource_(
+    const Image& image,
+    std::optional<std::uint32_t> layer,
+    std::optional<std::uint32_t> mip,
+    const char* what)
+{
+    if (layer && image.depth() > 1)
+    {
+        return std::unexpected(err_resource(
+            std::format(
+                "{}: layer= names an array layer, and this image is a 3D volume with no layers. "
+                "Use mip= alone, or bind the whole image.",
+                what)));
+    }
+    if (layer && *layer >= image.array_layers())
+    {
+        return std::unexpected(err_resource(
+            std::format(
+                "{}: layer {} is outside this image, which has {} layer(s).", what, *layer, image.array_layers())));
+    }
+    if (mip && *mip >= image.mip_levels())
+    {
+        return std::unexpected(err_resource(
+            std::format(
+                "{}: mip {} is outside this image, which has {} mip level(s).", what, *mip, image.mip_levels())));
+    }
+    return {};
+}
+
 std::expected<void, Error> DescriptorSet::set_image(
     uint32_t binding,
     std::shared_ptr<Image> image,
     std::shared_ptr<Sampler> sampler,
-    uint32_t index)
+    uint32_t index,
+    std::optional<std::uint32_t> layer,
+    std::optional<std::uint32_t> mip)
 {
     if (!context_)
     {
@@ -43,6 +74,10 @@ std::expected<void, Error> DescriptorSet::set_image(
         return std::unexpected(err_resource(
             std::format("Binding {} is not a sampler binding. Use set_buffer() for buffer bindings", binding)));
     }
+    if (auto r = check_subresource_(*image, layer, mip, "set_image"); !r)
+    {
+        return std::unexpected(r.error());
+    }
 
     if (!sampler)
     {
@@ -55,7 +90,9 @@ std::expected<void, Error> DescriptorSet::set_image(
     }
 
     VkDescriptorImageInfo imageInfo{
-        .sampler = sampler->get(), .imageView = image->view(), .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        .sampler = sampler->get(),
+        .imageView = image->subresource_view(layer, mip, /*storage=*/false),
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 
     for (auto& set : sets_)
     {
@@ -72,14 +109,17 @@ std::expected<void, Error> DescriptorSet::set_image(
             .pTexelBufferView = nullptr};
         context_->vk().vkUpdateDescriptorSets(context_->device(), 1, &write, 0, nullptr);
     }
-    record_image_(binding, index, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, std::move(image), std::move(sampler));
+    record_image_(
+        binding, index, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, std::move(image), std::move(sampler), layer, mip);
     return {};
 }
 
 std::expected<void, Error> DescriptorSet::set_storage_image(
     uint32_t binding,
     std::shared_ptr<Image> image,
-    uint32_t index)
+    uint32_t index,
+    std::optional<std::uint32_t> layer,
+    std::optional<std::uint32_t> mip)
 {
     if (!context_)
     {
@@ -104,12 +144,17 @@ std::expected<void, Error> DescriptorSet::set_storage_image(
                 binding,
                 binding)));
     }
+    if (auto r = check_subresource_(*image, layer, mip, "set_storage_image"); !r)
+    {
+        return std::unexpected(r.error());
+    }
 
     VkDescriptorImageInfo imageInfo{
         .sampler = VK_NULL_HANDLE,
         // storage_view() is the 2D_ARRAY view for a cubemap (a CUBE view is
-        // illegal as storage) and the plain view for everything else.
-        .imageView = image->storage_view(),
+        // illegal as storage) and the plain view for everything else;
+        // subresource_view narrows it where layer=/mip= asked.
+        .imageView = image->subresource_view(layer, mip, /*storage=*/true),
         .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
 
     for (auto& set : sets_)
@@ -132,8 +177,23 @@ std::expected<void, Error> DescriptorSet::set_storage_image(
     // optimism as a storage buffer being readable — the headless submit
     // blocks before read(), so contents exist by then, and read()'s
     // transition needs the resting layout to be GENERAL, not UNDEFINED.
-    image->mark_has_contents(VK_IMAGE_LAYOUT_GENERAL);
-    record_image_(binding, index, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, std::move(image), nullptr);
+    // Only what this descriptor writes: a narrowed storage binding leaves the
+    // rest of the chain alone, which is what makes image.read(mip=0) still
+    // return the upload after a pass wrote mip 1.
+    if (layer || mip)
+    {
+        image->mark_subresource_contents(
+            VK_IMAGE_LAYOUT_GENERAL,
+            layer.value_or(0),
+            layer ? 1 : image->array_layers(),
+            mip.value_or(0),
+            mip ? 1 : image->mip_levels());
+    }
+    else
+    {
+        image->mark_has_contents(VK_IMAGE_LAYOUT_GENERAL);
+    }
+    record_image_(binding, index, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, std::move(image), nullptr, layer, mip);
     return {};
 }
 
@@ -249,7 +309,9 @@ void DescriptorSet::record_image_(
     uint32_t index,
     VkDescriptorType type,
     std::shared_ptr<Image> image,
-    std::shared_ptr<Sampler> sampler)
+    std::shared_ptr<Sampler> sampler,
+    std::optional<std::uint32_t> layer,
+    std::optional<std::uint32_t> mip)
 {
     replace_or_append_(
         bound_images_,
@@ -258,7 +320,9 @@ void DescriptorSet::record_image_(
             .type = type,
             .binding = binding,
             .index = index,
-            .sampler = std::move(sampler)});
+            .sampler = std::move(sampler),
+            .layer = layer,
+            .mip = mip});
 }
 
 std::expected<std::shared_ptr<DescriptorPool>, Error> DescriptorPool::create(

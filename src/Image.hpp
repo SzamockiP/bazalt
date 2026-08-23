@@ -12,6 +12,7 @@
 #include <expected>
 #include <format>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -433,6 +434,20 @@ public:
     // thread, so the worker's own chain does not know about it. Two values
     // can be set at once since 0.30: the copy signals the transfer timeline
     // and the mip cascade the graphics one.
+    // One (layer, mip) of the image as a view, for a narrowed descriptor
+    // (set_image(layer=, mip=), 0.30). Whole-range asks return view() /
+    // storage_view() untouched, so the ordinary path allocates nothing and
+    // the 99% case is what it always was.
+    //
+    // A narrowed LAYER is always VIEW_TYPE_2D: naming one face of a cubemap
+    // asks for that face as a texture, not for a samplerCube of it. A
+    // mip-only narrowing keeps the image's own view type, so mip 2 of a cube
+    // is still a samplerCube.
+    //
+    // Cached and owned here, destroyed (deferred) with the image, exactly as
+    // OffscreenTarget caches its attachment views.
+    VkImageView subresource_view(std::optional<std::uint32_t> layer, std::optional<std::uint32_t> mip, bool storage);
+
     // The name= the image was created with, or empty. A debug label for
     // graph.explain() and the validation layer — never a key, the Pass::name_
     // contract.
@@ -764,6 +779,9 @@ private:
     // thread. The cv/mutex pair backs the CPU-side waits; the timeline serial
     // backs the GPU-side ones.
     std::string name_;
+    // Keyed (viewType, base_layer, layer_count, base_mip, mip_count).
+    std::map<std::tuple<VkImageViewType, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t>, VkImageView>
+        subresource_views_;
 
     std::atomic<UploadState> upload_state_{UploadState::None};
     std::array<std::atomic<std::uint64_t>, kQueueCount> upload_serial_{};

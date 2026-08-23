@@ -47,6 +47,17 @@ struct StageAccess
     VkAccessFlags access;
 };
 
+// A rectangle of subresources: which layers and mips a use touches (0.30, for
+// set_image(layer=, mip=)). layer_count == 0 means "the whole image", which is
+// what every whole-image call site says by default.
+struct ImageRange
+{
+    std::uint32_t base_layer = 0;
+    std::uint32_t layer_count = 0;
+    std::uint32_t base_mip = 0;
+    std::uint32_t mip_count = 0;
+};
+
 // Core-1.0 pairs on purpose: the whole codebase rides vkCmdPipelineBarrier,
 // not synchronization2, and mixing models would be a second way to say the
 // same thing.
@@ -229,6 +240,134 @@ public:
         pass_ = pass;
     }
 
+    // The hazard state, public since 0.30 so graph.explain() and the manual
+    // lint can read what the fold knew before a use. The maps stay private;
+    // state()/image_state() hand out const pointers.
+    struct BufferState
+    {
+        bool written = false;
+        VkPipelineStageFlags write_stages = 0;
+        VkAccessFlags write_access = 0;
+        // Which batch wrote it last, and on which queue. kNoBatch until
+        // something in this fold writes it.
+        std::size_t write_batch = kNoBatch;
+        QueueKind write_queue = QueueKind::Graphics;
+        // Stages/accesses already synchronized against the last write, PER
+        // QUEUE. One shared pair would let a read on the compute queue skip
+        // its wait because a read on the graphics queue had already made the
+        // write visible there — visibility established on one queue says
+        // nothing about the other.
+        std::array<VkPipelineStageFlags, kQueueCount> visible_stages{};
+        std::array<VkAccessFlags, kQueueCount> visible_access{};
+        // The latest batch that read it since the last write, per queue. Only
+        // the latest is needed: a timeline signal covers everything submitted
+        // earlier on its queue, and a wait is ">=".
+        std::array<std::size_t, kQueueCount> read_batch = per_queue(kNoBatch);
+        // Reads since the last write (what a future write must wait for).
+        VkPipelineStageFlags read_stages = 0;
+        VkAccessFlags read_access = 0;
+        // Provenance for explain() and the lint: which pass (in the caller's
+        // compiled order) wrote last, and which read last per queue. Carried
+        // beside the batch fields rather than derived from them, because a
+        // batch holds several passes.
+        std::size_t write_pass = kNoPass;
+        std::array<std::size_t, kQueueCount> read_pass = per_queue(kNoPass);
+    };
+
+    // BufferState plus the layout the recording has left the image in so far.
+    // Defaulted comparison: the split/collapse asks "does every subresource
+    // agree" and a field-by-field answer is exactly that question.
+    struct ImageState
+    {
+        VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        bool written = false;
+        VkPipelineStageFlags write_stages = 0;
+        VkAccessFlags write_access = 0;
+        std::size_t write_batch = kNoBatch;
+        QueueKind write_queue = QueueKind::Graphics;
+        std::array<VkPipelineStageFlags, kQueueCount> visible_stages{};
+        std::array<VkAccessFlags, kQueueCount> visible_access{};
+        std::array<std::size_t, kQueueCount> read_batch = per_queue(kNoBatch);
+        VkPipelineStageFlags read_stages = 0;
+        VkAccessFlags read_access = 0;
+        std::size_t write_pass = kNoPass;
+        std::array<std::size_t, kQueueCount> read_pass = per_queue(kNoPass);
+        bool operator==(const ImageState&) const = default;
+    };
+
+    // One state while the image is uniform, a per-(layer, mip) split while it
+    // is not — the SubresourceLayouts shape applied to hazard state (0.30).
+    struct ImageStates
+    {
+        ImageState whole;
+        // Layer-major, layers x mips entries; empty = uniform.
+        std::vector<ImageState> split;
+        std::uint32_t layers = 1;
+        std::uint32_t mips = 1;
+    };
+
+    static bool touched_(const ImageState& st)
+    {
+        return st.written || std::ranges::any_of(st.read_batch, [](std::size_t b) { return b != kNoBatch; });
+    }
+
+    // The manual-pass lint's question (0.30): would the automatic path emit a
+    // barrier or a cross-queue wait for this use that the pass's own notes do
+    // not already cover? Answered on a COPY, so it cannot drift from use() /
+    // use_image(); a manual use is peeked, never committed. An untracked
+    // resource answers no — the first-use floor covers writers outside the
+    // graph, and a warning with no producer to name is noise.
+    //
+    // The covered test is applied to writes too, which the automatic path
+    // does not do (it always barriers a WAW): the lint asks whether the
+    // caller ordered the use, not whether the fold would emit its
+    // belt-and-braces barrier.
+    // ponytail: each peek copies both state maps; manual passes are rare and
+    // a compile runs once — split use() into compute/commit halves if a
+    // profile ever cares.
+    struct Peek
+    {
+        bool barrier = false;
+        bool cross_queue = false;
+    };
+    Peek peek_use(Buffer* buffer, VkPipelineStageFlags stages, VkAccessFlags access, bool writes, bool shader_writable)
+        const
+    {
+        const auto it = states_.find(buffer);
+        if (it == states_.end() || covered_(it->second, stages, access))
+        {
+            return {};
+        }
+        ResourceTracker copy(*this);
+        std::vector<std::size_t> waits;
+        const auto b = copy.use(buffer, stages, access, writes, shader_writable, waits);
+        return {.barrier = b.has_value(), .cross_queue = !waits.empty()};
+    }
+    Peek peek_use_image(
+        Image* image,
+        VkImageLayout layout,
+        VkPipelineStageFlags stages,
+        VkAccessFlags access,
+        bool writes,
+        const ImageRange& range = {},
+        std::uint32_t layers = 1,
+        std::uint32_t mips = 1) const
+    {
+        const auto it = image_states_.find(image);
+        if (it == image_states_.end())
+        {
+            return {};
+        }
+        if (it->second.split.empty() && it->second.whole.layout == layout && covered_(it->second.whole, stages, access))
+        {
+            return {};
+        }
+        ResourceTracker copy(*this);
+        std::vector<std::size_t> waits;
+        const auto barriers = copy.use_image(image, layout, stages, access, writes, waits, range, layers, mips);
+        return {.barrier = !barriers.empty(), .cross_queue = !waits.empty()};
+    }
+
     struct Barrier
     {
         VkPipelineStageFlags src_stages;
@@ -351,10 +490,13 @@ public:
         VkPipelineStageFlags dst_stages;
         VkAccessFlags src_access;
         VkAccessFlags dst_access;
+        // Which subresources the barrier covers; layer_count == 0 = all of
+        // them (the pre-0.30 behaviour, and still the common case).
+        ImageRange range{};
     };
 
-    // Registers an image use in `layout` and returns the barrier that must
-    // precede it, if any. Keyed on Image* (object identity), like buffers.
+    // Registers an image use in `layout` and returns the barriers that must
+    // precede it. Keyed on Image* (object identity), like buffers.
     //
     // The image's layout at the START of each replay is taken to be UNDEFINED:
     // the recording replays every submit, and a discard on entry is legal from
@@ -362,16 +504,85 @@ public:
     // frame. Consequence — the documented ceiling — is that contents are NOT
     // carried between submits through the tracker; a dispatch that wants last
     // frame's image must overwrite it (post-processing does) or use cmd.barrier.
-    std::optional<ImageBarrier> use_image(
+    //
+    // Per (layer, mip) since 0.30, in the SubresourceLayouts shape: one state
+    // for a uniform image, a split on the first narrowed use, a collapse back
+    // when every entry agrees again. An image nobody narrows costs what it
+    // cost before, and a pyramid pass can hold mip N-1 sampled while it
+    // writes mip N — two layouts on one image at once, which one state per
+    // image could never say.
+    // ponytail: one barrier per subresource on a split image, no range
+    // coalescing; merge adjacent equal barriers if a profile ever shows it.
+    std::vector<ImageBarrier> use_image(
         Image* image,
+        VkImageLayout layout,
+        VkPipelineStageFlags stages,
+        VkAccessFlags access,
+        bool writes,
+        std::vector<std::size_t>& waits,
+        const ImageRange& range = {},
+        std::uint32_t layers = 1,
+        std::uint32_t mips = 1)
+    {
+        auto [it, inserted] = image_states_.try_emplace(image);
+        ImageStates& states = it->second;
+        states.layers = (std::max)(states.layers, layers);
+        states.mips = (std::max)(states.mips, mips);
+        const bool whole = range.layer_count == 0 || (range.base_layer == 0 && range.layer_count == states.layers &&
+                                                      range.base_mip == 0 && range.mip_count == states.mips);
+        std::vector<ImageBarrier> out;
+        if (whole && states.split.empty())
+        {
+            if (auto b = use_one_(states.whole, layout, stages, access, writes, waits))
+            {
+                out.push_back(*b);
+            }
+            return out;
+        }
+        if (states.split.empty())
+        {
+            states.split.assign(static_cast<std::size_t>(states.layers) * states.mips, states.whole);
+        }
+        const std::uint32_t l0 = whole ? 0 : range.base_layer;
+        const std::uint32_t lc = whole ? states.layers : range.layer_count;
+        const std::uint32_t m0 = whole ? 0 : range.base_mip;
+        const std::uint32_t mc = whole ? states.mips : range.mip_count;
+        for (std::uint32_t l = l0; l < l0 + lc; ++l)
+        {
+            for (std::uint32_t m = m0; m < m0 + mc; ++m)
+            {
+                if (auto b = use_one_(states.split[l * states.mips + m], layout, stages, access, writes, waits))
+                {
+                    b->range = {.base_layer = l, .layer_count = 1, .base_mip = m, .mip_count = 1};
+                    out.push_back(*b);
+                }
+            }
+        }
+        // A whole write resets every entry to one value, so the split ends
+        // there; a partially-diverged image keeps paying per subresource
+        // until then.
+        if (std::ranges::all_of(states.split, [&](const ImageState& s) { return s == states.split.front(); }))
+        {
+            states.whole = states.split.front();
+            states.split.clear();
+        }
+        return out;
+    }
+
+private:
+    // The hazard logic for ONE state — the pre-0.30 use_image body, verbatim
+    // in behaviour. Same logic as a buffer, plus a layout: a storage image
+    // must be in GENERAL to be read/written in a shader, SHADER_READ_ONLY to
+    // be sampled, so every use may need a layout transition on top of the
+    // memory barrier.
+    std::optional<ImageBarrier> use_one_(
+        ImageState& st,
         VkImageLayout layout,
         VkPipelineStageFlags stages,
         VkAccessFlags access,
         bool writes,
         std::vector<std::size_t>& waits)
     {
-        auto [it, inserted] = image_states_.try_emplace(image);
-        ImageState& st = it->second;
         const VkImageLayout old = st.layout;
         const bool layout_change = (old != layout);
         std::optional<ImageBarrier> result;
@@ -390,11 +601,10 @@ public:
             return {s, a};
         };
 
-        // Whether anything anywhere in this fold has touched the image yet:
+        // Whether anything anywhere in this fold has touched the state yet:
         // what tells a genuine first use (the floor applies) from one whose
         // predecessor simply ran on the other queue (the semaphore applies).
-        const bool touched = st.written ||
-                             std::ranges::any_of(st.read_batch, [](std::size_t b) { return b != kNoBatch; });
+        const bool touched = touched_(st);
 
         if (writes)
         {
@@ -463,6 +673,7 @@ public:
         return result;
     }
 
+public:
     // Every batch on another queue that has touched this image, without
     // changing anything. A render pass's attachment transitions are recorded
     // by the RenderTarget rather than through use_image, so the fold asks this
@@ -471,9 +682,14 @@ public:
     void cross_queue_touches(Image* image, std::vector<std::size_t>& waits) const
     {
         const auto it = image_states_.find(image);
-        if (it != image_states_.end())
+        if (it == image_states_.end())
         {
-            static_cast<void>(predecessors_(it->second, /*include_reads=*/true, waits));
+            return;
+        }
+        static_cast<void>(predecessors_(it->second.whole, /*include_reads=*/true, waits));
+        for (const ImageState& st : it->second.split)
+        {
+            static_cast<void>(predecessors_(st, /*include_reads=*/true, waits));
         }
     }
 
@@ -485,14 +701,57 @@ public:
         return image_states_.contains(image);
     }
 
-    // The layout this fold has left the image in, or nullopt where it has never
-    // seen it. A render pass derives its entry barrier from the RenderTarget
-    // rather than from any state, so when it PRESERVES an attachment something
-    // else moved, the graph asks here and corrects the difference first.
-    std::optional<VkImageLayout> layout_of(Image* image) const
+    // The ranged twin (0.30), and it is load-bearing for the pyramid: the
+    // storage write of mip N makes the image "tracked", and without the range
+    // the sample of the uploaded mip 0 in the same pass would be transitioned
+    // from the fold's UNDEFINED — a discard of the source.
+    bool tracks(Image* image, const ImageRange& range) const
     {
         const auto it = image_states_.find(image);
-        return it == image_states_.end() ? std::nullopt : std::optional{it->second.layout};
+        if (it == image_states_.end())
+        {
+            return false;
+        }
+        const ImageStates& states = it->second;
+        if (states.split.empty())
+        {
+            return touched_(states.whole);
+        }
+        if (range.layer_count == 0)
+        {
+            return std::ranges::any_of(states.split, [](const ImageState& s) { return touched_(s); });
+        }
+        for (std::uint32_t l = range.base_layer; l < range.base_layer + range.layer_count; ++l)
+        {
+            for (std::uint32_t m = range.base_mip; m < range.base_mip + range.mip_count; ++m)
+            {
+                const std::size_t index = static_cast<std::size_t>(l) * states.mips + m;
+                if (index < states.split.size() && touched_(states.split[index]))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Whether the fold has left ANY subresource of the image somewhere other
+    // than `layout`. A render pass derives its entry barrier from the
+    // RenderTarget rather than from any state, so when it PRESERVES an
+    // attachment something else moved, the graph asks here and corrects the
+    // difference first — per subresource where the image is split.
+    bool layouts_differ(Image* image, VkImageLayout layout) const
+    {
+        const auto it = image_states_.find(image);
+        if (it == image_states_.end())
+        {
+            return false;
+        }
+        if (it->second.split.empty())
+        {
+            return it->second.whole.layout != layout;
+        }
+        return std::ranges::any_of(it->second.split, [&](const ImageState& s) { return s.layout != layout; });
     }
 
     // A manual cmd.barrier(image) / generate_mipmaps already recorded a real
@@ -583,7 +842,12 @@ public:
         VkPipelineStageFlags visible_stages,
         VkAccessFlags visible_access)
     {
-        ImageState& st = image_states_[image];
+        // Whole-image on purpose: an attachment write covers every layer the
+        // target wrote, and the note supersedes any split. Accepted ceiling —
+        // rendering into target.layer(i) still claims the whole image here.
+        ImageStates& states = image_states_[image];
+        states.split.clear();
+        ImageState& st = states.whole;
         st = {};
         st.layout = layout;
         st.written = true;
@@ -601,16 +865,50 @@ public:
     // the image is already in the layout the read names — it is only here so a
     // later pass that WRITES the image (a render pass drawing into it) can be
     // ordered against the read, which across queues has no other way to happen.
-    void note_image_read(Image* image, VkImageLayout layout, VkPipelineStageFlags stages, VkAccessFlags access)
+    void note_image_read(
+        Image* image,
+        VkImageLayout layout,
+        VkPipelineStageFlags stages,
+        VkAccessFlags access,
+        const ImageRange& range = {},
+        std::uint32_t layers = 1,
+        std::uint32_t mips = 1)
     {
-        ImageState& st = image_states_[image];
-        st.layout = layout;
-        st.read_stages |= stages;
-        st.read_access |= access;
-        st.visible_stages[queue_slot_] |= stages;
-        st.visible_access[queue_slot_] |= access;
-        st.read_batch[queue_slot_] = batch_;
-        st.read_pass[queue_slot_] = pass_;
+        ImageStates& states = image_states_[image];
+        states.layers = (std::max)(states.layers, layers);
+        states.mips = (std::max)(states.mips, mips);
+        const auto note_one = [&](ImageState& st)
+        {
+            st.layout = layout;
+            st.read_stages |= stages;
+            st.read_access |= access;
+            st.visible_stages[queue_slot_] |= stages;
+            st.visible_access[queue_slot_] |= access;
+            st.read_batch[queue_slot_] = batch_;
+            st.read_pass[queue_slot_] = pass_;
+        };
+        const bool whole = range.layer_count == 0 || (range.base_layer == 0 && range.layer_count == states.layers &&
+                                                      range.base_mip == 0 && range.mip_count == states.mips);
+        if (whole && states.split.empty())
+        {
+            note_one(states.whole);
+            return;
+        }
+        if (states.split.empty())
+        {
+            states.split.assign(static_cast<std::size_t>(states.layers) * states.mips, states.whole);
+        }
+        const std::uint32_t l0 = whole ? 0 : range.base_layer;
+        const std::uint32_t lc = whole ? states.layers : range.layer_count;
+        const std::uint32_t m0 = whole ? 0 : range.base_mip;
+        const std::uint32_t mc = whole ? states.mips : range.mip_count;
+        for (std::uint32_t l = l0; l < l0 + lc; ++l)
+        {
+            for (std::uint32_t m = m0; m < m0 + mc; ++m)
+            {
+                note_one(states.split[l * states.mips + m]);
+            }
+        }
     }
 
     void note_image_layout(
@@ -620,15 +918,24 @@ public:
         VkAccessFlags dst_access,
         std::vector<std::size_t>* waits = nullptr)
     {
-        ImageState& st = image_states_[image];
-        // Same argument as note_buffer_access: a manual transition covers this
-        // queue, and a producer on the other one still needs a wait. The
-        // parameter is optional because the fold also calls this to record a
-        // transition it just emitted itself, where there is nothing to add.
+        // Whole-image on purpose (a manual cmd.barrier names the whole image —
+        // accepted ceiling), so a split collapses to what the note says.
+        ImageStates& states = image_states_[image];
         if (waits != nullptr)
         {
-            static_cast<void>(predecessors_(st, /*include_reads=*/true, *waits));
+            // Same argument as note_buffer_access: a manual transition covers
+            // this queue, and a producer on the other one still needs a wait.
+            // The parameter is optional because the fold also calls this to
+            // record a transition it just emitted itself, where there is
+            // nothing to add.
+            static_cast<void>(predecessors_(states.whole, /*include_reads=*/true, *waits));
+            for (const ImageState& split_state : states.split)
+            {
+                static_cast<void>(predecessors_(split_state, /*include_reads=*/true, *waits));
+            }
         }
+        states.split.clear();
+        ImageState& st = states.whole;
         // Same-pass accumulation, as note_buffer_access — the layout has to
         // agree, because a note that MOVED the image did supersede the last.
         VkPipelineStageFlags carried_stages = 0;
@@ -662,117 +969,33 @@ public:
         image_states_.clear();
     }
 
-    // The hazard state, public since 0.30 so graph.explain() and the manual
-    // lint can read what the fold knew before a use. The maps stay private;
-    // state()/image_state() hand out const pointers.
-    struct BufferState
-    {
-        bool written = false;
-        VkPipelineStageFlags write_stages = 0;
-        VkAccessFlags write_access = 0;
-        // Which batch wrote it last, and on which queue. kNoBatch until
-        // something in this fold writes it.
-        std::size_t write_batch = kNoBatch;
-        QueueKind write_queue = QueueKind::Graphics;
-        // Stages/accesses already synchronized against the last write, PER
-        // QUEUE. One shared pair would let a read on the compute queue skip
-        // its wait because a read on the graphics queue had already made the
-        // write visible there — visibility established on one queue says
-        // nothing about the other.
-        std::array<VkPipelineStageFlags, kQueueCount> visible_stages{};
-        std::array<VkAccessFlags, kQueueCount> visible_access{};
-        // The latest batch that read it since the last write, per queue. Only
-        // the latest is needed: a timeline signal covers everything submitted
-        // earlier on its queue, and a wait is ">=".
-        std::array<std::size_t, kQueueCount> read_batch = per_queue(kNoBatch);
-        // Reads since the last write (what a future write must wait for).
-        VkPipelineStageFlags read_stages = 0;
-        VkAccessFlags read_access = 0;
-        // Provenance for explain() and the lint: which pass (in the caller's
-        // compiled order) wrote last, and which read last per queue. Carried
-        // beside the batch fields rather than derived from them, because a
-        // batch holds several passes.
-        std::size_t write_pass = kNoPass;
-        std::array<std::size_t, kQueueCount> read_pass = per_queue(kNoPass);
-    };
-
-    // BufferState plus the layout the recording has left the image in so far.
-    struct ImageState
-    {
-        VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
-        bool written = false;
-        VkPipelineStageFlags write_stages = 0;
-        VkAccessFlags write_access = 0;
-        std::size_t write_batch = kNoBatch;
-        QueueKind write_queue = QueueKind::Graphics;
-        std::array<VkPipelineStageFlags, kQueueCount> visible_stages{};
-        std::array<VkAccessFlags, kQueueCount> visible_access{};
-        std::array<std::size_t, kQueueCount> read_batch = per_queue(kNoBatch);
-        VkPipelineStageFlags read_stages = 0;
-        VkAccessFlags read_access = 0;
-        std::size_t write_pass = kNoPass;
-        std::array<std::size_t, kQueueCount> read_pass = per_queue(kNoPass);
-    };
-
-    // The manual-pass lint's question (0.30): would the automatic path emit a
-    // barrier or a cross-queue wait for this use that the pass's own notes do
-    // not already cover? Answered on a COPY, so it cannot drift from use() /
-    // use_image(); a manual use is peeked, never committed. An untracked
-    // resource answers no — the first-use floor covers writers outside the
-    // graph, and a warning with no producer to name is noise.
-    //
-    // The covered test is applied to writes too, which the automatic path
-    // does not do (it always barriers a WAW): the lint asks whether the
-    // caller ordered the use, not whether the fold would emit its
-    // belt-and-braces barrier.
-    // ponytail: each peek copies both state maps; manual passes are rare and
-    // a compile runs once — split use() into compute/commit halves if a
-    // profile ever cares.
-    struct Peek
-    {
-        bool barrier = false;
-        bool cross_queue = false;
-    };
-    Peek peek_use(Buffer* buffer, VkPipelineStageFlags stages, VkAccessFlags access, bool writes, bool shader_writable)
-        const
-    {
-        const auto it = states_.find(buffer);
-        if (it == states_.end() || covered_(it->second, stages, access))
-        {
-            return {};
-        }
-        ResourceTracker copy(*this);
-        std::vector<std::size_t> waits;
-        const auto b = copy.use(buffer, stages, access, writes, shader_writable, waits);
-        return {.barrier = b.has_value(), .cross_queue = !waits.empty()};
-    }
-    Peek peek_use_image(
-        Image* image,
-        VkImageLayout layout,
-        VkPipelineStageFlags stages,
-        VkAccessFlags access,
-        bool writes) const
-    {
-        const auto it = image_states_.find(image);
-        if (it == image_states_.end() || (it->second.layout == layout && covered_(it->second, stages, access)))
-        {
-            return {};
-        }
-        ResourceTracker copy(*this);
-        std::vector<std::size_t> waits;
-        const auto b = copy.use_image(image, layout, stages, access, writes, waits);
-        return {.barrier = b.has_value(), .cross_queue = !waits.empty()};
-    }
-
     const BufferState* state(Buffer* buffer) const
     {
         const auto it = states_.find(buffer);
         return it != states_.end() ? &it->second : nullptr;
     }
+    // The whole-image state for explain() and the lint. Where the image is
+    // split this answers with the FIRST touched subresource — a debugging aid
+    // needs a representative previous state, not all of them.
     const ImageState* image_state(Image* image) const
     {
         const auto it = image_states_.find(image);
-        return it != image_states_.end() ? &it->second : nullptr;
+        if (it == image_states_.end())
+        {
+            return nullptr;
+        }
+        if (it->second.split.empty())
+        {
+            return &it->second.whole;
+        }
+        for (const ImageState& st : it->second.split)
+        {
+            if (touched_(st))
+            {
+                return &st;
+            }
+        }
+        return &it->second.whole;
     }
 
 private:
@@ -840,5 +1063,5 @@ private:
     std::size_t pass_ = kNoPass;
 
     std::unordered_map<Buffer*, BufferState> states_;
-    std::unordered_map<Image*, ImageState> image_states_;
+    std::unordered_map<Image*, ImageStates> image_states_;
 };

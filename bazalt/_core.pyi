@@ -1001,19 +1001,36 @@ class Pipeline: ...
 
 class DescriptorSet:
     def set_image(self, binding: int, image: Image,
-                  sampler: Optional[Sampler] = None, *, index: int = 0) -> None:
+                  sampler: Optional[Sampler] = None, *, index: int = 0,
+                  layer: Optional[int] = None, mip: Optional[int] = None) -> None:
         """Bind an image (+ sampler; None means linear/repeat/anisotropic).
 
         `index` selects the element of a binding declared with count>1, and
         raises ResourceError outside that count (so index>0 on a plain binding
         is refused). Writing the same (binding, index) again replaces what was
         there rather than adding a second reference to it.
+
+        `layer` and `mip` bind ONE layer or ONE mip level (0.30), the sampling
+        twin of target.layer(i, mip=). A named layer gives a 2D view of it, so
+        one face of a cubemap samples as a sampler2D; `mip` alone keeps the
+        image's own view type. A 3D image refuses `layer` — a volume has
+        depth, not layers — and a subresource outside the image names its
+        counts.
+
+        The graph barriers exactly what the descriptor names, so one pass can
+        sample level N-1 while it writes level N as a storage image. That is a
+        bloom pyramid, and it needed one Image per level before.
         """
         ...
-    def set_storage_image(self, binding: int, image: Image, *, index: int = 0) -> None:
+    def set_storage_image(self, binding: int, image: Image, *, index: int = 0,
+                          layer: Optional[int] = None, mip: Optional[int] = None) -> None:
         """Bind a storage image (no sampler) to a binding declared with
         .storage_image(). The image is accessed in GENERAL layout; the tracker
-        adds the transition and any barrier around the dispatch automatically."""
+        adds the transition and any barrier around the dispatch automatically.
+
+        `layer` and `mip` narrow it to one subresource, exactly as on
+        set_image — and a narrowed write claims only what it writes, so the
+        rest of the chain keeps its contents."""
         ...
     def set_buffer(self, binding: int, buffer: Buffer, *, index: int = 0) -> None: ...
 

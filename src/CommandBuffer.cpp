@@ -1800,7 +1800,8 @@ void CommandBuffer::track_image_use_(
     VkPipelineStageFlags stages,
     VkAccessFlags access,
     bool writes,
-    bool only_if_tracked)
+    bool only_if_tracked,
+    const ImageRange& range)
 {
     event_sink_->push_back(
         {.kind = UseEvent::Kind::ImageUse,
@@ -1810,6 +1811,9 @@ void CommandBuffer::track_image_use_(
          .access = access,
          .writes = writes,
          .manual = !auto_barriers_,
+         .range = range,
+         .layers = image->array_layers(),
+         .mips = image->mip_levels(),
          .only_if_tracked = only_if_tracked,
          .position = commands_.size()});
 }
@@ -1855,6 +1859,16 @@ void CommandBuffer::track_descriptor_uses_(
         }
         for (const auto& bi : set->images())
         {
+            // The descriptor's own subresource, if it was narrowed with
+            // set_image(layer=, mip=). A 3D image has one array layer, so a
+            // mip-only narrowing reads the same either way.
+            const ImageRange range = bi.layer || bi.mip
+                                         ? ImageRange{
+                                               .base_layer = bi.layer.value_or(0),
+                                               .layer_count = bi.layer ? 1 : bi.image->array_layers(),
+                                               .base_mip = bi.mip.value_or(0),
+                                               .mip_count = bi.mip ? 1 : bi.image->mip_levels()}
+                                         : ImageRange{};
             if (bi.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
             {
                 // GENERAL either way: it is the only layout a storage image is
@@ -1866,7 +1880,9 @@ void CommandBuffer::track_descriptor_uses_(
                     VK_IMAGE_LAYOUT_GENERAL,
                     stages,
                     writes ? (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT) : VK_ACCESS_SHADER_READ_BIT,
-                    writes);
+                    writes,
+                    /*only_if_tracked=*/false,
+                    range);
             }
             else if (bi.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
             {
@@ -1887,7 +1903,8 @@ void CommandBuffer::track_descriptor_uses_(
                     stages,
                     VK_ACCESS_SHADER_READ_BIT,
                     false,
-                    /*only_if_tracked=*/true);
+                    /*only_if_tracked=*/true,
+                    range);
             }
         }
     }
