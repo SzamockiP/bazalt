@@ -92,6 +92,14 @@ public:
 
     // Where resource uses are reported. The Pass owns both the recorder and
     // the sink, and sets this immediately after create().
+    // Which queue will replay this recording. The timer pool asks it, because
+    // timestampValidBits is per queue family and a pass on the compute queue
+    // must be measured against the family that runs it (0.29).
+    void set_queue(QueueKind queue)
+    {
+        queue_ = queue;
+    }
+
     void set_event_sink(std::vector<UseEvent>* sink)
     {
         event_sink_ = sink;
@@ -128,7 +136,12 @@ public:
     // binding one buffer and binding the other are the same operation.
     CommandBuffer& bind_vertex_buffer(const std::shared_ptr<Buffer>& buffer, std::uint32_t binding = 0);
 
-    CommandBuffer& bind_index_buffer(const std::shared_ptr<Buffer>& buffer);
+    // Returns expected since 0.29: a STORAGE buffer is a legitimate index
+    // buffer now (a compute shader that rewrites an index list), so the verb
+    // has a type to check, and a VERTEX or UNIFORM buffer here used to reach
+    // the layers as a VUID naming neither the call nor the fix. Same argument
+    // and same shape as the indirect verbs.
+    std::expected<void, Error> bind_index_buffer(const std::shared_ptr<Buffer>& buffer);
 
     // instances= is a kwarg on both draw verbs rather than a third verb: the
     // instance count is one argument of a draw, and draw_indexed_instanced was a
@@ -594,6 +607,10 @@ private:
     // Where resource uses are reported, for the graph to fold. Owned by the
     // Pass that owns this recorder, and set before anything is recorded.
     std::vector<UseEvent>* event_sink_ = nullptr;
+    // The queue this recording's pass runs on. One value for its whole life —
+    // a Pass names its queue at add_pass and never moves — which is why the
+    // timer's memoized answer below stays valid.
+    QueueKind queue_ = QueueKind::Graphics;
 
     // ── record-time state (reset by begin(), never touched at replay) ──
     bool auto_barriers_ = true;

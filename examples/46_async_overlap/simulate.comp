@@ -1,0 +1,44 @@
+// One step of a point simulation. Reads the previous state and writes the next
+// one into a DIFFERENT buffer, which is what makes it independent of the frame
+// that submits it: the draw in the same frame reads the buffer this dispatch is
+// not touching.
+//
+// `work` is how many octaves of the swirl each point gets. It exists so the
+// dispatch can be made expensive enough to be worth overlapping — a simulation
+// that costs nothing hides behind nothing.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer Src { vec4 src[]; };
+layout(set = 0, binding = 1) writeonly buffer Dst { vec4 dst[]; };
+layout(push_constant) uniform Push {
+    float time;
+    uint count;
+    uint work;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) {
+        return;
+    }
+
+    vec4 state = src[i];
+    vec3 p = state.xyz;
+    float seed = state.w;
+
+    // A curl-ish swirl. Each octave is a few transcendentals, so the cost per
+    // point is `work` times that and the whole dispatch scales with it.
+    for (uint k = 0u; k < pc.work; ++k) {
+        float f = 1.0 + float(k) * 0.7;
+        vec3 v = vec3(
+            sin(p.y * f + pc.time + seed),
+            sin(p.z * f - pc.time * 1.3),
+            sin(p.x * f + pc.time * 0.7 + seed));
+        p += v * (0.0016 / f);
+    }
+
+    // Wrapped rather than clamped, so the cloud never collapses onto its walls.
+    p = fract((p + 1.0) * 0.5) * 2.0 - 1.0;
+    dst[i] = vec4(p, seed);
+}

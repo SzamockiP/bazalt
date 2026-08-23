@@ -6,20 +6,14 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <span>
 #include <utility>
 #include <vector>
 #include "CommandBuffer.hpp"
 
-// Which queue a pass runs on. One member today, and Queue.COMPUTE deliberately
-// does NOT exist yet: 0.29 adds the member (the Feature-row pattern — a new
-// capability is a new enum value, never a new parameter), together with the
-// second QueueRuntime it needs. Accepting COMPUTE now and running it
-// sequentially was rejected: 0.29 would then silently change the scheduling of
-// unedited 0.28 programs, a behaviour break dressed as a no-op.
-enum class QueueKind
-{
-    Graphics
-};
+// QueueKind lives in Queue.hpp since 0.29: Context owns the runtimes and the
+// tracker has to know which queue folded a use, and neither header may include
+// the other. Reached from here through CommandBuffer.hpp.
 
 class Graph;
 
@@ -104,6 +98,14 @@ public:
     // and the right kind of pass for the verb.
     std::expected<void, Error> guard(VerbScope scope, const char* verb) const;
 
+    // The verbs a compute queue cannot run whatever the pass kind: a blit is
+    // graphics-only work, and generate_mipmaps is a chain of blits.
+    //
+    // Refused by QueueKind rather than by the family the queue happens to sit
+    // on, so the contract reads the same on a device whose compute runtime
+    // aliases the graphics queue. One rule, not one per driver.
+    std::expected<void, Error> require_graphics_queue(const char* verb) const;
+
     // Marks the owning graph dirty, surviving the graph's death (a Python
     // handle may outlive it).
     void mark_graph_dirty();
@@ -138,9 +140,11 @@ private:
 //
 // The graph never reorders passes. On one queue a topological sort could only
 // produce the order the caller wrote or a surprise, and determinism is a
-// prototyping feature. The 0.29 cross-queue edges come from the same fold
-// without reordering either: the fold groups maximal runs of same-queue
-// passes into batches, and today that is always exactly one batch.
+// prototyping feature. Two queues change nothing about that: the fold groups
+// maximal runs of same-queue passes into BATCHES, in add order, and a use whose
+// producer sits in another batch becomes a semaphore wait rather than a moved
+// pass. (0.28's comment here claimed the batches already existed. They did not
+// — Pass::queue_ was written and never read. 0.29 built them.)
 class Graph : public std::enable_shared_from_this<Graph>
 {
 public:
@@ -188,19 +192,73 @@ public:
         return passes_;
     }
 
-    VkCommandBuffer get(std::uint32_t frame_index) const
+    // A maximal run of consecutive enabled passes on ONE queue, which is what
+    // a submit is made of. Add order decides them, and nothing reorders: a
+    // pass whose producer sits in an earlier batch on the other queue gets a
+    // semaphore wait, never a move.
+    struct Batch
     {
-        return command_buffers_[frame_index];
+        QueueKind queue = QueueKind::Graphics;
+        // The half-open range of compiled_ this batch replays.
+        std::size_t first = 0;
+        std::size_t last = 0;
+        // The n-th batch on this queue, which picks its command-buffer row.
+        std::size_t ordinal = 0;
+        // Earlier batches on the OTHER queue whose work this one must wait for
+        // (the cross-queue half of the fold). Sorted, unique, and every entry
+        // is below this batch's own index — a batch never waits for one that
+        // has not been submitted yet.
+        std::vector<std::size_t> waits;
+    };
+
+    // Compile when dirty, sealing every pass. The batches and their command
+    // buffers are both decided here, so a caller that wants either asks for
+    // this first.
+    std::expected<void, Error> compile();
+
+    std::span<const Batch> batches() const
+    {
+        return batches_;
     }
 
-    // One Graph owns one VkCommandBuffer per ring slot — the same limit a
-    // CommandBuffer carried, moved here with the message rewritten.
+    VkCommandBuffer command_buffer(const Batch& batch, std::uint32_t frame_index) const
+    {
+        const std::vector<VkCommandBuffer>& row = command_buffers_[queue_index(batch.queue)];
+        return row[batch.ordinal * context_->frames_in_flight() + frame_index];
+    }
+
+    // What THIS graph's previous replay left running on each queue. A batch
+    // waits the other queues' values before it starts, which is the
+    // wrap-around barrier's argument one level up: frame N+1 of a graph races
+    // its own frame N, and a pipeline barrier cannot reach across a queue.
+    //
+    // Ungated, unlike the wrap-around barrier. That flag counts descriptor
+    // writes only, and the writes that matter most here are the ones it cannot
+    // see: an attachment a render pass draws into, and a copy_image or a
+    // clear_image, which reach the fold as notes. A wait on a value the other
+    // queue has already passed costs one semaphore entry and nothing else, so
+    // the cheap answer is also the correct one.
+    QueueSerials replay_wait() const
+    {
+        return last_replay_;
+    }
+
+    // Merged rather than assigned: a submit that failed halfway still put work
+    // on one queue, and forgetting it would leave the next replay unordered
+    // against work that is running.
+    void note_replay_serials(const QueueSerials& serials)
+    {
+        max_merge(last_replay_, serials);
+    }
+
+    // One Graph owns one VkCommandBuffer per batch per ring slot — the same
+    // limit a CommandBuffer carried, moved here with the message rewritten.
     std::expected<void, Error> claim_for_frame(std::uint64_t serial);
 
-    // Compile if dirty (sealing every pass), then replay every enabled pass
-    // into vkCmd: entry barriers, the rendering scope for render passes, the
-    // pass's commands with scheduled barriers interleaved, exit transitions.
-    void execute(VkCommandBuffer vkCmd, const FrameContext& frame);
+    // Replay one batch's passes into vkCmd: entry barriers, the rendering
+    // scope for render passes, the pass's commands with scheduled barriers
+    // interleaved, exit transitions.
+    void execute_batch(const Batch& batch, VkCommandBuffer vkCmd, const FrameContext& frame);
 
 private:
     explicit Graph(std::shared_ptr<Context> context)
@@ -229,6 +287,8 @@ private:
     struct CompiledPass
     {
         Pass* pass = nullptr;
+        // Which batch replays it — the index into batches_.
+        std::size_t batch = 0;
         // A render pass hoists every barrier to its entry (vkCmdPipelineBarrier
         // is illegal inside dynamic rendering); a general pass schedules them
         // at the command index the use recorded.
@@ -245,14 +305,21 @@ private:
         bool elide_entry = false;
     };
 
-    void compile_();
+    std::expected<void, Error> compile_();
+
+    // Allocate whatever command-buffer rows the batches now need, from each
+    // batch's own queue pool. Grow-only: a row entry is re-recorded only by
+    // the same (queue, ordinal, slot), and per-queue slot pacing proves that
+    // slot's previous replay finished on every queue first — the same argument
+    // one buffer per slot always rested on.
+    std::expected<void, Error> ensure_command_buffers_();
     // Route one computed barrier to where the executor must emit it: a render
     // pass's entry batch, or a general pass's schedule at `position`.
     static BarrierBatch& batch_at_(CompiledPass& cp, std::size_t position);
 
     // Bring a preserving pass's attachments to the layout its own entry
     // transition assumes, when something in this graph moved them since.
-    static void correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker);
+    static void correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, std::vector<std::size_t>& waits);
 
     // Report a render pass's attachment writes to the fold, so a later pass
     // that samples one is ordered against the drawing.
@@ -260,8 +327,12 @@ private:
 
     std::shared_ptr<Context> context_;
     std::vector<std::shared_ptr<Pass>> passes_;
-    std::vector<VkCommandBuffer> command_buffers_;
+    // Per queue, indexed [ordinal * frames_in_flight + slot].
+    std::array<std::vector<VkCommandBuffer>, kQueueCount> command_buffers_;
     std::vector<CompiledPass> compiled_;
+    std::vector<Batch> batches_;
+    // What the previous replay signalled on each queue — see replay_wait().
+    QueueSerials last_replay_{};
     bool dirty_ = true;
     // Any enabled pass writes a tracked resource → the replay wrap-around
     // barrier at the top, exactly as a writing CommandBuffer recording emits

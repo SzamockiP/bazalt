@@ -48,7 +48,7 @@ void bind_targets(py::module_& m)
             [](const OffscreenTarget& t) -> py::object
             { return t.multisampled_depth() ? py::cast(t.multisampled_depth()) : py::none(); })
         // Render-to-layer / render-to-mip: a lightweight view of one subresource.
-        // Pass it straight to cmd.rendering(...). Cube face i == layer i, Vulkan
+        // Pass it straight to graph.add_pass(target, ...). Cube face i == layer i, Vulkan
         // order +X, -X, +Y, -Y, +Z, -Z.
         //
         // mip is keyword-only since 0.23, by the rule the set_image break wrote:
@@ -72,7 +72,7 @@ void bind_targets(py::module_& m)
     // returns a NAMED type from layer() / all_layers() above — until 0.23 both
     // came back as opaque RenderTargetBase, so nothing could be said about them
     // in the stub. No methods: each is a view that exists to be handed to
-    // cmd.rendering(...), and the parent keeps every knob.
+    // graph.add_pass(target, ...), and the parent keeps every knob.
     [[maybe_unused]] const py::class_<SubresourceTarget, RenderTarget, std::shared_ptr<SubresourceTarget>>
         subresource_target(m, "SubresourceTarget");
     [[maybe_unused]] const py::class_<MultiviewTarget, RenderTarget, std::shared_ptr<MultiviewTarget>> multiview_target(

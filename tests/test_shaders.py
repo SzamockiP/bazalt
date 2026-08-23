@@ -370,6 +370,41 @@ def test_hlsl_triangle_matches_glsl_triangle(ctx):
     assert np.array_equal(hlsl_pixels, glsl_pixels)
 
 
+def test_hlsl_texture_and_sampler_bind_as_one_texture(ctx):
+    """HLSL declares a Texture2D and a SamplerState separately, and glslang emits
+    that pair as a SAMPLED_IMAGE plus a SAMPLER at its own binding. bazalt has no
+    declarator for a lone sampler, so before 0.29 the pipeline named a binding
+    nothing could declare.
+
+    The sampler carries its own [[vk::binding]] on purpose. A sampler with NO
+    binding lands on the texture's, where the combined descriptor happens to feed
+    both halves and the shader works by luck — so that shader passes against the
+    unfixed build and proves nothing. This one fails there, at
+    vkCreateGraphicsPipelines and again at the draw, and the ctx fixture is the
+    referee."""
+    colour = np.array([200, 30, 90, 255], np.uint8)
+    image = ctx.create_image(np.tile(colour, (4, 4, 1)))
+    vs = ctx.compile_shader(str(SHADER_DIR / "fullscreen_vs.hlsl"), bz.ShaderStage.VERTEX)
+    ps = ctx.compile_shader(str(SHADER_DIR / "textured_ps.hlsl"), bz.ShaderStage.FRAGMENT)
+
+    target = ctx.create_render_target(64, 64)
+    pipeline = (ctx.graphics_pipeline()
+                .vertex_shader(vs)
+                .fragment_shader(ps)
+                .texture(0, bz.ShaderStage.FRAGMENT)
+                .build(target))
+    pool = ctx.create_descriptor_pool()
+    dset = pool.allocate_set(pipeline)
+    dset.set_image(0, image)
+
+    g = ctx.graph()
+    with g.add_pass(target, clear_color=[0, 0, 0, 1]) as p:
+        p.bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline).draw(3)
+    ctx.submit(g)
+
+    assert np.allclose(target.color[0].read()[32, 32], colour, atol=2)
+
+
 def test_hlsl_error_is_a_shader_error(ctx):
     with pytest.raises(bz.ShaderError) as info:
         ctx.compile_shader(source="float4 main() : SV_Target0 { return undefined; }",
