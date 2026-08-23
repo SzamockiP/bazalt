@@ -213,13 +213,6 @@ class Feature(IntEnum):
     #: the shader still compiles and the driver may still run it, but it is
     #: undefined behaviour that the validation layers report.
     WORKGROUP_SIZE = 24
-    #: A queue family that does compute and not graphics (0.29). True means a
-    #: pass on `Queue.COMPUTE` runs on its own queue, beside the graphics work.
-    #: False means it runs on the graphics queue under its own timeline: the
-    #: same program with the same ordering rules, without the overlap.
-    #: `Context(features=[Feature.ASYNC_COMPUTE])` refuses a device that has
-    #: none.
-    ASYNC_COMPUTE = 25
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -1052,7 +1045,7 @@ class RenderTarget(RenderTargetBase):
 
     def layer(self, index: int, *, mip: int = 0) -> SubresourceTarget:
         """A view of one array layer / cube face (and optionally one mip) of this
-        target, to render into with graph.add_pass(target.layer(i)). `mip=` selects
+        target, to render into with cmd.rendering(target.layer(i)). `mip=` selects
         a level for a layered AND mipped target (e.g. a mipped cube for prefiltered
         reflections). Cube face i == layer i, Vulkan order +X, -X, +Y, -Y, +Z, -Z.
         Render every layer you intend to sample before sampling target.color /
@@ -1069,7 +1062,7 @@ class RenderTarget(RenderTargetBase):
         ...
 
     def all_layers(self) -> MultiviewTarget:
-        """A multiview view of the whole target: graph.add_pass(target.all_layers())
+        """A multiview view of the whole target: cmd.rendering(target.all_layers())
         renders into EVERY layer in ONE pass instead of a pass per layer. The
         shader selects per-layer work with gl_ViewIndex (e.g. a per-face matrix
         for cube capture). Needs a layered target and
@@ -1083,13 +1076,13 @@ class RenderTarget(RenderTargetBase):
 class SubresourceTarget(RenderTargetBase):
     """One (layer, mip) of a RenderTarget — or one Z slice of a 3D one — as a
     drawable view. Comes from target.layer(); owns nothing; hand it straight to
-    graph.add_pass(...). The parent keeps every attachment and knob (0.23:
+    cmd.rendering(...). The parent keeps every attachment and knob (0.23:
     named, so the stub can say so — it used to come back as RenderTargetBase)."""
     ...
 
 class MultiviewTarget(RenderTargetBase):
     """Every layer of a RenderTarget as one multiview drawable. Comes from
-    target.all_layers(); owns nothing; hand it straight to graph.add_pass(...)."""
+    target.all_layers(); owns nothing; hand it straight to cmd.rendering(...)."""
     ...
 
 class GraphicsPipelineBuilder:
@@ -1373,26 +1366,12 @@ class ComputePipelineBuilder:
 class Queue(IntEnum):
     """Which queue a pass runs on.
 
-    GRAPHICS is the default and runs everything. COMPUTE (0.29) runs a pass
-    without a render target on the device's compute queue, beside the graphics
-    work. A pass on COMPUTE cannot draw, blit or generate mipmaps, and each
-    refusal names the fix.
-
-    What the graph waits for by itself: inside one graph the passes order
-    themselves across both queues, and a graph you submit again waits for its
-    own previous submit. What it does not: two DIFFERENT graphs on different
-    queues have no order between them. Use submit(after=...) there.
-
-    Without Feature.ASYNC_COMPUTE the device has no compute-only queue family,
-    so a COMPUTE pass runs on the graphics queue under its own timeline. The
-    program and the ordering are the same; only the overlap is missing.
-
-    The choice is always yours: a compute pass on GRAPHICS stays legal, and
-    bazalt never moves a pass between queues on its own.
+    One member today. Async compute arrives as a new member, not as a new
+    parameter, and the choice always stays with you: after it arrives, a
+    compute pass on Queue.GRAPHICS stays legal.
     """
 
     GRAPHICS = 0
-    COMPUTE = 1
 
 class Serial:
     """The identity of one submit, returned by Context.submit().
@@ -1400,10 +1379,6 @@ class Serial:
     Pass it to ctx.wait(serial) to block until that submit finished, or to
     submit(after=...) to order one submit after another on the GPU. The handle
     is opaque on purpose: it has no attributes and no ordering.
-
-    One Serial covers every queue the submit used, so wait() and after= reach
-    both. It belongs to the Context that returned it; another Context refuses
-    it with ResourceError.
     """
 
 class Pass:
@@ -1449,16 +1424,7 @@ class Pass:
         """Bind a vertex buffer. binding=0 feeds vertex_format (per vertex),
         binding=1 feeds instance_format (per instance)."""
         ...
-    def bind_index_buffer(self, buffer: Buffer) -> Pass:
-        """Bind the index buffer.
-
-        Takes a `BufferType.INDEX` buffer, or a `BufferType.STORAGE` one when a
-        compute shader writes the indices (0.29). Any other type raises
-        `ResourceError`.
-
-        The indices are 32-bit unless the buffer was made with
-        `DataType.UINT16` or from a uint16 array."""
-        ...
+    def bind_index_buffer(self, buffer: Buffer) -> Pass: ...
     def draw(self, vertex_count: int, instances: int = 1) -> Pass: ...
     def draw_indexed(self, index_count: int, first_index: int = 0,
                      vertex_offset: int = 0, instances: int = 1) -> Pass:
@@ -1571,9 +1537,6 @@ class Pass:
         making a thumbnail all sat in that gap, and each one used to be a full
         graphics pass with a fullscreen shader.
 
-        Raises StateError on a Queue.COMPUTE pass: a blit is graphics work.
-        copy_image is legal there, and so are the clears and the fills.
-
         Mip 0 of every shared layer. Call generate_mipmaps on the destination if
         it needs a chain.
 
@@ -1633,9 +1596,6 @@ class Pass:
         names mip 0's current layout in p.barrier's vocabulary — SHADER_READ
         (SHADER_READ_ONLY, an uploaded or already-baked image; the default) or
         SHADER_WRITE (GENERAL, mip 0 fresh from compute).
-
-        Raises StateError on a Queue.COMPUTE pass: the chain is built out of
-        blits, and a blit needs a graphics queue.
 
         Raises ResourceError if the image has a single level (create it with
         mip_levels>1 or mipmaps=True), UnsupportedError if the format can't be
@@ -1827,9 +1787,6 @@ class Graph:
                  auto_barriers: Optional[bool] = None) -> Pass:
         """Add a render pass: one rendering scope into `target`.
 
-        queue= names the queue. A render pass refuses Queue.COMPUTE with
-        StateError, because a compute queue has no rasterizer.
-
         clear_color is either a single [r, g, b, a] applied to every attachment
         (the common case) or, for MRT, a list of them ([[r,g,b,a], …]) clearing
         each attachment independently.
@@ -1864,10 +1821,6 @@ class Graph:
 
         The clear arguments do not exist on this overload: they answer what
         happens to the attachments, and there are none.
-
-        queue=Queue.COMPUTE runs this pass on the compute queue, beside the
-        graphics work rather than through it. See Queue for what the graph
-        then orders by itself and what it leaves to you.
         """
         ...
 
@@ -2537,10 +2490,7 @@ class Context:
         Without `language=`, the extension decides:
 
         - `.hlsl` — HLSL. Use `[[vk::binding(n, set)]]` on resources; bare
-          `register()` piles everything into one Vulkan binding space. A
-          `Texture2D` and a `SamplerState` become ONE combined texture binding
-          at the texture's slot (0.29), which is what `.texture()` declares, so
-          the sampler needs no binding of its own.
+          `register()` piles everything into one Vulkan binding space.
         - anything else — GLSL. That covers .vert/.frag/.comp and whatever
           else a project calls its files.
 
@@ -2885,11 +2835,7 @@ class Context:
         after= orders this submit on the GPU: it starts after the named
         submits complete, and the CPU does not block. That is the manual
         control between whole submits; inside one graph the passes order
-        themselves, across both queues.
-
-        It is also the ONLY order between two different graphs on different
-        queues: bazalt adds none there, deliberately, so that two graphs may
-        overlap. The returned Serial covers every queue this submit used.
+        themselves.
 
         Reusing one Graph asynchronously is safe: the ring paces it, so a
         submit into a slot whose previous submit is still running waits for
@@ -3041,10 +2987,6 @@ class SwapchainRenderer(RenderTargetBase):
 
         None means one thing: the ring has not cycled once yet, so read it every
         frame and use it when it arrives.
-
-        It measures the GRAPHICS part of the frame — from the first graphics
-        pass to the last. Work on the compute queue overlaps it rather than
-        adding to it, so use p.timer() to measure a compute pass.
 
         Raises StateError when the Context was built without gpu_timing=True, and
         UnsupportedError when the GPU reports no usable timestamps. Same split

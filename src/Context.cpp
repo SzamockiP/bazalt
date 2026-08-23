@@ -95,18 +95,14 @@ Context::~Context()
     }
     sampler_cache_.clear();
 
-    // Both runtimes, compute first: it never owns the VkQueue (it may alias the
-    // graphics one) but it always owns its timeline and its pool.
-    for (QueueRuntime* q : {&compute_q_, &graphics_q_})
+    if (graphics_q_.timeline)
     {
-        if (q->timeline)
-        {
-            vk_.vkDestroySemaphore(vkb_device_.device, q->timeline, nullptr);
-        }
-        if (q->pool)
-        {
-            vk_.vkDestroyCommandPool(vkb_device_.device, q->pool, nullptr);
-        }
+        vk_.vkDestroySemaphore(vkb_device_.device, graphics_q_.timeline, nullptr);
+    }
+
+    if (graphics_q_.pool)
+    {
+        vk_.vkDestroyCommandPool(vkb_device_.device, graphics_q_.pool, nullptr);
     }
 
     if (pipeline_cache_)
@@ -141,12 +137,6 @@ void Context::close()
     // pool — all of which needs the device still alive.
     upload_manager_.reset();
 
-    // No queue lock here, and the asymmetry with the other device-idle sites
-    // is deliberate rather than an oversight: the two threads that submit from
-    // outside the main one — the watcher and the upload worker — were joined
-    // above, so there is nobody left to synchronize against. The swapchain and
-    // upload-worker idles take lock_queues() because their threads are still
-    // running.
     if (vkb_device_.device)
     {
         vk_.vkDeviceWaitIdle(vkb_device_.device);
@@ -207,65 +197,31 @@ void Context::begin_frame()
     flush_deletion_queue();
 }
 
-std::uint64_t Context::completed_submit_serial(QueueKind kind) const
+std::uint64_t Context::completed_submit_serial() const
 {
-    const QueueRuntime& q = runtime(kind);
     std::uint64_t value = 0;
-    // The result used to be dropped. Returning 0 on a failure makes every
-    // resource look "not ready" and the deletion queue free nothing, forever —
-    // with two timelines that is one clock silently reading zero while the
-    // other runs, which is far harder to recognize than a stall.
-    if (const VkResult result = vk_.vkGetSemaphoreCounterValue(vkb_device_.device, q.timeline, &value);
-        result != VK_SUCCESS)
-    {
-        if (logger_)
-        {
-            logger_->log(
-                Severity::Error,
-                Source::Device,
-                std::format("Failed to read the submission timeline ({})", vk_result_name(result)));
-        }
-        return 0;
-    }
+    vk_.vkGetSemaphoreCounterValue(vkb_device_.device, graphics_q_.timeline, &value);
     return value;
 }
 
-void Context::note_slot_submit(const QueueSerials& serials)
+void Context::note_slot_submit(std::uint64_t serial)
 {
     if (slot_serial_.size() != frames_in_flight_)
     {
-        slot_serial_.assign(frames_in_flight_, QueueSerials{});
+        slot_serial_.assign(frames_in_flight_, 0);
     }
-    // Merged, not assigned: several windows present into one logical frame, and
-    // the last one must not erase what an earlier one left on the other queue.
-    max_merge(slot_serial_[frame_serial_ % frames_in_flight_], serials);
+    slot_serial_[frame_serial_ % frames_in_flight_] = serial;
 }
 
-void Context::wait_for_slot(std::optional<QueueKind> only)
+void Context::wait_for_slot()
 {
     if (slot_serial_.size() != frames_in_flight_)
     {
         return;
     }
-    QueueSerials wanted = slot_serial_[frame_serial_ % frames_in_flight_];
-    if (only)
-    {
-        // Keep one queue's half and drop the rest. A window asks for the
-        // compute half alone: its in-flight fence has already covered the
-        // graphics one, and that half may hold a submit from THIS frame — the
-        // window that presented before this one.
-        const std::size_t keep = queue_index(*only);
-        for (std::size_t i = 0; i < kQueueCount; ++i)
-        {
-            if (i != keep)
-            {
-                wanted[i] = 0;
-            }
-        }
-    }
     // Frame pacing: a failure here surfaces at the next submit, which is
     // where a caller can be told about it.
-    static_cast<void>(wait_for_serials(wanted));
+    static_cast<void>(wait_for_serial(slot_serial_[frame_serial_ % frames_in_flight_]));
 }
 
 std::expected<void, Error> Context::wait_for_submits()
@@ -276,19 +232,14 @@ std::expected<void, Error> Context::wait_for_submits()
     {
         upload_manager_->wait_all();
     }
-    // The SUBMITTED values, not the reserved ones. A vkQueueSubmit that fails
-    // signals nothing and its reservation is dropped on purpose (the next
-    // submit signals a higher value, and every wait is ">="), but a wait for
-    // the dropped number itself has nothing to wake it — ctx.wait() after a
-    // failed present used to hang forever.
-    auto r = wait_for_serials({graphics_q_.submitted.load(), compute_q_.submitted.load()});
+    auto r = wait_for_serial(graphics_q_.serial.load());
     flush_deletion_queue();
     return r;
 }
 
 std::expected<std::uint64_t, Error> Context::submit_one_shot(VkCommandBuffer cmd, std::uint64_t after)
 {
-    std::lock_guard lock(*graphics_q_.mutex);
+    std::lock_guard lock(graphics_q_.mutex);
     const std::uint64_t serial = advance_submit_serial();
 
     VkSemaphore timeline = graphics_q_.timeline;
@@ -318,207 +269,25 @@ std::expected<std::uint64_t, Error> Context::submit_one_shot(VkCommandBuffer cmd
             "submit one-shot command buffer",
             ErrorCode::Resource))
     {
-        // Same reason as submit_batches: an unreachable reservation stops the
-        // deletion queue for good.
-        graphics_q_.serial.store(serial - 1);
         return std::unexpected(*e);
     }
-    graphics_q_.submitted.store(serial);
     return serial;
 }
 
-std::expected<void, Error> Context::submit_batches(
-    std::span<const SubmitBatch> batches,
-    std::uint64_t upload_serial,
-    const QueueSerials& after,
-    const QueueSerials& previous_replay,
-    QueueSerials& signalled,
-    SubmitBinaries* binaries)
+std::expected<void, Error> Context::wait_for_serial(std::uint64_t serial) const
 {
-    // Which batch signalled which value, so a later one can wait for it.
-    std::vector<std::uint64_t> serial_of(batches.size(), 0);
-
-    std::size_t first_graphics = batches.size();
-    std::size_t last_graphics = batches.size();
-    for (std::size_t i = 0; i < batches.size(); ++i)
-    {
-        if (batches[i].queue == QueueKind::Graphics)
-        {
-            first_graphics = (std::min)(first_graphics, i);
-            last_graphics = i;
-        }
-    }
-    if (binaries != nullptr && first_graphics == batches.size())
-    {
-        return std::unexpected(err_state(
-            "present(): this graph has no pass on Queue.GRAPHICS, and only the graphics queue "
-            "can draw into a window. Add the pass that renders into the window, or run the "
-            "graph with ctx.submit()."));
-    }
-
-    for (std::size_t i = 0; i < batches.size(); ++i)
-    {
-        const SubmitBatch& batch = batches[i];
-        QueueRuntime& rt = runtime(batch.queue);
-        const std::size_t own = queue_index(batch.queue);
-
-        // What this batch waits for, per timeline.
-        //
-        // Uploads ride the graphics timeline whatever queue reads them, so this
-        // one entry covers both cases — and it is waited even by a graphics
-        // batch, because the upload worker is a different submitter: same queue
-        // is not the same submission chain, and the replay wrap-around barrier
-        // names shader writes rather than the transfer write a staging copy is.
-        QueueSerials want{};
-        want[queue_index(QueueKind::Graphics)] = upload_serial;
-        // Same argument for after=: it names another graph's submit.
-        max_merge(want, after);
-        for (const std::size_t j : batch.waits)
-        {
-            if (j >= i)
-            {
-                return std::unexpected(err_state("internal: a batch waits for one that has not been submitted yet"));
-            }
-            const std::size_t producer = queue_index(batches[j].queue);
-            want[producer] = (std::max)(want[producer], serial_of[j]);
-        }
-        // The previous replay of THIS graph is the one dependency its own queue
-        // already has: a pipeline barrier's first scope covers everything
-        // submitted earlier on the same queue, which is what the wrap-around
-        // barrier at the top of every batch is for. The other queues have no
-        // such reach, so they are waited.
-        for (std::size_t q = 0; q < kQueueCount; ++q)
-        {
-            if (q != own)
-            {
-                want[q] = (std::max)(want[q], previous_replay[q]);
-            }
-        }
-
-        std::vector<VkSemaphore> wait_semaphores;
-        std::vector<VkPipelineStageFlags> wait_stages;
-        std::vector<std::uint64_t> wait_values;
-        if (binaries != nullptr && i == first_graphics && binaries->wait != VK_NULL_HANDLE)
-        {
-            wait_semaphores.push_back(binaries->wait);
-            wait_stages.push_back(binaries->wait_stage);
-            wait_values.push_back(0); // ignored for a binary semaphore
-        }
-        for (std::size_t q = 0; q < kQueueCount; ++q)
-        {
-            if (want[q] == 0)
-            {
-                continue;
-            }
-            wait_semaphores.push_back(runtime(static_cast<QueueKind>(q)).timeline);
-            // ALL_COMMANDS because a batch is a whole frame's worth of work
-            // and the dependency may be consumed anywhere in it. Universal, so
-            // it is legal on a compute-only family too.
-            wait_stages.push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
-            wait_values.push_back(want[q]);
-        }
-
-        std::vector<VkSemaphore> signal_semaphores;
-        std::vector<std::uint64_t> signal_values;
-        const bool last_graphics_batch = binaries != nullptr && i == last_graphics;
-        VkFence fence = VK_NULL_HANDLE;
-        if (last_graphics_batch && binaries->signal != VK_NULL_HANDLE)
-        {
-            signal_semaphores.push_back(binaries->signal);
-            signal_values.push_back(0);
-        }
-
-        std::lock_guard lock(*rt.mutex);
-        const std::uint64_t serial = ++rt.serial;
-        signal_semaphores.push_back(rt.timeline);
-        signal_values.push_back(serial);
-        if (last_graphics_batch)
-        {
-            fence = binaries->fence;
-        }
-
-        VkTimelineSemaphoreSubmitInfo timelineInfo{
-            .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
-            .pNext = nullptr,
-            .waitSemaphoreValueCount = static_cast<std::uint32_t>(wait_values.size()),
-            .pWaitSemaphoreValues = wait_values.data(),
-            .signalSemaphoreValueCount = static_cast<std::uint32_t>(signal_values.size()),
-            .pSignalSemaphoreValues = signal_values.data()};
-        VkSubmitInfo submitInfo{
-            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .pNext = &timelineInfo,
-            .waitSemaphoreCount = static_cast<std::uint32_t>(wait_semaphores.size()),
-            .pWaitSemaphores = wait_semaphores.data(),
-            .pWaitDstStageMask = wait_stages.data(),
-            .commandBufferCount = 1,
-            .pCommandBuffers = &batch.cmd,
-            .signalSemaphoreCount = static_cast<std::uint32_t>(signal_semaphores.size()),
-            .pSignalSemaphores = signal_semaphores.data()};
-
-        if (auto e = check(vk_.vkQueueSubmit(rt.queue, 1, &submitInfo, fence), "submit command buffer"))
-        {
-            // The reservation goes back. Nothing will ever signal it, and the
-            // deletion queue keys on the RESERVED value: a permanently
-            // unreachable key means every resource dropped afterwards waits
-            // forever and the queue stops draining. Safe under the lock we
-            // still hold — every reservation takes it, so this is provably the
-            // top one.
-            rt.serial.store(serial - 1);
-            // `signalled` is not rolled back: the earlier batches are running.
-            return std::unexpected(*e);
-        }
-        rt.submitted.store(serial);
-        serial_of[i] = serial;
-        signalled[own] = serial;
-        if (binaries != nullptr && i == first_graphics)
-        {
-            binaries->wait_consumed = true;
-        }
-        if (last_graphics_batch)
-        {
-            binaries->fence_consumed = true;
-        }
-    }
-    return {};
-}
-
-std::expected<void, Error> Context::wait_for_serial(QueueKind kind, std::uint64_t serial) const
-{
-    QueueSerials serials{};
-    serials[queue_index(kind)] = serial;
-    return wait_for_serials(serials);
-}
-
-std::expected<void, Error> Context::wait_for_serials(const QueueSerials& serials) const
-{
-    // One call over both timelines. A zero entry is dropped rather than waited
-    // for: it means "nothing ran there", and a semaphore still at 0 satisfies
-    // the wait anyway — but naming it would cost the call an entry per queue on
-    // every readback.
-    std::array<VkSemaphore, kQueueCount> semaphores{};
-    std::array<std::uint64_t, kQueueCount> values{};
-    std::uint32_t count = 0;
-    for (std::size_t i = 0; i < kQueueCount; ++i)
-    {
-        if (serials[i] == 0)
-        {
-            continue;
-        }
-        semaphores[count] = runtime(static_cast<QueueKind>(i)).timeline;
-        values[count] = serials[i];
-        ++count;
-    }
-    if (count == 0)
+    if (serial == 0)
     {
         return {};
     }
+    VkSemaphore timeline = graphics_q_.timeline;
     VkSemaphoreWaitInfo waitInfo{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .semaphoreCount = count,
-        .pSemaphores = semaphores.data(),
-        .pValues = values.data()};
+        .semaphoreCount = 1,
+        .pSemaphores = &timeline,
+        .pValues = &serial};
     if (auto e = check(
             vk_.vkWaitSemaphores(vkb_device_.device, &waitInfo, UINT64_MAX),
             "wait for submitted GPU work",
@@ -537,22 +306,7 @@ void Context::defer_destroy(std::function<void()> fn)
 
 void Context::flush_deletion_queue()
 {
-    const QueueSerials completed = {
-        completed_submit_serial(QueueKind::Graphics), completed_submit_serial(QueueKind::Compute)};
-    // An entry is free only once EVERY queue has passed its own half of the
-    // key: a resource dropped now may be referenced by work in flight on
-    // either one.
-    const auto reached = [&completed](const QueueSerials& key)
-    {
-        for (std::size_t i = 0; i < kQueueCount; ++i)
-        {
-            if (key[i] > completed[i])
-            {
-                return false;
-            }
-        }
-        return true;
-    };
+    const std::uint64_t completed = completed_submit_serial();
 
     // Run the ready entries outside the lock: a destructor lambda must be
     // free to enqueue (it doesn't today, but that trap is invisible).
@@ -563,7 +317,7 @@ void Context::flush_deletion_queue()
         // scan rather than pop-from-front. The queue stays tiny.
         for (auto it = deletion_queue_.begin(); it != deletion_queue_.end();)
         {
-            if (reached(it->first))
+            if (it->first <= completed)
             {
                 ready.push_back(std::move(it->second));
                 it = deletion_queue_.erase(it);
@@ -978,18 +732,6 @@ std::expected<void, Error> Context::select_physical_device_(Context& ctx, const 
     }
     selector.set_required_features(required_features.core);
 
-    // The queue topology is the one required capability the selector CAN gate
-    // on directly, because vk-bootstrap asks the same question when it scores a
-    // device. Same reason as the base features: a machine with two GPUs should
-    // pick the one that has a compute family rather than fail on the preferred
-    // one. The by-name diagnosis in configure_features_ still runs — it is what
-    // answers the explicitly-chosen-device path and the force-single-queue
-    // knob, both of which reach a device this line already accepted.
-    if (std::ranges::find(config.required, Feature::ASYNC_COMPUTE) != config.required.end())
-    {
-        selector.require_separate_compute_queue();
-    }
-
     // An explicitly chosen GPU still has to pass the same suitability gate —
     // required features and API version are not preferences. select_devices()
     // is select() without the "and now pick the best one" step, so the choice
@@ -1063,31 +805,12 @@ std::expected<void, Error> Context::configure_features_(
     // vk-bootstrap enables VK_KHR_portability_subset by default when the device
     // reports it, so the struct is legal to ask for exactly when this is true.
     ctx.portability_subset_ = ctx.vkb_physical_device_.is_extension_present(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
-    DeviceFeatures available = query_device_features(
+    const DeviceFeatures available = query_device_features(
         vkGetPhysicalDeviceFeatures2,
         vkEnumerateDeviceExtensionProperties,
-        vkGetPhysicalDeviceQueueFamilyProperties,
         ctx.vkb_physical_device_.physical_device,
         ctx.portability_subset_,
         (std::min)(target_api, ctx.vkb_physical_device_.properties.apiVersion));
-
-    // A test knob, not public API, and the BAZALT_FORCE_VULKAN_1_2 precedent:
-    // most CI drivers (lavapipe, MoltenVK) have one queue family, so the
-    // aliased-compute path is what runs there and the separate-queue path is
-    // what runs on a developer GPU. This makes the reverse reproducible — the
-    // aliased path on a machine that has two families. list_devices() ignores
-    // it, because that one reports the hardware.
-    if (const char* forced = std::getenv("BAZALT_FORCE_SINGLE_QUEUE"); forced != nullptr && forced[0] == '1')
-    {
-        available.separate_compute_family = false;
-        if (logger)
-        {
-            logger->log(
-                Severity::Info,
-                Source::Device,
-                "Vulkan: BAZALT_FORCE_SINGLE_QUEUE=1, the compute queue aliases the graphics queue");
-        }
-    }
 
     // Here rather than in a lazy accessor: this is the only place holding
     // the available features, and which property structs may be chained
@@ -1212,11 +935,7 @@ std::expected<void, Error> Context::configure_features_(
     // reach blocker. MULTIVIEW joins it in 0.21: target.all_layers() has offered
     // it since 0.13 without an opt-in, and making the Feature row the way to ASK
     // must not also make it a thing to request.
-    // ASYNC_COMPUTE joins them in 0.29 for a third reason: it is not a switch
-    // at all. The device either has a compute-only family or it does not, and
-    // supports() must answer that without anyone having asked, the way
-    // supports(MULTIVIEW) does.
-    for (Feature implicit : {Feature::ANISOTROPIC_FILTERING, Feature::MULTIVIEW, Feature::ASYNC_COMPUTE})
+    for (Feature implicit : {Feature::ANISOTROPIC_FILTERING, Feature::MULTIVIEW})
     {
         if (feature_available(available, implicit))
         {
@@ -1379,64 +1098,6 @@ std::expected<void, Error> Context::create_device_(Context& ctx)
     ctx.graphics_q_.queue = gq.value();
     ctx.graphics_q_.family = ctx.vkb_device_.get_queue_index(vkb::QueueType::graphics).value();
 
-    // The compute runtime (0.29). vk-bootstrap's DeviceBuilder already creates
-    // one queue on EVERY family the device reports, so a compute-only family's
-    // queue exists without asking for it.
-    //
-    // What must NOT be trusted is QueueType::compute itself: when no separate
-    // family exists it falls back to the first family with the COMPUTE bit,
-    // which is the graphics one, and get_queue then returns queue 0 of that
-    // family — bit for bit the handle above. A second QueueRuntime built on
-    // that would hold a second mutex over one VkQueue, which is a race wearing
-    // a lock. So the index is compared, never assumed.
-    bool separate = ctx.enabled_features_.contains(Feature::ASYNC_COMPUTE);
-    if (separate)
-    {
-        auto cq = ctx.vkb_device_.get_queue(vkb::QueueType::compute);
-        auto ci = ctx.vkb_device_.get_queue_index(vkb::QueueType::compute);
-        separate = cq.has_value() && ci.has_value() && ci.value() != ctx.graphics_q_.family;
-        if (separate)
-        {
-            ctx.compute_q_.queue = cq.value();
-            ctx.compute_q_.family = ci.value();
-        }
-        else
-        {
-            // The feature said yes and the device disagreed. supports() must
-            // not keep claiming it.
-            ctx.enabled_features_.erase(Feature::ASYNC_COMPUTE);
-        }
-    }
-    if (!separate)
-    {
-        ctx.compute_q_.queue = ctx.graphics_q_.queue;
-        ctx.compute_q_.family = ctx.graphics_q_.family;
-        ctx.compute_q_.mutex = &ctx.graphics_q_.own_mutex;
-    }
-
-    const auto families = ctx.vkb_physical_device_.get_queue_families();
-    for (QueueRuntime* q : {&ctx.graphics_q_, &ctx.compute_q_})
-    {
-        q->family_flags = q->family < families.size() ? families[q->family].queueFlags : VK_QUEUE_GRAPHICS_BIT;
-        q->legal_stages = legal_stages_for(q->family_flags);
-    }
-
-    // CONCURRENT over both families rather than the ownership-transfer protocol
-    // EXCLUSIVE would need: a release barrier on one queue and an acquire on
-    // the other for every resource that crosses, which is a new class of
-    // barrier the tracker has no field for, against a bandwidth cost that is
-    // noise for prototyping. Only when the families really differ — CONCURRENT
-    // with one index repeated is invalid, and on the aliased path there is one
-    // family anyway.
-    if (ctx.compute_q_.family != ctx.graphics_q_.family)
-    {
-        ctx.sharing_families_ = {ctx.graphics_q_.family, ctx.compute_q_.family};
-        ctx.sharing_ = Sharing{
-            .mode = VK_SHARING_MODE_CONCURRENT,
-            .family_count = static_cast<std::uint32_t>(ctx.sharing_families_.size()),
-            .families = ctx.sharing_families_.data()};
-    }
-
     return {};
 }
 
@@ -1468,23 +1129,17 @@ std::expected<void, Error> Context::create_allocator_and_pool_(Context& ctx)
         return std::unexpected(*e);
     }
 
-    // One pool per runtime. The compute runtime gets its own even when it
-    // aliases the graphics queue: a command buffer is allocated from a pool on
-    // ONE family, and the two runtimes record separately.
-    for (QueueRuntime* q : {&ctx.graphics_q_, &ctx.compute_q_})
-    {
-        VkCommandPoolCreateInfo poolInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-            .queueFamilyIndex = q->family};
+    VkCommandPoolCreateInfo poolInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = ctx.graphics_q_.family};
 
-        if (auto e = check(
-                ctx.vk_.vkCreateCommandPool(ctx.vkb_device_.device, &poolInfo, nullptr, &q->pool),
-                "create command pool"))
-        {
-            return std::unexpected(*e);
-        }
+    if (auto e = check(
+            ctx.vk_.vkCreateCommandPool(ctx.vkb_device_.device, &poolInfo, nullptr, &ctx.graphics_q_.pool),
+            "create command pool"))
+    {
+        return std::unexpected(*e);
     }
 
     // Which combined depth/stencil format this device gets. The float
@@ -1527,16 +1182,11 @@ std::expected<void, Error> Context::create_allocator_and_pool_(Context& ctx)
         .initialValue = 0};
     VkSemaphoreCreateInfo timelineInfo{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &timelineType, .flags = 0};
-    // One per runtime, aliased queue included — see QueueRuntime for why they
-    // are never shared.
-    for (QueueRuntime* q : {&ctx.graphics_q_, &ctx.compute_q_})
+    if (auto e = check(
+            ctx.vk_.vkCreateSemaphore(ctx.vkb_device_.device, &timelineInfo, nullptr, &ctx.graphics_q_.timeline),
+            "create submission timeline semaphore"))
     {
-        if (auto e = check(
-                ctx.vk_.vkCreateSemaphore(ctx.vkb_device_.device, &timelineInfo, nullptr, &q->timeline),
-                "create submission timeline semaphore"))
-        {
-            return std::unexpected(*e);
-        }
+        return std::unexpected(*e);
     }
 
     return {};

@@ -424,15 +424,6 @@ std::expected<ShaderCompiler::CompiledParts, Error> ShaderCompiler::compile_text
     if (hlsl)
     {
         options.SetSourceLanguage(shaderc_source_language_hlsl);
-        // HLSL separates the texture from the sampler (Texture2D + SamplerState),
-        // which glslang emits as SAMPLED_IMAGE plus SAMPLER — two descriptor types
-        // no bazalt declarator can express, so idiomatic HLSL built a pipeline that
-        // no descriptor set could feed. This folds the pair into one
-        // COMBINED_IMAGE_SAMPLER at the texture's binding, which is exactly what
-        // .texture() declares. The shaderc method is named for what it does to the
-        // textures; the C entry point behind it is
-        // shaderc_compile_options_set_auto_combined_image_sampler.
-        options.SetAutoSampledTextures(true);
     }
 
     // entry_point= exists for HLSL, where one file legitimately holds VSMain

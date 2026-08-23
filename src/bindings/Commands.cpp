@@ -82,12 +82,10 @@ void bind_commands(py::module_& m)
             {
                 guard(*self, Pass::VerbScope::Render, "bind_index_buffer");
                 require_same_context(self->recorder().owner(), buffer->owner(), "bind_index_buffer");
-                unwrap(self->recorder().bind_index_buffer(buffer), nullptr);
+                self->recorder().bind_index_buffer(buffer);
                 return self;
             },
-            // none(false): require_same_context reads buffer->owner() before
-            // the recorder's own null check could fire.
-            py::arg("buffer").none(false))
+            py::arg("buffer"))
         .def(
             "draw",
             [](std::shared_ptr<Pass> self, uint32_t vertex_count, uint32_t instances)
@@ -302,7 +300,6 @@ void bind_commands(py::module_& m)
             [](const std::shared_ptr<Pass>& self, const std::shared_ptr<Image>& image, Access src)
             {
                 guard(*self, Pass::VerbScope::General, "generate_mipmaps");
-                unwrap(self->require_graphics_queue("generate_mipmaps"), nullptr);
                 require_same_context(self->recorder().owner(), image->owner(), "generate_mipmaps");
                 unwrap(self->recorder().generate_mipmaps(image, src), nullptr);
                 return self;
@@ -339,7 +336,6 @@ void bind_commands(py::module_& m)
                Filter filter)
             {
                 guard(*self, Pass::VerbScope::General, "blit_image");
-                unwrap(self->require_graphics_queue("blit_image"), nullptr);
                 require_same_context(self->recorder().owner(), src->owner(), "blit_image");
                 require_same_context(self->recorder().owner(), dst->owner(), "blit_image");
                 unwrap(self->recorder().blit_image(src, dst, src_access, to_vk_filter(filter)), nullptr);

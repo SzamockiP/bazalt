@@ -93,13 +93,9 @@ inline constexpr VkBufferUsageFlags buffer_usage_for(BufferType type, bool devic
         // nothing — the same reasoning that gave DYNAMIC buffers the transfer
         // bits in 0.18. It matters for a DYNAMIC storage buffer too: draw
         // arguments the CPU rewrites every frame are exactly that.
-        // INDEX joined them in 0.29, and the argument is the VERTEX one seen
-        // from the other end: a compute shader that compacts or rewrites an
-        // index list is the same hand-off as one that writes vertices, and it
-        // was the only third of GPU-driven work bazalt could not spell.
         case BufferType::STORAGE:
             usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                     VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+                     VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
             break;
         // Constant data that never changes (e.g. baked matrices) is a legitimate
         // STATIC uniform buffer. Without this the buffer was created with only

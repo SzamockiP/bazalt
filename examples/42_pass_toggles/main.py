@@ -47,10 +47,7 @@ def on_message(msg):
 
 
 window = bz.Window(W, H, "Bazalt Demo - Pass Toggles", logger=logger)
-# gpu_timing=True adds a timestamp pair around every windowed submit, so the
-# title can report what the frame costs on the GPU. Switching a pass off is
-# supposed to make the frame cheaper, and this is where you see it.
-ctx = bz.Context(logger, gpu_timing=True)
+ctx = bz.Context(logger)
 renderer = ctx.create_renderer(window)
 
 pattern = (ctx.compute_pipeline()
@@ -116,11 +113,6 @@ with graph.add_pass(renderer, name="present") as p:
     p.bind_pipeline(present).bind_descriptor_set(present_set, present).draw(3)
 
 
-fps = 0
-gpu_ms = None
-gpu_timing_ok = True
-
-
 def title():
     parts = []
     if tint_pass.enabled:
@@ -129,19 +121,10 @@ def title():
         parts.append("vignette removed")
     elif vignette_pass.enabled:
         parts.append("vignette")
-    effects = ", ".join(parts) if parts else "no effects"
-    # Two numbers, because they answer different questions. The FPS is the whole
-    # loop, presentation included, and at this size it is mostly that. The GPU
-    # figure is the frame's own work, which is what a pass toggle changes.
-    speed = f"{fps} FPS" if fps else "measuring"
-    if gpu_ms is not None:
-        speed += f" | GPU {gpu_ms:.3f} ms"
-    return f"Bazalt Demo - Pass Toggles | {effects} | {speed}"
+    return f"Bazalt Demo - Pass Toggles | {', '.join(parts) if parts else 'no effects'}"
 
 
 start = time.time()
-fps_timer = start
-frames = 0
 window.set_title(title())
 while window.is_open():
     bz.poll_events()
@@ -177,24 +160,3 @@ while window.is_open():
     # The only per-frame work: the animation time. No re-recording.
     frame_buf.update([time.time() - start, 0.0, 0.0, 0.0])
     renderer.present(graph)
-
-    # gpu_time_ms is the frame submitted frames_in_flight ago, so it is None
-    # until the ring has cycled once — read it every frame and use it when it
-    # arrives.
-    if gpu_timing_ok:
-        try:
-            measured = renderer.gpu_time_ms
-        except bz.UnsupportedError:
-            # Some drivers advertise timestamps and cannot use them. The demo
-            # keeps running; it just stops claiming a number it has not got.
-            gpu_timing_ok = False
-        else:
-            if measured is not None:
-                gpu_ms = measured
-    frames += 1
-    now = time.time()
-    if now - fps_timer >= 1.0:
-        fps = frames
-        frames = 0
-        fps_timer = now
-        window.set_title(title())

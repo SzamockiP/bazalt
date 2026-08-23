@@ -6,7 +6,6 @@
 #include <expected>
 #include <format>
 #include <memory>
-#include <span>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -235,13 +234,6 @@ public:
         std::uint64_t upload_wait_serial = 0,
         bool capture = false);
 
-    // What the last present signalled, per queue. The caller hands it back to
-    // the graph so its next replay waits for itself.
-    QueueSerials last_signalled() const
-    {
-        return last_signalled_;
-    }
-
     // ── Readback ─────────────────────────────────────────────────────────────
     //
     // A screenshot of a window. Only offscreen targets could be read back before
@@ -284,13 +276,7 @@ public:
     // upload_wait_serial: the highest submission-timeline value this frame's
     // resources depend on (async uploads). 0 waits for nothing — a timeline
     // wait for 0 is trivially satisfied, so no branching is needed.
-    // previous_replay: what this graph's own previous submit left running on
-    // each queue, so a batch waits for the other queues' half of it.
-    // Returns what this submit signalled, valid even when it failed halfway.
-    QueueSerials end_frame(
-        std::span<const Context::SubmitBatch> batches,
-        std::uint64_t upload_wait_serial,
-        const QueueSerials& previous_replay);
+    void end_frame(VkCommandBuffer cmd, std::uint64_t upload_wait_serial = 0);
 
 private:
     // Gives up an acquired frame that will never be submitted, and puts the slot
@@ -307,24 +293,9 @@ private:
     // presented or when the swapchain is destroyed, and this frame does neither.
     // If the empty submit fails too, the device is out of memory at a depth
     // nothing here can recover from.
-    // wait_acquire: whether the acquire semaphore is still unconsumed. A submit
-    // that succeeded already waited it, and waiting a binary semaphore twice
-    // is a deadlock rather than an error.
-    //
-    // signal_fence: whether the slot's fence still needs signalling. A partial
-    // submit failure can leave it already handed to a batch that WAS accepted,
-    // and signalling one fence from two submits is a validation error — the
-    // accepted batch will signal it, so the next acquire cannot hang either
-    // way.
-    void abandon_frame_(bool wait_acquire = true, bool signal_fence = true);
-
-    // image_acquired_ with the Context's counter kept in step — the counter is
-    // what refuses a headless ctx.submit() while a window holds an image.
-    void set_acquired_(bool acquired);
+    void abandon_frame_();
 
     SwapchainRenderer(std::shared_ptr<Context> context, SurfaceProvider surface_provider);
-
-    QueueSerials last_signalled_{};
 
     std::shared_ptr<Context> context_;
     SurfaceProvider surface_provider_;

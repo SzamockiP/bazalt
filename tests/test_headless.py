@@ -124,42 +124,6 @@ def test_uint16_indices_draw_correctly(ctx, triangle_shaders, triangle_buffers):
     assert not np.allclose(pixels[32, 32, :3], CLEAR_RGB, atol=2)
 
 
-def test_uint16_numpy_indices_are_read_as_uint16(ctx, triangle_shaders, triangle_buffers):
-    """The list overload recorded the data type and the numpy one did not, so a
-    uint16 index ARRAY was read back as UINT32 at half the count — the same
-    silent bug the test above pins for the list form (0.29)."""
-    vbuf, _ = triangle_buffers
-    ibuf16 = ctx.create_buffer(np.array([0, 1, 2], np.uint16), bz.BufferType.INDEX,
-                               bz.MemoryUsage.STATIC)
-    target = ctx.create_render_target(64, 64)
-    pixels = draw_triangle(ctx, target, triangle_shaders, (vbuf, ibuf16))
-    assert not np.allclose(pixels[32, 32, :3], CLEAR_RGB, atol=2)
-
-
-def test_a_storage_buffer_binds_as_indices(ctx, triangle_shaders, triangle_buffers):
-    """A compute shader that rewrites an index list writes a STORAGE buffer, and
-    until 0.29 that buffer could not be bound as indices at all: BufferType.STORAGE
-    carried VERTEX and INDIRECT but not INDEX. Here the indices are written from
-    the host, which is the same buffer with the same usage."""
-    vbuf, _ = triangle_buffers
-    indices = ctx.create_buffer(np.array([0, 1, 2], np.uint32), bz.BufferType.STORAGE,
-                                bz.MemoryUsage.STATIC)
-    target = ctx.create_render_target(64, 64)
-    pixels = draw_triangle(ctx, target, triangle_shaders, (vbuf, indices))
-    assert not np.allclose(pixels[32, 32, :3], CLEAR_RGB, atol=2)
-
-
-def test_bind_index_buffer_refuses_a_vertex_buffer(ctx, triangle_buffers):
-    """A VERTEX buffer has no INDEX_BUFFER usage bit, so this used to reach the
-    validation layers as a VUID that named neither the call nor the fix."""
-    vbuf, _ = triangle_buffers
-    g = ctx.graph()
-    target = ctx.create_render_target(16, 16)
-    with pytest.raises(bz.ResourceError, match="BufferType.INDEX"):
-        with g.add_pass(target) as p:
-            p.bind_index_buffer(vbuf)
-
-
 def test_two_targets_from_one_context(ctx, triangle_shaders, triangle_buffers):
     """Multiple render targets coexist — only SwapchainRenderers are restricted."""
     a = ctx.create_render_target(32, 32)
