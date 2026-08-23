@@ -2548,6 +2548,25 @@ read-modify-write dispatch is spelled by hand, and the lint warned about it — 
 the state it could see. Same-pass notes now accumulate their visible masks. **A lint that
 reports correct code has usually found the model's mistake, not the caller's.**
 
+**Then it found a real one, in bazalt's own example.** `examples/43_manual_barriers` — the
+program whose whole subject is writing barriers by hand — declared
+`p.barrier(values, SHADER_WRITE, SHADER_WRITE)` before a dispatch of `scale.comp`, whose body
+is `values[i] = values[i] * factor`. That is a read-modify-write: the WAW half was spelled and
+the RAW half was not, so the prior pass's writes were made visible to writes and not to reads.
+The comment beside it said "WAW", which is what the author believed the shader did. Sync
+validation has never reported it and probably never will — the barrier does create the
+execution dependency, and on every driver the same cache flush serves both. The example now
+records both halves before the dispatch, and says why one access needs two calls.
+
+**Two things follow.** The first is about `Access`: it names ONE access, so "visible to reads
+and to writes" is two barriers rather than a combined mask, and the accumulation rule above is
+what makes the pair work. That is a real ergonomic edge of the manual vocabulary, and it is
+now written down in the one example that meets it. The second is about what a lint is for. The
+suite could not have found this — sync validation is the referee for manual passes and it is
+silent here — and no reader had found it in two releases of looking at that file. **A model
+that can say what a barrier does not cover finds the barriers that are nearly right, which is
+the class a hazard checker built on execution never sees.**
+
 ### Asynchronous submits
 
 - **`submit(wait=False)` is paced by the ring, not by a fence per submit** (0.18). The

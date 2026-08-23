@@ -120,6 +120,9 @@ resource no barrier in it covers.
   image it names.** Such an image is in no descriptor set, so the submit did
   not know to wait for it. Nothing was wrong while uploads ran on the graphics
   queue, because submission order there covered it.
+- **`examples/43_manual_barriers` declares both halves of its read-modify-write
+  barrier.** It made the previous writes visible to writes and not to reads,
+  which the new warning reported the first time it ran.
 
 ### Notes
 
