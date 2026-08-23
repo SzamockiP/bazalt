@@ -396,7 +396,7 @@ void bind_context(py::module_& m)
                 std::vector<std::byte> bytes(view.size());
                 std::memcpy(bytes.data(), view.data(), view.size());
                 auto image = unwrap(manager->load_memory(std::move(bytes), mipmaps), self.logger().get());
-                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                name_image(self, image, name);
                 return py::cast(image);
             },
             py::arg("data"),
@@ -421,7 +421,7 @@ void bind_context(py::module_& m)
                 // explicit-control verbs.
                 auto* manager = self.upload_manager();
                 auto image = unwrap(manager->load(path, mipmaps), self.logger().get());
-                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                name_image(self, image, name);
                 if (auto* hr = self.hot_reload())
                 {
                     hr->watch_image(image, path);
@@ -445,7 +445,7 @@ void bind_context(py::module_& m)
                 require_open(self, "load_image");
                 auto* manager = self.upload_manager();
                 auto image = unwrap(manager->load_layered(paths, cube, mipmaps), self.logger().get());
-                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                name_image(self, image, name);
                 return py::cast(image);
             },
             py::arg("paths"),
@@ -527,7 +527,7 @@ void bind_context(py::module_& m)
                     Image::create_empty(
                         self, width, height, format, mip_levels, layers, cube, VK_SAMPLE_COUNT_1_BIT, depth),
                     self.logger().get());
-                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                name_image(self, image, name);
                 return py::cast(image);
             },
             py::arg("width"),
@@ -567,7 +567,7 @@ void bind_context(py::module_& m)
                     Image::create_from_pixels(
                         self, info.ptr, spec.width, spec.height, spec.format, mipmaps, spec.depth),
                     self.logger().get());
-                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                name_image(self, image, name);
                 return py::cast(image);
             },
             py::arg("array"),
@@ -649,7 +649,7 @@ void bind_context(py::module_& m)
                         spec->format,
                         mipmaps),
                     self.logger().get());
-                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                name_image(self, image, name);
                 return py::cast(image);
             },
             py::arg("images"),
@@ -744,7 +744,7 @@ void bind_context(py::module_& m)
                         }
                     }
                 }
-                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                name_image(self, image, name);
                 return py::cast(image);
             },
             py::arg("source"),

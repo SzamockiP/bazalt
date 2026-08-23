@@ -78,6 +78,7 @@ void bind_resources(py::module_& m)
         // waits CPU-side — which leaves these for loading screens and for
         // timing a setup phase.
         .def_property_readonly("ready", &Buffer::ready)
+        .def_property_readonly("name", &Buffer::name)
         .def_property_readonly(
             "address",
             [](Buffer& buffer)
@@ -138,6 +139,7 @@ void bind_resources(py::module_& m)
         .def_property_readonly("depth", &Image::depth)
         .def_property_readonly("format", &Image::format)
         .def_property_readonly("mip_levels", &Image::mip_levels)
+        .def_property_readonly("name", &Image::name)
         .def_property_readonly("array_layers", &Image::array_layers)
         .def_property_readonly("is_cube", &Image::is_cube)
         .def_property_readonly("samples", &Image::samples)

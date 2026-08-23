@@ -6,6 +6,8 @@ commands, what invalidates the compiled barriers, and what the two structural
 verbs (enabled, remove) do to a frame.
 """
 
+import struct
+
 import numpy as np
 import pytest
 
@@ -463,3 +465,51 @@ def test_a_timer_from_before_a_reset_is_stale(ctx):
     g.reset()
     with pytest.raises(bz.StateError):
         _ = t.ms
+
+
+def _write_then_sample(ctx):
+    """A compute pass writes a storage image, a render pass samples it — the
+    smallest graph whose compile decides a barrier with a named producer."""
+    pattern = ctx.compile_shader(str(SHADER_DIR / "pattern.comp"), bz.ShaderStage.COMPUTE)
+    write = ctx.compute_pipeline().shader(pattern).storage_image(0).push_constant(4).build()
+    vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+    frag = ctx.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
+    target = ctx.create_render_target(32, 32)
+    read = (ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
+            .texture(0, bz.ShaderStage.FRAGMENT).build(target))
+    image = ctx.create_image(32, 32, bz.Format.RGBA8, name="hdr_color")
+    pool = ctx.create_descriptor_pool()
+    ws = pool.allocate_set(write)
+    ws.set_storage_image(0, image)
+    rs = pool.allocate_set(read)
+    rs.set_image(0, image)
+
+    g = ctx.graph()
+    with g.add_pass(name="write") as p:
+        p.bind_pipeline(write).bind_descriptor_set(ws)
+        p.push_constants(0, struct.pack("f", 0.5)).dispatch(4, 4)
+    with g.add_pass(target, name="sample") as p:
+        p.bind_pipeline(read).bind_descriptor_set(rs).draw(3)
+    return g
+
+
+def test_explain_names_the_producer_pass(ctx):
+    """The report shows the barrier the compile decided, with the resource's
+    name= and the pass that produced the dependency. The text is a debugging
+    aid — these substrings are what a reader greps for, not API."""
+    g = _write_then_sample(ctx)
+    text = g.explain()
+    assert 'GENERAL -> SHADER_READ_ONLY_OPTIMAL' in text
+    assert 'image "hdr_color"' in text
+    assert 'producer: pass [0] "write"' in text
+    assert "UNORDERED" not in text
+    ctx.submit(g)
+    assert g.explain() == g.explain()
+
+
+def test_explain_compiles_a_dirty_graph(ctx):
+    """explain() before any submit compiles exactly as a submit would, and the
+    submit afterwards is still clean."""
+    g = _write_then_sample(ctx)
+    assert "graph: 2 passes" in g.explain()
+    ctx.submit(g)

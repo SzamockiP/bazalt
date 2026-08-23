@@ -558,3 +558,16 @@ def test_a_precise_occlusion_query_counts_samples(ctx, extra_context):
     precise.submit(g)
 
     assert q.samples >= 64, "a precise query counts every covered sample"
+
+
+def test_resources_report_their_debug_name(ctx):
+    """name= lives on the object since 0.30, not only in the debug-utils
+    layer: graph.explain() cannot ask Vulkan for the string back. Never a
+    key — the Pass.name contract."""
+    import numpy as np
+    assert ctx.create_image(4, 4, name="hdr").name == "hdr"
+    assert ctx.create_image(4, 4).name == ""
+    named = ctx.create_buffer(np.zeros(4, np.float32), bz.BufferUsage.STORAGE,
+                              bz.MemoryUsage.STATIC, name="counts")
+    assert named.name == "counts"
+    assert ctx.create_buffer(16, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC).name == ""

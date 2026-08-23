@@ -433,6 +433,18 @@ public:
     // thread, so the worker's own chain does not know about it. Two values
     // can be set at once since 0.30: the copy signals the transfer timeline
     // and the mip cascade the graphics one.
+    // The name= the image was created with, or empty. A debug label for
+    // graph.explain() and the validation layer — never a key, the Pass::name_
+    // contract.
+    const std::string& name() const
+    {
+        return name_;
+    }
+    void set_name(std::string name)
+    {
+        name_ = std::move(name);
+    }
+
     QueueSerials upload_serial() const
     {
         QueueSerials out{};
@@ -751,6 +763,8 @@ private:
     // Async upload state, written by the upload worker, read by the main
     // thread. The cv/mutex pair backs the CPU-side waits; the timeline serial
     // backs the GPU-side ones.
+    std::string name_;
+
     std::atomic<UploadState> upload_state_{UploadState::None};
     std::array<std::atomic<std::uint64_t>, kQueueCount> upload_serial_{};
     // How many queued uploads have not been submitted yet. Guarded by

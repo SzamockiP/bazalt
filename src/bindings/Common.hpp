@@ -1516,8 +1516,11 @@ void name_object(Context& ctx, VkObjectType type, Handle handle, const std::stri
 
 // A DynamicBuffer is one VkBuffer per in-flight frame; name each the same (a
 // StaticBuffer hands out the same handle for every frame, harmlessly re-named).
+// The string is kept on the object too (0.30): the Vulkan side is write-only,
+// and graph.explain() cannot ask the layer for it back.
 inline void name_buffer(Context& ctx, const std::shared_ptr<Buffer>& buffer, const std::string& name)
 {
+    buffer->set_name(name);
     if (name.empty())
     {
         return;
@@ -1526,4 +1529,12 @@ inline void name_buffer(Context& ctx, const std::shared_ptr<Buffer>& buffer, con
     {
         name_object(ctx, VK_OBJECT_TYPE_BUFFER, buffer->get_for_frame(i), name);
     }
+}
+
+// The image twin, replacing seven direct name_object calls (0.30): the string
+// lives on the Image for the same reason as the buffer's.
+inline void name_image(Context& ctx, const std::shared_ptr<Image>& image, const std::string& name)
+{
+    image->set_name(name);
+    name_object(ctx, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
 }

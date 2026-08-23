@@ -773,6 +773,11 @@ class Buffer:
         ...
 
     @property
+    def name(self) -> str:
+        """The name= the buffer was created with, or "". A debug label for
+        graph.explain() and the validation layer. Never a key."""
+        ...
+    @property
     def ready(self) -> bool:
         """Non-blocking: is the data on the GPU?
 
@@ -891,6 +896,11 @@ class Image:
     def format(self) -> Format: ...
     @property
     def mip_levels(self) -> int: ...
+    @property
+    def name(self) -> str:
+        """The name= the image was created with, or "". A debug label for
+        graph.explain() and the validation layer. Never a key."""
+        ...
     @property
     def array_layers(self) -> int:
         """Number of layers: 1 for a plain 2D image, N for a texture array,
@@ -1946,6 +1956,17 @@ class Graph:
         """Drop every pass and keep the GPU objects. The rebuild-per-frame
         idiom: reset(), add the passes again, submit. Timer and occlusion
         handles made before the reset report StateError."""
+        ...
+
+    def explain(self) -> str:
+        """A debugging aid: what the compile decided, as text.
+
+        Each enabled pass with its queue, batch and timeline waits, and every
+        barrier, wait and attachment transition the compile emitted, with the
+        pass that produced each dependency. Compiles the graph first when it
+        changed, exactly as a submit would. A manual pass's unordered uses are
+        listed as UNORDERED. The text is not API: read it, do not parse it.
+        """
         ...
 
 class Window:

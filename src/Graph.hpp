@@ -225,6 +225,13 @@ public:
     // this first.
     std::expected<void, Error> compile();
 
+    // A human-readable report of what the compile decided: each enabled pass,
+    // its queue and batch, and every barrier, timeline wait and attachment
+    // transition the fold emitted, with the pass that produced each
+    // dependency. Compiles first when the graph changed. A debugging aid —
+    // the text is not API.
+    std::expected<std::string, Error> explain();
+
     std::span<const Batch> batches() const
     {
         return batches_;
@@ -314,6 +321,47 @@ private:
         bool elide_entry = false;
     };
 
+    // One line of graph.explain(): something the compile decided, attributed
+    // to the pass it runs for and the pass that produced the dependency.
+    // Filled beside the real emission in compile_, so the report cannot drift
+    // from what the executor replays.
+    struct ExplainEntry
+    {
+        enum class Kind
+        {
+            Barrier,    // a vkCmdPipelineBarrier the fold computed
+            Floor,      // the same, from a first-use floor (no producer here)
+            Wait,       // a cross-queue edge that became a timeline wait
+            Attachment, // a render pass's entry transition (from the target)
+            Retire,     // its exit transition
+            Elided,     // an entry/exit the look-ahead removed
+            Unordered   // a manual pass's use no barrier covers (the lint)
+        };
+        Kind kind;
+        std::size_t pass = 0;
+        std::shared_ptr<Buffer> buffer; // one of the two, or neither for an
+        std::shared_ptr<Image> image;   // attachment row
+        std::size_t producer = ResourceTracker::kNoPass;
+        bool producer_wrote = true;
+        ResourceTracker::ImageBarrier b{}; // layouts UNDEFINED for buffers
+        std::string note;                  // extra text: "color[0]", "(clear)", ...
+    };
+    std::vector<ExplainEntry> explain_;
+
+    // Classify what one tracker call did and append the entries. `prev` is
+    // the state snapshot from before the call (null on a true first use).
+    template <typename State>
+    void record_explain_(
+        std::size_t pass,
+        const std::shared_ptr<Buffer>& buffer,
+        const std::shared_ptr<Image>& image,
+        const State* prev,
+        bool had_prev,
+        QueueKind queue,
+        std::size_t waits_before,
+        const std::vector<std::size_t>& waits,
+        const std::optional<ResourceTracker::ImageBarrier>& barrier);
+
     std::expected<void, Error> compile_();
 
     // Allocate whatever command-buffer rows the batches now need, from each
@@ -328,7 +376,8 @@ private:
 
     // Bring a preserving pass's attachments to the layout its own entry
     // transition assumes, when something in this graph moved them since.
-    static void correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, std::vector<std::size_t>& waits);
+    // A member since 0.30: it appends explain entries.
+    void correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, std::vector<std::size_t>& waits);
 
     // Report a render pass's attachment writes to the fold, so a later pass
     // that samples one is ordered against the drawing.

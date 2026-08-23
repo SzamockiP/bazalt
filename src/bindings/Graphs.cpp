@@ -81,5 +81,6 @@ void bind_graphs(py::module_& m)
             [](Graph& self, const std::shared_ptr<Pass>& pass) { unwrap(self.remove(pass), nullptr); },
             py::arg("pass_"),
             py::pos_only())
-        .def("reset", &Graph::reset);
+        .def("reset", &Graph::reset)
+        .def("explain", [](Graph& self) { return unwrap(self.explain(), nullptr); });
 }

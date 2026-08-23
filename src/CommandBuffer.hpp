@@ -80,6 +80,31 @@ void record_render_pass_transitions_out(const VolkDeviceTable& vk, VkCommandBuff
 // The recorded lambdas take a FrameContext rather than a SwapchainRenderer&.
 // That is what lets one recording be replayed against a window, an offscreen
 // image or a compute-only submit: this file does not know swapchains exist.
+// The debug-utils label pair, shared by cmd.begin_label/end_label and the
+// per-pass label Graph::execute wraps every named pass in (0.30). Loaded by
+// volkLoadInstanceOnly, null without VK_EXT_debug_utils — then both are no-ops.
+inline void begin_debug_label(VkCommandBuffer cmd, const std::string& name)
+{
+    if (vkCmdBeginDebugUtilsLabelEXT == nullptr)
+    {
+        return;
+    }
+    VkDebugUtilsLabelEXT label{
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
+        .pNext = nullptr,
+        .pLabelName = name.c_str(),
+        .color = {0.0f, 0.0f, 0.0f, 0.0f}};
+    vkCmdBeginDebugUtilsLabelEXT(cmd, &label);
+}
+
+inline void end_debug_label(VkCommandBuffer cmd)
+{
+    if (vkCmdEndDebugUtilsLabelEXT != nullptr)
+    {
+        vkCmdEndDebugUtilsLabelEXT(cmd);
+    }
+}
+
 class CommandBuffer
 {
 public:

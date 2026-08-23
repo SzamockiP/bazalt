@@ -213,16 +213,20 @@ public:
 
     // No batch at all — the value every "who touched this" field starts at.
     static constexpr std::size_t kNoBatch = static_cast<std::size_t>(-1);
+    // No pass — the provenance twin of kNoBatch (0.30, for graph.explain()).
+    static constexpr std::size_t kNoPass = static_cast<std::size_t>(-1);
 
-    // Which batch the fold is currently folding, and on which queue. The
-    // caller sets it before each pass; everything below records it, so a use
-    // whose producer ran on the other queue can name the batch to wait for
-    // instead of emitting a barrier that cannot reach it.
-    void set_batch(std::size_t batch, QueueKind queue)
+    // Which batch the fold is currently folding, on which queue, and which
+    // pass (an index the caller understands — the graph's compiled_ order).
+    // The caller sets it before each pass; everything below records it, so a
+    // use whose producer ran on the other queue can name the batch to wait
+    // for, and explain() can name the pass that produced a dependency.
+    void set_batch(std::size_t batch, QueueKind queue, std::size_t pass = kNoPass)
     {
         batch_ = batch;
         queue_ = queue;
         queue_slot_ = queue_index(queue);
+        pass_ = pass;
     }
 
     struct Barrier
@@ -301,6 +305,7 @@ public:
             st.write_access = access;
             st.write_batch = batch_;
             st.write_queue = queue_;
+            st.write_pass = pass_;
         }
         else
         {
@@ -330,6 +335,7 @@ public:
             st.read_stages |= stages;
             st.read_access |= access;
             st.read_batch[queue_slot_] = batch_;
+            st.read_pass[queue_slot_] = pass_;
         }
         return result;
     }
@@ -416,6 +422,7 @@ public:
             st.write_access = access;
             st.write_batch = batch_;
             st.write_queue = queue_;
+            st.write_pass = pass_;
         }
         else
         {
@@ -451,6 +458,7 @@ public:
             st.read_stages |= stages;
             st.read_access |= access;
             st.read_batch[queue_slot_] = batch_;
+            st.read_pass[queue_slot_] = pass_;
         }
         return result;
     }
@@ -529,11 +537,13 @@ public:
         st.write_access = dst_access;
         st.write_batch = batch_;
         st.write_queue = queue_;
+        st.write_pass = pass_;
         st.read_stages = dst_stages;
         st.read_access = dst_access;
         st.visible_stages[queue_slot_] = dst_stages;
         st.visible_access[queue_slot_] = dst_access;
         st.read_batch[queue_slot_] = batch_;
+        st.read_pass[queue_slot_] = pass_;
     }
 
     // A render pass WROTE this image as an attachment, and left it in `layout`.
@@ -571,6 +581,7 @@ public:
         st.write_access = src_access;
         st.write_batch = batch_;
         st.write_queue = queue_;
+        st.write_pass = pass_;
         st.visible_stages[queue_slot_] = visible_stages;
         st.visible_access[queue_slot_] = visible_access;
     }
@@ -589,6 +600,7 @@ public:
         st.visible_stages[queue_slot_] |= stages;
         st.visible_access[queue_slot_] |= access;
         st.read_batch[queue_slot_] = batch_;
+        st.read_pass[queue_slot_] = pass_;
     }
 
     void note_image_layout(
@@ -616,11 +628,13 @@ public:
         st.write_access = dst_access;
         st.write_batch = batch_;
         st.write_queue = queue_;
+        st.write_pass = pass_;
         st.read_stages = dst_stages;
         st.read_access = dst_access;
         st.visible_stages[queue_slot_] = dst_stages;
         st.visible_access[queue_slot_] = dst_access;
         st.read_batch[queue_slot_] = batch_;
+        st.read_pass[queue_slot_] = pass_;
     }
 
     void reset()
@@ -629,7 +643,9 @@ public:
         image_states_.clear();
     }
 
-private:
+    // The hazard state, public since 0.30 so graph.explain() and the manual
+    // lint can read what the fold knew before a use. The maps stay private;
+    // state()/image_state() hand out const pointers.
     struct BufferState
     {
         bool written = false;
@@ -653,6 +669,12 @@ private:
         // Reads since the last write (what a future write must wait for).
         VkPipelineStageFlags read_stages = 0;
         VkAccessFlags read_access = 0;
+        // Provenance for explain() and the lint: which pass (in the caller's
+        // compiled order) wrote last, and which read last per queue. Carried
+        // beside the batch fields rather than derived from them, because a
+        // batch holds several passes.
+        std::size_t write_pass = kNoPass;
+        std::array<std::size_t, kQueueCount> read_pass = per_queue(kNoPass);
     };
 
     // BufferState plus the layout the recording has left the image in so far.
@@ -669,8 +691,22 @@ private:
         std::array<std::size_t, kQueueCount> read_batch = per_queue(kNoBatch);
         VkPipelineStageFlags read_stages = 0;
         VkAccessFlags read_access = 0;
+        std::size_t write_pass = kNoPass;
+        std::array<std::size_t, kQueueCount> read_pass = per_queue(kNoPass);
     };
 
+    const BufferState* state(Buffer* buffer) const
+    {
+        const auto it = states_.find(buffer);
+        return it != states_.end() ? &it->second : nullptr;
+    }
+    const ImageState* image_state(Image* image) const
+    {
+        const auto it = image_states_.find(image);
+        return it != image_states_.end() ? &it->second : nullptr;
+    }
+
+private:
     // Whichever touches of `st` happened on ANOTHER queue become semaphore
     // waits; returns whether anything touched it on THIS one, which is what
     // still needs a pipeline barrier.
@@ -723,6 +759,7 @@ private:
     std::size_t batch_ = 0;
     QueueKind queue_ = QueueKind::Graphics;
     std::size_t queue_slot_ = 0;
+    std::size_t pass_ = kNoPass;
 
     std::unordered_map<Buffer*, BufferState> states_;
     std::unordered_map<Image*, ImageState> image_states_;

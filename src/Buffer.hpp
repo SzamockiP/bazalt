@@ -204,6 +204,17 @@ public:
     {
         return {};
     }
+
+    // The name= the buffer was created with, or empty. A debug label for
+    // graph.explain() and the validation layer — never a key.
+    const std::string& name() const
+    {
+        return name_;
+    }
+    void set_name(std::string name)
+    {
+        name_ = std::move(name);
+    }
     virtual bool ready() const
     {
         return true;
@@ -252,6 +263,7 @@ public:
 
 protected:
     DataType data_type_ = DataType::FLOAT;
+    std::string name_;
     BufferUsage buffer_usage_ = BufferUsage::UNIFORM;
 };
 

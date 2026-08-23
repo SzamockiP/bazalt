@@ -1291,20 +1291,7 @@ CommandBuffer::TimerReading CommandBuffer::read_timer(std::size_t index, std::ui
 
 CommandBuffer& CommandBuffer::begin_label(const std::string& name)
 {
-    commands_.emplace_back(
-        [name](VkCommandBuffer cmd, const FrameContext&)
-        {
-            if (vkCmdBeginDebugUtilsLabelEXT == nullptr)
-            {
-                return;
-            }
-            VkDebugUtilsLabelEXT label{
-                .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
-                .pNext = nullptr,
-                .pLabelName = name.c_str(),
-                .color = {0.0f, 0.0f, 0.0f, 0.0f}};
-            vkCmdBeginDebugUtilsLabelEXT(cmd, &label);
-        });
+    commands_.emplace_back([name](VkCommandBuffer cmd, const FrameContext&) { begin_debug_label(cmd, name); });
     ++open_labels_;
     return *this;
 }

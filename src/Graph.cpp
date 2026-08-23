@@ -252,10 +252,340 @@ std::expected<void, Error> Graph::ensure_command_buffers_()
     return {};
 }
 
+namespace
+{
+    // Human names for the report. Core-1.0 bits only, which is the tracker's
+    // whole vocabulary; an unknown bit prints as hex so nothing is hidden.
+    std::string stage_names(VkPipelineStageFlags stages)
+    {
+        if (stages == 0)
+        {
+            return "NONE";
+        }
+        if (stages == ~VkPipelineStageFlags{0})
+        {
+            return "ALL_COMMANDS";
+        }
+        static constexpr std::pair<VkPipelineStageFlags, const char*> kNames[] = {
+            {VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, "TOP_OF_PIPE"},
+            {VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, "DRAW_INDIRECT"},
+            {VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, "VERTEX_INPUT"},
+            {VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, "VERTEX_SHADER"},
+            {VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT, "TESS_CONTROL"},
+            {VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT, "TESS_EVALUATION"},
+            {VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT, "GEOMETRY_SHADER"},
+            {VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, "FRAGMENT_SHADER"},
+            {VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, "EARLY_FRAGMENT_TESTS"},
+            {VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, "LATE_FRAGMENT_TESTS"},
+            {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, "COLOR_ATTACHMENT_OUTPUT"},
+            {VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, "COMPUTE_SHADER"},
+            {VK_PIPELINE_STAGE_TRANSFER_BIT, "TRANSFER"},
+            {VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, "BOTTOM_OF_PIPE"},
+            {VK_PIPELINE_STAGE_HOST_BIT, "HOST"},
+            {VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, "ALL_GRAPHICS"},
+            {VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, "ALL_COMMANDS"},
+        };
+        std::string out;
+        VkPipelineStageFlags rest = stages;
+        for (const auto& [bit, name] : kNames)
+        {
+            if ((rest & bit) != 0)
+            {
+                out += out.empty() ? name : std::string("|") + name;
+                rest &= ~bit;
+            }
+        }
+        if (rest != 0)
+        {
+            out += std::format("{}0x{:x}", out.empty() ? "" : "|", rest);
+        }
+        return out;
+    }
+
+    std::string access_names(VkAccessFlags access)
+    {
+        if (access == 0)
+        {
+            return "NONE";
+        }
+        if (access == ~VkAccessFlags{0})
+        {
+            return "ANY";
+        }
+        static constexpr std::pair<VkAccessFlags, const char*> kNames[] = {
+            {VK_ACCESS_INDIRECT_COMMAND_READ_BIT, "INDIRECT_COMMAND_READ"},
+            {VK_ACCESS_INDEX_READ_BIT, "INDEX_READ"},
+            {VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT, "VERTEX_ATTRIBUTE_READ"},
+            {VK_ACCESS_UNIFORM_READ_BIT, "UNIFORM_READ"},
+            {VK_ACCESS_INPUT_ATTACHMENT_READ_BIT, "INPUT_ATTACHMENT_READ"},
+            {VK_ACCESS_SHADER_READ_BIT, "SHADER_READ"},
+            {VK_ACCESS_SHADER_WRITE_BIT, "SHADER_WRITE"},
+            {VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, "COLOR_ATTACHMENT_READ"},
+            {VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, "COLOR_ATTACHMENT_WRITE"},
+            {VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT, "DEPTH_STENCIL_READ"},
+            {VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, "DEPTH_STENCIL_WRITE"},
+            {VK_ACCESS_TRANSFER_READ_BIT, "TRANSFER_READ"},
+            {VK_ACCESS_TRANSFER_WRITE_BIT, "TRANSFER_WRITE"},
+            {VK_ACCESS_HOST_READ_BIT, "HOST_READ"},
+            {VK_ACCESS_HOST_WRITE_BIT, "HOST_WRITE"},
+            {VK_ACCESS_MEMORY_READ_BIT, "MEMORY_READ"},
+            {VK_ACCESS_MEMORY_WRITE_BIT, "MEMORY_WRITE"},
+        };
+        std::string out;
+        VkAccessFlags rest = access;
+        for (const auto& [bit, name] : kNames)
+        {
+            if ((rest & bit) != 0)
+            {
+                out += out.empty() ? name : std::string("|") + name;
+                rest &= ~bit;
+            }
+        }
+        if (rest != 0)
+        {
+            out += std::format("{}0x{:x}", out.empty() ? "" : "|", rest);
+        }
+        return out;
+    }
+
+    const char* layout_name(VkImageLayout layout)
+    {
+        switch (layout)
+        {
+            case VK_IMAGE_LAYOUT_UNDEFINED:
+                return "UNDEFINED";
+            case VK_IMAGE_LAYOUT_GENERAL:
+                return "GENERAL";
+            case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+                return "COLOR_ATTACHMENT_OPTIMAL";
+            case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+                return "DEPTH_STENCIL_ATTACHMENT_OPTIMAL";
+            case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+                return "DEPTH_STENCIL_READ_ONLY_OPTIMAL";
+            case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+                return "SHADER_READ_ONLY_OPTIMAL";
+            case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+                return "TRANSFER_SRC_OPTIMAL";
+            case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+                return "TRANSFER_DST_OPTIMAL";
+            case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+                return "PRESENT_SRC_KHR";
+            default:
+                return "OTHER";
+        }
+    }
+
+    std::string describe(const Image& image)
+    {
+        if (!image.name().empty())
+        {
+            return std::format("image \"{}\"", image.name());
+        }
+        return std::format("image {}x{} {}", image.width(), image.height(), format_name(image.format()));
+    }
+
+    std::string describe(const Buffer& buffer)
+    {
+        if (!buffer.name().empty())
+        {
+            return std::format("buffer \"{}\"", buffer.name());
+        }
+        return std::format("buffer {} B", buffer.size());
+    }
+} // namespace
+
+template <typename State>
+void Graph::record_explain_(
+    std::size_t pass,
+    const std::shared_ptr<Buffer>& buffer,
+    const std::shared_ptr<Image>& image,
+    const State* prev,
+    bool had_prev,
+    QueueKind queue,
+    std::size_t waits_before,
+    const std::vector<std::size_t>& waits,
+    const std::optional<ResourceTracker::ImageBarrier>& barrier)
+{
+    static_cast<void>(queue);
+    // Who produced the dependency, read from the state as it was BEFORE the
+    // use: the last writer when there is one, else the last reader (a WAR
+    // edge). kNoPass means nothing in this graph — the floor's territory.
+    const auto producer = [&]() -> std::pair<std::size_t, bool>
+    {
+        if (prev != nullptr && prev->write_pass != ResourceTracker::kNoPass)
+        {
+            return {prev->write_pass, true};
+        }
+        if (prev != nullptr)
+        {
+            for (std::size_t q = 0; q < kQueueCount; ++q)
+            {
+                if (prev->read_pass[q] != ResourceTracker::kNoPass)
+                {
+                    return {prev->read_pass[q], false};
+                }
+            }
+        }
+        return {ResourceTracker::kNoPass, true};
+    }();
+
+    if (waits.size() > waits_before)
+    {
+        explain_.push_back(
+            {.kind = ExplainEntry::Kind::Wait,
+             .pass = pass,
+             .buffer = buffer,
+             .image = image,
+             .producer = producer.first,
+             .producer_wrote = producer.second,
+             .b = barrier.value_or(ResourceTracker::ImageBarrier{})});
+    }
+    if (barrier)
+    {
+        const bool floor = !had_prev || producer.first == ResourceTracker::kNoPass;
+        explain_.push_back(
+            {.kind = floor ? ExplainEntry::Kind::Floor : ExplainEntry::Kind::Barrier,
+             .pass = pass,
+             .buffer = buffer,
+             .image = image,
+             .producer = floor ? ResourceTracker::kNoPass : producer.first,
+             .producer_wrote = producer.second,
+             .b = *barrier});
+    }
+}
+
+std::expected<std::string, Error> Graph::explain()
+{
+    if (dirty_)
+    {
+        if (auto r = compile_(); !r)
+        {
+            return std::unexpected(r.error());
+        }
+    }
+
+    std::string out = std::format(
+        "graph: {} pass{}, {} batch{}\n",
+        compiled_.size(),
+        compiled_.size() == 1 ? "" : "es",
+        batches_.size(),
+        batches_.size() == 1 ? "" : "es");
+
+    for (std::size_t i = 0; i < compiled_.size(); ++i)
+    {
+        const CompiledPass& cp = compiled_[i];
+        const Pass& pass = *cp.pass;
+        const Batch& batch = batches_[cp.batch];
+
+        std::string waits_text;
+        for (const std::size_t j : batch.waits)
+        {
+            waits_text +=
+                std::format("{}batch {} ({})", waits_text.empty() ? "" : ", ", j, queue_name(batches_[j].queue));
+        }
+        std::string header = std::format(
+            "[{}] {}  queue {}  batch {} (#{} on {})  waits: {}",
+            i,
+            pass.name().empty() ? std::format("pass") : std::format("\"{}\"", pass.name()),
+            queue_name(pass.queue()),
+            cp.batch,
+            batch.ordinal,
+            queue_name(batch.queue),
+            waits_text.empty() ? "none" : waits_text);
+        if (!pass.enabled())
+        {
+            header += "  (disabled)";
+        }
+        if (pass.is_render())
+        {
+            const VkExtent2D extent = pass.target()->extent();
+            header += std::format("  render target {}x{}", extent.width, extent.height);
+        }
+        out += header + "\n";
+
+        for (const ExplainEntry& e : explain_)
+        {
+            if (e.pass != i)
+            {
+                continue;
+            }
+            const std::string what = e.image    ? describe(*e.image)
+                                     : e.buffer ? describe(*e.buffer)
+                                                : std::string("attachment");
+            const std::string producer = e.producer == ResourceTracker::kNoPass
+                                             ? std::string("outside this graph or a previous replay (first use)")
+                                             : std::format(
+                                                   "{}pass [{}] {}",
+                                                   e.producer_wrote ? "" : "reads in ",
+                                                   e.producer,
+                                                   compiled_[e.producer].pass->name().empty()
+                                                       ? std::string()
+                                                       : std::format("\"{}\"", compiled_[e.producer].pass->name()));
+            switch (e.kind)
+            {
+                case ExplainEntry::Kind::Barrier:
+                case ExplainEntry::Kind::Floor:
+                    if (e.image)
+                    {
+                        out += std::format(
+                            "  barrier  {}  {} -> {}\n",
+                            what,
+                            layout_name(e.b.old_layout),
+                            layout_name(e.b.new_layout));
+                    }
+                    else
+                    {
+                        out += std::format("  barrier  {}\n", what);
+                    }
+                    out += std::format(
+                        "           {} / {} -> {} / {}\n",
+                        stage_names(e.b.src_stages),
+                        access_names(e.b.src_access),
+                        stage_names(e.b.dst_stages),
+                        access_names(e.b.dst_access));
+                    out += std::format("           producer: {}\n", producer);
+                    break;
+                case ExplainEntry::Kind::Wait:
+                    out += std::format("  wait     {}  cross-queue: timeline wait, producer: {}\n", what, producer);
+                    break;
+                case ExplainEntry::Kind::Attachment:
+                    out += std::format(
+                        "  attachment {}  {} -> {}\n",
+                        e.note,
+                        layout_name(e.b.old_layout),
+                        layout_name(e.b.new_layout));
+                    break;
+                case ExplainEntry::Kind::Retire:
+                    out += std::format(
+                        "  retire     {}  {} -> {}\n",
+                        e.note,
+                        layout_name(e.b.old_layout),
+                        layout_name(e.b.new_layout));
+                    break;
+                case ExplainEntry::Kind::Elided:
+                    out += std::format(
+                        "  elided     {}  stays {} (the seam with the neighbouring pass is one "
+                        "execution barrier)\n",
+                        e.note,
+                        layout_name(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+                    break;
+                case ExplainEntry::Kind::Unordered:
+                    out += std::format(
+                        "  UNORDERED (manual)  {}  no barrier in this pass covers the use, producer: {}\n",
+                        what,
+                        producer);
+                    break;
+            }
+        }
+    }
+    return out;
+}
+
 std::expected<void, Error> Graph::compile_()
 {
     compiled_.clear();
     batches_.clear();
+    explain_.clear();
     tracked_writes_ = false;
 
     // Sealing is what lets this fold trust every pass's use list; disabled
@@ -334,7 +664,8 @@ std::expected<void, Error> Graph::compile_()
         // batch: a dependency inside one batch is a pipeline barrier, and one
         // that crosses batches on different queues is a semaphore wait, which
         // only the submit can emit.
-        tracker.set_batch(cp.batch, batch.queue);
+        const std::size_t pass_index = static_cast<std::size_t>(&cp - compiled_.data());
+        tracker.set_batch(cp.batch, batch.queue, pass_index);
         std::vector<std::size_t>& waits = batch.waits;
 
         // A render pass's attachments are transitioned by the RenderTarget
@@ -346,11 +677,17 @@ std::expected<void, Error> Graph::compile_()
             RenderTarget& rt = *pass->target();
             for (const auto& image : rt.written_color_images())
             {
+                const auto* prev = tracker.image_state(image.get());
+                const std::size_t before = waits.size();
                 tracker.cross_queue_touches(image.get(), waits);
+                record_explain_(pass_index, nullptr, image, prev, prev != nullptr, batch.queue, before, waits, {});
             }
             if (const auto& depth = rt.written_depth_image())
             {
+                const auto* prev = tracker.image_state(depth.get());
+                const std::size_t before = waits.size();
                 tracker.cross_queue_touches(depth.get(), waits);
+                record_explain_(pass_index, nullptr, depth, prev, prev != nullptr, batch.queue, before, waits, {});
             }
         }
 
@@ -373,10 +710,35 @@ std::expected<void, Error> Graph::compile_()
                 case UseEvent::Kind::BufferUse:
                 {
                     tracked_writes_ |= e.writes;
-                    if (auto b = tracker.use(e.buffer.get(), e.stages, e.access, e.writes, e.shader_writable, waits))
+                    const auto* prev_state = tracker.state(e.buffer.get());
+                    const auto prev = prev_state != nullptr ? std::optional(*prev_state) : std::nullopt;
+                    const std::size_t before = waits.size();
+                    auto b = tracker.use(e.buffer.get(), e.stages, e.access, e.writes, e.shader_writable, waits);
+                    if (b)
                     {
                         batch_at_(cp, e.position).buffers.emplace_back(e.buffer, *b);
                     }
+                    std::optional<ResourceTracker::ImageBarrier> as_image;
+                    if (b)
+                    {
+                        as_image = ResourceTracker::ImageBarrier{
+                            VK_IMAGE_LAYOUT_UNDEFINED,
+                            VK_IMAGE_LAYOUT_UNDEFINED,
+                            b->src_stages,
+                            b->dst_stages,
+                            b->src_access,
+                            b->dst_access};
+                    }
+                    record_explain_(
+                        pass_index,
+                        e.buffer,
+                        nullptr,
+                        prev ? &*prev : nullptr,
+                        prev.has_value(),
+                        batch.queue,
+                        before,
+                        waits,
+                        as_image);
                     break;
                 }
                 case UseEvent::Kind::ImageUse:
@@ -398,18 +760,64 @@ std::expected<void, Error> Graph::compile_()
                         break;
                     }
                     tracked_writes_ |= e.writes;
-                    if (auto b = tracker.use_image(e.image.get(), e.layout, e.stages, e.access, e.writes, waits))
                     {
-                        batch_at_(cp, e.position).images.emplace_back(e.image, *b);
+                        const auto* prev_state = tracker.image_state(e.image.get());
+                        const auto prev = prev_state != nullptr ? std::optional(*prev_state) : std::nullopt;
+                        const std::size_t before = waits.size();
+                        auto b = tracker.use_image(e.image.get(), e.layout, e.stages, e.access, e.writes, waits);
+                        if (b)
+                        {
+                            batch_at_(cp, e.position).images.emplace_back(e.image, *b);
+                        }
+                        record_explain_(
+                            pass_index,
+                            nullptr,
+                            e.image,
+                            prev ? &*prev : nullptr,
+                            prev.has_value(),
+                            batch.queue,
+                            before,
+                            waits,
+                            b);
                     }
                     break;
                 }
                 case UseEvent::Kind::BufferNote:
+                {
+                    const auto* prev_state = tracker.state(e.buffer.get());
+                    const auto prev = prev_state != nullptr ? std::optional(*prev_state) : std::nullopt;
+                    const std::size_t before = waits.size();
                     tracker.note_buffer_access(e.buffer.get(), e.stages, e.access, waits);
+                    record_explain_(
+                        pass_index,
+                        e.buffer,
+                        nullptr,
+                        prev ? &*prev : nullptr,
+                        prev.has_value(),
+                        batch.queue,
+                        before,
+                        waits,
+                        {});
                     break;
+                }
                 case UseEvent::Kind::ImageNote:
+                {
+                    const auto* prev_state = tracker.image_state(e.image.get());
+                    const auto prev = prev_state != nullptr ? std::optional(*prev_state) : std::nullopt;
+                    const std::size_t before = waits.size();
                     tracker.note_image_layout(e.image.get(), e.layout, e.stages, e.access, &waits);
+                    record_explain_(
+                        pass_index,
+                        nullptr,
+                        e.image,
+                        prev ? &*prev : nullptr,
+                        prev.has_value(),
+                        batch.queue,
+                        before,
+                        waits,
+                        {});
                     break;
+                }
             }
         }
 
@@ -426,6 +834,41 @@ std::expected<void, Error> Graph::compile_()
         if (pass->is_render() && !cp.elide_exit)
         {
             note_attachment_writes_(*pass, tracker);
+        }
+
+        // The attachment rows: descriptive, because the executor builds these
+        // transitions from the TARGET rather than through the tracker. The
+        // report says which layout each attachment enters and retires to, and
+        // where the look-ahead elided the seam.
+        if (pass->is_render())
+        {
+            RenderTarget& rt = *pass->target();
+            const bool clears = !pass->preserve();
+            std::size_t index = 0;
+            for (const auto& image : rt.written_color_images())
+            {
+                ExplainEntry entry{
+                    .kind = cp.elide_entry ? ExplainEntry::Kind::Elided : ExplainEntry::Kind::Attachment,
+                    .pass = pass_index,
+                    .image = image,
+                    .b =
+                        {clears ? VK_IMAGE_LAYOUT_UNDEFINED : rt.final_layout(),
+                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                         0,
+                         0,
+                         0,
+                         0},
+                    .note = std::format("color[{}]{}", index, clears ? " (clear)" : " (preserve)")};
+                explain_.push_back(std::move(entry));
+                ExplainEntry exit{
+                    .kind = cp.elide_exit ? ExplainEntry::Kind::Elided : ExplainEntry::Kind::Retire,
+                    .pass = pass_index,
+                    .image = image,
+                    .b = {VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, rt.final_layout(), 0, 0, 0, 0},
+                    .note = std::format("color[{}]", index)};
+                explain_.push_back(std::move(exit));
+                ++index;
+            }
         }
     }
 
@@ -453,6 +896,7 @@ void Graph::correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, 
 {
     RenderTarget& rt = *cp.pass->target();
     const VkImageLayout wanted = rt.final_layout();
+    const std::size_t pass_index = static_cast<std::size_t>(&cp - compiled_.data());
     for (const auto& image : rt.written_color_images())
     {
         const auto known = tracker.layout_of(image.get());
@@ -460,21 +904,27 @@ void Graph::correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, 
         {
             continue;
         }
+        const auto* prev_state = tracker.image_state(image.get());
+        const auto prev = prev_state != nullptr ? std::optional(*prev_state) : std::nullopt;
+        const std::size_t before = waits.size();
         // Through the tracker rather than hand-built since 0.29: the old
         // ALL_COMMANDS source scope covers everything on THIS queue and nothing
         // on the other, and a compute pass that moved the attachment is exactly
         // the case this correction exists for. use_image answers both halves —
         // a barrier for the local predecessor, a wait for the remote one.
-        if (auto b = tracker.use_image(
-                image.get(),
-                wanted,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                /*writes=*/true,
-                waits))
+        auto b = tracker.use_image(
+            image.get(),
+            wanted,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            /*writes=*/true,
+            waits);
+        if (b)
         {
             cp.entry.images.emplace_back(image, *b);
         }
+        record_explain_(
+            pass_index, nullptr, image, prev ? &*prev : nullptr, prev.has_value(), cp.pass->queue(), before, waits, b);
         // The pass's own entry transition now starts where it says it does.
         tracker.note_image_layout(
             image.get(), wanted, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT);
@@ -686,6 +1136,16 @@ void Graph::execute_batch(const Batch& batch, VkCommandBuffer vkCmd, const Frame
         const CompiledPass& cp = compiled_[i];
         Pass& pass = *cp.pass;
         CommandBuffer& rec = pass.recorder();
+        // Every named pass replays inside a debug label — entry barriers
+        // included, so a validation message about one names the pass that
+        // needed it (0.30). The pass's own begin_label/end_label pairs replay
+        // strictly inside this one, and end_label drops unbalanced ends, so
+        // the outer label cannot be closed from within.
+        const bool labelled = !pass.name().empty();
+        if (labelled)
+        {
+            begin_debug_label(vkCmd, pass.name());
+        }
         cp.entry.record(vkCmd, frame);
         if (pass.is_render())
         {
@@ -716,6 +1176,10 @@ void Graph::execute_batch(const Batch& batch, VkCommandBuffer vkCmd, const Frame
                 at = position;
             }
             rec.replay_range(vkCmd, frame, at, rec.command_count());
+        }
+        if (labelled)
+        {
+            end_debug_label(vkCmd);
         }
     }
 }
