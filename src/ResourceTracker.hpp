@@ -1,7 +1,12 @@
 #pragma once
 #include <volk.h>
+#include <array>
+#include <cstddef>
 #include <optional>
 #include <unordered_map>
+#include <vector>
+
+#include "Queue.hpp"
 
 class Buffer;
 class Image;
@@ -77,6 +82,91 @@ inline constexpr StageAccess to_vk(Access access, VkPipelineStageFlags all_shade
     return {all_shader_stages, VK_ACCESS_SHADER_READ_BIT};
 }
 
+// Which access bits a stage mask is allowed to carry (the spec's "Supported
+// access types" table, in the shape the narrowing below needs). Dropping a
+// stage from a mask must drop the accesses only that stage could perform, or
+// the barrier names an access no stage in its mask supports — which is a
+// validation error rather than a conservative one.
+inline constexpr VkAccessFlags access_supported_by(VkPipelineStageFlags stages)
+{
+    // TOP_OF_PIPE and BOTTOM_OF_PIPE support no access at all; ALL_COMMANDS
+    // supports every one, and the two ends of the pipe are what an emptied
+    // mask falls back to, so an empty result there is correct.
+    VkAccessFlags access = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    if (stages & VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
+    {
+        return ~VkAccessFlags{0};
+    }
+    if (stages & VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT)
+    {
+        access |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    }
+    if (stages & VK_PIPELINE_STAGE_VERTEX_INPUT_BIT)
+    {
+        access |= VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+    }
+    constexpr VkPipelineStageFlags kShaderStages =
+        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+        VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT | VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    if (stages & kShaderStages)
+    {
+        access |= VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    }
+    if (stages & VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+    {
+        access |= VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
+    }
+    if (stages & VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+    {
+        access |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    }
+    if (stages & (VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT))
+    {
+        access |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    }
+    if (stages & VK_PIPELINE_STAGE_TRANSFER_BIT)
+    {
+        access |= VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    }
+    if (stages & VK_PIPELINE_STAGE_HOST_BIT)
+    {
+        access |= VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT;
+    }
+    return access;
+}
+
+// Narrow one half of a barrier to what the replaying queue family supports.
+//
+// Every stage bit in a vkCmdPipelineBarrier must be one the pool's family
+// supports, and a compute-only family supports a handful. The tracker computes
+// in graphics vocabulary because the fold does not know which queue will replay
+// a pass, so the narrowing happens where the barrier is EMITTED.
+//
+// An emptied mask does not mean "no dependency": it means the dependency is
+// carried by something else — the semaphore wait that got this batch its work
+// in the first place. TOP_OF_PIPE as a source and BOTTOM_OF_PIPE as a
+// destination are the empty scopes that say so, and both carry no access.
+inline constexpr StageAccess narrow(StageAccess sa, VkPipelineStageFlags legal, VkPipelineStageFlags when_empty)
+{
+    const VkPipelineStageFlags stages = sa.stages & legal;
+    if (stages == 0)
+    {
+        return {when_empty, 0};
+    }
+    return {stages, sa.access & access_supported_by(stages)};
+}
+
+inline constexpr StageAccess narrow_src(StageAccess sa, VkPipelineStageFlags legal)
+{
+    return narrow(sa, legal, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+}
+
+inline constexpr StageAccess narrow_dst(StageAccess sa, VkPipelineStageFlags legal)
+{
+    return narrow(sa, legal, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+}
+
 // The image layout each shader access implies: a storage image written by a
 // shader lives in GENERAL, a sampled image in SHADER_READ_ONLY. Only these two
 // shader accesses name an image layout; the rest are buffer-only. Backs the
@@ -120,6 +210,20 @@ public:
         all_shader_stages_ = stages;
     }
 
+    // No batch at all — the value every "who touched this" field starts at.
+    static constexpr std::size_t kNoBatch = static_cast<std::size_t>(-1);
+
+    // Which batch the fold is currently folding, and on which queue. The
+    // caller sets it before each pass; everything below records it, so a use
+    // whose producer ran on the other queue can name the batch to wait for
+    // instead of emitting a barrier that cannot reach it.
+    void set_batch(std::size_t batch, QueueKind queue)
+    {
+        batch_ = batch;
+        queue_ = queue;
+        queue_slot_ = queue_index(queue);
+    }
+
     struct Barrier
     {
         VkPipelineStageFlags src_stages;
@@ -138,7 +242,8 @@ public:
         VkPipelineStageFlags stages,
         VkAccessFlags access,
         bool writes,
-        bool shader_writable)
+        bool shader_writable,
+        std::vector<std::size_t>& waits)
     {
         auto [it, inserted] = states_.try_emplace(buffer);
         BufferState& st = it->second;
@@ -182,7 +287,10 @@ public:
         if (writes)
         {
             // WAW / WAR: everything that touched the buffer must drain first.
-            if (st.written || st.read_stages != 0)
+            // Whatever touched it on ANOTHER queue becomes a wait; a barrier is
+            // still due for the half that ran on this one.
+            const bool local = predecessors_(st, /*include_reads=*/true, waits);
+            if (local && (st.written || st.read_stages != 0))
             {
                 result = Barrier{st.write_stages | st.read_stages, stages, st.write_access | st.read_access, access};
             }
@@ -190,19 +298,37 @@ public:
             st.written = true;
             st.write_stages = stages;
             st.write_access = access;
+            st.write_batch = batch_;
+            st.write_queue = queue_;
         }
         else
         {
-            // RAW — only if the write isn't already visible to these stages.
-            // (Two draws reading the same SSBO emit one barrier, not two.)
-            if (st.written && ((stages & ~st.visible_stages) != 0 || (access & ~st.visible_access) != 0))
+            // RAW — only if the write isn't already visible to these stages ON
+            // THIS QUEUE. (Two draws reading the same SSBO emit one barrier,
+            // not two.)
+            if (st.written &&
+                ((stages & ~st.visible_stages[queue_slot_]) != 0 || (access & ~st.visible_access[queue_slot_]) != 0))
             {
-                result = Barrier{st.write_stages, stages, st.write_access, access};
-                st.visible_stages |= stages;
-                st.visible_access |= access;
+                if (st.write_queue == queue_)
+                {
+                    result = Barrier{st.write_stages, stages, st.write_access, access};
+                    st.visible_stages[queue_slot_] |= stages;
+                    st.visible_access[queue_slot_] |= access;
+                }
+                else
+                {
+                    // The wait carries it, and a semaphore wait's second scope
+                    // covers every access of every command later in submission
+                    // order on this queue — so the write is visible here to
+                    // everything from now on, not only to these stages.
+                    waits.push_back(st.write_batch);
+                    st.visible_stages[queue_slot_] = ~VkPipelineStageFlags{0};
+                    st.visible_access[queue_slot_] = ~VkAccessFlags{0};
+                }
             }
             st.read_stages |= stages;
             st.read_access |= access;
+            st.read_batch[queue_slot_] = batch_;
         }
         return result;
     }
@@ -234,7 +360,8 @@ public:
         VkImageLayout layout,
         VkPipelineStageFlags stages,
         VkAccessFlags access,
-        bool writes)
+        bool writes,
+        std::vector<std::size_t>& waits)
     {
         auto [it, inserted] = image_states_.try_emplace(image);
         ImageState& st = it->second;
@@ -256,37 +383,88 @@ public:
             return {s, a};
         };
 
+        // Whether anything anywhere in this fold has touched the image yet:
+        // what tells a genuine first use (the floor applies) from one whose
+        // predecessor simply ran on the other queue (the semaphore applies).
+        const bool touched = st.written || st.read_batch[0] != kNoBatch || st.read_batch[1] != kNoBatch;
+
         if (writes)
         {
-            if (st.written || st.read_stages != 0 || layout_change)
+            const bool local = predecessors_(st, /*include_reads=*/true, waits);
+            if (local || !touched)
             {
-                auto [ss, sa] =
-                    with_first_use_floor(st.write_stages | st.read_stages, st.write_access | st.read_access);
-                result = ImageBarrier{old, layout, ss, stages, sa, access};
+                if (st.written || st.read_stages != 0 || layout_change)
+                {
+                    auto [ss, sa] =
+                        with_first_use_floor(st.write_stages | st.read_stages, st.write_access | st.read_access);
+                    result = ImageBarrier{old, layout, ss, stages, sa, access};
+                }
+            }
+            else if (layout_change)
+            {
+                // The other queue's work is already complete and visible by the
+                // time this batch runs (the semaphore wait says so), so the
+                // transition needs no source scope — only the layout move.
+                result = ImageBarrier{old, layout, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, stages, 0, access};
             }
             st = {};
             st.layout = layout;
             st.written = true;
             st.write_stages = stages;
             st.write_access = access;
+            st.write_batch = batch_;
+            st.write_queue = queue_;
         }
         else
         {
-            const bool needs = layout_change || (st.written && ((stages & ~st.visible_stages) != 0 ||
-                                                                (access & ~st.visible_access) != 0));
+            const bool needs = layout_change || (st.written && ((stages & ~st.visible_stages[queue_slot_]) != 0 ||
+                                                                (access & ~st.visible_access[queue_slot_]) != 0));
             if (needs)
             {
-                auto [ss, sa] = with_first_use_floor(
-                    st.written ? st.write_stages : st.read_stages, st.written ? st.write_access : st.read_access);
-                result = ImageBarrier{old, layout, ss, stages, sa, access};
-                st.visible_stages |= stages;
-                st.visible_access |= access;
+                // A layout transition is itself a write, so it has to wait for
+                // every reader on the other queue, not only for the writer.
+                const bool local = predecessors_(st, /*include_reads=*/layout_change, waits);
+                if (local || !touched)
+                {
+                    auto [ss, sa] = with_first_use_floor(
+                        st.written ? st.write_stages : st.read_stages, st.written ? st.write_access : st.read_access);
+                    result = ImageBarrier{old, layout, ss, stages, sa, access};
+                }
+                else if (layout_change)
+                {
+                    result = ImageBarrier{old, layout, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, stages, 0, access};
+                }
+                if (st.written && st.write_queue == queue_)
+                {
+                    st.visible_stages[queue_slot_] |= stages;
+                    st.visible_access[queue_slot_] |= access;
+                }
+                else if (st.written)
+                {
+                    st.visible_stages[queue_slot_] = ~VkPipelineStageFlags{0};
+                    st.visible_access[queue_slot_] = ~VkAccessFlags{0};
+                }
             }
             st.layout = layout;
             st.read_stages |= stages;
             st.read_access |= access;
+            st.read_batch[queue_slot_] = batch_;
         }
         return result;
+    }
+
+    // Every batch on another queue that has touched this image, without
+    // changing anything. A render pass's attachment transitions are recorded
+    // by the RenderTarget rather than through use_image, so the fold asks this
+    // before one runs: a pass on the compute queue that sampled the attachment
+    // has to finish before the drawing overwrites it.
+    void cross_queue_touches(Image* image, std::vector<std::size_t>& waits) const
+    {
+        const auto it = image_states_.find(image);
+        if (it != image_states_.end())
+        {
+            static_cast<void>(predecessors_(it->second, /*include_reads=*/true, waits));
+        }
     }
 
     // Has this image been touched in the current recording? track_draw_ uses
@@ -322,14 +500,38 @@ public:
     // second barrier for a dependency the caller just expressed. Seeding the
     // state as a completed read removes it, and orders a later write in this
     // recording against the consumers the caller named.
-    void note_buffer_access(Buffer* buffer, VkPipelineStageFlags dst_stages, VkAccessFlags dst_access)
+    void note_buffer_access(
+        Buffer* buffer,
+        VkPipelineStageFlags dst_stages,
+        VkAccessFlags dst_access,
+        std::vector<std::size_t>& waits)
     {
         BufferState& st = states_[buffer];
+        // The caller wrote the local half of this dependency by hand. The half
+        // a pipeline barrier cannot express — a producer on the other queue —
+        // is still the fold's to add.
+        static_cast<void>(predecessors_(st, /*include_reads=*/true, waits));
         st = {};
+        // Recorded as a WRITE this queue has already made available, not as a
+        // bare read. The visible mask is what stops a redundant barrier on this
+        // queue — a use covered by the caller's own barrier asks for nothing
+        // more — while `written` is what a use on the OTHER queue trips on, so
+        // it gets the semaphore wait a pipeline barrier could never give it.
+        //
+        // Leaving `written` false modelled this as "somebody read it", and a
+        // read is not something a later reader has to wait for: a manual
+        // barrier, a copy_image or a clear_image on one queue then left the
+        // other queue's reader completely unordered.
+        st.written = true;
+        st.write_stages = dst_stages;
+        st.write_access = dst_access;
+        st.write_batch = batch_;
+        st.write_queue = queue_;
         st.read_stages = dst_stages;
         st.read_access = dst_access;
-        st.visible_stages = dst_stages;
-        st.visible_access = dst_access;
+        st.visible_stages[queue_slot_] = dst_stages;
+        st.visible_access[queue_slot_] = dst_access;
+        st.read_batch[queue_slot_] = batch_;
     }
 
     // A render pass WROTE this image as an attachment, and left it in `layout`.
@@ -365,23 +567,58 @@ public:
         st.written = true;
         st.write_stages = src_stages;
         st.write_access = src_access;
-        st.visible_stages = visible_stages;
-        st.visible_access = visible_access;
+        st.write_batch = batch_;
+        st.write_queue = queue_;
+        st.visible_stages[queue_slot_] = visible_stages;
+        st.visible_access[queue_slot_] = visible_access;
+    }
+
+    // An image this fold will not touch, read by this batch. Records the read
+    // and nothing else: no layout is claimed and no barrier is implied, because
+    // the image is already in the layout the read names — it is only here so a
+    // later pass that WRITES the image (a render pass drawing into it) can be
+    // ordered against the read, which across queues has no other way to happen.
+    void note_image_read(Image* image, VkImageLayout layout, VkPipelineStageFlags stages, VkAccessFlags access)
+    {
+        ImageState& st = image_states_[image];
+        st.layout = layout;
+        st.read_stages |= stages;
+        st.read_access |= access;
+        st.visible_stages[queue_slot_] |= stages;
+        st.visible_access[queue_slot_] |= access;
+        st.read_batch[queue_slot_] = batch_;
     }
 
     void note_image_layout(
         Image* image,
         VkImageLayout layout,
         VkPipelineStageFlags dst_stages,
-        VkAccessFlags dst_access)
+        VkAccessFlags dst_access,
+        std::vector<std::size_t>* waits = nullptr)
     {
         ImageState& st = image_states_[image];
+        // Same argument as note_buffer_access: a manual transition covers this
+        // queue, and a producer on the other one still needs a wait. The
+        // parameter is optional because the fold also calls this to record a
+        // transition it just emitted itself, where there is nothing to add.
+        if (waits != nullptr)
+        {
+            static_cast<void>(predecessors_(st, /*include_reads=*/true, *waits));
+        }
         st = {};
         st.layout = layout;
+        // A write this queue has already made available — see
+        // note_buffer_access for why it is not modelled as a read.
+        st.written = true;
+        st.write_stages = dst_stages;
+        st.write_access = dst_access;
+        st.write_batch = batch_;
+        st.write_queue = queue_;
         st.read_stages = dst_stages;
         st.read_access = dst_access;
-        st.visible_stages = dst_stages;
-        st.visible_access = dst_access;
+        st.visible_stages[queue_slot_] = dst_stages;
+        st.visible_access[queue_slot_] = dst_access;
+        st.read_batch[queue_slot_] = batch_;
     }
 
     void reset()
@@ -396,9 +633,21 @@ private:
         bool written = false;
         VkPipelineStageFlags write_stages = 0;
         VkAccessFlags write_access = 0;
-        // Stages/accesses already synchronized against the last write.
-        VkPipelineStageFlags visible_stages = 0;
-        VkAccessFlags visible_access = 0;
+        // Which batch wrote it last, and on which queue. kNoBatch until
+        // something in this fold writes it.
+        std::size_t write_batch = kNoBatch;
+        QueueKind write_queue = QueueKind::Graphics;
+        // Stages/accesses already synchronized against the last write, PER
+        // QUEUE. One shared pair would let a read on the compute queue skip
+        // its wait because a read on the graphics queue had already made the
+        // write visible there — visibility established on one queue says
+        // nothing about the other.
+        std::array<VkPipelineStageFlags, kQueueCount> visible_stages{};
+        std::array<VkAccessFlags, kQueueCount> visible_access{};
+        // The latest batch that read it since the last write, per queue. Only
+        // the latest is needed: a timeline signal covers everything submitted
+        // earlier on its queue, and a wait is ">=".
+        std::array<std::size_t, kQueueCount> read_batch{kNoBatch, kNoBatch};
         // Reads since the last write (what a future write must wait for).
         VkPipelineStageFlags read_stages = 0;
         VkAccessFlags read_access = 0;
@@ -411,11 +660,53 @@ private:
         bool written = false;
         VkPipelineStageFlags write_stages = 0;
         VkAccessFlags write_access = 0;
-        VkPipelineStageFlags visible_stages = 0;
-        VkAccessFlags visible_access = 0;
+        std::size_t write_batch = kNoBatch;
+        QueueKind write_queue = QueueKind::Graphics;
+        std::array<VkPipelineStageFlags, kQueueCount> visible_stages{};
+        std::array<VkAccessFlags, kQueueCount> visible_access{};
+        std::array<std::size_t, kQueueCount> read_batch{kNoBatch, kNoBatch};
         VkPipelineStageFlags read_stages = 0;
         VkAccessFlags read_access = 0;
     };
+
+    // Whichever touches of `st` happened on ANOTHER queue become semaphore
+    // waits; returns whether anything touched it on THIS one, which is what
+    // still needs a pipeline barrier.
+    template <typename State>
+    bool predecessors_(const State& st, bool include_reads, std::vector<std::size_t>& waits) const
+    {
+        bool local = false;
+        if (st.write_batch != kNoBatch)
+        {
+            if (st.write_queue == queue_)
+            {
+                local = true;
+            }
+            else
+            {
+                waits.push_back(st.write_batch);
+            }
+        }
+        if (include_reads)
+        {
+            for (std::size_t q = 0; q < kQueueCount; ++q)
+            {
+                if (st.read_batch[q] == kNoBatch)
+                {
+                    continue;
+                }
+                if (q == queue_slot_)
+                {
+                    local = true;
+                }
+                else
+                {
+                    waits.push_back(st.read_batch[q]);
+                }
+            }
+        }
+        return local;
+    }
 
     // Defaults to the mask every conformant device has, so a tracker nobody told
     // is narrow rather than illegal. reset() must NOT clear it: it survives every
@@ -423,6 +714,13 @@ private:
     VkPipelineStageFlags all_shader_stages_ = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
                                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+    // Which batch is being folded, and on which queue. Set per pass by the
+    // graph; a tracker nobody told folds everything as batch 0 on the graphics
+    // queue, which is what a single-queue graph is.
+    std::size_t batch_ = 0;
+    QueueKind queue_ = QueueKind::Graphics;
+    std::size_t queue_slot_ = 0;
 
     std::unordered_map<Buffer*, BufferState> states_;
     std::unordered_map<Image*, ImageState> image_states_;

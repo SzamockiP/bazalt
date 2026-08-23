@@ -237,3 +237,25 @@ def test_a_transferred_image_carries_its_own_mip_levels(extra_context):
     assert copy.read(mip=0)[0, 0].tolist() == [255, 0, 0, 255]
     assert copy.read(mip=1)[0, 0].tolist() == [0, 255, 0, 255], \
         "mip 1 was regenerated from mip 0 instead of copied"
+
+
+def test_a_serial_from_another_context_is_refused(ctx, extra_context):
+    """A Serial carries timeline values that mean something on the Context that
+    signalled them and nothing anywhere else. Waiting for another Context's
+    serial used to be accepted: it waited THIS Context's timeline for that
+    number, which returns too early or hangs, and never says why."""
+    other = extra_context()
+    buf = other.create_buffer(16, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    g = other.graph()
+    with g.add_pass(name="clear") as p:
+        p.fill_buffer(buf, 0)
+    foreign = other.submit(g)
+
+    own = ctx.graph()
+    with own.add_pass(name="empty"):
+        pass
+    with pytest.raises(bz.ResourceError, match="different Context"):
+        ctx.wait(foreign)
+    with pytest.raises(bz.ResourceError, match="different Context"):
+        ctx.submit(own, after=foreign)
+
