@@ -272,132 +272,15 @@ def test_clear_arguments_need_a_target(ctx):
         g.add_pass(clear_color=[0, 0, 0, 1])
 
 
-def test_the_queue_enum_gained_compute_as_a_value(ctx):
-    """0.28 shipped the parameter and 0.29 the second value, which is what made
-    async compute additive: a program written against 0.28 schedules exactly as
-    it did, and the new queue is one more thing to pass rather than a new way
-    to say anything."""
-    assert list(bz.Queue.__members__) == ["GRAPHICS", "COMPUTE"]
-    assert int(bz.Queue.COMPUTE) == 1
-    assert ctx.graph().add_pass(queue=bz.Queue.COMPUTE) is not None
-
-
-def test_a_render_pass_refuses_the_compute_queue(ctx):
-    """A compute queue has no rasterizer, so a pass with a target cannot run
-    there. Refused where the pass is made rather than at submit, because the
-    target is what says it draws."""
-    target = ctx.create_render_target(16, 16)
-    g = ctx.graph()
-    with pytest.raises(bz.StateError, match="cannot draw"):
-        g.add_pass(target, queue=bz.Queue.COMPUTE)
-
-
-def test_a_compute_queue_pass_refuses_the_blit_verbs(ctx):
-    """vkCmdBlitImage needs a graphics queue, and generate_mipmaps is a chain
-    of blits. Both are legal on a target-less pass, so the QUEUE is what
-    refuses them — and it refuses by Queue.COMPUTE rather than by the family
-    the device happens to have, so the contract reads the same everywhere."""
-    # From an array rather than empty: a never-written image is still in
-    # UNDEFINED, and copying out of one trips validation on any queue.
-    src = ctx.create_image(np.zeros((32, 32, 4), np.uint8))
-    dst = ctx.create_image(16, 16, bz.Format.RGBA8)
-    mipped = ctx.create_image(32, 32, bz.Format.RGBA8, mip_levels=4)
-    g = ctx.graph()
-    with g.add_pass(name="compute", queue=bz.Queue.COMPUTE) as p:
-        with pytest.raises(bz.StateError, match="Queue.GRAPHICS"):
-            p.blit_image(src, dst)
-        with pytest.raises(bz.StateError, match="Queue.GRAPHICS"):
-            p.generate_mipmaps(mipped)
-        # An occlusion query needs no new guard: it is a render verb, and a
-        # pass on the compute queue can never have a target.
-        with pytest.raises(bz.StateError, match="no render target"):
-            p.occlusion_query()
-        # What a compute pass CAN do: copies, clears and fills are legal on a
-        # compute family, and the suite's referee is the validation layers.
-        p.copy_image(src, ctx.create_image(32, 32, bz.Format.RGBA8))
-        p.fill_buffer(ctx.create_buffer(16, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC), 0)
-        p.clear_image(dst, [0, 0, 0, 1])
-    ctx.submit(g)
-
-
-def test_passes_on_two_queues_run_in_add_order(ctx):
-    """Two queues change nothing about the order the caller wrote. The three
-    passes are not commutative, so a reordered or unsynchronized run gives a
-    different number: (3*2)+1 then *2 is 14, any other order is not."""
-    pipeline, _, _, pool = add_one(ctx)
-    buf = ctx.create_buffer(np.full(4, 3.0, np.float32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-    dset = pool.allocate_set(pipeline)
-    dset.set_buffer(0, buf)
-    double = (ctx.compute_pipeline()
-              .shader(ctx.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE))
-              .storage_buffer(0)
-              .build())
-    double_set = pool.allocate_set(double)
-    double_set.set_buffer(0, buf)
-
-    g = ctx.graph()
-    (g.add_pass(name="double on graphics")
-        .bind_pipeline(double).bind_descriptor_set(double_set, double).dispatch(1))
-    (g.add_pass(name="add one on compute", queue=bz.Queue.COMPUTE)
-        .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline).dispatch(1))
-    (g.add_pass(name="double again on graphics")
-        .bind_pipeline(double).bind_descriptor_set(double_set, double).dispatch(1))
-    ctx.submit(g)
-
-    assert np.allclose(buf.read(np.float32), [14.0] * 4)
-
-
-def test_toggling_a_pass_recomputes_the_batches(ctx):
-    """A disabled pass is absent from the compile, and with two queues that
-    changes which batches exist at all — not only which barriers they carry."""
-    pipeline, _, _, pool = add_one(ctx)
-    double = (ctx.compute_pipeline()
-              .shader(ctx.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE))
-              .storage_buffer(0)
-              .build())
-
-    def fresh_buffer():
-        buf = ctx.create_buffer(np.full(4, 3.0, np.float32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-        add_set = pool.allocate_set(pipeline)
-        add_set.set_buffer(0, buf)
-        double_set = pool.allocate_set(double)
-        double_set.set_buffer(0, buf)
-        return buf, add_set, double_set
-
-    buf, dset, double_set = fresh_buffer()
-    g = ctx.graph()
-    first = (g.add_pass(name="double", queue=bz.Queue.GRAPHICS)
-             .bind_pipeline(double).bind_descriptor_set(double_set, double).dispatch(1))
-    middle = (g.add_pass(name="add one", queue=bz.Queue.COMPUTE)
-              .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline).dispatch(1))
-    (g.add_pass(name="double again", queue=bz.Queue.GRAPHICS)
-        .bind_pipeline(double).bind_descriptor_set(double_set, double).dispatch(1))
-
-    ctx.submit(g)
-    assert np.allclose(buf.read(np.float32), [14.0] * 4)
-
-    # One batch instead of three: the two graphics passes become consecutive.
-    middle.enabled = False
-    ctx.submit(g)
-    assert np.allclose(buf.read(np.float32), [56.0] * 4), "the disabled pass ran"
-
-    middle.enabled = True
-    ctx.submit(g)
-    assert np.allclose(buf.read(np.float32), [226.0] * 4)
-    assert first.enabled
-
-
-def test_a_compute_queue_pass_measures_a_timer(ctx):
-    """A timer asks the family that REPLAYS the pass whether its timestamps are
-    usable, not the graphics family. Both answers are legitimate; what would be
-    wrong is reading the graphics family's answer for a compute queue."""
-    pipeline, buf, dset, pool = add_one(ctx)
-    g = ctx.graph()
-    with g.add_pass(name="timed", queue=bz.Queue.COMPUTE) as p:
-        with p.timer() as t:
-            p.bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline).dispatch(1)
-    ctx.submit(g)
-    assert t.ms is None or t.ms >= 0.0
+def test_the_queue_enum_has_only_graphics(ctx):
+    """0.29 adds Queue.COMPUTE together with the queue behind it. An enum
+    member no code path can reach would be untestable surface, and accepting
+    it now would let 0.29 silently change the scheduling of unedited
+    programs."""
+    assert list(bz.Queue.__members__) == ["GRAPHICS"]
+    assert not hasattr(bz.Queue, "COMPUTE")
+    # The parameter exists now, so 0.29 adds a VALUE and never a parameter.
+    assert ctx.graph().add_pass(queue=bz.Queue.GRAPHICS) is not None
 
 
 # The per-frame claim ("Each window needs its own Graph") is NOT tested here,

@@ -63,16 +63,12 @@ class Image;
 // Only mip 0 is copied: the destination's other levels, if it has any, are
 // regenerated with cmd.generate_mipmaps. Copying a chain would be N regions for
 // a case that has not come up.
-// legal_stages: the stage bits the replaying queue family supports (0.29).
-// Both helpers name all_shader_stages() as one side of their transitions, and
-// on a compute-only family most of those bits are illegal in a barrier.
 void record_image_copy(
     const VolkDeviceTable& vk,
     VkCommandBuffer cmd,
     Image& src,
     Image& dst,
-    VkImageLayout src_layout,
-    VkPipelineStageFlags legal_stages = ~VkPipelineStageFlags{0});
+    VkImageLayout src_layout);
 
 // A copy that RESIZES. vkCmdBlitImage rather than vkCmdCopyImage, so the two
 // images need not share an extent, and the filter chooses how the sampling is
@@ -97,12 +93,7 @@ void record_image_blit(
 // Fill every layer of mip 0 with one colour and leave the image sampleable.
 // The contents are discarded on entry for the same reason a copy's destination
 // is: the clear covers all of them.
-void record_image_clear(
-    const VolkDeviceTable& vk,
-    VkCommandBuffer cmd,
-    Image& image,
-    std::array<float, 4> color,
-    VkPipelineStageFlags legal_stages = ~VkPipelineStageFlags{0});
+void record_image_clear(const VolkDeviceTable& vk, VkCommandBuffer cmd, Image& image, std::array<float, 4> color);
 
 // The layout of every (layer, mip) of one image, with a fast path for the case
 // where they all agree.

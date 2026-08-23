@@ -387,9 +387,9 @@ std::expected<std::shared_ptr<Image>, Error> Image::create_empty(
         // needs a feature we don't enable, and SAMPLED/TRANSFER are dead weight
         // (you sample the single-sample resolve, never this).
         .usage = usage_for_image(context, format, samples),
-        .sharingMode = context.sharing().mode,
-        .queueFamilyIndexCount = context.sharing().family_count,
-        .pQueueFamilyIndices = context.sharing().families,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
 
     VmaAllocationCreateInfo allocInfo{};
@@ -1066,22 +1066,12 @@ void Image::record_mip_generation(
 
 // ── Image-to-image recorders ──────────────────────────────────────────────────
 
-void record_image_copy(
-    const VolkDeviceTable& vk,
-    VkCommandBuffer cmd,
-    Image& src,
-    Image& dst,
-    VkImageLayout src_layout,
-    VkPipelineStageFlags legal_stages)
+void record_image_copy(const VolkDeviceTable& vk, VkCommandBuffer cmd, Image& src, Image& dst, VkImageLayout src_layout)
 {
     // Read off the source rather than threaded in as a parameter: both images
     // already belong to this Context (the binding layer compares owners), so the
     // fact is here, and record_image_transition takes `vk` for the same reason.
-    //
-    // Masked by the replaying family's legal set (0.29). Never empty: the
-    // compute stage is in both, so the transition keeps a real source scope on
-    // a compute queue as well.
-    const VkPipelineStageFlags shader_stages = src.owner()->all_shader_stages() & legal_stages;
+    const VkPipelineStageFlags shader_stages = src.owner()->all_shader_stages();
     const std::uint32_t layers = src.array_layers();
     const std::uint32_t barrier_span = src.barrier_layers(layers);
     // Every level the two images share. 0.17 copied mip 0 only and called the
@@ -1254,14 +1244,9 @@ void record_image_blit(
     }
 }
 
-void record_image_clear(
-    const VolkDeviceTable& vk,
-    VkCommandBuffer cmd,
-    Image& image,
-    std::array<float, 4> color,
-    VkPipelineStageFlags legal_stages)
+void record_image_clear(const VolkDeviceTable& vk, VkCommandBuffer cmd, Image& image, std::array<float, 4> color)
 {
-    const VkPipelineStageFlags shader_stages = image.owner()->all_shader_stages() & legal_stages;
+    const VkPipelineStageFlags shader_stages = image.owner()->all_shader_stages();
     const std::uint32_t barrier_span = image.barrier_layers(image.array_layers());
     record_image_transition(
         vk,

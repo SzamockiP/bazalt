@@ -181,16 +181,9 @@ SwapchainRenderer::~SwapchainRenderer()
         return;
     }
 
-    // A window destroyed between acquire() and present() still owes the
-    // Context's counter its decrement.
-    set_acquired_(false);
-
     if (context_->device())
     {
-        // Both queue mutexes: an idle drains every queue, so every queue's
-        // submitter must be held off. lock_queues() skips the compute lock when
-        // it IS the graphics one (locking one mutex twice is undefined).
-        auto locks = context_->lock_queues();
+        std::lock_guard lock(context_->queue_mutex());
         context_->vk().vkDeviceWaitIdle(context_->device());
     }
 
@@ -469,7 +462,7 @@ std::expected<bool, Error> SwapchainRenderer::acquire()
             "ctx.begin_frame() once per frame, then acquire() once per window."));
     }
     acquired_serial_ = context_->frame_serial();
-    set_acquired_(false);
+    image_acquired_ = false;
     frame_skipped_ = false;
 
     // Check framebuffer size — return false if minimized (0x0)
@@ -481,14 +474,6 @@ std::expected<bool, Error> SwapchainRenderer::acquire()
     }
 
     context_->vk().vkWaitForFences(context_->device(), 1, &in_flight_fences_[current_frame()], VK_TRUE, UINT64_MAX);
-    // The fence rides the last GRAPHICS batch, so it says nothing about a
-    // compute batch that shared the slot. The per-queue slot serials do.
-    //
-    // The COMPUTE half only: the fence above is the graphics half, and the
-    // slot's graphics serial may belong to this very frame — another window on
-    // this Context that presented first — so waiting it would serialize the
-    // windows against each other.
-    context_->wait_for_slot(QueueKind::Compute);
 
     // The fence proves this slot's previous submission finished, so its
     // timestamp pair is ready to read (frames_in_flight frames of latency).
@@ -522,21 +507,8 @@ std::expected<bool, Error> SwapchainRenderer::acquire()
     }
 
     context_->vk().vkResetFences(context_->device(), 1, &in_flight_fences_[current_frame()]);
-    set_acquired_(true);
+    image_acquired_ = true;
     return true;
-}
-
-void SwapchainRenderer::set_acquired_(bool acquired)
-{
-    if (image_acquired_ == acquired)
-    {
-        return;
-    }
-    image_acquired_ = acquired;
-    // The Context counts how many windows hold an image, because a headless
-    // ctx.submit() in that state advances the frame ring under this window's
-    // fence and semaphores — which are indexed by the slot the ring names.
-    context_->note_image_acquired(acquired);
 }
 
 std::expected<void, Error> SwapchainRenderer::check_presentable() const
@@ -550,28 +522,24 @@ std::expected<void, Error> SwapchainRenderer::check_presentable() const
     return {};
 }
 
-QueueSerials SwapchainRenderer::end_frame(
-    std::span<const Context::SubmitBatch> batches,
-    std::uint64_t upload_wait_serial,
-    const QueueSerials& previous_replay)
+void SwapchainRenderer::end_frame(VkCommandBuffer cmd, std::uint64_t upload_wait_serial)
 {
     // The image is consumed here; a second present() on it would submit
     // against semaphores this one already signalled.
-    set_acquired_(false);
+    image_acquired_ = false;
 
-    // The binary pair rides the GRAPHICS batches: the first waits for the
-    // acquire and the last signals render-finished, because a present waits for
-    // the drawing and a compute batch cannot touch a swapchain image (a render
-    // target is what names one, and a render pass is refused on the compute
-    // queue). Everything else — uploads, after=, the previous replay, the
-    // cross-queue edges inside this submit — is submit_batches's business.
-    Context::SubmitBinaries binaries{
-        .wait = image_available_semaphores_[current_frame()],
-        .wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .signal = render_finished_semaphores_[image_index_],
-        .fence = in_flight_fences_[current_frame()]};
+    // Vectors, not arrays (0.28): a submit's wait set is a LIST from here on.
+    // The 0.29 rule slots straight in — the final graphics batch waits every
+    // earlier compute batch's timeline value as more entries here, and
+    // timeline semaphores wait across queues natively.
+    const std::vector<VkSemaphore> waitSemaphores = {
+        image_available_semaphores_[current_frame()], context_->submit_timeline()};
+    const std::vector<VkPipelineStageFlags> waitStages = {
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
+    const std::vector<std::uint64_t> waitValues = {0, upload_wait_serial}; // binary sem value ignored
 
-    const std::array<VkSemaphore, 1> signalSemaphores = {render_finished_semaphores_[image_index_]};
+    const std::array<VkSemaphore, 2> signalSemaphores = {
+        render_finished_semaphores_[image_index_], context_->submit_timeline()};
     const std::array<VkSwapchainKHR, 1> swapchains = {swapchain_};
 
     VkPresentInfoKHR presentInfo{
@@ -584,68 +552,85 @@ QueueSerials SwapchainRenderer::end_frame(
         .pImageIndices = &image_index_,
         .pResults = nullptr};
 
-    QueueSerials signalled{};
-    auto submitted =
-        context_->submit_batches(batches, upload_wait_serial, QueueSerials{}, previous_replay, signalled, &binaries);
-    // Recorded whatever happened: a partial failure still left work running,
-    // and both the ring slot and the graph's next replay have to know about it.
-    // The windowed path records its slot serials since 0.29 — before it only
-    // the headless one did, so a window's work paced nothing.
-    context_->note_slot_submit(signalled);
-    last_signalled_ = signalled;
+    // The lock ends before recreate_swapchain below: that path takes the
+    // device idle, which must not happen while holding the queue mutex.
+    VkResult result = VK_SUCCESS;
+    bool submitted = false;
+    {
+        std::lock_guard lock(context_->queue_mutex());
+
+        // Every submit signals the timeline; the serial is reserved under
+        // the same lock that orders the submits.
+        const std::array<std::uint64_t, 2> signalValues = {0, context_->advance_submit_serial()};
+
+        VkTimelineSemaphoreSubmitInfo timelineInfo{
+            .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+            .pNext = nullptr,
+            .waitSemaphoreValueCount = static_cast<uint32_t>(waitValues.size()),
+            .pWaitSemaphoreValues = waitValues.data(),
+            .signalSemaphoreValueCount = 2,
+            .pSignalSemaphoreValues = signalValues.data()};
+
+        VkSubmitInfo submitInfo{
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .pNext = &timelineInfo,
+            .waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size()),
+            .pWaitSemaphores = waitSemaphores.data(),
+            .pWaitDstStageMask = waitStages.data(),
+            .commandBufferCount = 1,
+            .pCommandBuffers = &cmd,
+            .signalSemaphoreCount = 2,
+            .pSignalSemaphores = signalSemaphores.data()};
+
+        if (VkResult submit_result = context_->vk().vkQueueSubmit(
+                context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
+            submit_result != VK_SUCCESS)
+        {
+            if (auto l = context_->logger())
+            {
+                l->log(
+                    Severity::Error,
+                    Source::Device,
+                    std::format("Failed to submit draw command buffer ({})", vk_result_name(submit_result)));
+            }
+        }
+        else
+        {
+            submitted = true;
+            result = context_->vk().vkQueuePresentKHR(present_queue_, &presentInfo);
+        }
+    }
 
     if (!submitted)
     {
-        if (auto l = context_->logger())
-        {
-            l->log(
-                Severity::Error,
-                Source::Device,
-                std::format("Failed to submit draw command buffer ({})", submitted.error().message));
-        }
         // A submit that fails signals nothing, so presenting would wait on a
         // render-finished semaphore nobody is going to signal, and the slot's
-        // fence is still as acquire() left it. Give the frame back instead —
-        // waiting the acquire semaphore only if no batch consumed it, because
-        // waiting one binary semaphore twice is a deadlock rather than an error.
+        // fence is still as acquire() left it. Give the frame back instead.
         //
-        // The reserved timeline serials are dropped with it, and that needs no
+        // The reserved timeline serial is dropped with it, and that needs no
         // repair: a timeline signal only has to be GREATER than the current
         // value, and every wait is "value >= N", so the next submit's higher
-        // signal satisfies anything that was waiting for the skipped one. What
-        // it would not satisfy is a wait for the dropped number itself, which is
-        // why ctx.wait() waits the last SUBMITTED value rather than the reserved
-        // one.
-        abandon_frame_(!binaries.wait_consumed, !binaries.fence_consumed);
-        return signalled;
-    }
-
-    // Outside the submits' critical sections: the binary render-finished
-    // semaphore is what orders the present behind the drawing, and holding a
-    // queue mutex across both would serialize the other queue behind a present.
-    VkResult result = VK_SUCCESS;
-    {
-        std::lock_guard lock(context_->queue_mutex());
-        result = context_->vk().vkQueuePresentKHR(present_queue_, &presentInfo);
+        // signal satisfies anything that was waiting for the skipped one.
+        abandon_frame_();
+        return;
     }
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || surface_provider_.consume_resize_flag())
     {
         recreate_swapchain();
     }
-    return signalled;
 }
 
-void SwapchainRenderer::abandon_frame_(bool wait_acquire, bool signal_fence)
+void SwapchainRenderer::abandon_frame_()
 {
-    set_acquired_(false);
+    image_acquired_ = false;
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo submitInfo{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .pNext = nullptr,
-        .waitSemaphoreCount = wait_acquire ? 1u : 0u,
-        .pWaitSemaphores = wait_acquire ? &image_available_semaphores_[current_frame()] : nullptr,
-        .pWaitDstStageMask = wait_acquire ? &wait_stage : nullptr,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &image_available_semaphores_[current_frame()],
+        .pWaitDstStageMask = &wait_stage,
         .commandBufferCount = 0,
         .pCommandBuffers = nullptr,
         .signalSemaphoreCount = 0,
@@ -654,8 +639,7 @@ void SwapchainRenderer::abandon_frame_(bool wait_acquire, bool signal_fence)
         // Released before recreate_swapchain: that path takes the device idle,
         // which must not happen while holding the queue mutex.
         std::lock_guard lock(context_->queue_mutex());
-        const VkFence fence = signal_fence ? in_flight_fences_[current_frame()] : VK_NULL_HANDLE;
-        context_->vk().vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, fence);
+        context_->vk().vkQueueSubmit(context_->graphics_queue(), 1, &submitInfo, in_flight_fences_[current_frame()]);
     }
     recreate_swapchain();
 }
@@ -836,10 +820,6 @@ std::expected<void, Error> SwapchainRenderer::create_swapchain_manually(
         .imageExtent = extent,
         .imageArrayLayers = 1,
         .imageUsage = image_usage,
-        // EXCLUSIVE, unlike every other image: a swapchain image is acquired,
-        // drawn and presented on the graphics queue only. A compute pass cannot
-        // reach one — a render target is what names it, and a render pass is
-        // refused on the compute queue.
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices = nullptr,
@@ -966,10 +946,7 @@ std::expected<void, Error> SwapchainRenderer::create_swapchain_manually(
 void SwapchainRenderer::recreate_swapchain()
 {
     {
-        // Both queue mutexes: an idle drains every queue, so every queue's
-        // submitter must be held off. lock_queues() skips the compute lock when
-        // it IS the graphics one (locking one mutex twice is undefined).
-        auto locks = context_->lock_queues();
+        std::lock_guard lock(context_->queue_mutex());
         context_->vk().vkDeviceWaitIdle(context_->device());
     }
 
@@ -1073,9 +1050,9 @@ std::expected<void, Error> SwapchainRenderer::create_depth_resources()
         .samples = samples_,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-        .sharingMode = context_->sharing().mode,
-        .queueFamilyIndexCount = context_->sharing().family_count,
-        .pQueueFamilyIndices = context_->sharing().families,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
 
     VmaAllocationCreateInfo allocImageInfo = {};
@@ -1133,9 +1110,9 @@ std::expected<void, Error> SwapchainRenderer::create_depth_resources()
             .samples = samples_,
             .tiling = VK_IMAGE_TILING_OPTIMAL,
             .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-            .sharingMode = context_->sharing().mode,
-            .queueFamilyIndexCount = context_->sharing().family_count,
-            .pQueueFamilyIndices = context_->sharing().families,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
 
         VmaAllocationCreateInfo allocColorInfo = {};

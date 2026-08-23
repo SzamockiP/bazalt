@@ -11,27 +11,14 @@ Two windows, one Context, one culled scene:
 The observer is the whole point. From inside the culled camera nothing looks
 culled — that is what culling means, and it is measurable: the culled view renders
 PIXEL-IDENTICAL with culling on and off, while the observer's pixel count drops
-sharply — press P with culling on, then C and P again, and read your own two
-numbers rather than mine (they depend on where you have flown the observer, and
-the ratio is the claim). Fly out to the side and you can see the scene
+by roughly a factor of seven (about 99,000 to about 13,000 on the machine this
+was written on — press P to get your own). Fly out to the side and you can see the scene
 has been cut to a wedge: cubes exist inside the yellow frustum and nowhere else,
 and the wedge swings around as the culling camera turns.
 
-About 16,000 of the 200,000 survive, cross-checked against the same test run on
-the CPU — which is how the frustum-plane bug below was found, because a wrong
-plane still produces a plausible-looking number.
-
-**Read the GPU milliseconds in the title, not the FPS.** The two say different
-things and only one of them is about culling. With 200,000 cubes on the machine
-this was written on the frame's own GPU work is about 0.52 ms with culling off
-and about 0.07 ms with it on — seven times less, which is the claim. The FPS
-counter beside it measures the whole loop: two windows, two acquires, two
-presents and the compositor, which together cost more than either number above.
-At 20,000 cubes, where this example started, the entire GPU frame was 0.05 ms
-and the FPS was the same with culling on and off — or slightly WORSE with it on,
-because recording one more pass costs a little CPU and the GPU had nothing left
-to save. Culling pays when the drawing is the expensive part, and that takes a
-scene big enough to be worth culling.
+About 1,570 of the 20,000 survive, cross-checked against the same test run on the
+CPU — which is how the frustum-plane bug below was found, because a wrong plane
+still produces a plausible-looking number.
 
 Each frame:
 
@@ -42,20 +29,6 @@ Each frame:
      atomically increments `instanceCount`, and compacts the survivors.
   3. `p.draw_indexed_indirect(args)` draws whatever that came to — in BOTH
      windows, from one argument buffer.
-
-The cull pass stays on `Queue.GRAPHICS`, and that is measured rather than
-assumed: moving it to `Queue.COMPUTE` makes this frame SLOWER. The reason is not
-the semaphore between the two halves, which is what it looks like — the same
-frame split into two submits on ONE queue costs the same, and a frame whose draw
-does not wait for the dispatch at all costs nearly as much. What costs is the
-second `vkQueueSubmit`: about 0.07-0.11 ms on this driver, against a frame whose
-entire GPU work is 0.07 ms. Another queue means another submit, so a pass is
-worth moving only when it is worth more than a submit.
-
-Here it never is, and the dependency settles it anyway: the drawing is waiting
-for the culling by definition. A second queue pays for work the frame does NOT
-consume — a simulation the next frame draws, or post-processing of the previous
-one. See examples/46_async_overlap, which is that shape with a switch on it.
 
 The CPU never learns the count. That is what makes it different from culling on the
 host: no readback, and no per-instance buffer to size.
@@ -74,7 +47,6 @@ Close either window to exit.
 
 Press P from outside the frustum with culling on, then C and P again: the two
 numbers are the claim above, measured on your machine rather than remembered.
-Watch the GPU milliseconds in the title while you press C, for the other half.
 """
 
 import struct
@@ -88,10 +60,7 @@ import bazalt as bz
 logger = bz.Logger()
 logger.on_message(lambda msg: print(f"[{msg.severity}] {msg.text}"))
 
-# gpu_timing=True puts a timestamp pair around every windowed submit. Without it
-# the only number available is the FPS, and at this size the FPS measures the
-# presentation rather than the culling — see the note in the docstring.
-ctx = bz.Context(logger, gpu_timing=True)
+ctx = bz.Context(logger)
 
 culled_window = bz.Window(760, 560, "Bazalt Demo - culled view (the frustum)", logger=logger)
 culled_window.set_position(60, 90)
@@ -101,11 +70,7 @@ observer_window.set_position(860, 90)
 culled_renderer = ctx.create_renderer(culled_window)
 observer_renderer = ctx.create_renderer(observer_window)
 
-# Ten times what this example started with, and the reason is the whole point of
-# it: at 20,000 the drawing costs 0.05 ms and there is nothing for culling to
-# save. Culling is a way to not draw things, so the scene has to be big enough
-# that drawing it is the expensive part.
-COUNT = 200000
+COUNT = 20000
 INDEX_COUNT = 36
 
 # ── the candidates ────────────────────────────────────────────────────────
@@ -258,8 +223,6 @@ start = time.time()
 last = start
 frames = 0
 fps_timer = start
-gpu_ms = None
-gpu_timing_ok = True
 
 
 def culling_view_proj(aspect):
@@ -429,29 +392,10 @@ while culled_window.is_open() and observer_window.is_open():
                 state = "on" if culling else "OFF"
                 print(f"observer: {drawn} drawn pixels of {packed.size}, culling {state}")
 
-    # The frame's own GPU cost, which is what culling changes. None until the
-    # ring has cycled once (the number is the frame submitted frames_in_flight
-    # ago), so it is read every frame and kept when it arrives.
-    if gpu_timing_ok:
-        try:
-            measured = culled_renderer.gpu_time_ms
-        except bz.UnsupportedError:
-            # Advertised and unusable — MoltenVK on a paravirtual device does
-            # this. The demo keeps running without the number.
-            gpu_timing_ok = False
-        else:
-            if measured is not None:
-                gpu_ms = measured
-
     frames += 1
     if time.time() - fps_timer >= 1.0:
         state = "on" if culling else "OFF"
-        # Both numbers, because they answer different questions: the GPU figure
-        # is the frame's work and the FPS is the loop around it, presentation
-        # included. Culling moves the first one.
-        cost = f" | GPU {gpu_ms:.3f} ms" if gpu_ms is not None else ""
-        culled_window.set_title(
-            f"Bazalt Demo - culled view | culling {state}{cost} | {frames} FPS")
+        culled_window.set_title(f"Bazalt Demo - culled view | culling {state} | {frames} FPS")
         observer_window.set_title(
             f"Bazalt Demo - observer | WASD+QE move, RMB look | culling {state}")
         frames = 0

@@ -155,8 +155,6 @@ inline std::expected<std::vector<Device>, Error> list_devices()
     auto get_memory = (PFN_vkGetPhysicalDeviceMemoryProperties)load("vkGetPhysicalDeviceMemoryProperties");
     auto enumerate_device_extensions =
         (PFN_vkEnumerateDeviceExtensionProperties)load("vkEnumerateDeviceExtensionProperties");
-    auto get_queue_families =
-        (PFN_vkGetPhysicalDeviceQueueFamilyProperties)load("vkGetPhysicalDeviceQueueFamilyProperties");
 
     ScopeGuard cleanup(
         [&]
@@ -230,12 +228,7 @@ inline std::expected<std::vector<Device>, Error> list_devices()
                 { return std::string_view(extension.extensionName) == VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME; });
         }
         device.features = query_device_features(
-            get_features2,
-            enumerate_device_extensions,
-            get_queue_families,
-            handle,
-            portability_subset,
-            props2.properties.apiVersion);
+            get_features2, enumerate_device_extensions, handle, portability_subset, props2.properties.apiVersion);
         device.limits = query_device_limits(get_properties2, handle, device.features);
         device.limits.device_memory = device_local;
         devices.push_back(std::move(device));

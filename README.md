@@ -299,11 +299,8 @@ GPU as a calculator.
   are still tuning wants, and it used to mean rebuilding the frame around an `if`.
 - **Compute beside graphics.** One graph holds a compute pass and a render pass. A
   dispatch writes the vertices and the draw reads them. Results come back as NumPy arrays.
-  Each pass names the queue it runs on: `queue=bz.Queue.COMPUTE` puts a pass on the
-  compute queue, where it runs beside the graphics work. Bazalt puts the waits between
-  the two queues for you, and it does that for the passes of one graph and for a graph
-  you send again. Between two different graphs you say it with `submit(after=...)`.
-  The graphics queue stays the default, and the choice stays yours.
+  Each pass names the queue it runs on. A later release adds a second queue, and that
+  needs no change to this API: you get a new value to pass, and the choice stays yours.
 - **Images in every shape.** 2D textures, texture arrays, cubemaps and 3D volumes come from
   one function: `create_image(w, h, cube=True)` or `create_image(w, h, depth=n)`. A volume
   is a `sampler3D` in the shader — colour-grading LUTs, volumetric noise, raymarched
@@ -366,7 +363,7 @@ Every directory in `examples/` runs on its own.
 | Subject | Examples |
 | --- | --- |
 | Basics | [01_empty_window](examples/01_empty_window), [02_triangle](examples/02_triangle), [03_textured_quad](examples/03_textured_quad), [04_colored_cube](examples/04_colored_cube), [05_textured_cube](examples/05_textured_cube), [06_multiple_cubes](examples/06_multiple_cubes), [07_model_loading](examples/07_model_loading) |
-| The graph | [42_pass_toggles](examples/42_pass_toggles) (switch a pass off, take one out), [43_manual_barriers](examples/43_manual_barriers) (one manual pass beside the automatic ones), [44_submit_order](examples/44_submit_order) (Serial handles and `after=`), [45_async_compute](examples/45_async_compute) (a pass on the compute queue), [46_async_overlap](examples/46_async_overlap) (switch a simulation between the queues and measure it) |
+| The graph | [42_pass_toggles](examples/42_pass_toggles) (switch a pass off, take one out), [43_manual_barriers](examples/43_manual_barriers) (one manual pass beside the automatic ones), [44_submit_order](examples/44_submit_order) (Serial handles and `after=`) |
 | Compute | [11_particles](examples/11_particles) (compute writes the vertices), [13_compute_postprocess](examples/13_compute_postprocess), [41_buffer_address](examples/41_buffer_address) (a buffer larger than a descriptor can bind) |
 | Shadows and deferred | [09_shadow_map](examples/09_shadow_map), [17_cascade_shadows](examples/17_cascade_shadows), [10_gbuffer_mrt](examples/10_gbuffer_mrt) |
 | Cubemaps and layers | [14_skybox](examples/14_skybox), [16_env_capture](examples/16_env_capture) (six faces), [18_multiview](examples/18_multiview) |

@@ -240,15 +240,6 @@ void bind_context(py::module_& m)
                 auto buffer = unwrap(
                     Buffer::create(self, info.ptr, contiguous_nbytes(info, "create_buffer"), type, usage),
                     self.logger().get());
-                // The list overload above records the data type so
-                // bind_index_buffer can pick UINT16; this one never did, so a
-                // uint16 numpy index array was read back at UINT32 and drew
-                // half the triangles from garbage (0.29). "H" is the struct
-                // code for an unsigned 16-bit integer.
-                if (info.format == py::format_descriptor<std::uint16_t>::format())
-                {
-                    buffer->set_data_type(DataType::UINT16);
-                }
                 name_buffer(self, buffer, name);
                 return py::cast(buffer);
             },
@@ -944,15 +935,15 @@ void bind_context(py::module_& m)
             {
                 require_open(self, "submit");
                 require_same_context(&self, graph->owner(), "submit");
-                const QueueSerials after_values = after_wait_values(self, after);
-                std::expected<QueueSerials, Error> r;
+                const std::uint64_t after_value = after_wait_value(after);
+                std::expected<std::uint64_t, Error> r;
                 {
                     // May block (the wait for this serial when wait=True, and
                     // the ring slot wait either way) — release the GIL.
                     py::gil_scoped_release release;
-                    r = context_submit(self, std::move(graph), wait, after_values);
+                    r = context_submit(self, std::move(graph), wait, after_value);
                 }
-                return Serial{.values = unwrap(std::move(r), self.logger().get()), .owner = &self};
+                return Serial{.queue_id = 0, .value = unwrap(std::move(r), self.logger().get())};
             },
             py::arg("graph"),
             py::kw_only(),
@@ -976,14 +967,9 @@ void bind_context(py::module_& m)
                 }
                 else
                 {
-                    // Checked before the GIL goes: a Serial from another
-                    // Context names a value on a timeline this one does not
-                    // own, and waiting for it is a hang rather than an error.
-                    const auto& handle = py::cast<const Serial&>(serial);
-                    require_same_context(&self, handle.owner, "wait");
-                    const QueueSerials values = handle.values;
+                    const std::uint64_t value = py::cast<const Serial&>(serial).value;
                     py::gil_scoped_release release;
-                    r = self.wait_for_serials(values);
+                    r = self.wait_for_serial(value);
                     if (r)
                     {
                         self.flush_deletion_queue();

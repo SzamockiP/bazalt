@@ -111,9 +111,9 @@ std::expected<std::shared_ptr<StaticBuffer>, Error> StaticBuffer::create(
         .flags = 0,
         .size = data_size,
         .usage = usage,
-        .sharingMode = context.sharing().mode,
-        .queueFamilyIndexCount = context.sharing().family_count,
-        .pQueueFamilyIndices = context.sharing().families};
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr};
 
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
@@ -300,9 +300,9 @@ std::expected<std::shared_ptr<DynamicBuffer>, Error> DynamicBuffer::create(
         .flags = 0,
         .size = data_size,
         .usage = usage,
-        .sharingMode = context.sharing().mode,
-        .queueFamilyIndexCount = context.sharing().family_count,
-        .pQueueFamilyIndices = context.sharing().families};
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr};
 
     const std::uint32_t frames = context.frames_in_flight();
     std::vector<VkBuffer> buffers(frames, VK_NULL_HANDLE);

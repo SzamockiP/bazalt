@@ -38,10 +38,7 @@ UploadManager::~UploadManager()
     // the pool frees its remaining command buffers implicitly (the worker
     // has joined, so this thread is the pool's sole owner).
     {
-        // Both queue mutexes: an idle drains every queue, so every queue's
-        // submitter must be held off. lock_queues() skips the compute lock when
-        // it IS the graphics one (locking one mutex twice is undefined).
-        auto locks = context_.lock_queues();
+        std::lock_guard lock(context_.queue_mutex());
         context_.vk().vkDeviceWaitIdle(context_.device());
     }
     context_.flush_deletion_queue();

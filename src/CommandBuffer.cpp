@@ -528,23 +528,8 @@ CommandBuffer& CommandBuffer::bind_vertex_buffer(const std::shared_ptr<Buffer>& 
     return *this;
 }
 
-std::expected<void, Error> CommandBuffer::bind_index_buffer(const std::shared_ptr<Buffer>& buffer)
+CommandBuffer& CommandBuffer::bind_index_buffer(const std::shared_ptr<Buffer>& buffer)
 {
-    if (!buffer)
-    {
-        return std::unexpected(err_resource("bind_index_buffer: buffer is null"));
-    }
-    // STORAGE is accepted because it carries INDEX_BUFFER_BIT since 0.29, for
-    // the reason buffer_usage_for gives. VERTEX and UNIFORM do not, and binding
-    // one used to fail inside the layers instead of here.
-    if (const BufferType type = buffer->buffer_type(); type != BufferType::INDEX && type != BufferType::STORAGE)
-    {
-        return std::unexpected(err_resource(
-            std::format(
-                "bind_index_buffer: indices must live in a BufferType.INDEX buffer, or in a "
-                "BufferType.STORAGE one when a compute shader writes them. This is a {} buffer.",
-                buffer_type_name(type))));
-    }
     track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_INDEX_READ_BIT, false);
     record_buffer_use_(buffer);
     commands_.emplace_back(
@@ -554,7 +539,7 @@ std::expected<void, Error> CommandBuffer::bind_index_buffer(const std::shared_pt
             // accepts UINT16 indices, which used to be read back at half count.
             frame.vk->vkCmdBindIndexBuffer(cmd, buffer->get(), 0, buffer->index_type());
         });
-    return {};
+    return *this;
 }
 
 CommandBuffer& CommandBuffer::draw(uint32_t vertexCount, uint32_t instances)
@@ -725,17 +710,11 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Buffer> buffer
     commands_.emplace_back(
         [buffer = std::move(buffer), s, d](VkCommandBuffer cmd, const FrameContext& frame)
         {
-            // Narrowed to the replaying family: Access.SHADER_READ means every
-            // shader stage this Context has, and a compute-only queue supports
-            // one of them. What the narrowing drops is carried by the batch's
-            // semaphore wait instead.
-            const StageAccess src = narrow_src(s, frame.legal_stages);
-            const StageAccess dst = narrow_dst(d, frame.legal_stages);
             VkBufferMemoryBarrier barrier{
                 .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
                 .pNext = nullptr,
-                .srcAccessMask = src.access,
-                .dstAccessMask = dst.access,
+                .srcAccessMask = s.access,
+                .dstAccessMask = d.access,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 // Resolved at replay, never captured: a DynamicBuffer has one
@@ -743,7 +722,7 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Buffer> buffer
                 .buffer = buffer->get(),
                 .offset = 0,
                 .size = VK_WHOLE_SIZE};
-            frame.vk->vkCmdPipelineBarrier(cmd, src.stages, dst.stages, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+            frame.vk->vkCmdPipelineBarrier(cmd, s.stages, d.stages, 0, 0, nullptr, 1, &barrier, 0, nullptr);
         });
     return {};
 }
@@ -774,18 +753,16 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Image> image, 
         {
             // All mips and all layers together: the fold holds one layout per
             // image, and a cube or an array is used as a whole.
-            const StageAccess src = narrow_src(s, frame.legal_stages);
-            const StageAccess dst = narrow_dst(d, frame.legal_stages);
             record_image_transition(
                 *frame.vk,
                 cmd,
                 image->vk_image(),
                 old,
                 now,
-                src.access,
-                dst.access,
-                src.stages,
-                dst.stages,
+                s.access,
+                d.access,
+                s.stages,
+                d.stages,
                 VK_IMAGE_ASPECT_COLOR_BIT,
                 0,
                 image->mip_levels(),
@@ -872,7 +849,7 @@ std::expected<void, Error> CommandBuffer::copy_image(
             "it, GENERAL)"));
     }
     commands_.emplace_back([src, dst, layout = *src_layout](VkCommandBuffer cmd, const FrameContext& frame)
-                           { record_image_copy(*frame.vk, cmd, *src, *dst, layout, frame.legal_stages); });
+                           { record_image_copy(*frame.vk, cmd, *src, *dst, layout); });
     finish_image_transfer_(src, dst);
     return {};
 }
@@ -1028,10 +1005,10 @@ std::expected<void, Error> CommandBuffer::clear_image(const std::shared_ptr<Imag
     {
         return std::unexpected(err_resource(
             "clear_image: a depth image is cleared by the pass that renders into it "
-            "(graph.add_pass(target, clear_depth=...))"));
+            "(cmd.rendering(target, clear_depth=...))"));
     }
     commands_.emplace_back([image, color](VkCommandBuffer cmd, const FrameContext& frame)
-                           { record_image_clear(*frame.vk, cmd, *image, color, frame.legal_stages); });
+                           { record_image_clear(*frame.vk, cmd, *image, color); });
     image->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     note_image_state_(
         image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, context_->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT);
@@ -1368,11 +1345,7 @@ void CommandBuffer::ensure_timer_pool_(std::size_t needed)
         vkGetPhysicalDeviceQueueFamilyProperties(context_->physical_device(), &family_count, nullptr);
         std::vector<VkQueueFamilyProperties> families(family_count);
         vkGetPhysicalDeviceQueueFamilyProperties(context_->physical_device(), &family_count, families.data());
-        // The family that will REPLAY this pass, not the graphics one:
-        // timestampValidBits is per family, and a compute family may report a
-        // different number or none at all (0.29). Memoized safely because a
-        // pass names its queue once, at add_pass.
-        const std::uint32_t gf = context_->queue_family(queue_);
+        const std::uint32_t gf = context_->graphics_queue_family();
         const bool ok = props.limits.timestampPeriod > 0.0f && gf < family_count &&
                         families[gf].timestampValidBits != 0;
         timer_supported_ = ok;

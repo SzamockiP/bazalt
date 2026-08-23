@@ -84,16 +84,7 @@ enum class Feature
     // maintenance4, because that is what makes the OpExecutionMode LocalSizeId
     // glslang emits legal. Core in 1.3, VK_KHR_maintenance4 on the 1.2 path —
     // the first row that needs both spellings, hence the sixth column below.
-    WORKGROUP_SIZE,
-    // The first row that is not a bit in any struct: it asks about the shape of
-    // the DEVICE'S QUEUES (0.29). True when some family reports COMPUTE and not
-    // GRAPHICS, which is the only thing that makes a Queue.COMPUTE pass run
-    // beside the graphics work rather than through it. A device without one
-    // still runs the same program — the compute runtime aliases the graphics
-    // queue and keeps its own timeline — so this row answers "is the overlap
-    // real", and features=[ASYNC_COMPUTE] is how a caller refuses the device
-    // that cannot give it. Hence the seventh column below.
-    ASYNC_COMPUTE
+    WORKGROUP_SIZE
 };
 
 // The feature structs bazalt reads, as one value with no pNext links between the
@@ -127,11 +118,6 @@ struct DeviceFeatures
     // cares about, and a second list here would be a place for the two to
     // disagree.
     std::vector<std::string> extensions;
-
-    // A queue family with COMPUTE and without GRAPHICS (0.29) — the vk-bootstrap
-    // "separate compute queue" test, spelled here because bazalt asks it of a
-    // Device too, and a Device holds no VkPhysicalDevice to ask later.
-    bool separate_compute_family = false;
 };
 
 // One query for all three structs. Both callers used to build this chain by hand
@@ -154,34 +140,12 @@ struct DeviceFeatures
 inline DeviceFeatures query_device_features(
     PFN_vkGetPhysicalDeviceFeatures2 get_features2,
     PFN_vkEnumerateDeviceExtensionProperties enumerate_extensions,
-    PFN_vkGetPhysicalDeviceQueueFamilyProperties get_queue_families,
     VkPhysicalDevice physical_device,
     bool portability_subset = false,
     std::uint32_t api_version = VK_API_VERSION_1_2)
 {
     DeviceFeatures features;
     features.portability_subset = portability_subset;
-
-    // The queue topology, for Feature::ASYNC_COMPUTE. A parameter like the two
-    // above and for the same reason: list_devices runs before any Context has
-    // bound volk's instance globals.
-    if (get_queue_families != nullptr)
-    {
-        std::uint32_t family_count = 0;
-        get_queue_families(physical_device, &family_count, nullptr);
-        if (family_count > 0)
-        {
-            std::vector<VkQueueFamilyProperties> families(family_count);
-            get_queue_families(physical_device, &family_count, families.data());
-            features.separate_compute_family = std::ranges::any_of(
-                families,
-                [](const VkQueueFamilyProperties& family)
-                {
-                    return (family.queueFlags & VK_QUEUE_COMPUTE_BIT) != 0 &&
-                           (family.queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0;
-                });
-        }
-    }
 
     // Before the feature query since 0.26, not after: which pNext structs are
     // legal to chain is partly an extension question, so the list has to exist
@@ -348,12 +312,6 @@ struct FeatureInfo
     VkBool32 VkPhysicalDevicePortabilitySubsetFeaturesKHR::* portability = nullptr;
     VkBool32 VkPhysicalDeviceMaintenance4Features::* maintenance4 = nullptr;
     const char* extension = nullptr;
-    // A fact about the device that is not a feature bit at all — the queue
-    // topology, so far. It reads like a seventh kind of column and behaves like
-    // the others: feature_available answers from it, ctx.supports() cannot tell
-    // the difference, and enable_feature has nothing to turn on because the
-    // capability is a property of the hardware rather than a switch.
-    bool DeviceFeatures::* fact = nullptr;
 };
 
 // std::to_array, not std::array<FeatureInfo, N>: the extent was a hardcoded 8 and
@@ -412,9 +370,6 @@ inline constexpr auto kFeatureTable = std::to_array<FeatureInfo>({
      .name = "WORKGROUP_SIZE",
      .maintenance4 = &VkPhysicalDeviceMaintenance4Features::maintenance4,
      .extension = VK_KHR_MAINTENANCE_4_EXTENSION_NAME},
-    // The first row whose capability is a fact about the device rather than a
-    // bit it may be asked to turn on.
-    {.feature = Feature::ASYNC_COMPUTE, .name = "ASYNC_COMPUTE", .fact = &DeviceFeatures::separate_compute_family},
 });
 
 inline constexpr const FeatureInfo& feature_info(Feature feature)
@@ -467,10 +422,6 @@ inline bool feature_available(const DeviceFeatures& available, Feature feature)
     {
         return std::ranges::find(available.extensions, std::string_view(info.extension)) != available.extensions.end();
     }
-    if (info.fact)
-    {
-        return available.*(info.fact);
-    }
     return false;
 }
 
@@ -499,13 +450,6 @@ inline constexpr void enable_feature(DeviceFeatures& features, Feature feature)
         // create_device_ reads this to decide whether to chain the struct at
         // all, so the bit and the permission to send it travel together.
         features.maintenance4_queryable = true;
-    }
-    else if (info.fact)
-    {
-        // Nothing to enable — a queue topology is not a switch. Recorded anyway
-        // so the negotiated struct says what was asked for, the way every other
-        // column does.
-        features.*(info.fact) = true;
     }
 }
 

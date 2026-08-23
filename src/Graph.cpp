@@ -61,28 +61,29 @@ std::expected<void, Error> Pass::guard(VerbScope scope, const char* verb) const
     return {};
 }
 
-std::expected<void, Error> Pass::require_graphics_queue(const char* verb) const
-{
-    if (queue_ == QueueKind::Compute)
-    {
-        return std::unexpected(err_state(
-            std::format(
-                "{}: a pass on Queue.COMPUTE cannot blit — vkCmdBlitImage needs a graphics "
-                "queue. Put this pass on Queue.GRAPHICS, or use copy_image for a copy that "
-                "does not resize.",
-                verb)));
-    }
-    return {};
-}
-
 // ── Graph ───────────────────────────────────────────────────────────────────
 
 std::expected<std::shared_ptr<Graph>, Error> Graph::create(Context& context)
 {
-    // Nothing is allocated here since 0.29: how many command buffers a graph
-    // needs follows from its batches, and a fresh graph has no passes yet.
-    // compile() allocates, and grows the rows when a rebuild adds a batch.
-    return std::shared_ptr<Graph>(new Graph(context.shared_from_this()));
+    auto ctx = context.shared_from_this();
+    auto graph = std::shared_ptr<Graph>(new Graph(ctx));
+    graph->command_buffers_.resize(ctx->frames_in_flight(), VK_NULL_HANDLE);
+
+    VkCommandBufferAllocateInfo allocInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .commandPool = ctx->command_pool(),
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = ctx->frames_in_flight()};
+
+    if (auto e = check(
+            ctx->vk().vkAllocateCommandBuffers(ctx->device(), &allocInfo, graph->command_buffers_.data()),
+            "allocate graph command buffers",
+            ErrorCode::Resource))
+    {
+        return std::unexpected(*e);
+    }
+    return graph;
 }
 
 Graph::~Graph()
@@ -93,23 +94,13 @@ Graph::~Graph()
     {
         pass->removed_ = true;
     }
-    if (!context_)
+    if (context_ && !command_buffers_.empty())
     {
-        return;
-    }
-    // One deferred free per queue: a command buffer goes back to the pool it
-    // came from, and the two runtimes have one pool each.
-    for (std::size_t i = 0; i < kQueueCount; ++i)
-    {
-        if (command_buffers_[i].empty())
-        {
-            continue;
-        }
         context_->defer_destroy(
             [vk = &context_->vk(),
              device = context_->device(),
-             pool = context_->command_pool(static_cast<QueueKind>(i)),
-             buffers = std::move(command_buffers_[i])]
+             pool = context_->command_pool(),
+             buffers = std::move(command_buffers_)]
             { vk->vkFreeCommandBuffers(device, pool, static_cast<uint32_t>(buffers.size()), buffers.data()); });
     }
 }
@@ -134,9 +125,6 @@ std::shared_ptr<Pass> Graph::add_pass(
     // The recorder owns no VkCommandBuffer of its own — the graph replays
     // every pass into its per-slot buffer — so creating one cannot fail.
     pass->recorder_ = CommandBuffer::create(*context_, auto_barriers).value();
-    // The recorder needs to know which queue will replay it: the timer pool
-    // asks that family whether its timestamps are usable.
-    pass->recorder_->set_queue(queue);
     pass->recorder_->set_event_sink(&pass->events_);
     passes_.push_back(pass);
     dirty_ = true;
@@ -170,7 +158,6 @@ void Graph::reset()
     }
     passes_.clear();
     compiled_.clear();
-    batches_.clear();
     dirty_ = true;
 }
 
@@ -180,8 +167,8 @@ std::expected<void, Error> Graph::claim_for_frame(std::uint64_t serial)
     {
         return std::unexpected(err_state(
             "This Graph was already submitted in the current frame. Each window needs its "
-            "own Graph — one holds a single command buffer per batch per frame slot, so "
-            "replaying it twice would overwrite work still in flight."));
+            "own Graph — one holds a single command buffer per frame slot, so replaying it "
+            "twice would overwrite work still in flight."));
     }
     recorded_serial_ = serial;
     return {};
@@ -200,58 +187,9 @@ Graph::BarrierBatch& Graph::batch_at_(CompiledPass& cp, std::size_t position)
     return cp.mid.back().second;
 }
 
-std::expected<void, Error> Graph::compile()
-{
-    if (!dirty_)
-    {
-        return {};
-    }
-    return compile_();
-}
-
-std::expected<void, Error> Graph::ensure_command_buffers_()
-{
-    std::array<std::size_t, kQueueCount> needed{};
-    for (const Batch& batch : batches_)
-    {
-        std::size_t& count = needed[queue_index(batch.queue)];
-        count = (std::max)(count, batch.ordinal + 1);
-    }
-
-    const std::uint32_t frames = context_->frames_in_flight();
-    for (std::size_t i = 0; i < kQueueCount; ++i)
-    {
-        std::vector<VkCommandBuffer>& row = command_buffers_[i];
-        const std::size_t want = needed[i] * frames;
-        if (row.size() >= want)
-        {
-            continue;
-        }
-        const auto extra = static_cast<std::uint32_t>(want - row.size());
-        const std::size_t at = row.size();
-        row.resize(want, VK_NULL_HANDLE);
-        VkCommandBufferAllocateInfo allocInfo{
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            .pNext = nullptr,
-            .commandPool = context_->command_pool(static_cast<QueueKind>(i)),
-            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = extra};
-        if (auto e = check(
-                context_->vk().vkAllocateCommandBuffers(context_->device(), &allocInfo, row.data() + at),
-                "allocate graph command buffers",
-                ErrorCode::Resource))
-        {
-            row.resize(at);
-            return std::unexpected(*e);
-        }
-    }
-    return {};
-}
-
-std::expected<void, Error> Graph::compile_()
+void Graph::compile_()
 {
     compiled_.clear();
-    batches_.clear();
     tracked_writes_ = false;
 
     // Sealing is what lets this fold trust every pass's use list; disabled
@@ -281,30 +219,6 @@ std::expected<void, Error> Graph::compile_()
         }
     }
 
-    // The batches: maximal runs of consecutive enabled passes on one queue, in
-    // add order. A graph with no enabled pass gets one empty graphics batch,
-    // so a submit always has something to signal and a window always has a
-    // command buffer to present.
-    std::array<std::size_t, kQueueCount> per_queue{};
-    for (std::size_t i = 0; i < compiled_.size(); ++i)
-    {
-        const QueueKind queue = compiled_[i].pass->queue();
-        if (batches_.empty() || batches_.back().queue != queue)
-        {
-            batches_.push_back(
-                Batch{.queue = queue, .first = i, .last = i + 1, .ordinal = per_queue[queue_index(queue)]++});
-        }
-        else
-        {
-            batches_.back().last = i + 1;
-        }
-        compiled_[i].batch = batches_.size() - 1;
-    }
-    if (batches_.empty())
-    {
-        batches_.push_back(Batch{.queue = QueueKind::Graphics, .first = 0, .last = 0, .ordinal = 0});
-    }
-
     // The priced "a preserved second pass re-transitions the attachment" entry
     // being paid: when the immediately next enabled pass renders into the SAME
     // target and preserves, the attachment stays in its attachment layout
@@ -325,30 +239,6 @@ std::expected<void, Error> Graph::compile_()
     for (CompiledPass& cp : compiled_)
     {
         Pass* pass = cp.pass;
-        Batch& batch = batches_[cp.batch];
-        // Everything the fold learns about this pass is attributed to its
-        // batch: a dependency inside one batch is a pipeline barrier, and one
-        // that crosses batches on different queues is a semaphore wait, which
-        // only the submit can emit.
-        tracker.set_batch(cp.batch, batch.queue);
-        std::vector<std::size_t>& waits = batch.waits;
-
-        // A render pass's attachments are transitioned by the RenderTarget
-        // rather than through the tracker, so a pass on the other queue that
-        // sampled one has no other way to be ordered against the drawing that
-        // is about to overwrite it.
-        if (pass->is_render())
-        {
-            RenderTarget& rt = *pass->target();
-            for (const auto& image : rt.written_color_images())
-            {
-                tracker.cross_queue_touches(image.get(), waits);
-            }
-            if (const auto& depth = rt.written_depth_image())
-            {
-                tracker.cross_queue_touches(depth.get(), waits);
-            }
-        }
 
         // A render pass builds its entry transition from the RenderTarget, not
         // from any state: preserving means "come from final_layout()". That is
@@ -359,7 +249,7 @@ std::expected<void, Error> Graph::compile_()
         // un-elided case, which is the only one where a predecessor exists.
         if (pass->is_render() && pass->preserve() && !cp.elide_entry)
         {
-            correct_preserve_entry_(cp, tracker, waits);
+            correct_preserve_entry_(cp, tracker);
         }
 
         for (const UseEvent& e : pass->events())
@@ -369,7 +259,7 @@ std::expected<void, Error> Graph::compile_()
                 case UseEvent::Kind::BufferUse:
                 {
                     tracked_writes_ |= e.writes;
-                    if (auto b = tracker.use(e.buffer.get(), e.stages, e.access, e.writes, e.shader_writable, waits))
+                    if (auto b = tracker.use(e.buffer.get(), e.stages, e.access, e.writes, e.shader_writable))
                     {
                         batch_at_(cp, e.position).buffers.emplace_back(e.buffer, *b);
                     }
@@ -381,30 +271,22 @@ std::expected<void, Error> Graph::compile_()
                     // graph has written alone. It rests in SHADER_READ_ONLY
                     // already, and the fold's starting layout is UNDEFINED, so
                     // a transition here would discard an uploaded texture.
-                    //
-                    // Recorded as a completed read rather than dropped, though:
-                    // it emits nothing (the layout it names is the layout the
-                    // image is in), and without it a later pass that RENDERS
-                    // into this image has no way to know somebody was reading
-                    // it — which across queues is a write-after-read nothing
-                    // else would catch.
                     if (e.only_if_tracked && !tracker.tracks(e.image.get()))
                     {
-                        tracker.note_image_read(e.image.get(), e.layout, e.stages, e.access);
                         break;
                     }
                     tracked_writes_ |= e.writes;
-                    if (auto b = tracker.use_image(e.image.get(), e.layout, e.stages, e.access, e.writes, waits))
+                    if (auto b = tracker.use_image(e.image.get(), e.layout, e.stages, e.access, e.writes))
                     {
                         batch_at_(cp, e.position).images.emplace_back(e.image, *b);
                     }
                     break;
                 }
                 case UseEvent::Kind::BufferNote:
-                    tracker.note_buffer_access(e.buffer.get(), e.stages, e.access, waits);
+                    tracker.note_buffer_access(e.buffer.get(), e.stages, e.access);
                     break;
                 case UseEvent::Kind::ImageNote:
-                    tracker.note_image_layout(e.image.get(), e.layout, e.stages, e.access, &waits);
+                    tracker.note_image_layout(e.image.get(), e.layout, e.stages, e.access);
                     break;
             }
         }
@@ -425,27 +307,10 @@ std::expected<void, Error> Graph::compile_()
         }
     }
 
-    // A batch may have collected the same producer several times, and the
-    // submit compares each entry against its own index.
-    for (Batch& batch : batches_)
-    {
-        std::ranges::sort(batch.waits);
-        const auto duplicates = std::ranges::unique(batch.waits);
-        batch.waits.erase(duplicates.begin(), duplicates.end());
-    }
-
-    // Only once the command buffers really exist: a failed allocation used to
-    // leave the graph clean AND short a row, so the next submit indexed past
-    // the end of it rather than retrying the compile.
-    if (auto r = ensure_command_buffers_(); !r)
-    {
-        return r;
-    }
     dirty_ = false;
-    return {};
 }
 
-void Graph::correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, std::vector<std::size_t>& waits)
+void Graph::correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker)
 {
     RenderTarget& rt = *cp.pass->target();
     const VkImageLayout wanted = rt.final_layout();
@@ -456,21 +321,15 @@ void Graph::correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, 
         {
             continue;
         }
-        // Through the tracker rather than hand-built since 0.29: the old
-        // ALL_COMMANDS source scope covers everything on THIS queue and nothing
-        // on the other, and a compute pass that moved the attachment is exactly
-        // the case this correction exists for. use_image answers both halves —
-        // a barrier for the local predecessor, a wait for the remote one.
-        if (auto b = tracker.use_image(
-                image.get(),
-                wanted,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                /*writes=*/true,
-                waits))
-        {
-            cp.entry.images.emplace_back(image, *b);
-        }
+        cp.entry.images.emplace_back(
+            image,
+            ResourceTracker::ImageBarrier{
+                .old_layout = *known,
+                .new_layout = wanted,
+                .src_stages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                .dst_stages = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .src_access = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .dst_access = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT});
         // The pass's own entry transition now starts where it says it does.
         tracker.note_image_layout(
             image.get(), wanted, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT);
@@ -509,11 +368,6 @@ void Graph::note_attachment_writes_(const Pass& pass, ResourceTracker& tracker)
 
 void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame) const
 {
-    // Every mask is narrowed to what the replaying queue family supports (see
-    // narrow_src/narrow_dst). On a graphics family the legal set is everything,
-    // so nothing changes; on a compute-only one the graphics stages go and the
-    // dependency they expressed is carried by this batch's semaphore wait.
-    const VkPipelineStageFlags legal = frame.legal_stages;
     VkPipelineStageFlags src = 0;
     VkPipelineStageFlags dst = 0;
 
@@ -521,15 +375,13 @@ void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame)
     bufs.reserve(buffers.size());
     for (const auto& [buffer, b] : buffers)
     {
-        const StageAccess s = narrow_src({.stages = b.src_stages, .access = b.src_access}, legal);
-        const StageAccess d = narrow_dst({.stages = b.dst_stages, .access = b.dst_access}, legal);
-        src |= s.stages;
-        dst |= d.stages;
+        src |= b.src_stages;
+        dst |= b.dst_stages;
         bufs.push_back(
             {.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
              .pNext = nullptr,
-             .srcAccessMask = s.access,
-             .dstAccessMask = d.access,
+             .srcAccessMask = b.src_access,
+             .dstAccessMask = b.dst_access,
              .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
              .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
              .buffer = buffer->get(),
@@ -541,10 +393,8 @@ void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame)
     imgs.reserve(images.size());
     for (const auto& [image, b] : images)
     {
-        const StageAccess s = narrow_src({.stages = b.src_stages, .access = b.src_access}, legal);
-        const StageAccess d = narrow_dst({.stages = b.dst_stages, .access = b.dst_access}, legal);
-        src |= s.stages;
-        dst |= d.stages;
+        src |= b.src_stages;
+        dst |= b.dst_stages;
         // All mips and all layers: the fold holds one layout per image. The
         // aspect comes from the FORMAT rather than being COLOR — a depth
         // image reaches this path as soon as a pass samples the depth another
@@ -553,8 +403,8 @@ void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame)
         imgs.push_back(
             {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
              .pNext = nullptr,
-             .srcAccessMask = s.access,
-             .dstAccessMask = d.access,
+             .srcAccessMask = b.src_access,
+             .dstAccessMask = b.dst_access,
              .oldLayout = b.old_layout,
              .newLayout = b.new_layout,
              .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -572,12 +422,10 @@ void Graph::BarrierBatch::record(VkCommandBuffer cmd, const FrameContext& frame)
     {
         return;
     }
-    // BOTTOM_OF_PIPE for an empty destination, not TOP: an empty second scope
-    // is the one that waits for nothing, and TOP there would block everything.
     frame.vk->vkCmdPipelineBarrier(
         cmd,
         src != 0 ? src : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        dst != 0 ? dst : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        dst != 0 ? dst : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         0,
         0,
         nullptr,
@@ -642,15 +490,19 @@ namespace
 
 } // namespace
 
-void Graph::execute_batch(const Batch& batch, VkCommandBuffer vkCmd, const FrameContext& frame)
+void Graph::execute(VkCommandBuffer vkCmd, const FrameContext& frame)
 {
-    // Query-pool resets are illegal inside a render pass, so this batch's
-    // pools reset here, before anything opens. Per batch rather than per
-    // graph: a reset has to run on the queue that writes the queries, and each
-    // batch is its own submit.
-    for (std::size_t i = batch.first; i < batch.last; ++i)
+    if (dirty_)
     {
-        compiled_[i].pass->recorder().reset_query_pools(vkCmd, frame);
+        compile_();
+    }
+
+    // Query-pool resets are illegal inside a render pass, so every pass's
+    // pools reset here, before anything opens — the same spot execute() gives
+    // them on the inline path.
+    for (auto& cp : compiled_)
+    {
+        cp.pass->recorder().reset_query_pools(vkCmd, frame);
     }
 
     // Replay wrap-around, verbatim from the inline recorder: in-graph barriers
@@ -660,26 +512,20 @@ void Graph::execute_batch(const Batch& batch, VkCommandBuffer vkCmd, const Frame
     // resource: read-only graphs race with nothing.
     if (tracked_writes_)
     {
-        const VkPipelineStageFlags wide = context_->all_shader_stages() | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
-                                          VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
-        const StageAccess s = narrow_src({.stages = wide, .access = VK_ACCESS_SHADER_WRITE_BIT}, frame.legal_stages);
-        const StageAccess d = narrow_dst(
-            {.stages = wide,
-             .access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
-                       VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
-                       VK_ACCESS_INDIRECT_COMMAND_READ_BIT},
-            frame.legal_stages);
         VkMemoryBarrier barrier{
             .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
             .pNext = nullptr,
-            .srcAccessMask = s.access,
-            .dstAccessMask = d.access};
-        frame.vk->vkCmdPipelineBarrier(vkCmd, s.stages, d.stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
+                             VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
+                             VK_ACCESS_INDIRECT_COMMAND_READ_BIT};
+        const VkPipelineStageFlags stages = context_->all_shader_stages() | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                                            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+        frame.vk->vkCmdPipelineBarrier(vkCmd, stages, stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     }
 
-    for (std::size_t i = batch.first; i < batch.last; ++i)
+    for (const CompiledPass& cp : compiled_)
     {
-        const CompiledPass& cp = compiled_[i];
         Pass& pass = *cp.pass;
         CommandBuffer& rec = pass.recorder();
         cp.entry.record(vkCmd, frame);
@@ -705,10 +551,10 @@ void Graph::execute_batch(const Batch& batch, VkCommandBuffer vkCmd, const Frame
         else
         {
             std::size_t at = 0;
-            for (const auto& [position, barriers] : cp.mid)
+            for (const auto& [position, batch] : cp.mid)
             {
                 rec.replay_range(vkCmd, frame, at, position);
-                barriers.record(vkCmd, frame);
+                batch.record(vkCmd, frame);
                 at = position;
             }
             rec.replay_range(vkCmd, frame, at, rec.command_count());
