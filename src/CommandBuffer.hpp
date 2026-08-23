@@ -504,11 +504,24 @@ public:
     // The buffers this recording binds or copies, for the same reason
     // used_sets exists: a STATIC buffer's fill is a submit of its own since
     // 0.18.0, and the submit path waits on it. Recorded by record_buffer_use_,
-    // which is deliberately NOT part of track_use_ — that one returns early
-    // with auto_barriers=False, and residency is not a barrier question.
+    // which is deliberately NOT part of track_use_ — residency is not a
+    // barrier question, and a manual pass needs it just as much.
     const std::vector<std::shared_ptr<Buffer>>& used_buffers() const
     {
         return used_buffers_;
+    }
+
+    // The images this recording copies, blits, clears or barriers WITHOUT a
+    // descriptor set (0.30). The descriptor path is covered by used_sets, and
+    // until the transfer queue these verbs needed nothing: the upload
+    // submitted on the graphics queue, this recording replays on the graphics
+    // queue, and a pipeline barrier's first scope covers everything submitted
+    // earlier there. An upload on the TRANSFER queue is out of that reach, so
+    // the image has to be named for the submit's timeline wait — the same
+    // thing used_buffers has done for a staged buffer since 0.18.
+    const std::vector<std::shared_ptr<Image>>& used_images() const
+    {
+        return used_images_;
     }
 
     // ── The replay surface the graph executor drives ────────────────────────
@@ -585,6 +598,7 @@ private:
     // pending upload are skipped, so a recording of DYNAMIC buffers stores
     // nothing.
     void record_buffer_use_(const std::shared_ptr<Buffer>& buffer);
+    void record_image_use_(const std::shared_ptr<Image>& image);
 
     // Everything the three indirect verbs check, in one place so they cannot
     // disagree about which buffer is legal or what the message says.
@@ -676,6 +690,7 @@ private:
     std::vector<std::function<void(VkCommandBuffer, const FrameContext&)>> commands_;
     std::vector<std::shared_ptr<DescriptorSet>> used_sets_;
     std::vector<std::shared_ptr<Buffer>> used_buffers_;
+    std::vector<std::shared_ptr<Image>> used_images_;
 
     // Where resource uses are reported, for the graph to fold. Owned by the
     // Pass that owns this recorder, and set before anything is recorded.

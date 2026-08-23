@@ -788,6 +788,7 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Image> image, 
     // use would transition it again from a stale one — a validation error plus
     // a useless barrier.
     note_image_state_(image, *new_layout, d.stages, d.access);
+    record_image_use_(image);
     commands_.emplace_back(
         [image = std::move(image), old = *old_layout, now = *new_layout, s, d](
             VkCommandBuffer cmd, const FrameContext& frame)
@@ -840,6 +841,7 @@ std::expected<void, Error> CommandBuffer::generate_mipmaps(const std::shared_ptr
             "SHADER_READ_ONLY) or Access.SHADER_WRITE (mip 0 in GENERAL)"));
     }
     const StageAccess s = to_vk(src, context_->all_shader_stages());
+    record_image_use_(image);
     commands_.emplace_back([image, layout = *src_layout, s](VkCommandBuffer cmd, const FrameContext& frame)
                            { image->record_generate_mipmaps(cmd, layout, s.stages, s.access); });
     // The image now rests in SHADER_READ_ONLY across every level; keep the
@@ -891,6 +893,8 @@ std::expected<void, Error> CommandBuffer::copy_image(
             "SHADER_READ_ONLY) or Access.SHADER_WRITE (a compute shader just wrote "
             "it, GENERAL)"));
     }
+    record_image_use_(src);
+    record_image_use_(dst);
     commands_.emplace_back([src, dst, layout = *src_layout](VkCommandBuffer cmd, const FrameContext& frame)
                            { record_image_copy(*frame.vk, cmd, *src, *dst, layout, frame.legal_stages); });
     finish_image_transfer_(src, dst);
@@ -949,6 +953,8 @@ std::expected<void, Error> CommandBuffer::blit_image(
             "SHADER_READ_ONLY) or Access.SHADER_WRITE (a compute shader just wrote "
             "it, GENERAL)"));
     }
+    record_image_use_(src);
+    record_image_use_(dst);
     commands_.emplace_back([src, dst, layout = *src_layout, filter](VkCommandBuffer cmd, const FrameContext& frame)
                            { record_image_blit(*frame.vk, cmd, *src, *dst, layout, filter); });
     finish_image_transfer_(src, dst);
@@ -1159,6 +1165,7 @@ std::expected<void, Error> CommandBuffer::copy_buffer_to_image(
     // copy_image does — a tracked image use would start from the fold's
     // UNDEFINED and discard an uploaded texture nothing in this graph wrote.
     track_use_(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, false);
+    record_image_use_(image);
     record_buffer_use_(buffer);
     commands_.emplace_back(
         [buffer, image, buffer_offset, layer, mip](VkCommandBuffer cmd, const FrameContext& frame)
@@ -1206,6 +1213,7 @@ std::expected<void, Error> CommandBuffer::copy_image_to_buffer(
             "SHADER_READ_ONLY) or Access.SHADER_WRITE (a compute shader just wrote it, GENERAL)"));
     }
     track_use_(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, true);
+    record_image_use_(image);
     record_buffer_use_(buffer);
     commands_.emplace_back(
         [buffer, image, buffer_offset, layer, mip, layout = *src_layout](VkCommandBuffer cmd, const FrameContext& frame)
@@ -1231,6 +1239,7 @@ std::expected<void, Error> CommandBuffer::clear_image(const std::shared_ptr<Imag
             "clear_image: a depth image is cleared by the pass that renders into it "
             "(graph.add_pass(target, clear_depth=...))"));
     }
+    record_image_use_(image);
     commands_.emplace_back([image, color](VkCommandBuffer cmd, const FrameContext& frame)
                            { record_image_clear(*frame.vk, cmd, *image, color, frame.legal_stages); });
     image->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -1621,6 +1630,14 @@ void CommandBuffer::ensure_occlusion_pool_(std::size_t needed)
         return;
     }
     occlusion_capacity_ = static_cast<std::uint32_t>(needed);
+}
+
+void CommandBuffer::record_image_use_(const std::shared_ptr<Image>& image)
+{
+    if (image && image->upload_serial() != QueueSerials{})
+    {
+        used_images_.push_back(image);
+    }
 }
 
 void CommandBuffer::record_buffer_use_(const std::shared_ptr<Buffer>& buffer)

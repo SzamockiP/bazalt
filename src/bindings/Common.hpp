@@ -1094,6 +1094,19 @@ inline std::expected<QueueSerials, Error> require_uploads_resident(Graph& graph)
         {
             max_merge(wait_serial, buffer->upload_serial());
         }
+        // Images a copy, blit, clear or manual barrier names directly (0.30).
+        // Never needed before the transfer queue: the upload submitted on the
+        // graphics queue and a barrier in this recording covered it by
+        // submission order. An upload on another queue is out of that reach.
+        for (const auto& image : cmd.used_images())
+        {
+            auto serial = image->require_resident();
+            if (!serial)
+            {
+                return std::unexpected(serial.error());
+            }
+            max_merge(wait_serial, *serial);
+        }
     }
     return wait_serial;
 }

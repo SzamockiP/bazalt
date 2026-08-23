@@ -255,3 +255,43 @@ def test_uploads_ride_the_transfer_timeline(ctx):
     ctx.submit(g)
     assert out.read(np.float32)[-1] == 4095.0
     assert buf.ready
+
+
+def test_a_copy_verb_waits_for_an_upload_it_never_bound():
+    """An image a copy or a blit names directly is in no descriptor set, so
+    `used_sets` never sees it.
+
+    Until 0.30 that cost nothing: the upload submitted on the graphics queue,
+    the graph replayed on the graphics queue, and a pipeline barrier's first
+    scope covers everything submitted earlier there. The upload runs on the
+    TRANSFER queue now and a barrier cannot reach it, so the image has to be
+    named for the submit's timeline wait — the job used_buffers has done for a
+    staged buffer since 0.18.
+
+    The referee is sync validation plus the pixels. The image is large enough
+    that the copy really can start before the upload lands: the bug this pins
+    passed the whole suite once and was found by a run that shifted the
+    timing."""
+    hazards = []
+    log = bz.Logger(min_severity=bz.Severity.INFO)
+
+    @log.on_message
+    def _(msg):
+        if msg.source == bz.Source.VALIDATION and "hazard" in msg.text.lower():
+            hazards.append(msg.text)
+
+    context = bz.Context(log, validation="sync")
+    pixels = np.zeros((512, 512, 4), np.uint8)
+    pixels[:, :, 1] = 200
+    pixels[:, :, 3] = 255
+
+    src = context.create_image(pixels, name="uploaded")
+    dst = context.create_image(512, 512, bz.Format.RGBA8, name="copy of it")
+    g = context.graph()
+    g.add_pass(name="copy").copy_image(src, dst)
+    context.submit(g)
+
+    out = dst.read()
+    log.flush()
+    assert hazards == []
+    assert out[256, 256, 1] == 200, "the copy read the image before its upload landed"

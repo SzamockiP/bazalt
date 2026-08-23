@@ -116,6 +116,10 @@ resource no barrier in it covers.
   said.
 - **A hot reload marks the image pending while it runs.** A mipped upload is
   two submits now, and a reader between them could see the image half built.
+- **A copy, a blit, a clear or a manual barrier waits for the upload of an
+  image it names.** Such an image is in no descriptor set, so the submit did
+  not know to wait for it. Nothing was wrong while uploads ran on the graphics
+  queue, because submission order there covered it.
 
 ### Notes
 

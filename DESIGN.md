@@ -2340,6 +2340,28 @@ The third and last `QueueRuntime`. What 0.29's entry promised and what it cost.
   available", so a later sample on another queue still gets its semaphore wait. The buffer
   side of both verbs is a real tracked use, because a buffer has no layout to discard.
 
+- **The queue move broke a wait nobody had written, and finding it is the best thing in
+  this release.** An image that a copy, a blit, a clear or a manual barrier names DIRECTLY is
+  in no descriptor set, so `require_uploads_resident` — which walks descriptor sets and
+  `used_buffers` — never saw it. That cost nothing for three years: the upload submitted on
+  the graphics queue, the graph replayed on the graphics queue, and a pipeline barrier's
+  first scope covers everything submitted earlier on the same queue. Move the upload to the
+  transfer queue and that reach is gone, so `p.copy_image(uploaded, dst)` races its own
+  upload. `used_images` is the fix, and it is the twin of what `used_buffers` has done for a
+  staged buffer since 0.18.
+
+  **How it was found is the part worth keeping.** The whole suite passed — 748 tests, on
+  three queue configurations — because the race usually wins. It surfaced in a run
+  instrumented for the api-coverage gate, where wrapping every public callable shifted the
+  timing enough to lose it once. Then it was pinned the only way that means anything:
+  reverted, rebuilt, watched the new test FAIL, restored, watched it pass.
+
+  Two rules come out of it. **A dependency carried by submission order is invisible until
+  something changes queues** — and every one of them is written nowhere, because there is no
+  code to read. When work moves to another queue, the question is not "what barriers did I
+  port" but "what was ordered for free". And **a green suite is not evidence about a race**;
+  the run that found this differed from the passing ones only in refcount timing.
+
 - **What the release did NOT do.** Nothing was measured. The priced entry's argument is that
   the win is the copy leaving the graphics queue's execution slots, which is a real number on
   a discrete GPU and zero on an iGPU, and `examples/47_transfer_queue` says so in its
