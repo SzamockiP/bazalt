@@ -102,7 +102,7 @@ vertices = [
 ]
 vbuf = viewer.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 ibuf = viewer.create_buffer([0, 3, 2, 2, 1, 0], bz.BufferUsage.INDEX,
-                            bz.MemoryUsage.STATIC, dtype=np.uint32)
+                            bz.MemoryUsage.STATIC)
 
 pool = viewer.create_descriptor_pool()
 dset = pool.allocate_set(pipeline)

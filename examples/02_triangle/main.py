@@ -1,5 +1,4 @@
 import bazalt as bz
-import numpy as np
 
 # Create window, logger, and renderer
 logger = bz.Logger()
@@ -31,7 +30,7 @@ vertices = [
 vbuf = ctx.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
 indices = [0, 1, 2]
-ibuf = ctx.create_buffer(indices, bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC, dtype=np.uint32)
+ibuf = ctx.create_buffer(indices, bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 
 # Build the graph once
 g = ctx.graph()

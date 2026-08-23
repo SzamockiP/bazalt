@@ -4,7 +4,6 @@ import time
 from PyQt6.QtWidgets import QApplication, QWidget
 from PyQt6.QtCore import QTimer
 import bazalt as bz
-import numpy as np
 
 class VulkanWidget(QWidget):
     def __init__(self):
@@ -59,7 +58,7 @@ class VulkanWidget(QWidget):
         ]
         self.vbuf = self.ctx.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
         
-        self.ibuf = self.ctx.create_buffer([0, 1, 2], bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC, dtype=np.uint32)
+        self.ibuf = self.ctx.create_buffer([0, 1, 2], bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
         
         # Build the graph. The triangle never changes, so the same graph
         # goes to every tick.

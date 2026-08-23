@@ -1,5 +1,4 @@
 import bazalt as bz
-import numpy as np
 import glm
 import time
 import math
@@ -113,7 +112,7 @@ indices = [
     13, 12, 15, 15, 14, 13, # Right
     23, 22, 21, 21, 20, 23  # Bottom
 ]
-ibuf = ctx.create_buffer(indices, bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC, dtype=np.uint32)
+ibuf = ctx.create_buffer(indices, bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 
 ubuf = ctx.create_buffer([0.0]*16, bz.BufferUsage.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
