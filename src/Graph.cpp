@@ -1128,6 +1128,43 @@ std::expected<void, Error> Graph::compile_()
         batch.waits.erase(duplicates.begin(), duplicates.end());
     }
 
+    // The layouts the replay really leaves behind. Every verb marks its image
+    // when it is RECORDED, and record order is not execution order: a
+    // clear_image on an image a later pass binds as storage marked
+    // SHADER_READ_ONLY, the draw then moved the image to GENERAL and told
+    // nobody, and the next read()'s barrier sourced from a layout the image
+    // had already left (DESIGN.md, debt 7). The fold is the only party that
+    // knows what every pass did to every subresource, so it is the one that
+    // answers.
+    final_layouts_.clear();
+    for (const auto& [image, states] : tracker.image_states())
+    {
+        // UNDEFINED means the fold reached the image without ever naming a
+        // layout for it. Writing that back would make the next barrier
+        // DISCARD the image, which is worse than the stale mark this replaces.
+        const auto keep = [this, image = image](VkImageLayout layout, ImageRange range)
+        {
+            if (layout != VK_IMAGE_LAYOUT_UNDEFINED)
+            {
+                final_layouts_.push_back({.image = image, .layout = layout, .range = range});
+            }
+        };
+        if (states.split.empty())
+        {
+            keep(states.whole.layout, {});
+            continue;
+        }
+        for (std::uint32_t layer = 0; layer < states.layers; ++layer)
+        {
+            for (std::uint32_t mip = 0; mip < states.mips; ++mip)
+            {
+                keep(
+                    states.split[(layer * states.mips) + mip].layout,
+                    {.base_layer = layer, .layer_count = 1, .base_mip = mip, .mip_count = 1});
+            }
+        }
+    }
+
     // Only once the command buffers really exist: a failed allocation used to
     // leave the graph clean AND short a row, so the next submit indexed past
     // the end of it rather than retrying the compile.
@@ -1137,6 +1174,21 @@ std::expected<void, Error> Graph::compile_()
     }
     dirty_ = false;
     return {};
+}
+
+void Graph::apply_final_layouts()
+{
+    for (const auto& [image, layout, range] : final_layouts_)
+    {
+        if (range.layer_count == 0)
+        {
+            image->set_layout(layout);
+        }
+        else
+        {
+            image->set_layout(layout, range.base_layer, range.layer_count, range.base_mip, range.mip_count);
+        }
+    }
 }
 
 void Graph::correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, std::vector<std::size_t>& waits)

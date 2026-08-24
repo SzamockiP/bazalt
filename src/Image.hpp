@@ -381,6 +381,21 @@ public:
         has_contents_.store(true);
     }
 
+    // The layout the GPU really leaves a subresource in, with no claim about
+    // contents. The graph writes these back after a replay, and it must not
+    // answer the contents question too: a pass that only SAMPLES an image
+    // moves nothing into it, so marking it as filled would let read() hand
+    // back a virgin image's garbage. Defaults cover the whole image.
+    void set_layout(
+        VkImageLayout layout,
+        std::uint32_t base_layer = 0,
+        std::uint32_t layer_count = VK_REMAINING_ARRAY_LAYERS,
+        std::uint32_t base_mip = 0,
+        std::uint32_t mip_count = VK_REMAINING_MIP_LEVELS)
+    {
+        layouts_.set_range(layout, base_layer, layer_count, base_mip, mip_count);
+    }
+
     // The same statement about one part of the image. Used by a pass that
     // rendered into a single layer or mip, and by a copy that filled one
     // subresource: marking the whole image would be the 0.13 bug — a stale

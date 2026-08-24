@@ -276,6 +276,13 @@ public:
     // interleaved, exit transitions.
     void execute_batch(const Batch& batch, VkCommandBuffer vkCmd, const FrameContext& frame);
 
+    // Write the layouts this graph leaves behind onto the Images, from what
+    // the fold computed rather than from the record-time mark each verb makes.
+    // Called once per submit, AFTER the recording: the replay still reads the
+    // pre-graph layouts (even_out_image does), so an earlier write-back would
+    // hand it this frame's answer to last frame's question.
+    void apply_final_layouts();
+
 private:
     explicit Graph(std::shared_ptr<Context> context)
         : context_(std::move(context))
@@ -401,6 +408,18 @@ private:
     std::array<std::vector<VkCommandBuffer>, kQueueCount> command_buffers_;
     std::vector<CompiledPass> compiled_;
     std::vector<Batch> batches_;
+    // What apply_final_layouts() writes back, one entry per image the fold
+    // touched and per subresource where it left them disagreeing. Raw
+    // pointers: the compiled passes hold the images alive, and any change to
+    // the pass set marks the graph dirty, so a compile refreshes this before
+    // anything can read it again.
+    struct FinalLayout
+    {
+        Image* image;
+        VkImageLayout layout;
+        ImageRange range;
+    };
+    std::vector<FinalLayout> final_layouts_;
     // What the previous replay signalled on each queue — see replay_wait().
     QueueSerials last_replay_{};
     bool dirty_ = true;

@@ -2882,6 +2882,55 @@ permanent ceiling.
    harness. It is that every example needs its frame loop behind a guard the harness can
    stop at, which is 34 small edits and a convention the next example has to follow.
 
+7. ✅ **`clear_image` desynced the resting layout of a graphics storage image** — found
+   2026-08-24 by a program built against 0.30, outside the suite. PAID in 0.30.
+   `p.clear_image(img)` where `img` was also bound through the graphics
+   `.storage_image()` declarator made the next submit fail: the command buffer expected
+   `SHADER_READ_ONLY_OPTIMAL` and the image was in `GENERAL`.
+
+   The minimal shape needed **all three** of `clear_image(img)`, the graphics
+   `storage_image` binding, and `img.read()`. Ruled out, each by a green run: the image
+   being 3D (2D RGBA8 reproduced identically), the format, `imageAtomicAdd` versus
+   `imageStore`, the compute path (clean), and graph ordering — splitting the clear into
+   its own `ctx.submit` behaved the same, which said the clear pass was not racing the
+   draw but leaving a state behind it.
+
+   The GPU results were right on this driver: the writes landed, every value was correct.
+   So this was bookkeeping the driver tolerates rather than a wrong picture — but
+   validation-as-assert is the referee here, and a tracker that disagrees with itself is
+   the thing that referee exists to catch.
+
+   **The cause was record-time optimism, one layer under where it looked.** Every verb
+   marks its image the moment it is RECORDED — `set_storage_image` claims `GENERAL`
+   because a storage image is an output, `clear_image` claims `SHADER_READ_ONLY_OPTIMAL`
+   because a clear leaves the image sampleable. Both are true statements about one verb,
+   and record order is not execution order, so the LAST verb recorded wins a race the GPU
+   never ran. Here the clear was recorded after the descriptor write, so the image rested
+   as `SHADER_READ_ONLY_OPTIMAL` while the draw really left it in `GENERAL`, and
+   `read()`'s barrier then sourced from a layout the image had left. The compute path was
+   clean only by luck of ordering: nothing there overwrites the mark.
+
+   The fix makes the fold answer instead. `Graph::compile_` already knows what every pass
+   does to every subresource, so it now keeps the layout each one ends in, and
+   `Graph::apply_final_layouts` writes those onto the Images once per submit — after the
+   recording, because the replay still asks the images what layout they are in NOW
+   (`even_out_image` does). `Image::set_layout` is the layout half of `mark_has_contents`
+   with no contents claim: a pass that only SAMPLES an image moves nothing into it, and
+   saying otherwise would let `read()` hand back a virgin image's garbage. The verbs keep
+   their record-time marks, which are still what answers for an image no graph touched.
+
+   `tests/test_storage_images.py::test_cleared_graphics_storage_image_reads_back_clean`
+   holds the repro. It owns its Context on purpose: the subject of the test IS the
+   validation output, and the `ctx` fixture's referee runs in teardown, so the same
+   filter runs in the body where the assertion can name it.
+
+   **The lesson is about the bisect, not the bug.** Every single-factor test was green:
+   clear alone, storage alone, read alone, 2D, 3D, compute. A bisect that changes one
+   thing at a time exonerates all three factors of a three-way conjunction and concludes
+   there is nothing there. When a validation error survives every narrowing, stop
+   narrowing and start building the matrix — the answer was the one cell where all three
+   were on.
+
 ### Ceilings accepted on purpose
 
 **Audited in 0.22.** The section used to open with "these are not debt to pay, they are

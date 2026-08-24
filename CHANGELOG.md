@@ -123,6 +123,13 @@ resource no barrier in it covers.
 - **`examples/43_manual_barriers` declares both halves of its read-modify-write
   barrier.** It made the previous writes visible to writes and not to reads,
   which the new warning reported the first time it ran.
+- **The graph writes the layout of each image back after a submit.** Each verb
+  recorded the layout it leaves behind, so two verbs on one image resolved in
+  record order. Record order is not run order. A `p.clear_image(img)` on an
+  image that a later pass binds as a storage image left the image marked as
+  sampleable while the pass really left it in `GENERAL`, and the next
+  `img.read()` then used the wrong old layout. The graph now knows what every
+  pass does to every subresource, so it reports the true layout.
 
 ### Notes
 

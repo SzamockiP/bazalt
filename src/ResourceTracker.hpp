@@ -996,6 +996,15 @@ public:
         const auto it = states_.find(buffer);
         return it != states_.end() ? &it->second : nullptr;
     }
+    // Every image this fold touched, with the state each subresource ends the
+    // graph in. The graph reads it to write the real layouts back onto the
+    // Images after a replay: a verb marks the image when it is RECORDED, and
+    // record order is not execution order (DESIGN.md, debt 7).
+    const std::unordered_map<Image*, ImageStates>& image_states() const
+    {
+        return image_states_;
+    }
+
     // The whole-image state for explain() and the lint. Where the image is
     // split this answers with the FIRST touched subresource — a debugging aid
     // needs a representative previous state, not all of them.

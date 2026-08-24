@@ -1005,6 +1005,10 @@ inline std::expected<std::vector<Context::SubmitBatch>, Error> record_frame(
         recorded.push_back(Context::SubmitBatch{.queue = batch.queue, .cmd = vkCmd, .waits = batch.waits});
     }
 
+    // After the recording, never before it: the replay above still asks the
+    // images what layout they are in NOW (even_out_image does), and these are
+    // the layouts they will be in once this frame runs.
+    graph.apply_final_layouts();
     return recorded;
 }
 
