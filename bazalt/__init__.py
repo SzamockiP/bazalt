@@ -65,6 +65,7 @@ __all__ = [
     "AddressMode",
     "CompareOp",
     "PresentMode",
+    "ConservativeRaster",
     "CullMode",
     "FrontFace",
     "PolygonMode",

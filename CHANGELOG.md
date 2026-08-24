@@ -55,6 +55,21 @@ resource no barrier in it covers.
   into a buffer from the command stream. There is no staging buffer and no
   second submit, so a small patch lands inside the frame that needs it. The
   size and the offset must be multiples of 4.
+- **`bz.Feature.CONSERVATIVE_RASTER`** plus
+  **`graphics_pipeline().conservative_raster(mode, extra_overestimation=0.0)`**
+  rasterize by what a primitive touches instead of by where the samples land.
+  Normal rasterization gives a pixel a fragment when the primitive covers the
+  pixel centre, so a triangle that crosses a pixel without reaching the centre
+  draws nothing. `bz.ConservativeRaster.OVERESTIMATE` gives a fragment to every
+  pixel the primitive touches, which is how a voxel grid or a coverage mask
+  comes out with no holes. `bz.ConservativeRaster.UNDERESTIMATE` gives a
+  fragment only to the pixels the primitive covers completely, which is how an
+  occlusion test stays a guarantee. The mode is a property of one pipeline, so
+  every other pipeline on the same Context rasterizes as before and pays
+  nothing. `extra_overestimation` grows the covered area further, in pixels.
+  `ctx.limits` reports what the GPU allows: `conservative_underestimation`,
+  `max_extra_overestimation` and `extra_overestimation_granularity`. `build()`
+  raises above the maximum instead of letting the driver clamp the value.
 - **`p.copy_buffer_to_image(buffer, image, *, layer=0, mip=0, buffer_offset=0)`**
   and **`p.copy_image_to_buffer(image, buffer, ...)`** copy one (layer, mip)
   between an image and tightly packed bytes. This is how a texture atlas

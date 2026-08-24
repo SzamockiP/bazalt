@@ -1341,6 +1341,15 @@ limit answers "how much", and the moment a limit is spelled as a capability the 
 "what do I do when it is False" has no sensible answer. Hence a separate object rather than
 more rows in the feature table.
 
+**One field breaks that rule on purpose** (0.30). `Limits.conservative_underestimation` is a
+may-I sitting on the how-much object. It is there because the capability is a bit in a
+PROPERTIES struct rather than in a features one, and `FeatureInfo` has a column for the
+second and none for the first — so the honest alternatives were an eighth column on the
+feature table for one row, or a third object. Neither is worth it for a bit whose only reader
+is the pipeline that has to refuse `UNDERESTIMATE`. The rule survives the exception because
+the exception names itself: it is the only field on `Limits` that answers may-I, and the next
+one is a signal that the table needs the column after all.
+
 Which numbers `Limits` carries is a judgement and is meant to stay one.
 `VkPhysicalDeviceLimits` has about a hundred members; a field earns its place by being the
 reason some code takes a different path. Eleven qualified in 0.26. The failure mode to avoid
@@ -2566,6 +2575,58 @@ suite could not have found this — sync validation is the referee for manual pa
 silent here — and no reader had found it in two releases of looking at that file. **A model
 that can say what a barrier does not cover finds the barriers that are nearly right, which is
 the class a hazard checker built on execution never sees.**
+
+### Conservative rasterization (0.30)
+
+Ordinary rasterization asks whether a primitive covers a sample point, so a triangle that
+crosses a pixel without reaching its centre produces no fragment. Conservative rasterization
+changes the question: OVERESTIMATE covers every pixel the primitive TOUCHES, UNDERESTIMATE
+only the pixels it covers ENTIRELY. The two are opposite guarantees rather than more and less
+of one thing — the first never misses what the primitive reached, the second never claims
+what it cannot prove — which is why the knob is a three-member enum and not a bool. A bool
+would have to pick one of them as "on", and either choice makes the other unreachable without
+a break.
+
+**It is in scope by both halves of the scope test.** It needs Vulkan glue nobody can supply
+from outside — a device extension plus a `pNext` chained onto the pipeline's rasterization
+state — and no Python package solves it, because there is no Vulkan object to hand one.
+
+**Which is exactly why the escape hatch could not reach it, and that is the point of the
+entry.** `Context(raw_extensions=)` feeds the INSTANCE builder (`Context.cpp`, in
+`create_instance_`), and `VK_EXT_conservative_rasterization` is a DEVICE extension. Even
+granting it a device-level spelling, `rasterization_state_` writes `.pNext = nullptr` and no
+`VkDevice` or `VkPipeline` leaves the library, so there was nowhere to attach the struct.
+This is the "root gap" entry of the 0.29 API-ceiling audit met head on: a library whose
+escape hatch is `raw_extensions` should be able to reach a device extension through it, and
+it still cannot. **Adding this row does not close that gap** — it buys one capability, not
+the hatch. The gap stays priced where it is.
+
+**The Feature is permission; the pipeline is the switch.** `Feature::CONSERVATIVE_RASTER`
+enables the extension and changes no rasterization whatsoever;
+`graphics_pipeline().conservative_raster(mode)` is what turns it on, per pipeline. There is
+no device-wide version of this in Vulkan and there should not be one here: a frame that
+voxelizes in one pass and shades normally in the next needs both behaviours alive at once,
+and the same fragment shader can feed two pipelines that differ only in this. So the cost to
+every pipeline that does not ask is zero, which is the answer to "is it silly to turn it on
+globally" — nothing is global.
+
+**`extra_overestimation` is refused rather than clamped.** The driver would silently take
+`maxExtraPrimitiveOverestimationSize` and carry on, and a grid built on a dilation it did not
+get is wrong with nothing reported — the same class as the layout desync in debt 7, a wrong
+answer that no referee catches. `build()` raises above the maximum and names both the maximum
+and the granularity. The rounding DOWN to a granularity multiple is left to the driver: it is
+a legal narrowing of a value the caller already chose, not a different value.
+
+**The extension's other knobs are a ceiling, not an oversight.**
+`conservativePointAndLineRasterization`, `degenerateTrianglesRasterized`,
+`degenerateLinesRasterized`, `fullyCoveredFragmentShaderInputVariable` and
+`conservativeRasterizationPostDepthCoverage` are all reported by the same properties struct
+and none is exposed. Four of the five are things the driver decides and only report what it
+does; the fifth (`fullyCovered...`) needs a shader-side `SPV_EXT_fragment_fully_covered`
+builtin, which is a reflection and GLSL-extension question rather than a pipeline one.
+**Price: ~120 lines** for the fully-covered builtin, most of it in `SpirvReflect` deciding
+whether a module declares the capability, and the rest is `Limits` rows. **Paid by:** a
+caller who wants the inner-conservative test in one pass instead of two.
 
 ### Asynchronous submits
 

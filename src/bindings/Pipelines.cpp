@@ -67,6 +67,12 @@ void bind_pipelines(py::module_& m)
             py::arg("constant"),
             py::arg("slope") = 0.0f)
         .def(
+            "conservative_raster",
+            [](GraphicsPipelineBuilder& self, ConservativeRaster mode, float extra_overestimation)
+                -> GraphicsPipelineBuilder& { return self.conservative_raster(mode, extra_overestimation); },
+            py::arg("mode"),
+            py::arg("extra_overestimation") = 0.0f)
+        .def(
             "blend",
             [](GraphicsPipelineBuilder& self,
                bool enable,

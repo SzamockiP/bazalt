@@ -37,6 +37,9 @@ void bind_context(py::module_& m)
         .def_readonly("max_dispatch", &DeviceLimits::max_dispatch)
         .def_readonly("min_subgroup_size", &DeviceLimits::min_subgroup_size)
         .def_readonly("max_subgroup_size", &DeviceLimits::max_subgroup_size)
+        .def_readonly("conservative_underestimation", &DeviceLimits::conservative_underestimation)
+        .def_readonly("max_extra_overestimation", &DeviceLimits::max_extra_overestimation)
+        .def_readonly("extra_overestimation_granularity", &DeviceLimits::extra_overestimation_granularity)
         .def(
             "__repr__",
             [](const DeviceLimits& self)

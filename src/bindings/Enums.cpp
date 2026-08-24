@@ -53,7 +53,8 @@ void bind_enums(py::module_& m)
         // The first row that names a fact about the device's queues rather
         // than a bit it can be asked to turn on.
         .value("ASYNC_COMPUTE", Feature::ASYNC_COMPUTE)
-        .value("ASYNC_TRANSFER", Feature::ASYNC_TRANSFER);
+        .value("ASYNC_TRANSFER", Feature::ASYNC_TRANSFER)
+        .value("CONSERVATIVE_RASTER", Feature::CONSERVATIVE_RASTER);
 
     // The gamepad layout GLFW maps every known pad onto, renamed rather than
     // translated: the values ARE the GLFW ones, so the two cannot drift.
@@ -386,6 +387,11 @@ void bind_enums(py::module_& m)
         .value("FILL", PolygonMode::FILL)
         .value("LINE", PolygonMode::LINE)
         .value("POINT", PolygonMode::POINT);
+
+    py::enum_<ConservativeRaster>(m, "ConservativeRaster")
+        .value("OFF", ConservativeRaster::OFF)
+        .value("OVERESTIMATE", ConservativeRaster::OVERESTIMATE)
+        .value("UNDERESTIMATE", ConservativeRaster::UNDERESTIMATE);
 
     py::enum_<CullMode>(m, "CullMode")
         .value("NONE", CullMode::NONE)

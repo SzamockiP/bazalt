@@ -228,6 +228,13 @@ class Feature(IntEnum):
     #: `Context(features=[Feature.ASYNC_TRANSFER])` refuses a device that has
     #: none.
     ASYNC_TRANSFER = 26
+    #: Rasterizing by what a primitive touches rather than by where the
+    #: samples land (0.30). Enabling it changes nothing on its own — it makes
+    #: `graphics_pipeline().conservative_raster(...)` legal, and that call is
+    #: per pipeline, so everything else still rasterizes normally.
+    #: `VK_EXT_conservative_rasterization`, which most desktop GPUs have and
+    #: MoltenVK does not.
+    CONSERVATIVE_RASTER = 27
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
@@ -371,6 +378,28 @@ class PolygonMode(IntEnum):
     FILL = 0
     LINE = 1
     POINT = 2
+
+class ConservativeRaster(IntEnum):
+    """Which pixels a primitive produces fragments for.
+
+    OFF is ordinary Vulkan: a pixel gets a fragment when the primitive covers
+    its sample point, so a triangle that crosses a pixel without reaching the
+    sample produces nothing there.
+
+    The other two are the two directions to be wrong in on purpose, and both
+    need Feature.CONSERVATIVE_RASTER.
+    """
+    OFF = 0
+    #: Every pixel the primitive TOUCHES gets a fragment. Nothing the
+    #: primitive reaches is missed, and some pixels are shaded that a strict
+    #: test would not be. This is what makes a voxel grid or a coverage mask
+    #: come out with no holes.
+    OVERESTIMATE = 1
+    #: Only the pixels the primitive covers ENTIRELY get a fragment. Every
+    #: fragment is a pixel fully inside, and some are dropped. This is what
+    #: makes an occlusion test a guarantee rather than a guess. Needs a device
+    #: whose `Limits.conservative_underestimation` is True.
+    UNDERESTIMATE = 2
 
 class StencilOp(IntEnum):
     """What happens to a stencil value when a fragment arrives, 1:1 with
@@ -1207,6 +1236,24 @@ class GraphicsPipelineBuilder:
         `slope` scales with the polygon's depth gradient, which is what makes
         one setting hold at every angle. depth_bias(0) is the same pipeline as
         no call at all.
+        """
+        ...
+    def conservative_raster(self, mode: ConservativeRaster,
+                            extra_overestimation: float = 0.0) -> GraphicsPipelineBuilder:
+        """Rasterize by what the primitive touches, not by where the samples land.
+
+        Per pipeline, never per device: Feature.CONSERVATIVE_RASTER only makes
+        this call legal, so every other pipeline on the same Context
+        rasterizes normally and pays nothing.
+
+        `extra_overestimation` pushes the covered area further out, in pixels,
+        on top of what OVERESTIMATE already covers — the knob for a grid whose
+        cells must catch a surface that only grazes them. build() raises
+        UnsupportedError above `ctx.limits.max_extra_overestimation` rather
+        than letting the driver clamp it, and the driver rounds what it does
+        take down to a multiple of
+        `ctx.limits.extra_overestimation_granularity`. It means nothing to
+        the other two modes and build() refuses it there.
         """
         ...
     def blend(self, enable: bool, mode: Optional[BlendMode] = None, *,
@@ -2463,6 +2510,21 @@ class Limits:
     @property
     def max_subgroup_size(self) -> int:
         """The widest subgroup this device runs."""
+        ...
+    @property
+    def conservative_underestimation(self) -> bool:
+        """Whether this device rasterizes ConservativeRaster.UNDERESTIMATE.
+        False on a device without Feature.CONSERVATIVE_RASTER, and on some
+        that have it — OVERESTIMATE works wherever the feature does."""
+        ...
+    @property
+    def max_extra_overestimation(self) -> float:
+        """The largest `extra_overestimation` this device takes, in pixels.
+        0.0 means it allows no extra dilation, which is legal and common."""
+        ...
+    @property
+    def extra_overestimation_granularity(self) -> float:
+        """The step this device rounds `extra_overestimation` down to."""
         ...
 
 class Context:

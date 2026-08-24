@@ -100,7 +100,22 @@ enum class Feature
     // Queue.TRANSFER passes run on it when it exists; without it the transfer
     // runtime aliases the graphics queue, so the same program runs with no
     // overlap, and this row says which you got.
-    ASYNC_TRANSFER
+    ASYNC_TRANSFER,
+    // Rasterizing by what a primitive TOUCHES rather than by where its samples
+    // land (0.30). Ordinary rasterization asks whether the primitive covers the
+    // sample point, so a triangle that crosses a pixel without reaching its
+    // centre produces no fragment at all. Overestimation asks whether it
+    // touches the pixel anywhere, which is what makes a voxel grid or a
+    // coverage mask come out with no holes; underestimation asks whether the
+    // pixel is entirely inside, which is what makes an occlusion test a
+    // guarantee rather than a guess.
+    //
+    // The second row (after EXCLUSIVE_FULLSCREEN) whose Vulkan spelling is an
+    // extension and nothing else: VK_EXT_conservative_rasterization has no
+    // feature bit anywhere, only a properties struct. Enabling it changes no
+    // rasterization by itself — it makes the pipeline knob legal, and
+    // `.conservative_raster()` on one pipeline is what turns it on.
+    CONSERVATIVE_RASTER
 };
 
 // The feature structs bazalt reads, as one value with no pNext links between the
@@ -282,6 +297,22 @@ struct DeviceLimits
     std::uint32_t subgroup_size = 0;
     std::uint32_t min_subgroup_size = 0;
     std::uint32_t max_subgroup_size = 0;
+
+    // What Feature::CONSERVATIVE_RASTER is held to (0.30). All three read zero
+    // or false on a device without the extension, which is also what a caller
+    // who never asked for the Feature gets.
+    //
+    // The bool breaks the rule above on purpose. It is a may-I rather than a
+    // how-much, and it is here because it is a PROPERTY: the Feature table has
+    // a column for a bit in a features struct and none for a bit in a
+    // properties one, and the only reader is the pipeline that has to refuse
+    // UNDERESTIMATE on a device that cannot do it.
+    bool conservative_underestimation = false;
+    // How far past the primitive overestimation may be pushed, in pixels, and
+    // the step the driver rounds that request to. Both zero on a driver that
+    // allows no extra dilation at all, which is legal and common.
+    float max_extra_overestimation = 0.0f;
+    float extra_overestimation_granularity = 0.0f;
 };
 
 // Same shape and the same reasoning as query_device_features: one query, so two
@@ -295,6 +326,9 @@ inline DeviceLimits query_device_limits(
     const bool subgroup_control =
         std::ranges::find(features.extensions, std::string_view(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME)) !=
         features.extensions.end();
+    const bool conservative =
+        std::ranges::find(features.extensions, std::string_view(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME)) !=
+        features.extensions.end();
 
     VkPhysicalDeviceSubgroupProperties subgroup{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
     VkPhysicalDeviceVulkan11Properties v11{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES};
@@ -302,6 +336,8 @@ inline DeviceLimits query_device_limits(
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_PROPERTIES};
     VkPhysicalDeviceSubgroupSizeControlProperties size_control{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES};
+    VkPhysicalDeviceConservativeRasterizationPropertiesEXT conservative_props{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONSERVATIVE_RASTERIZATION_PROPERTIES_EXT};
 
     subgroup.pNext = &v11;
     void** tail = &v11.pNext;
@@ -313,6 +349,11 @@ inline DeviceLimits query_device_limits(
     if (subgroup_control)
     {
         *tail = &size_control;
+        tail = &size_control.pNext;
+    }
+    if (conservative)
+    {
+        *tail = &conservative_props;
     }
 
     VkPhysicalDeviceProperties2 props{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &subgroup};
@@ -338,6 +379,11 @@ inline DeviceLimits query_device_limits(
     limits.subgroup_size = subgroup.subgroupSize;
     limits.min_subgroup_size = subgroup_control ? size_control.minSubgroupSize : subgroup.subgroupSize;
     limits.max_subgroup_size = subgroup_control ? size_control.maxSubgroupSize : subgroup.subgroupSize;
+
+    limits.conservative_underestimation = conservative && conservative_props.primitiveUnderestimation == VK_TRUE;
+    limits.max_extra_overestimation = conservative ? conservative_props.maxExtraPrimitiveOverestimationSize : 0.0f;
+    limits.extra_overestimation_granularity =
+        conservative ? conservative_props.extraPrimitiveOverestimationSizeGranularity : 0.0f;
     return limits;
 }
 
@@ -432,6 +478,9 @@ inline constexpr auto kFeatureTable = std::to_array<FeatureInfo>({
     // bit it may be asked to turn on.
     {.feature = Feature::ASYNC_COMPUTE, .name = "ASYNC_COMPUTE", .fact = &DeviceFeatures::separate_compute_family},
     {.feature = Feature::ASYNC_TRANSFER, .name = "ASYNC_TRANSFER", .fact = &DeviceFeatures::separate_transfer_family},
+    {.feature = Feature::CONSERVATIVE_RASTER,
+     .name = "CONSERVATIVE_RASTER",
+     .extension = VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME},
 });
 
 inline constexpr const FeatureInfo& feature_info(Feature feature)
