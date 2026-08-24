@@ -68,8 +68,8 @@ def render(ctx, target, pipeline, vbuf, ibuf, instances, vertex_count=4):
 
 
 def float_instance_buffer(ctx, rows):
-    return ctx.create_buffer([v for row in rows for v in row], bz.BufferType.VERTEX,
-                             bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    return ctx.create_buffer([v for row in rows for v in row], bz.BufferUsage.VERTEX,
+                             bz.MemoryUsage.STATIC)
 
 
 def test_one_draw_paints_every_instance(ctx, instanced):
@@ -78,7 +78,7 @@ def test_one_draw_paints_every_instance(ctx, instanced):
     screenshot."""
     target = ctx.create_render_target(64, 64)
     pipeline = instanced(target, [bz.VertexFormat.FLOAT2, bz.VertexFormat.FLOAT4])
-    vbuf = ctx.create_buffer(QUAD, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    vbuf = ctx.create_buffer(QUAD, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
     ibuf = float_instance_buffer(ctx, INSTANCES)
 
     pixels = render(ctx, target, pipeline, vbuf, ibuf, instances=4)
@@ -100,13 +100,13 @@ def test_ubyte4_norm_instance_colour(ctx, instanced):
     """
     target = ctx.create_render_target(64, 64)
     pipeline = instanced(target, [bz.VertexFormat.FLOAT2, bz.VertexFormat.UBYTE4_NORM])
-    vbuf = ctx.create_buffer(QUAD, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    vbuf = ctx.create_buffer(QUAD, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
     packed = b"".join(struct.pack("<2f4B", x, y, 128, 0, 255, 255) for x, y in
                       [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)])
     assert len(packed) == 4 * 12, "12 bytes per instance: 2 floats plus 4 bytes"
     ibuf = ctx.create_buffer(np.frombuffer(packed, dtype=np.uint8),
-                             bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+                             bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
     pixels = render(ctx, target, pipeline, vbuf, ibuf, instances=4)
     for row, col in CENTRES:
@@ -116,7 +116,7 @@ def test_ubyte4_norm_instance_colour(ctx, instanced):
 def test_strip_covers_the_quad_a_list_leaves_half(ctx, instanced):
     """The same four vertices: a strip makes two triangles, a list makes one."""
     target = ctx.create_render_target(64, 64)
-    vbuf = ctx.create_buffer(QUAD, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    vbuf = ctx.create_buffer(QUAD, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
     ibuf = float_instance_buffer(ctx, INSTANCES[:1])
 
     strip = instanced(target, [bz.VertexFormat.FLOAT2, bz.VertexFormat.FLOAT4])
@@ -136,10 +136,10 @@ def test_draw_indexed_takes_an_instance_count(ctx, instanced):
     target = ctx.create_render_target(64, 64)
     pipeline = instanced(target, [bz.VertexFormat.FLOAT2, bz.VertexFormat.FLOAT4],
                          topology=bz.Topology.TRIANGLE_LIST)
-    vbuf = ctx.create_buffer(QUAD, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    vbuf = ctx.create_buffer(QUAD, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
     ibuf = float_instance_buffer(ctx, INSTANCES)
-    indices = ctx.create_buffer([0, 1, 2, 1, 3, 2], bz.BufferType.INDEX,
-                                bz.MemoryUsage.STATIC, bz.DataType.UINT32)
+    indices = ctx.create_buffer([0, 1, 2, 1, 3, 2], bz.BufferUsage.INDEX,
+                                bz.MemoryUsage.STATIC, dtype=np.uint32)
 
     g = ctx.graph()
     with g.add_pass(target, clear_color=[0.0, 0.0, 0.0, 1.0]) as p:

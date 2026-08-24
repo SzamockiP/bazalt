@@ -55,7 +55,7 @@ for blade in range(3):
     ranges.append((start, len(positions)))
 
 vbuf = ctx.create_buffer(np.array(positions, dtype=np.float32),
-                         bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+                         bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
 
 def index_buffer(separate):
@@ -65,7 +65,7 @@ def index_buffer(separate):
             indices.append(RESTART)
         indices += list(range(start, end))
     data = np.array(indices, dtype=np.uint32)
-    return ctx.create_buffer(data, bz.BufferType.INDEX, bz.MemoryUsage.STATIC), len(data)
+    return ctx.create_buffer(data, bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC), len(data)
 
 
 def pipeline(restart, polygon_mode):

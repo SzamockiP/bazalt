@@ -118,10 +118,10 @@ BAZALT_FORCE_VULKAN_1_2=1 venv/Scripts/python.exe -m pytest -q
 ```
 
 `BAZALT_FORCE_SINGLE_QUEUE=1` is the same kind of knob and 0.29 added it for the same reason:
-CI's drivers report ONE queue family, so the aliased-compute path is what runs there and the
+CI's drivers report ONE queue family, so the aliased path is what runs there and the
 separate-queue path is what runs on a developer GPU. This forces the alias on hardware that
-has two families, so both halves are reachable in one place. `list_devices()` ignores it,
-because that one reports the hardware.
+has more families, so both halves are reachable in one place. Since 0.30 it forces the
+TRANSFER alias too. `list_devices()` ignores it, because that one reports the hardware.
 
 ```bash
 BAZALT_FORCE_SINGLE_QUEUE=1 venv/Scripts/python.exe -m pytest -q
@@ -140,17 +140,22 @@ The layering exists so nothing below `Renderer.hpp` knows swapchains exist.
   index), the serial-keyed deferred destruction queue, the sampler cache, and debug-name
   plumbing. Since 0.28 a queue is a **`QueueRuntime`** — handle, family and its flags, the
   legal barrier stages of that family, timeline semaphore, reserved and submitted serial
-  counters, a mutex POINTER and a command pool. **Two are constructed since 0.29.** Where the
-  device has a compute-only family they are two queues; where it has none, the compute runtime
-  aliases the graphics `VkQueue` and its mutex (external synchronization is about the queue,
-  so a second lock over one handle would be a race) and keeps its own timeline and pool — so
-  the cross-queue path runs on every driver, including CI's single-family ones.
-  `Feature::ASYNC_COMPUTE` reports which you have; `BAZALT_FORCE_SINGLE_QUEUE=1` forces the
-  alias. One timeline per runtime because two queues cannot keep one counter strictly
+  counters, a mutex POINTER and a command pool. **Three are constructed since 0.30**
+  (graphics, compute, transfer), reached through `runtimes_[queue_index(kind)]`. Where the
+  device has a compute-only or transfer-only family that runtime is a real queue; where it
+  has neither, the runtime aliases the graphics `VkQueue` and its mutex (external
+  synchronization is about the queue, so a second lock over one handle would be a race) and
+  keeps its own timeline and pool — so the cross-queue path runs on every driver, including
+  CI's single-family ones. The transfer runtime never borrows the COMPUTE family: a staging
+  copy is DMA, not shader work. `Feature::ASYNC_COMPUTE` / `ASYNC_TRANSFER` report which you
+  have; `BAZALT_FORCE_SINGLE_QUEUE=1` forces both aliases. One timeline per runtime because
+  two queues cannot keep one counter strictly
   increasing without waiting on each other — NOT because the spec forbids co-signalling, which
   is the binary rule and what 0.28's comment wrongly quoted. The deletion-queue key and the
   ring's slot serials are per queue (`retire_key()`, `note_slot_submit`), and `lock_queues()`
-  takes both mutexes for whoever idles the device. Both windowed and headless submits advance
+  takes every non-aliasing mutex for whoever idles the device. **A per-queue sentinel array is
+  written `per_queue(value)`, never a brace list** — a short brace list value-initializes the
+  rest, and `kNoBatch` becoming 0 in the third slot is a silent wait no test would catch. Both windowed and headless submits advance
   the same ring, and both record into it. Since 0.15 any
   number of Contexts may be alive: **every device-level `vk*` call goes through
   `ctx.vk()`**, and `create_instance_` calls `volkLoadInstanceOnly`, so the device-level
@@ -181,7 +186,11 @@ The layering exists so nothing below `Renderer.hpp` knows swapchains exist.
   sink, and owns the query pools. It computes no barrier — it cannot, because whatever
   wrote what this pass reads was recorded by a different recorder.
 - **`ResourceTracker.hpp`** — the hazard state machine the graph's fold drives (it used to
-  run per recording). Its first-use floors now answer for writers OUTSIDE the graph —
+  run per recording). Image state is per `(layer, mip)` since 0.30, in the
+  `SubresourceLayouts` shape: one state while the image is uniform, a split on the first
+  narrowed use (`set_image(layer=, mip=)`), a collapse when every entry agrees again — so an
+  image nobody narrows takes the same path it always did, and a pyramid pass can sample mip
+  N-1 while it writes mip N. `tracks()` answers per RANGE for the same reason. Its first-use floors now answer for writers OUTSIDE the graph —
   another graph, or the previous frame — which is the 0.24 argument one level up.
   `add_pass(auto_barriers=False)` hands one pass's hazards to `p.barrier()`, and those
   barriers still feed the fold. Attachment layout transitions are the compile's job and
@@ -190,10 +199,15 @@ The layering exists so nothing below `Renderer.hpp` knows swapchains exist.
   version or extension name. Vulkan 1.2 baseline; on 1.2 devices the dynamic-rendering
   entry points are loaded under KHR names and aliased onto the core symbols
   (`Context::alias_dynamic_rendering_entry_points`), so call sites only use core names.
-- **`UploadManager.hpp`** — one worker thread decodes images and submits copies/mipgen on
-  the graphics queue; each submit signals the graphics timeline, so frames wait GPU-side. It
-  stays on that queue permanently — mipgen is a blit cascade and a blit needs graphics — so a
-  compute batch that reads an uploaded image waits the graphics timeline for it.
+- **`UploadManager.hpp`** — one worker thread decodes images and submits the staging copy on
+  the **transfer** runtime since 0.30; each submit signals that queue's timeline, so frames
+  wait GPU-side. A MIPPED upload is two submits: the copy on transfer, then the blit cascade
+  on graphics waiting the copy's serial, because `vkCmdBlitImage` needs a graphics family.
+  So `upload_serial_` is a `QueueSerials` on both `Buffer` and `Image`, and
+  `require_uploads_resident` returns one. A reload or an `image.update` also waits the
+  graphics queue's newest submitted serial — the frames still sampling the image used to be
+  ordered by a fragment-shader source scope, which a transfer-only family may not name — and
+  marks the image PENDING, so nothing reads between the two halves of a split upload.
 - **`HotReload.hpp`** — watches the shaders (plus `#include`s) and images bazalt itself
   loaded, recompiling/re-uploading in place; a bad edit logs and keeps the last good
   version. Drained on the main thread from `begin_frame` / `ctx.submit`.

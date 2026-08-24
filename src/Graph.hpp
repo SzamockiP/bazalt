@@ -38,6 +38,23 @@ public:
         Any
     };
 
+    // What a verb needs from the queue its pass runs on. Refused by QueueKind
+    // rather than by the family the queue happens to sit on, so the contract
+    // reads the same on a device whose compute or transfer runtime aliases
+    // the graphics queue. One rule, not one per driver.
+    //
+    // Graphics: a blit (and generate_mipmaps, a chain of blits) needs a
+    // graphics family and always will. Shader: a dispatch, a bound pipeline,
+    // a descriptor set or a clear (vkCmdClearColorImage) need GRAPHICS or
+    // COMPUTE — a transfer family runs copies only. Any: copies, fills,
+    // barriers, labels, timers.
+    enum class QueueNeeds
+    {
+        Any,
+        Shader,
+        Graphics
+    };
+
     bool is_render() const
     {
         return target_ != nullptr;
@@ -95,16 +112,8 @@ public:
     }
 
     // The gate every recording verb passes first: not removed, not sealed,
-    // and the right kind of pass for the verb.
-    std::expected<void, Error> guard(VerbScope scope, const char* verb) const;
-
-    // The verbs a compute queue cannot run whatever the pass kind: a blit is
-    // graphics-only work, and generate_mipmaps is a chain of blits.
-    //
-    // Refused by QueueKind rather than by the family the queue happens to sit
-    // on, so the contract reads the same on a device whose compute runtime
-    // aliases the graphics queue. One rule, not one per driver.
-    std::expected<void, Error> require_graphics_queue(const char* verb) const;
+    // the right kind of pass for the verb, and a queue that can run it.
+    std::expected<void, Error> guard(VerbScope scope, const char* verb, QueueNeeds needs = QueueNeeds::Any) const;
 
     // Marks the owning graph dirty, surviving the graph's death (a Python
     // handle may outlive it).
@@ -216,6 +225,13 @@ public:
     // this first.
     std::expected<void, Error> compile();
 
+    // A human-readable report of what the compile decided: each enabled pass,
+    // its queue and batch, and every barrier, timeline wait and attachment
+    // transition the fold emitted, with the pass that produced each
+    // dependency. Compiles first when the graph changed. A debugging aid —
+    // the text is not API.
+    std::expected<std::string, Error> explain();
+
     std::span<const Batch> batches() const
     {
         return batches_;
@@ -259,6 +275,13 @@ public:
     // scope for render passes, the pass's commands with scheduled barriers
     // interleaved, exit transitions.
     void execute_batch(const Batch& batch, VkCommandBuffer vkCmd, const FrameContext& frame);
+
+    // Write the layouts this graph leaves behind onto the Images, from what
+    // the fold computed rather than from the record-time mark each verb makes.
+    // Called once per submit, AFTER the recording: the replay still reads the
+    // pre-graph layouts (even_out_image does), so an earlier write-back would
+    // hand it this frame's answer to last frame's question.
+    void apply_final_layouts();
 
 private:
     explicit Graph(std::shared_ptr<Context> context)
@@ -305,6 +328,59 @@ private:
         bool elide_entry = false;
     };
 
+    // One line of graph.explain(): something the compile decided, attributed
+    // to the pass it runs for and the pass that produced the dependency.
+    // Filled beside the real emission in compile_, so the report cannot drift
+    // from what the executor replays.
+    struct ExplainEntry
+    {
+        enum class Kind
+        {
+            Barrier,    // a vkCmdPipelineBarrier the fold computed
+            Floor,      // the same, from a first-use floor (no producer here)
+            Wait,       // a cross-queue edge that became a timeline wait
+            Attachment, // a render pass's entry transition (from the target)
+            Retire,     // its exit transition
+            Elided,     // an entry/exit the look-ahead removed
+            Unordered   // a manual pass's use no barrier covers (the lint)
+        };
+        Kind kind;
+        std::size_t pass = 0;
+        std::shared_ptr<Buffer> buffer; // one of the two, or neither for an
+        std::shared_ptr<Image> image;   // attachment row
+        std::size_t producer = ResourceTracker::kNoPass;
+        bool producer_wrote = true;
+        ResourceTracker::ImageBarrier b{}; // layouts UNDEFINED for buffers
+        std::string note;                  // extra text: "color[0]", "(clear)", ...
+    };
+    std::vector<ExplainEntry> explain_;
+
+    // Classify what one tracker call did and append the entries. `prev` is
+    // the state snapshot from before the call (null on a true first use).
+    // The manual-pass lint (0.30): one WARNING per (pass, resource) per
+    // compile when a manual use needs a barrier or a wait no p.barrier() in
+    // the pass established. Never an exception — a manual pass exists because
+    // it may know better, and an exception would close the escape hatch rule
+    // 2 requires.
+    void warn_manual_hazard_(
+        std::size_t pass_index,
+        const UseEvent& e,
+        const ResourceTracker::BufferState* buffer_state,
+        const ResourceTracker::ImageState* image_state,
+        ResourceTracker::Peek peek);
+
+    template <typename State>
+    void record_explain_(
+        std::size_t pass,
+        const std::shared_ptr<Buffer>& buffer,
+        const std::shared_ptr<Image>& image,
+        const State* prev,
+        bool had_prev,
+        QueueKind queue,
+        std::size_t waits_before,
+        const std::vector<std::size_t>& waits,
+        const std::optional<ResourceTracker::ImageBarrier>& barrier);
+
     std::expected<void, Error> compile_();
 
     // Allocate whatever command-buffer rows the batches now need, from each
@@ -319,7 +395,8 @@ private:
 
     // Bring a preserving pass's attachments to the layout its own entry
     // transition assumes, when something in this graph moved them since.
-    static void correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, std::vector<std::size_t>& waits);
+    // A member since 0.30: it appends explain entries.
+    void correct_preserve_entry_(CompiledPass& cp, ResourceTracker& tracker, std::vector<std::size_t>& waits);
 
     // Report a render pass's attachment writes to the fold, so a later pass
     // that samples one is ordered against the drawing.
@@ -331,6 +408,18 @@ private:
     std::array<std::vector<VkCommandBuffer>, kQueueCount> command_buffers_;
     std::vector<CompiledPass> compiled_;
     std::vector<Batch> batches_;
+    // What apply_final_layouts() writes back, one entry per image the fold
+    // touched and per subresource where it left them disagreeing. Raw
+    // pointers: the compiled passes hold the images alive, and any change to
+    // the pass set marks the graph dirty, so a compile refreshes this before
+    // anything can read it again.
+    struct FinalLayout
+    {
+        Image* image;
+        VkImageLayout layout;
+        ImageRange range;
+    };
+    std::vector<FinalLayout> final_layouts_;
     // What the previous replay signalled on each queue — see replay_wait().
     QueueSerials last_replay_{};
     bool dirty_ = true;

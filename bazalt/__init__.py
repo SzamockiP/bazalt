@@ -2,7 +2,7 @@
 
 from bazalt._core import *
 
-__version__ = "0.29.0"
+__version__ = "0.30.0"
 
 __all__ = [
     # Core
@@ -54,8 +54,7 @@ __all__ = [
     "Limits",
     "MouseState",
     "WindowMode",
-    "BufferType",
-    "DataType",
+    "BufferUsage",
     "ShaderStage",
     "ShaderLanguage",
     "VertexFormat",
@@ -66,6 +65,7 @@ __all__ = [
     "AddressMode",
     "CompareOp",
     "PresentMode",
+    "ConservativeRaster",
     "CullMode",
     "FrontFace",
     "PolygonMode",

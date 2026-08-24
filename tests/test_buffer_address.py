@@ -40,15 +40,15 @@ def address_ctx(extra_context):
 
 def test_address_is_not_null(address_ctx):
     buf = address_ctx.create_buffer(
-        np.arange(64, dtype=np.uint32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+        np.arange(64, dtype=np.uint32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     assert buf.address != 0
     # Stable: it is where the buffer IS, not a token handed out per call.
     assert buf.address == buf.address
 
 
 def test_two_buffers_have_different_addresses(address_ctx):
-    a = address_ctx.create_buffer(1024, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-    b = address_ctx.create_buffer(1024, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    a = address_ctx.create_buffer(1024, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    b = address_ctx.create_buffer(1024, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     assert a.address != b.address
 
 
@@ -61,9 +61,9 @@ def test_shader_reads_through_the_address(address_ctx):
                 .build())
 
     src = address_ctx.create_buffer(
-        np.arange(n, dtype=np.uint32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+        np.arange(n, dtype=np.uint32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     dst = address_ctx.create_buffer(
-        np.zeros(n, dtype=np.uint32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+        np.zeros(n, dtype=np.uint32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     g = address_ctx.graph()
     p = g.add_pass()
@@ -105,7 +105,7 @@ def test_a_shader_may_use_64_bit_integers(extra_context):
                 .build())
 
     out = context.create_buffer(
-        np.zeros(4, dtype=np.uint32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+        np.zeros(4, dtype=np.uint32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     bound = context.create_descriptor_pool().allocate_set(pipeline)
     bound.set_buffer(0, out)
 
@@ -123,14 +123,14 @@ def test_a_shader_may_use_64_bit_integers(extra_context):
 
 
 def test_a_dynamic_buffer_has_an_address_too(address_ctx):
-    buf = address_ctx.create_buffer(256, bz.BufferType.STORAGE, bz.MemoryUsage.DYNAMIC)
+    buf = address_ctx.create_buffer(256, bz.BufferUsage.STORAGE, bz.MemoryUsage.DYNAMIC)
     assert buf.address != 0
 
 
 def test_address_without_the_feature_raises(extra_context):
     """The flag is set at creation, so a Context without it can never answer."""
     plain = extra_context()
-    buf = plain.create_buffer(256, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = plain.create_buffer(256, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     with pytest.raises(bz.UnsupportedError, match="BUFFER_ADDRESS"):
         buf.address
 
@@ -144,7 +144,7 @@ def test_a_buffer_larger_than_one_staging_chunk_uploads_whole(ctx):
     """
     words = 40 * 1024 * 1024  # 160 MiB of uint32
     data = np.arange(words, dtype=np.uint32)
-    buf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = ctx.create_buffer(data, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     got = buf.read(np.uint32)
     assert len(got) == words

@@ -252,11 +252,11 @@ class ImGuiOverlay:
     def _upload(self, vertices, indices):
         if self.vbuf is None or vertices.nbytes > self.vertex_bytes:
             self.vertex_bytes = max(vertices.nbytes * 2, 64 * 1024)
-            self.vbuf = self.ctx.create_buffer(self.vertex_bytes, bz.BufferType.VERTEX,
+            self.vbuf = self.ctx.create_buffer(self.vertex_bytes, bz.BufferUsage.VERTEX,
                                                bz.MemoryUsage.DYNAMIC, name="imgui vertices")
         if self.ibuf is None or indices.nbytes > self.index_bytes:
             self.index_bytes = max(indices.nbytes * 2, 32 * 1024)
-            self.ibuf = self.ctx.create_buffer(self.index_bytes, bz.BufferType.INDEX,
+            self.ibuf = self.ctx.create_buffer(self.index_bytes, bz.BufferUsage.INDEX,
                                                bz.MemoryUsage.DYNAMIC, name="imgui indices")
         self.vbuf.update(vertices)
         self.ibuf.update(indices)

@@ -95,9 +95,9 @@ Context::~Context()
     }
     sampler_cache_.clear();
 
-    // Both runtimes, compute first: it never owns the VkQueue (it may alias the
-    // graphics one) but it always owns its timeline and its pool.
-    for (QueueRuntime* q : {&compute_q_, &graphics_q_})
+    // Every runtime: an aliasing one never owns the VkQueue but it always owns
+    // its timeline and its pool.
+    for (QueueRuntime* q : runtimes_)
     {
         if (q->timeline)
         {
@@ -241,27 +241,20 @@ void Context::note_slot_submit(const QueueSerials& serials)
     max_merge(slot_serial_[frame_serial_ % frames_in_flight_], serials);
 }
 
-void Context::wait_for_slot(std::optional<QueueKind> only)
+void Context::wait_for_slot(std::optional<QueueKind> except)
 {
     if (slot_serial_.size() != frames_in_flight_)
     {
         return;
     }
     QueueSerials wanted = slot_serial_[frame_serial_ % frames_in_flight_];
-    if (only)
+    if (except)
     {
-        // Keep one queue's half and drop the rest. A window asks for the
-        // compute half alone: its in-flight fence has already covered the
-        // graphics one, and that half may hold a submit from THIS frame — the
-        // window that presented before this one.
-        const std::size_t keep = queue_index(*only);
-        for (std::size_t i = 0; i < kQueueCount; ++i)
-        {
-            if (i != keep)
-            {
-                wanted[i] = 0;
-            }
-        }
+        // Drop one queue's half and keep the rest. A window drops the
+        // graphics half: its in-flight fence has already covered it, and that
+        // half may hold a submit from THIS frame — the window that presented
+        // before this one.
+        wanted[queue_index(*except)] = 0;
     }
     // Frame pacing: a failure here surfaces at the next submit, which is
     // where a caller can be told about it.
@@ -281,55 +274,73 @@ std::expected<void, Error> Context::wait_for_submits()
     // submit signals a higher value, and every wait is ">="), but a wait for
     // the dropped number itself has nothing to wake it — ctx.wait() after a
     // failed present used to hang forever.
-    auto r = wait_for_serials({graphics_q_.submitted.load(), compute_q_.submitted.load()});
+    auto r = wait_for_serials(submitted_serials());
     flush_deletion_queue();
     return r;
 }
 
-std::expected<std::uint64_t, Error> Context::submit_one_shot(VkCommandBuffer cmd, std::uint64_t after)
+std::expected<std::uint64_t, Error> Context::submit_one_shot(
+    VkCommandBuffer cmd,
+    QueueKind kind,
+    const QueueSerials& after)
 {
-    std::lock_guard lock(*graphics_q_.mutex);
-    const std::uint64_t serial = advance_submit_serial();
+    QueueRuntime& rt = runtime(kind);
+    std::lock_guard lock(*rt.mutex);
+    const std::uint64_t serial = ++rt.serial;
 
-    VkSemaphore timeline = graphics_q_.timeline;
-    // TRANSFER, not TOP_OF_PIPE: an upload's first real work is a copy, and
-    // there is nothing before it worth letting run early.
-    const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    const bool ordered = after != 0;
+    // One wait per queue named in `after`, each on that queue's own timeline.
+    // TRANSFER, not TOP_OF_PIPE: an upload's first real work is a copy (the
+    // mip cascade's first work is a blit, which is the same stage), and there
+    // is nothing before it worth letting run early. Legal on every family.
+    std::array<VkSemaphore, kQueueCount> wait_semaphores{};
+    std::array<VkPipelineStageFlags, kQueueCount> wait_stages{};
+    std::array<std::uint64_t, kQueueCount> wait_values{};
+    std::uint32_t waits = 0;
+    for (std::size_t q = 0; q < kQueueCount; ++q)
+    {
+        if (after[q] == 0)
+        {
+            continue;
+        }
+        wait_semaphores[waits] = runtimes_[q]->timeline;
+        wait_stages[waits] = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        wait_values[waits] = after[q];
+        ++waits;
+    }
     VkTimelineSemaphoreSubmitInfo timelineInfo{
         .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
         .pNext = nullptr,
-        .waitSemaphoreValueCount = ordered ? 1u : 0u,
-        .pWaitSemaphoreValues = ordered ? &after : nullptr,
+        .waitSemaphoreValueCount = waits,
+        .pWaitSemaphoreValues = wait_values.data(),
         .signalSemaphoreValueCount = 1,
         .pSignalSemaphoreValues = &serial};
     VkSubmitInfo submitInfo{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .pNext = &timelineInfo,
-        .waitSemaphoreCount = ordered ? 1u : 0u,
-        .pWaitSemaphores = ordered ? &timeline : nullptr,
-        .pWaitDstStageMask = ordered ? &wait_stage : nullptr,
+        .waitSemaphoreCount = waits,
+        .pWaitSemaphores = wait_semaphores.data(),
+        .pWaitDstStageMask = wait_stages.data(),
         .commandBufferCount = 1,
         .pCommandBuffers = &cmd,
         .signalSemaphoreCount = 1,
-        .pSignalSemaphores = &timeline};
+        .pSignalSemaphores = &rt.timeline};
     if (auto e = check(
-            vk_.vkQueueSubmit(graphics_queue(), 1, &submitInfo, VK_NULL_HANDLE),
+            vk_.vkQueueSubmit(rt.queue, 1, &submitInfo, VK_NULL_HANDLE),
             "submit one-shot command buffer",
             ErrorCode::Resource))
     {
         // Same reason as submit_batches: an unreachable reservation stops the
         // deletion queue for good.
-        graphics_q_.serial.store(serial - 1);
+        rt.serial.store(serial - 1);
         return std::unexpected(*e);
     }
-    graphics_q_.submitted.store(serial);
+    rt.submitted.store(serial);
     return serial;
 }
 
 std::expected<void, Error> Context::submit_batches(
     std::span<const SubmitBatch> batches,
-    std::uint64_t upload_serial,
+    const QueueSerials& uploads,
     const QueueSerials& after,
     const QueueSerials& previous_replay,
     QueueSerials& signalled,
@@ -364,13 +375,13 @@ std::expected<void, Error> Context::submit_batches(
 
         // What this batch waits for, per timeline.
         //
-        // Uploads ride the graphics timeline whatever queue reads them, so this
-        // one entry covers both cases — and it is waited even by a graphics
-        // batch, because the upload worker is a different submitter: same queue
-        // is not the same submission chain, and the replay wrap-around barrier
-        // names shader writes rather than the transfer write a staging copy is.
-        QueueSerials want{};
-        want[queue_index(QueueKind::Graphics)] = upload_serial;
+        // Uploads name the timeline they signalled — the transfer one for a
+        // copy, the graphics one for a mip cascade, both for a mipped upload —
+        // and every one is waited even by a batch on the same queue, because
+        // the upload worker is a different submitter: same queue is not the
+        // same submission chain, and the replay wrap-around barrier names
+        // shader writes rather than the transfer write a staging copy is.
+        QueueSerials want = uploads;
         // Same argument for after=: it names another graph's submit.
         max_merge(want, after);
         for (const std::size_t j : batch.waits)
@@ -537,8 +548,11 @@ void Context::defer_destroy(std::function<void()> fn)
 
 void Context::flush_deletion_queue()
 {
-    const QueueSerials completed = {
-        completed_submit_serial(QueueKind::Graphics), completed_submit_serial(QueueKind::Compute)};
+    QueueSerials completed{};
+    for (std::size_t i = 0; i < kQueueCount; ++i)
+    {
+        completed[i] = completed_submit_serial(static_cast<QueueKind>(i));
+    }
     // An entry is free only once EVERY queue has passed its own half of the
     // key: a resource dropped now may be referenced by work in flight on
     // either one.
@@ -585,11 +599,11 @@ void Context::set_upload_manager(std::unique_ptr<UploadManager> manager)
     upload_manager_ = std::move(manager);
 }
 
-void Context::note_upload_serial(std::uint64_t serial)
+void Context::note_upload_serial(const QueueSerials& serials)
 {
     if (upload_manager_)
     {
-        upload_manager_->note_direct_upload(serial);
+        upload_manager_->note_direct_upload(serials);
     }
 }
 
@@ -989,6 +1003,10 @@ std::expected<void, Error> Context::select_physical_device_(Context& ctx, const 
     {
         selector.require_separate_compute_queue();
     }
+    if (std::ranges::find(config.required, Feature::ASYNC_TRANSFER) != config.required.end())
+    {
+        selector.require_dedicated_transfer_queue();
+    }
 
     // An explicitly chosen GPU still has to pass the same suitability gate —
     // required features and API version are not preferences. select_devices()
@@ -1080,12 +1098,14 @@ std::expected<void, Error> Context::configure_features_(
     if (const char* forced = std::getenv("BAZALT_FORCE_SINGLE_QUEUE"); forced != nullptr && forced[0] == '1')
     {
         available.separate_compute_family = false;
+        available.separate_transfer_family = false;
         if (logger)
         {
             logger->log(
                 Severity::Info,
                 Source::Device,
-                "Vulkan: BAZALT_FORCE_SINGLE_QUEUE=1, the compute queue aliases the graphics queue");
+                "Vulkan: BAZALT_FORCE_SINGLE_QUEUE=1, the compute and transfer queues alias the "
+                "graphics queue");
         }
     }
 
@@ -1215,8 +1235,10 @@ std::expected<void, Error> Context::configure_features_(
     // ASYNC_COMPUTE joins them in 0.29 for a third reason: it is not a switch
     // at all. The device either has a compute-only family or it does not, and
     // supports() must answer that without anyone having asked, the way
-    // supports(MULTIVIEW) does.
-    for (Feature implicit : {Feature::ANISOTROPIC_FILTERING, Feature::MULTIVIEW, Feature::ASYNC_COMPUTE})
+    // supports(MULTIVIEW) does. ASYNC_TRANSFER (0.30) is the same fact about
+    // the transfer-only family.
+    for (Feature implicit :
+         {Feature::ANISOTROPIC_FILTERING, Feature::MULTIVIEW, Feature::ASYNC_COMPUTE, Feature::ASYNC_TRANSFER})
     {
         if (feature_available(available, implicit))
         {
@@ -1414,27 +1436,68 @@ std::expected<void, Error> Context::create_device_(Context& ctx)
         ctx.compute_q_.mutex = &ctx.graphics_q_.own_mutex;
     }
 
+    // The transfer runtime (0.30), by the same rule. vk-bootstrap's "dedicated"
+    // queue is one on a family with TRANSFER and neither GRAPHICS nor COMPUTE
+    // — the DMA engine — which is exactly the fact ASYNC_TRANSFER reports, but
+    // the index is still compared against BOTH other families, because a
+    // library fallback answers a different question than the one asked. A
+    // device without such a family aliases graphics, never compute: a staging
+    // copy is bandwidth-bound DMA, and the compute queue is the wrong home for
+    // it (DESIGN.md, "Uploads on a TRANSFER queue").
+    bool dedicated = ctx.enabled_features_.contains(Feature::ASYNC_TRANSFER);
+    if (dedicated)
+    {
+        auto tq = ctx.vkb_device_.get_dedicated_queue(vkb::QueueType::transfer);
+        auto ti = ctx.vkb_device_.get_dedicated_queue_index(vkb::QueueType::transfer);
+        dedicated = tq.has_value() && ti.has_value() && ti.value() != ctx.graphics_q_.family &&
+                    ti.value() != ctx.compute_q_.family;
+        if (dedicated)
+        {
+            ctx.transfer_q_.queue = tq.value();
+            ctx.transfer_q_.family = ti.value();
+        }
+        else
+        {
+            ctx.enabled_features_.erase(Feature::ASYNC_TRANSFER);
+        }
+    }
+    if (!dedicated)
+    {
+        ctx.transfer_q_.queue = ctx.graphics_q_.queue;
+        ctx.transfer_q_.family = ctx.graphics_q_.family;
+        ctx.transfer_q_.mutex = &ctx.graphics_q_.own_mutex;
+    }
+
     const auto families = ctx.vkb_physical_device_.get_queue_families();
-    for (QueueRuntime* q : {&ctx.graphics_q_, &ctx.compute_q_})
+    for (QueueRuntime* q : ctx.runtimes_)
     {
         q->family_flags = q->family < families.size() ? families[q->family].queueFlags : VK_QUEUE_GRAPHICS_BIT;
         q->legal_stages = legal_stages_for(q->family_flags);
     }
 
-    // CONCURRENT over both families rather than the ownership-transfer protocol
-    // EXCLUSIVE would need: a release barrier on one queue and an acquire on
-    // the other for every resource that crosses, which is a new class of
-    // barrier the tracker has no field for, against a bandwidth cost that is
-    // noise for prototyping. Only when the families really differ — CONCURRENT
-    // with one index repeated is invalid, and on the aliased path there is one
-    // family anyway.
-    if (ctx.compute_q_.family != ctx.graphics_q_.family)
+    // CONCURRENT over the distinct families rather than the ownership-transfer
+    // protocol EXCLUSIVE would need: a release barrier on one queue and an
+    // acquire on the other for every resource that crosses, which is a new
+    // class of barrier the tracker has no field for, against a bandwidth cost
+    // that is noise for prototyping. Deduplicated, and only when two or more
+    // remain — CONCURRENT with one index repeated is invalid, and on the fully
+    // aliased path there is one family anyway.
+    std::uint32_t distinct = 0;
+    for (const QueueRuntime* q : ctx.runtimes_)
     {
-        ctx.sharing_families_ = {ctx.graphics_q_.family, ctx.compute_q_.family};
+        // A span over what has been kept so far: std::array's begin() is a
+        // pointer in libstdc++ and a class iterator in MSVC's STL, and only
+        // this spelling reads the same to both.
+        const std::span seen(ctx.sharing_families_.data(), distinct);
+        if (std::ranges::find(seen, q->family) == seen.end())
+        {
+            ctx.sharing_families_[distinct++] = q->family;
+        }
+    }
+    if (distinct >= 2)
+    {
         ctx.sharing_ = Sharing{
-            .mode = VK_SHARING_MODE_CONCURRENT,
-            .family_count = static_cast<std::uint32_t>(ctx.sharing_families_.size()),
-            .families = ctx.sharing_families_.data()};
+            .mode = VK_SHARING_MODE_CONCURRENT, .family_count = distinct, .families = ctx.sharing_families_.data()};
     }
 
     return {};
@@ -1468,10 +1531,10 @@ std::expected<void, Error> Context::create_allocator_and_pool_(Context& ctx)
         return std::unexpected(*e);
     }
 
-    // One pool per runtime. The compute runtime gets its own even when it
-    // aliases the graphics queue: a command buffer is allocated from a pool on
-    // ONE family, and the two runtimes record separately.
-    for (QueueRuntime* q : {&ctx.graphics_q_, &ctx.compute_q_})
+    // One pool per runtime. An aliasing runtime gets its own even though it
+    // shares the graphics queue: a command buffer is allocated from a pool on
+    // ONE family, and the runtimes record separately.
+    for (QueueRuntime* q : ctx.runtimes_)
     {
         VkCommandPoolCreateInfo poolInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -1527,9 +1590,9 @@ std::expected<void, Error> Context::create_allocator_and_pool_(Context& ctx)
         .initialValue = 0};
     VkSemaphoreCreateInfo timelineInfo{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &timelineType, .flags = 0};
-    // One per runtime, aliased queue included — see QueueRuntime for why they
+    // One per runtime, aliased queues included — see QueueRuntime for why they
     // are never shared.
-    for (QueueRuntime* q : {&ctx.graphics_q_, &ctx.compute_q_})
+    for (QueueRuntime* q : ctx.runtimes_)
     {
         if (auto e = check(
                 ctx.vk_.vkCreateSemaphore(ctx.vkb_device_.device, &timelineInfo, nullptr, &q->timeline),

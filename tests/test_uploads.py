@@ -149,7 +149,7 @@ def test_wait_and_progress_endpoints(ctx, tmp_path):
 
 def test_static_buffer_upload_is_async_and_wait_settles_it(ctx):
     data = np.arange(1024, dtype=np.float32)
-    buf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = ctx.create_buffer(data, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     buf.wait()
     assert buf.ready
 
@@ -157,7 +157,7 @@ def test_static_buffer_upload_is_async_and_wait_settles_it(ctx):
 def test_dynamic_buffers_are_never_pending(ctx):
     """Host-visible memory is written by mapping, so there is no copy to wait
     for and `ready` is the honest constant it looks like."""
-    buf = ctx.create_buffer(np.zeros(16, dtype=np.float32), bz.BufferType.UNIFORM,
+    buf = ctx.create_buffer(np.zeros(16, dtype=np.float32), bz.BufferUsage.UNIFORM,
                             bz.MemoryUsage.DYNAMIC)
     assert buf.ready
 
@@ -167,7 +167,7 @@ def test_reading_a_fresh_static_buffer_needs_no_wait(ctx):
     itself. Without that wait this is a race that returns uninitialized memory
     on any driver that overlaps two submits."""
     data = np.arange(256, dtype=np.float32)
-    buf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = ctx.create_buffer(data, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     np.testing.assert_array_equal(buf.read(np.float32), data)
 
 
@@ -179,8 +179,8 @@ def test_drawing_from_a_fresh_buffer_needs_no_wait(ctx, triangle_shaders):
         -0.5, +0.5, 0.0, 1.0, 0.0, 0.0,
         +0.5, +0.5, 0.0, 1.0, 0.0, 0.0,
     ], dtype=np.float32)
-    vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
-    ibuf = ctx.create_buffer(np.array([0, 1, 2], dtype=np.uint32), bz.BufferType.INDEX,
+    vbuf = ctx.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
+    ibuf = ctx.create_buffer(np.array([0, 1, 2], dtype=np.uint32), bz.BufferUsage.INDEX,
                              bz.MemoryUsage.STATIC)
 
     vert, frag = triangle_shaders
@@ -206,7 +206,7 @@ def test_wait_covers_one_shot_uploads(ctx):
     both be a lie otherwise."""
     ctx.wait()
 
-    buf = ctx.create_buffer(np.zeros(4096, dtype=np.float32), bz.BufferType.STORAGE,
+    buf = ctx.create_buffer(np.zeros(4096, dtype=np.float32), bz.BufferUsage.STORAGE,
                             bz.MemoryUsage.STATIC)
     img = ctx.create_image(np.zeros((256, 256, 4), dtype=np.uint8))
 
@@ -221,3 +221,77 @@ def fullscreen_and_textured(ctx):
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
     return vert, frag
+
+
+def test_a_mipped_upload_is_sampled_after_the_split(ctx, tmp_path):
+    """A mipped upload is TWO submits since 0.30 — the copy on the transfer
+    queue, the blit cascade on graphics waiting for it — and the image carries
+    a serial on each timeline. Reading a generated level proves the cascade
+    ran and the split stayed ordered; the validation fixture is the referee
+    for the layouts."""
+    png_path = tmp_path / "mipped.png"
+    write_png(png_path, [[(64, 128, 192, 255)] * 64] * 64)
+    img = ctx.load_image(str(png_path), mipmaps=True)
+    assert img.mip_levels >= 3
+    img.wait()
+    assert img.ready
+    top = img.read(mip=0)
+    low = img.read(mip=2)
+    # A constant image box-filters to itself, so every level holds the colour.
+    assert tuple(top[0, 0]) == (64, 128, 192, 255)
+    assert tuple(low[0, 0]) == (64, 128, 192, 255)
+
+
+def test_uploads_ride_the_transfer_timeline(ctx):
+    """create_buffer's staging copy submits on the transfer runtime since
+    0.30, so a graph that binds the buffer waits that timeline through
+    require_uploads_resident. Validation-clean is the whole assertion; a
+    missing wait is a hazard the fixture reports."""
+    buf = ctx.create_buffer(np.arange(4096, dtype=np.float32),
+                            bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    out = ctx.create_buffer(4096 * 4, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    g = ctx.graph()
+    g.add_pass(name="copy").copy_buffer(buf, out)
+    ctx.submit(g)
+    assert out.read(np.float32)[-1] == 4095.0
+    assert buf.ready
+
+
+def test_a_copy_verb_waits_for_an_upload_it_never_bound():
+    """An image a copy or a blit names directly is in no descriptor set, so
+    `used_sets` never sees it.
+
+    Until 0.30 that cost nothing: the upload submitted on the graphics queue,
+    the graph replayed on the graphics queue, and a pipeline barrier's first
+    scope covers everything submitted earlier there. The upload runs on the
+    TRANSFER queue now and a barrier cannot reach it, so the image has to be
+    named for the submit's timeline wait — the job used_buffers has done for a
+    staged buffer since 0.18.
+
+    The referee is sync validation plus the pixels. The image is large enough
+    that the copy really can start before the upload lands: the bug this pins
+    passed the whole suite once and was found by a run that shifted the
+    timing."""
+    hazards = []
+    log = bz.Logger(min_severity=bz.Severity.INFO)
+
+    @log.on_message
+    def _(msg):
+        if msg.source == bz.Source.VALIDATION and "hazard" in msg.text.lower():
+            hazards.append(msg.text)
+
+    context = bz.Context(log, validation="sync")
+    pixels = np.zeros((512, 512, 4), np.uint8)
+    pixels[:, :, 1] = 200
+    pixels[:, :, 3] = 255
+
+    src = context.create_image(pixels, name="uploaded")
+    dst = context.create_image(512, 512, bz.Format.RGBA8, name="copy of it")
+    g = context.graph()
+    g.add_pass(name="copy").copy_image(src, dst)
+    context.submit(g)
+
+    out = dst.read()
+    log.flush()
+    assert hazards == []
+    assert out[256, 256, 1] == 200, "the copy read the image before its upload landed"

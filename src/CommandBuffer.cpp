@@ -512,8 +512,26 @@ CommandBuffer& CommandBuffer::bind_pipeline(const std::shared_ptr<Pipeline>& pip
     return *this;
 }
 
-CommandBuffer& CommandBuffer::bind_vertex_buffer(const std::shared_ptr<Buffer>& buffer, std::uint32_t binding)
+std::expected<void, Error> CommandBuffer::bind_vertex_buffer(
+    const std::shared_ptr<Buffer>& buffer,
+    std::uint32_t binding)
 {
+    if (!buffer)
+    {
+        return std::unexpected(err_resource("bind_vertex_buffer: buffer is null"));
+    }
+    // STORAGE carries VERTEX_BUFFER_BIT (the compute->graphics hand-off), so
+    // both bits are accepted; INDEX and UNIFORM are not.
+    if (const BufferUsage usage = buffer->buffer_usage();
+        !has(usage, BufferUsage::VERTEX) && !has(usage, BufferUsage::STORAGE))
+    {
+        return std::unexpected(err_resource(
+            std::format(
+                "bind_vertex_buffer: the vertices must live in a buffer whose usage has "
+                "BufferUsage.VERTEX, or BufferUsage.STORAGE when a compute shader writes them. "
+                "This buffer has usage {}.",
+                buffer_usage_name(usage))));
+    }
     // The read truly happens at draw, but a barrier placed before the bind
     // is still before the draw — sound, and simpler than deferring it.
     track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT, false);
@@ -525,7 +543,7 @@ CommandBuffer& CommandBuffer::bind_vertex_buffer(const std::shared_ptr<Buffer>& 
             const std::array<VkDeviceSize, 1> offsets = {0};
             frame.vk->vkCmdBindVertexBuffers(cmd, binding, 1, vertexBuffers.data(), offsets.data());
         });
-    return *this;
+    return {};
 }
 
 std::expected<void, Error> CommandBuffer::bind_index_buffer(const std::shared_ptr<Buffer>& buffer)
@@ -537,13 +555,15 @@ std::expected<void, Error> CommandBuffer::bind_index_buffer(const std::shared_pt
     // STORAGE is accepted because it carries INDEX_BUFFER_BIT since 0.29, for
     // the reason buffer_usage_for gives. VERTEX and UNIFORM do not, and binding
     // one used to fail inside the layers instead of here.
-    if (const BufferType type = buffer->buffer_type(); type != BufferType::INDEX && type != BufferType::STORAGE)
+    if (const BufferUsage usage = buffer->buffer_usage();
+        !has(usage, BufferUsage::INDEX) && !has(usage, BufferUsage::STORAGE))
     {
         return std::unexpected(err_resource(
             std::format(
-                "bind_index_buffer: indices must live in a BufferType.INDEX buffer, or in a "
-                "BufferType.STORAGE one when a compute shader writes them. This is a {} buffer.",
-                buffer_type_name(type))));
+                "bind_index_buffer: the indices must live in a buffer whose usage has "
+                "BufferUsage.INDEX, or BufferUsage.STORAGE when a compute shader writes them. "
+                "This buffer has usage {}.",
+                buffer_usage_name(usage))));
     }
     track_use_(buffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_INDEX_READ_BIT, false);
     record_buffer_use_(buffer);
@@ -768,6 +788,7 @@ std::expected<void, Error> CommandBuffer::barrier(std::shared_ptr<Image> image, 
     // use would transition it again from a stale one — a validation error plus
     // a useless barrier.
     note_image_state_(image, *new_layout, d.stages, d.access);
+    record_image_use_(image);
     commands_.emplace_back(
         [image = std::move(image), old = *old_layout, now = *new_layout, s, d](
             VkCommandBuffer cmd, const FrameContext& frame)
@@ -820,6 +841,7 @@ std::expected<void, Error> CommandBuffer::generate_mipmaps(const std::shared_ptr
             "SHADER_READ_ONLY) or Access.SHADER_WRITE (mip 0 in GENERAL)"));
     }
     const StageAccess s = to_vk(src, context_->all_shader_stages());
+    record_image_use_(image);
     commands_.emplace_back([image, layout = *src_layout, s](VkCommandBuffer cmd, const FrameContext& frame)
                            { image->record_generate_mipmaps(cmd, layout, s.stages, s.access); });
     // The image now rests in SHADER_READ_ONLY across every level; keep the
@@ -871,6 +893,8 @@ std::expected<void, Error> CommandBuffer::copy_image(
             "SHADER_READ_ONLY) or Access.SHADER_WRITE (a compute shader just wrote "
             "it, GENERAL)"));
     }
+    record_image_use_(src);
+    record_image_use_(dst);
     commands_.emplace_back([src, dst, layout = *src_layout](VkCommandBuffer cmd, const FrameContext& frame)
                            { record_image_copy(*frame.vk, cmd, *src, *dst, layout, frame.legal_stages); });
     finish_image_transfer_(src, dst);
@@ -929,6 +953,8 @@ std::expected<void, Error> CommandBuffer::blit_image(
             "SHADER_READ_ONLY) or Access.SHADER_WRITE (a compute shader just wrote "
             "it, GENERAL)"));
     }
+    record_image_use_(src);
+    record_image_use_(dst);
     commands_.emplace_back([src, dst, layout = *src_layout, filter](VkCommandBuffer cmd, const FrameContext& frame)
                            { record_image_blit(*frame.vk, cmd, *src, *dst, layout, filter); });
     finish_image_transfer_(src, dst);
@@ -1018,6 +1044,189 @@ std::expected<void, Error> CommandBuffer::fill_buffer(
     return {};
 }
 
+namespace
+{
+    // The shared checks of the two buffer<->image copy verbs: a plain
+    // single-sample colour image, an existing (layer, mip), and a buffer that
+    // can hold the level. Returns the level's tightly packed byte size.
+    std::expected<VkDeviceSize, Error> check_subresource_copy(
+        const char* verb,
+        const Image& image,
+        const Buffer& buffer,
+        std::uint32_t layer,
+        std::uint32_t mip,
+        VkDeviceSize buffer_offset)
+    {
+        if (image.samples() != 1)
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: a multisampled image cannot be copied. Render into it and read the "
+                    "resolved attachment",
+                    verb)));
+        }
+        if (format_info(image.format()).depth)
+        {
+            return std::unexpected(
+                err_resource(std::format("{}: a depth image is read through read_pixels on its render target", verb)));
+        }
+        if (layer >= image.array_layers() || mip >= image.mip_levels())
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: layer {} mip {} does not exist in an image with {} layers and {} mip levels.",
+                    verb,
+                    layer,
+                    mip,
+                    image.array_layers(),
+                    image.mip_levels())));
+        }
+        const VkDeviceSize bytes = static_cast<VkDeviceSize>((std::ranges::max)(image.width() >> mip, 1u)) *
+                                   (std::ranges::max)(image.height() >> mip, 1u) *
+                                   (std::ranges::max)(image.depth() >> mip, 1u) *
+                                   format_info(image.format()).bytes_per_pixel;
+        if (!fits_within(buffer_offset, bytes, buffer.size()))
+        {
+            return std::unexpected(err_resource(
+                std::format(
+                    "{}: mip {} of this image is {} bytes, and offset {} of a {}-byte buffer cannot hold it.",
+                    verb,
+                    mip,
+                    bytes,
+                    buffer_offset,
+                    buffer.size())));
+        }
+        return bytes;
+    }
+} // namespace
+
+std::expected<void, Error> CommandBuffer::update_buffer(
+    std::shared_ptr<Buffer> buffer,
+    std::vector<std::byte> data,
+    VkDeviceSize offset)
+{
+    if (!buffer)
+    {
+        return std::unexpected(err_resource("update_buffer: buffer is null"));
+    }
+    if (data.empty())
+    {
+        return std::unexpected(err_resource("update_buffer: nothing to write (data is empty)"));
+    }
+    if (data.size() > 65536 || data.size() % 4 != 0 || offset % 4 != 0)
+    {
+        return std::unexpected(err_resource(
+            std::format(
+                "update_buffer: vkCmdUpdateBuffer takes at most 65536 bytes, and the size and "
+                "offset must be multiples of 4. Got {} bytes at offset {}. Use copy_buffer from "
+                "a staging buffer, or buffer.update(), for more.",
+                data.size(),
+                offset)));
+    }
+    if (!fits_within(offset, data.size(), buffer->size()))
+    {
+        return std::unexpected(err_resource(
+            std::format(
+                "update_buffer: {} bytes at offset {} do not fit in a {}-byte buffer",
+                data.size(),
+                offset,
+                buffer->size())));
+    }
+    track_use_(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, true);
+    record_buffer_use_(buffer);
+    commands_.emplace_back(
+        [buffer = std::move(buffer), bytes = std::move(data), offset](VkCommandBuffer cmd, const FrameContext& frame)
+        {
+            // Resolved at execute, never captured: a DynamicBuffer has one
+            // handle per frame in flight.
+            frame.vk->vkCmdUpdateBuffer(cmd, buffer->get(), offset, bytes.size(), bytes.data());
+        });
+    return {};
+}
+
+std::expected<void, Error> CommandBuffer::copy_buffer_to_image(
+    const std::shared_ptr<Buffer>& buffer,
+    const std::shared_ptr<Image>& image,
+    std::uint32_t layer,
+    std::uint32_t mip,
+    VkDeviceSize buffer_offset)
+{
+    if (!buffer || !image)
+    {
+        return std::unexpected(err_resource("copy_buffer_to_image: buffer or image is null"));
+    }
+    auto bytes = check_subresource_copy("copy_buffer_to_image", *image, *buffer, layer, mip, buffer_offset);
+    if (!bytes)
+    {
+        return std::unexpected(bytes.error());
+    }
+    // The buffer side is a real tracked use; the image side records its own
+    // transitions (record_buffer_image_copy) and then a note, exactly as
+    // copy_image does — a tracked image use would start from the fold's
+    // UNDEFINED and discard an uploaded texture nothing in this graph wrote.
+    track_use_(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, false);
+    record_image_use_(image);
+    record_buffer_use_(buffer);
+    commands_.emplace_back(
+        [buffer, image, buffer_offset, layer, mip](VkCommandBuffer cmd, const FrameContext& frame)
+        {
+            record_buffer_image_copy(
+                *frame.vk,
+                cmd,
+                *image,
+                buffer->get(),
+                buffer_offset,
+                layer,
+                mip,
+                true,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                frame.legal_stages);
+        });
+    image->mark_subresource_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, layer, 1, mip, 1);
+    note_image_state_(
+        image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, context_->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT);
+    return {};
+}
+
+std::expected<void, Error> CommandBuffer::copy_image_to_buffer(
+    const std::shared_ptr<Image>& image,
+    const std::shared_ptr<Buffer>& buffer,
+    std::uint32_t layer,
+    std::uint32_t mip,
+    VkDeviceSize buffer_offset,
+    Access src_access)
+{
+    if (!buffer || !image)
+    {
+        return std::unexpected(err_resource("copy_image_to_buffer: buffer or image is null"));
+    }
+    auto bytes = check_subresource_copy("copy_image_to_buffer", *image, *buffer, layer, mip, buffer_offset);
+    if (!bytes)
+    {
+        return std::unexpected(bytes.error());
+    }
+    const auto src_layout = image_layout_for(src_access);
+    if (!src_layout)
+    {
+        return std::unexpected(err_resource(
+            "copy_image_to_buffer: src_access must be Access.SHADER_READ (the source is sampled, "
+            "SHADER_READ_ONLY) or Access.SHADER_WRITE (a compute shader just wrote it, GENERAL)"));
+    }
+    track_use_(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, true);
+    record_image_use_(image);
+    record_buffer_use_(buffer);
+    commands_.emplace_back(
+        [buffer, image, buffer_offset, layer, mip, layout = *src_layout](VkCommandBuffer cmd, const FrameContext& frame)
+        {
+            record_buffer_image_copy(
+                *frame.vk, cmd, *image, buffer->get(), buffer_offset, layer, mip, false, layout, frame.legal_stages);
+        });
+    image->mark_subresource_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, layer, 1, mip, 1);
+    note_image_state_(
+        image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, context_->all_shader_stages(), VK_ACCESS_SHADER_READ_BIT);
+    return {};
+}
+
 std::expected<void, Error> CommandBuffer::clear_image(const std::shared_ptr<Image>& image, std::array<float, 4> color)
 {
     if (!image)
@@ -1030,6 +1239,7 @@ std::expected<void, Error> CommandBuffer::clear_image(const std::shared_ptr<Imag
             "clear_image: a depth image is cleared by the pass that renders into it "
             "(graph.add_pass(target, clear_depth=...))"));
     }
+    record_image_use_(image);
     commands_.emplace_back([image, color](VkCommandBuffer cmd, const FrameContext& frame)
                            { record_image_clear(*frame.vk, cmd, *image, color, frame.legal_stages); });
     image->mark_has_contents(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -1090,20 +1300,7 @@ CommandBuffer::TimerReading CommandBuffer::read_timer(std::size_t index, std::ui
 
 CommandBuffer& CommandBuffer::begin_label(const std::string& name)
 {
-    commands_.emplace_back(
-        [name](VkCommandBuffer cmd, const FrameContext&)
-        {
-            if (vkCmdBeginDebugUtilsLabelEXT == nullptr)
-            {
-                return;
-            }
-            VkDebugUtilsLabelEXT label{
-                .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
-                .pNext = nullptr,
-                .pLabelName = name.c_str(),
-                .color = {0.0f, 0.0f, 0.0f, 0.0f}};
-            vkCmdBeginDebugUtilsLabelEXT(cmd, &label);
-        });
+    commands_.emplace_back([name](VkCommandBuffer cmd, const FrameContext&) { begin_debug_label(cmd, name); });
     ++open_labels_;
     return *this;
 }
@@ -1435,9 +1632,17 @@ void CommandBuffer::ensure_occlusion_pool_(std::size_t needed)
     occlusion_capacity_ = static_cast<std::uint32_t>(needed);
 }
 
+void CommandBuffer::record_image_use_(const std::shared_ptr<Image>& image)
+{
+    if (image && image->upload_serial() != QueueSerials{})
+    {
+        used_images_.push_back(image);
+    }
+}
+
 void CommandBuffer::record_buffer_use_(const std::shared_ptr<Buffer>& buffer)
 {
-    if (buffer && buffer->upload_serial() != 0)
+    if (buffer && buffer->upload_serial() != QueueSerials{})
     {
         used_buffers_.push_back(buffer);
     }
@@ -1470,16 +1675,18 @@ std::expected<void, Error> CommandBuffer::check_indirect_(
     {
         return std::unexpected(err_resource(std::format("{}: buffer is null", what)));
     }
-    // Only BufferType::STORAGE carries VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, so
+    // Only BufferUsage::STORAGE carries VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, so
     // this names the fix instead of leaving the layers to report a usage flag.
-    if (buffer->buffer_type() != BufferType::STORAGE)
+    if (!has(buffer->buffer_usage(), BufferUsage::STORAGE))
     {
         return std::unexpected(err_resource(
             std::format(
-                "{}: the arguments must live in a BufferType.STORAGE buffer, which is the "
-                "one that carries the indirect usage flag. A compute shader writing the "
-                "draw arguments needs it to be a storage buffer anyway.",
-                what)));
+                "{}: the arguments must live in a buffer whose usage has BufferUsage.STORAGE, "
+                "which is the one that carries the indirect usage flag. A compute shader "
+                "writing the draw arguments needs a storage buffer anyway. This buffer has "
+                "usage {}.",
+                what,
+                buffer_usage_name(buffer->buffer_usage()))));
     }
     // The spec requires a 4-byte-aligned offset, and every argument struct is a
     // run of 32-bit words, so an unaligned one is always a mistake.
@@ -1548,14 +1755,15 @@ std::expected<void, Error> CommandBuffer::check_count_buffer_(
                 "the instanceCount of the commands you do not want.",
                 what)));
     }
-    if (count_buffer->buffer_type() != BufferType::STORAGE)
+    if (!has(count_buffer->buffer_usage(), BufferUsage::STORAGE))
     {
         return std::unexpected(err_resource(
             std::format(
-                "{}: the count must live in a BufferType.STORAGE buffer, which is the one "
-                "that carries the indirect usage flag. A compute shader writing the count "
-                "needs it to be a storage buffer anyway.",
-                what)));
+                "{}: the count must live in a buffer whose usage has BufferUsage.STORAGE, "
+                "which is the one that carries the indirect usage flag. A compute shader "
+                "writing the count needs a storage buffer anyway. This buffer has usage {}.",
+                what,
+                buffer_usage_name(count_buffer->buffer_usage()))));
     }
     if (count_offset % 4 != 0)
     {
@@ -1586,15 +1794,12 @@ void CommandBuffer::track_use_(
     VkAccessFlags access,
     bool writes)
 {
-    if (!auto_barriers_)
-    {
-        return;
-    }
     // Only a STORAGE buffer carries VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, so it
-    // is the only type a shader can write. The fold uses that to narrow its
-    // first-use floor rather than to switch it off — every type can be written
-    // by copy_buffer and fill_buffer.
-    const bool shader_writable = buffer->buffer_type() == BufferType::STORAGE;
+    // is the only usage a shader can write. The fold uses that to narrow its
+    // first-use floor rather than to switch it off — every usage can be written
+    // by copy_buffer and fill_buffer. A bit test, so a VERTEX|STORAGE union
+    // cannot fool it.
+    const bool shader_writable = has(buffer->buffer_usage(), BufferUsage::STORAGE);
     event_sink_->push_back(
         {.kind = UseEvent::Kind::BufferUse,
          .buffer = buffer,
@@ -1602,6 +1807,7 @@ void CommandBuffer::track_use_(
          .access = access,
          .writes = writes,
          .shader_writable = shader_writable,
+         .manual = !auto_barriers_,
          .position = commands_.size()});
 }
 
@@ -1611,12 +1817,9 @@ void CommandBuffer::track_image_use_(
     VkPipelineStageFlags stages,
     VkAccessFlags access,
     bool writes,
-    bool only_if_tracked)
+    bool only_if_tracked,
+    const ImageRange& range)
 {
-    if (!auto_barriers_)
-    {
-        return;
-    }
     event_sink_->push_back(
         {.kind = UseEvent::Kind::ImageUse,
          .image = image,
@@ -1624,6 +1827,10 @@ void CommandBuffer::track_image_use_(
          .stages = stages,
          .access = access,
          .writes = writes,
+         .manual = !auto_barriers_,
+         .range = range,
+         .layers = image->array_layers(),
+         .mips = image->mip_levels(),
          .only_if_tracked = only_if_tracked,
          .position = commands_.size()});
 }
@@ -1647,10 +1854,6 @@ void CommandBuffer::track_descriptor_uses_(
     const std::shared_ptr<Pipeline>& pipeline,
     VkPipelineStageFlags stages)
 {
-    if (!auto_barriers_)
-    {
-        return;
-    }
     for (const auto& [set_index, set] : sets)
     {
         for (const auto& bb : set->buffers())
@@ -1673,6 +1876,16 @@ void CommandBuffer::track_descriptor_uses_(
         }
         for (const auto& bi : set->images())
         {
+            // The descriptor's own subresource, if it was narrowed with
+            // set_image(layer=, mip=). A 3D image has one array layer, so a
+            // mip-only narrowing reads the same either way.
+            const ImageRange range = bi.layer || bi.mip
+                                         ? ImageRange{
+                                               .base_layer = bi.layer.value_or(0),
+                                               .layer_count = bi.layer ? 1 : bi.image->array_layers(),
+                                               .base_mip = bi.mip.value_or(0),
+                                               .mip_count = bi.mip ? 1 : bi.image->mip_levels()}
+                                         : ImageRange{};
             if (bi.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
             {
                 // GENERAL either way: it is the only layout a storage image is
@@ -1684,7 +1897,9 @@ void CommandBuffer::track_descriptor_uses_(
                     VK_IMAGE_LAYOUT_GENERAL,
                     stages,
                     writes ? (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT) : VK_ACCESS_SHADER_READ_BIT,
-                    writes);
+                    writes,
+                    /*only_if_tracked=*/false,
+                    range);
             }
             else if (bi.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
             {
@@ -1705,7 +1920,8 @@ void CommandBuffer::track_descriptor_uses_(
                     stages,
                     VK_ACCESS_SHADER_READ_BIT,
                     false,
-                    /*only_if_tracked=*/true);
+                    /*only_if_tracked=*/true,
+                    range);
             }
         }
     }

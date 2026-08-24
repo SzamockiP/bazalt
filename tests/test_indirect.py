@@ -45,7 +45,7 @@ def args_buffer(ctx, size=DRAW_ARGS_BYTES):
     """A storage buffer for draw arguments. STORAGE is the only type that carries
     the indirect usage flag, which is also the type a compute shader needs it to
     be."""
-    return ctx.create_buffer(size, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    return ctx.create_buffer(size, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
 
 # ── the feature ───────────────────────────────────────────────────────────────
@@ -65,7 +65,7 @@ def test_compute_decides_how_many_instances_are_drawn(ctx):
     assert 0 < expected < TOTAL_STRIPES  # the test is pointless at either extreme
 
     args = args_buffer(ctx)
-    candidates = ctx.create_buffer(scores, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    candidates = ctx.create_buffer(scores, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     comp = ctx.compile_shader(str(SHADER_DIR / "cull_args.comp"), bz.ShaderStage.COMPUTE)
     cull = (ctx.compute_pipeline()
@@ -120,7 +120,7 @@ def test_a_zero_instance_count_draws_nothing(ctx):
     only one of them can be decided on the GPU."""
     scores = np.zeros(8, dtype=np.float32)
     args = args_buffer(ctx)
-    candidates = ctx.create_buffer(scores, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    candidates = ctx.create_buffer(scores, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     comp = ctx.compile_shader(str(SHADER_DIR / "cull_args.comp"), bz.ShaderStage.COMPUTE)
     cull = (ctx.compute_pipeline().shader(comp)
@@ -161,7 +161,7 @@ def test_cpu_written_arguments_work_too(ctx):
     instances = 3
     args = ctx.create_buffer(
         np.array([6, instances, 0, 0], dtype=np.uint32),
-        bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+        bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     vert = ctx.compile_shader(str(SHADER_DIR / "stripe.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
@@ -184,8 +184,8 @@ def test_dispatch_indirect_takes_its_group_count_from_the_gpu(ctx):
     it. bump_counter.comp increments once per invocation at local_size 1, so the
     counter IS the group count the second dispatch ran with."""
     want = 5
-    groups = ctx.create_buffer(12, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-    counter = ctx.create_buffer(4, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    groups = ctx.create_buffer(12, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    counter = ctx.create_buffer(4, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     writer_shader = ctx.compile_shader(str(SHADER_DIR / "write_groups.comp"), bz.ShaderStage.COMPUTE)
     writer = (ctx.compute_pipeline().shader(writer_shader)
@@ -222,10 +222,10 @@ def test_draw_indexed_indirect_uses_the_index_buffer(ctx):
     # indexCount, instanceCount, firstIndex, vertexOffset (int32), firstInstance
     args = ctx.create_buffer(
         np.array([6, instances, 0, 0, 0], dtype=np.uint32),
-        bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+        bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     indices = ctx.create_buffer(
         np.array([0, 1, 2, 3, 4, 5], dtype=np.uint32),
-        bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
+        bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 
     vert = ctx.compile_shader(str(SHADER_DIR / "stripe.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
@@ -247,13 +247,13 @@ def test_draw_indexed_indirect_uses_the_index_buffer(ctx):
 # ── what it refuses, and why ──────────────────────────────────────────────────
 
 def test_only_a_storage_buffer_can_hold_the_arguments(ctx):
-    """Only BufferType.STORAGE carries VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, so the
+    """Only BufferUsage.STORAGE carries VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, so the
     refusal names the fix instead of leaving the layers to report a usage flag. A
     compute shader writing the arguments needs a storage buffer anyway."""
-    uniform = ctx.create_buffer(64, bz.BufferType.UNIFORM, bz.MemoryUsage.STATIC)
+    uniform = ctx.create_buffer(64, bz.BufferUsage.UNIFORM, bz.MemoryUsage.STATIC)
     g = ctx.graph()
     p = g.add_pass()
-    with pytest.raises(bz.ResourceError, match="BufferType.STORAGE"):
+    with pytest.raises(bz.ResourceError, match="BufferUsage.STORAGE"):
         p.dispatch_indirect(uniform)
 
 
@@ -301,7 +301,7 @@ def test_multi_draw_works_with_the_feature(ctx, extra_context):
     args = multi.create_buffer(
         np.array([6, 1, 0, 0,
                   6, 2, 0, 0], dtype=np.uint32),
-        bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+        bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     vert = multi.compile_shader(str(SHADER_DIR / "stripe.vert"), bz.ShaderStage.VERTEX)
     frag = multi.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
@@ -323,7 +323,7 @@ def test_multi_draw_works_with_the_feature(ctx, extra_context):
 
 def test_a_buffer_from_another_context_is_refused(ctx, extra_context):
     other = extra_context()
-    foreign = other.create_buffer(16, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    foreign = other.create_buffer(16, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     g = ctx.graph()
     p = g.add_pass()
     with pytest.raises(bz.ResourceError, match="different Context"):
@@ -377,12 +377,12 @@ def one_stripe_each(ctx, commands):
     for i in range(commands):
         words += [6, 1, 0, i]  # vertexCount, instanceCount, firstVertex, firstInstance
     return ctx.create_buffer(np.array(words, dtype=np.uint32),
-                             bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                             bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
 
 def count_buffer(ctx, value):
     return ctx.create_buffer(np.array([value], dtype=np.uint32),
-                             bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                             bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
 
 @pytest.mark.parametrize("issued", [1, 3])
@@ -440,8 +440,8 @@ def test_compute_writes_the_count(extra_context):
     expected = int((scores > threshold).sum())
 
     ctx = count_context(extra_context)
-    counts = ctx.create_buffer(DRAW_ARGS_BYTES, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-    candidates = ctx.create_buffer(scores, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    counts = ctx.create_buffer(DRAW_ARGS_BYTES, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    candidates = ctx.create_buffer(scores, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     comp = ctx.compile_shader(str(SHADER_DIR / "cull_args.comp"), bz.ShaderStage.COMPUTE)
     cull = (ctx.compute_pipeline().shader(comp)
@@ -490,8 +490,8 @@ def test_a_count_buffer_needs_its_feature(ctx):
 
 def test_a_count_buffer_must_be_a_storage_buffer(extra_context):
     ctx = count_context(extra_context)
-    args = ctx.create_buffer(DRAW_ARGS_BYTES, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-    wrong = ctx.create_buffer(16, bz.BufferType.UNIFORM, bz.MemoryUsage.STATIC)
+    args = ctx.create_buffer(DRAW_ARGS_BYTES, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    wrong = ctx.create_buffer(16, bz.BufferUsage.UNIFORM, bz.MemoryUsage.STATIC)
     g = ctx.graph()
     p = g.add_pass(ctx.create_render_target(8, 8))
     with pytest.raises(bz.ResourceError, match="STORAGE"):
@@ -500,8 +500,8 @@ def test_a_count_buffer_must_be_a_storage_buffer(extra_context):
 
 def test_a_count_offset_must_be_aligned_and_inside_the_buffer(extra_context):
     ctx = count_context(extra_context)
-    args = ctx.create_buffer(DRAW_ARGS_BYTES, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-    counts = ctx.create_buffer(8, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    args = ctx.create_buffer(DRAW_ARGS_BYTES, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    counts = ctx.create_buffer(8, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     g = ctx.graph()
     p = g.add_pass(ctx.create_render_target(8, 8))
     with pytest.raises(bz.ResourceError, match="multiple of 4"):
@@ -532,7 +532,7 @@ def test_indirect_stride_steps_over_per_draw_data(extra_context):
     words[0:4] = [6, 1, 0, 0]
     words[4:8] = [0xDEAD, 0, 0, 0]
     words[8:12] = [6, 2, 0, 0]
-    args = multi.create_buffer(words, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    args = multi.create_buffer(words, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     vert = multi.compile_shader(str(SHADER_DIR / "stripe.vert"), bz.ShaderStage.VERTEX)
     frag = multi.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
@@ -556,7 +556,7 @@ def test_indirect_stride_steps_over_per_draw_data(extra_context):
 def test_a_stride_smaller_than_the_struct_is_refused(ctx):
     """stride= exists to leave room BETWEEN the argument structs, so it can only
     be larger. Smaller would make consecutive commands overlap."""
-    buffer = ctx.create_buffer(256, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buffer = ctx.create_buffer(256, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     g = ctx.graph()
     p = g.add_pass(ctx.create_render_target(8, 8))
     with pytest.raises(bz.ResourceError, match="stride"):
@@ -572,7 +572,7 @@ def test_the_last_command_needs_only_its_own_struct(extra_context):
     if not multi.supports(bz.Feature.MULTI_DRAW_INDIRECT):
         pytest.skip("GPU reports no multiDrawIndirect")
     # Two 16-byte commands at a stride of 32 need 32 + 16 = 48 bytes, not 64.
-    buffer = multi.create_buffer(48, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buffer = multi.create_buffer(48, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     g = multi.graph()
     p = g.add_pass(multi.create_render_target(8, 8))
     p.draw_indirect(buffer, count=2, stride=32)

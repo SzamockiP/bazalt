@@ -100,7 +100,7 @@ vertices = [
      0.5,  0.5,  0.5,   1.0, 1.0,
     -0.5,  0.5,  0.5,   0.0, 1.0,
 ]
-vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+vbuf = ctx.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
 indices = [
     # --- BRICKS ---
@@ -112,9 +112,9 @@ indices = [
     13, 12, 15, 15, 14, 13, # Right
     23, 22, 21, 21, 20, 23  # Bottom
 ]
-ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
+ibuf = ctx.create_buffer(indices, bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 
-ubuf = ctx.create_buffer([0.0]*16, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC, bz.DataType.FLOAT)
+ubuf = ctx.create_buffer([0.0]*16, bz.BufferUsage.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
 # Load textures and create descriptors
 tex1 = ctx.load_image("../assets/wall.png")

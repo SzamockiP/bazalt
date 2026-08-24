@@ -94,13 +94,13 @@ for r in range(RINGS):
         indices += [a, b, a + 1, a + 1, b, b + 1]
 
 vbuf = ctx.create_buffer(np.array(positions, dtype=np.float32),
-                         bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+                         bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 ibuf = ctx.create_buffer(np.array(indices, dtype=np.uint32),
-                         bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
+                         bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 index_count = len(indices)
 
 # view_proj + model
-ubuf = ctx.create_buffer(32 * 4, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+ubuf = ctx.create_buffer(32 * 4, bz.BufferUsage.UNIFORM, bz.MemoryUsage.DYNAMIC)
 pool = ctx.create_descriptor_pool()
 desc_set = pool.allocate_frame_set(solid)
 desc_set.set_buffer(0, ubuf)

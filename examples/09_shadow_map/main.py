@@ -80,14 +80,14 @@ idx += [ground_base, ground_base + 1, ground_base + 2,
         ground_base + 2, ground_base + 3, ground_base]
 
 vbuf = ctx.create_buffer(np.array(verts, dtype=np.float32),
-                         bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+                         bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 ibuf = ctx.create_buffer(np.array(idx, dtype=np.uint32),
-                         bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
+                         bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 index_count = len(idx)
 
 # One UBO feeds both pipelines: { mat4 cameraMvp; mat4 lightMvp; }.
 ubuf = ctx.create_buffer(np.zeros(32, dtype=np.float32),
-                         bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+                         bz.BufferUsage.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
 pool = ctx.create_descriptor_pool()
 

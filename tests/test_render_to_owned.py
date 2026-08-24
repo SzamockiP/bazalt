@@ -289,8 +289,8 @@ def _white_triangle(ctx):
         -0.5, +0.5, 0.0, 1.0, 1.0, 1.0,
         +0.5, +0.5, 0.0, 1.0, 1.0, 1.0,
     ]
-    vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
-    ibuf = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
+    vbuf = ctx.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
+    ibuf = ctx.create_buffer([0, 1, 2], bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC, dtype=np.uint32)
     return vbuf, ibuf
 
 

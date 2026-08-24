@@ -112,7 +112,7 @@ class DemoApp:
             .build(self.renderer))
 
         # 3 * mat4 = 192 bytes
-        self.ubuf = self.ctx.create_buffer(192, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+        self.ubuf = self.ctx.create_buffer(192, bz.BufferUsage.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
     def load_scene(self, obj_path):
         print("Loading model...")
@@ -189,8 +189,8 @@ class DemoApp:
         interleaved[:, 6:8] = np.concatenate(all_uvs)
         interleaved[:, 8:11] = np.concatenate(all_colors)
         
-        self.vbuf = self.ctx.create_buffer(interleaved.flatten(), bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
-        self.ibuf = self.ctx.create_buffer(np.concatenate(all_faces).flatten().astype(np.uint32), bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
+        self.vbuf = self.ctx.create_buffer(interleaved.flatten(), bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
+        self.ibuf = self.ctx.create_buffer(np.concatenate(all_faces).flatten().astype(np.uint32), bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 
     def setup_descriptors(self):
         # Create Descriptor Pool and allocate descriptor set. The pool sizes

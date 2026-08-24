@@ -77,7 +77,7 @@ def test_a_workgroup_size_the_pipeline_picks(extra_context):
                     .constant(0, size)
                     .build())
         out = context.create_buffer(
-            np.zeros(4, dtype=np.uint32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+            np.zeros(4, dtype=np.uint32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
         bound = context.create_descriptor_pool().allocate_set(pipeline)
         bound.set_buffer(0, out)
 

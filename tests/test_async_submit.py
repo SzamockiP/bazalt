@@ -10,6 +10,7 @@ submit, and submit(after=serial) orders one submit after another on the GPU
 without blocking the CPU.
 """
 
+import re
 import os
 import pathlib
 
@@ -28,8 +29,8 @@ def add_one_pipeline(ctx):
 
 def counting_setup(ctx):
     pipeline = add_one_pipeline(ctx)
-    buf = ctx.create_buffer([0.0, 0.0, 0.0, 0.0], bz.BufferType.STORAGE,
-                            bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    buf = ctx.create_buffer([0.0, 0.0, 0.0, 0.0], bz.BufferUsage.STORAGE,
+                            bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=1, storage_buffers=1)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, buf)
@@ -219,7 +220,7 @@ def test_forced_single_queue_aliases_the_compute_queue(extra_context, monkeypatc
 
     comp = context.compile_shader(str(SHADER_DIR / "add_one.comp"), bz.ShaderStage.COMPUTE)
     pipeline = context.compute_pipeline().shader(comp).storage_buffer(0).build()
-    buf = context.create_buffer(np.zeros(4, np.float32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = context.create_buffer(np.zeros(4, np.float32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = context.create_descriptor_pool(max_sets=4, storage_buffers=4)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, buf)
@@ -247,7 +248,7 @@ def test_a_buffer_dropped_after_a_two_queue_submit_is_reclaimed(ctx):
     comp = ctx.compile_shader(str(SHADER_DIR / "add_one.comp"), bz.ShaderStage.COMPUTE)
     pipeline = ctx.compute_pipeline().shader(comp).storage_buffer(0).build()
     buf = ctx.create_buffer(np.zeros(1 << 20, np.float32),
-                            bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                            bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=4, storage_buffers=4)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, buf)
@@ -291,3 +292,87 @@ def test_requiring_async_compute_on_a_single_queue_device_raises(monkeypatch):
     with pytest.raises(bz.InitializationError, match="ASYNC_COMPUTE"):
         bz.Context(features=[bz.Feature.ASYNC_COMPUTE])
 
+
+
+def test_forced_single_queue_aliases_the_transfer_queue(extra_context, monkeypatch):
+    """The transfer twin of the compute alias: without a transfer-only family
+    the transfer runtime shares the graphics VkQueue and keeps its own
+    timeline, so a three-queue graph runs unchanged with no overlap."""
+    monkeypatch.setenv("BAZALT_FORCE_SINGLE_QUEUE", "1")
+    context = extra_context()
+    assert context.supports(bz.Feature.ASYNC_TRANSFER) is False
+
+    comp = context.compile_shader(str(SHADER_DIR / "add_one.comp"), bz.ShaderStage.COMPUTE)
+    pipeline = context.compute_pipeline().shader(comp).storage_buffer(0).build()
+    buf = context.create_buffer(np.zeros(4, np.float32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    out = context.create_buffer(16, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    pool = context.create_descriptor_pool(max_sets=4, storage_buffers=4)
+    dset = pool.allocate_set(pipeline, set=0)
+    dset.set_buffer(0, buf)
+
+    g = context.graph()
+    (g.add_pass(name="graphics")
+        .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1))
+    (g.add_pass(name="compute", queue=bz.Queue.COMPUTE)
+        .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0).dispatch(1))
+    g.add_pass(name="transfer", queue=bz.Queue.TRANSFER).copy_buffer(buf, out)
+    context.submit(g)
+
+    assert np.allclose(out.read(np.float32), [2.0] * 4)
+
+
+def test_a_buffer_dropped_after_a_three_queue_submit_is_reclaimed(ctx):
+    """The 0.29 deletion-key test, one queue wider: a resource dropped while a
+    transfer pass still copies it must outlive the transfer timeline too. The
+    referee is the validation layer, and the same race caveat applies."""
+    comp = ctx.compile_shader(str(SHADER_DIR / "add_one.comp"), bz.ShaderStage.COMPUTE)
+    pipeline = ctx.compute_pipeline().shader(comp).storage_buffer(0).build()
+    buf = ctx.create_buffer(np.zeros(1 << 20, np.float32),
+                            bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    scratch = ctx.create_buffer(4 << 20, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    pool = ctx.create_descriptor_pool(max_sets=4, storage_buffers=4)
+    dset = pool.allocate_set(pipeline, set=0)
+    dset.set_buffer(0, buf)
+
+    g = ctx.graph()
+    (g.add_pass(name="graphics")
+        .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0)
+        .dispatch((1 << 20) // 64))
+    (g.add_pass(name="compute", queue=bz.Queue.COMPUTE)
+        .bind_pipeline(pipeline).bind_descriptor_set(dset, pipeline, set=0)
+        .dispatch((1 << 20) // 64))
+    with g.add_pass(name="transfer", queue=bz.Queue.TRANSFER) as p:
+        for _ in range(8):
+            p.copy_buffer(buf, scratch)
+    ctx.submit(g, wait=False)
+
+    del g, dset, buf, scratch, pipeline, pool
+    for _ in range(ctx.frames_in_flight + 1):
+        ctx.begin_frame()
+    ctx.wait()
+
+
+def test_a_serial_repr_names_every_queue(ctx):
+    """The repr is for a debugger and shows one value per queue. Code cannot
+    reach them, which is the point of the opaque handle."""
+    g = ctx.graph()
+    g.add_pass(name="empty")
+    serial = ctx.submit(g, wait=False)
+    assert re.search(r"graphics=\d+ compute=\d+ transfer=\d+", repr(serial))
+    ctx.wait()
+
+
+def test_async_transfer_is_reported_honestly(ctx):
+    """The transfer twin of the ASYNC_COMPUTE honesty test."""
+    answer = ctx.supports(bz.Feature.ASYNC_TRANSFER)
+    assert isinstance(answer, bool)
+    if os.environ.get("BAZALT_FORCE_SINGLE_QUEUE") != "1":
+        matching = [d for d in bz.list_devices() if d.name == ctx.device_name]
+        assert matching and matching[0].supports(bz.Feature.ASYNC_TRANSFER) == answer
+
+
+def test_requiring_async_transfer_on_a_single_queue_device_raises(monkeypatch):
+    """features= is a refusal, not a preference, for the transfer family too."""
+    monkeypatch.setenv("BAZALT_FORCE_SINGLE_QUEUE", "1")
+    with pytest.raises(bz.InitializationError, match="ASYNC_TRANSFER"):
+        bz.Context(features=[bz.Feature.ASYNC_TRANSFER])

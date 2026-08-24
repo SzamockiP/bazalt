@@ -22,9 +22,13 @@ namespace
     // Every recording verb passes the same gate first: the pass is live, not
     // sealed, and the right kind for the verb. Raises so the verb bodies read
     // straight.
-    void guard(const Pass& pass, Pass::VerbScope scope, const char* verb)
+    void guard(
+        const Pass& pass,
+        Pass::VerbScope scope,
+        const char* verb,
+        Pass::QueueNeeds needs = Pass::QueueNeeds::Any)
     {
-        unwrap(pass.guard(scope, verb), nullptr);
+        unwrap(pass.guard(scope, verb, needs), nullptr);
     }
 } // namespace
 
@@ -59,7 +63,7 @@ void bind_commands(py::module_& m)
             "bind_pipeline",
             [](std::shared_ptr<Pass> self, const std::shared_ptr<Pipeline>& pipeline)
             {
-                guard(*self, Pass::VerbScope::Any, "bind_pipeline");
+                guard(*self, Pass::VerbScope::Any, "bind_pipeline", Pass::QueueNeeds::Shader);
                 require_same_context(self->recorder().owner(), pipeline->owner(), "bind_pipeline");
                 self->recorder().bind_pipeline(pipeline);
                 return self;
@@ -71,10 +75,10 @@ void bind_commands(py::module_& m)
             {
                 guard(*self, Pass::VerbScope::Render, "bind_vertex_buffer");
                 require_same_context(self->recorder().owner(), buffer->owner(), "bind_vertex_buffer");
-                self->recorder().bind_vertex_buffer(buffer, binding);
+                unwrap(self->recorder().bind_vertex_buffer(buffer, binding), nullptr);
                 return self;
             },
-            py::arg("buffer"),
+            py::arg("buffer").none(false),
             py::arg("binding") = 0)
         .def(
             "bind_index_buffer",
@@ -122,7 +126,7 @@ void bind_commands(py::module_& m)
             "dispatch",
             [](std::shared_ptr<Pass> self, uint32_t group_count_x, uint32_t group_count_y, uint32_t group_count_z)
             {
-                guard(*self, Pass::VerbScope::General, "dispatch");
+                guard(*self, Pass::VerbScope::General, "dispatch", Pass::QueueNeeds::Shader);
                 self->recorder().dispatch(group_count_x, group_count_y, group_count_z);
                 return self;
             },
@@ -162,7 +166,10 @@ void bind_commands(py::module_& m)
             "timer",
             [](const std::shared_ptr<Pass>& self)
             {
-                guard(*self, Pass::VerbScope::Any, "timer");
+                // Shader, not Any: vkCmdWriteTimestamp is transfer-legal but the
+                // vkCmdResetQueryPool the timer records is not
+                // (VUID-vkCmdResetQueryPool-commandBuffer-cmdpool).
+                guard(*self, Pass::VerbScope::Any, "timer", Pass::QueueNeeds::Shader);
                 CommandBuffer& rec = self->recorder();
                 const std::size_t index = rec.start_timer();
                 const std::uint64_t generation = rec.recording_generation();
@@ -259,7 +266,7 @@ void bind_commands(py::module_& m)
             "dispatch_indirect",
             [](std::shared_ptr<Pass> self, std::shared_ptr<Buffer> buffer, VkDeviceSize offset)
             {
-                guard(*self, Pass::VerbScope::General, "dispatch_indirect");
+                guard(*self, Pass::VerbScope::General, "dispatch_indirect", Pass::QueueNeeds::Shader);
                 require_same_context(self->recorder().owner(), buffer->owner(), "dispatch_indirect");
                 unwrap(self->recorder().dispatch_indirect(std::move(buffer), offset), nullptr);
                 return self;
@@ -301,8 +308,7 @@ void bind_commands(py::module_& m)
             "generate_mipmaps",
             [](const std::shared_ptr<Pass>& self, const std::shared_ptr<Image>& image, Access src)
             {
-                guard(*self, Pass::VerbScope::General, "generate_mipmaps");
-                unwrap(self->require_graphics_queue("generate_mipmaps"), nullptr);
+                guard(*self, Pass::VerbScope::General, "generate_mipmaps", Pass::QueueNeeds::Graphics);
                 require_same_context(self->recorder().owner(), image->owner(), "generate_mipmaps");
                 unwrap(self->recorder().generate_mipmaps(image, src), nullptr);
                 return self;
@@ -338,8 +344,7 @@ void bind_commands(py::module_& m)
                Access src_access,
                Filter filter)
             {
-                guard(*self, Pass::VerbScope::General, "blit_image");
-                unwrap(self->require_graphics_queue("blit_image"), nullptr);
+                guard(*self, Pass::VerbScope::General, "blit_image", Pass::QueueNeeds::Graphics);
                 require_same_context(self->recorder().owner(), src->owner(), "blit_image");
                 require_same_context(self->recorder().owner(), dst->owner(), "blit_image");
                 unwrap(self->recorder().blit_image(src, dst, src_access, to_vk_filter(filter)), nullptr);
@@ -392,10 +397,94 @@ void bind_commands(py::module_& m)
             py::arg("offset") = 0,
             py::arg("size") = 0)
         .def(
+            "update_buffer",
+            [](std::shared_ptr<Pass> self, std::shared_ptr<Buffer> buffer, std::string_view data, VkDeviceSize offset)
+            {
+                guard(*self, Pass::VerbScope::General, "update_buffer");
+                require_same_context(self->recorder().owner(), buffer->owner(), "update_buffer");
+                const auto* begin = reinterpret_cast<const std::byte*>(data.data());
+                unwrap(
+                    self->recorder().update_buffer(
+                        std::move(buffer), std::vector<std::byte>(begin, begin + data.size()), offset),
+                    nullptr);
+                return self;
+            },
+            py::arg("buffer").none(false),
+            py::arg("data"),
+            py::kw_only(),
+            py::arg("offset") = 0)
+        .def(
+            "update_buffer",
+            [](std::shared_ptr<Pass> self, std::shared_ptr<Buffer> buffer, const py::buffer& b, VkDeviceSize offset)
+            {
+                guard(*self, Pass::VerbScope::General, "update_buffer");
+                require_same_context(self->recorder().owner(), buffer->owner(), "update_buffer");
+                py::buffer_info info = b.request();
+                const std::size_t nbytes = contiguous_nbytes(info, "update_buffer");
+                const auto* begin = static_cast<const std::byte*>(info.ptr);
+                unwrap(
+                    self->recorder().update_buffer(
+                        std::move(buffer), std::vector<std::byte>(begin, begin + nbytes), offset),
+                    nullptr);
+                return self;
+            },
+            // No list overload on purpose: np.asarray or struct.pack is one
+            // call away, and Buffer.update already has the list form.
+            py::arg("buffer").none(false),
+            py::arg("data"),
+            py::kw_only(),
+            py::arg("offset") = 0)
+        .def(
+            "copy_buffer_to_image",
+            [](std::shared_ptr<Pass> self,
+               const std::shared_ptr<Buffer>& buffer,
+               const std::shared_ptr<Image>& image,
+               std::uint32_t layer,
+               std::uint32_t mip,
+               VkDeviceSize buffer_offset)
+            {
+                guard(*self, Pass::VerbScope::General, "copy_buffer_to_image");
+                require_same_context(self->recorder().owner(), buffer->owner(), "copy_buffer_to_image");
+                require_same_context(self->recorder().owner(), image->owner(), "copy_buffer_to_image");
+                unwrap(self->recorder().copy_buffer_to_image(buffer, image, layer, mip, buffer_offset), nullptr);
+                return self;
+            },
+            py::arg("buffer").none(false),
+            py::arg("image").none(false),
+            py::kw_only(),
+            py::arg("layer") = 0,
+            py::arg("mip") = 0,
+            py::arg("buffer_offset") = 0)
+        .def(
+            "copy_image_to_buffer",
+            [](std::shared_ptr<Pass> self,
+               const std::shared_ptr<Image>& image,
+               const std::shared_ptr<Buffer>& buffer,
+               std::uint32_t layer,
+               std::uint32_t mip,
+               VkDeviceSize buffer_offset,
+               Access src_access)
+            {
+                guard(*self, Pass::VerbScope::General, "copy_image_to_buffer");
+                require_same_context(self->recorder().owner(), buffer->owner(), "copy_image_to_buffer");
+                require_same_context(self->recorder().owner(), image->owner(), "copy_image_to_buffer");
+                unwrap(
+                    self->recorder().copy_image_to_buffer(image, buffer, layer, mip, buffer_offset, src_access),
+                    nullptr);
+                return self;
+            },
+            py::arg("image").none(false),
+            py::arg("buffer").none(false),
+            py::kw_only(),
+            py::arg("layer") = 0,
+            py::arg("mip") = 0,
+            py::arg("buffer_offset") = 0,
+            py::arg("src_access") = Access::SHADER_READ)
+        .def(
             "clear_image",
             [](const std::shared_ptr<Pass>& self, const std::shared_ptr<Image>& image, const py::object& color)
             {
-                guard(*self, Pass::VerbScope::General, "clear_image");
+                guard(*self, Pass::VerbScope::General, "clear_image", Pass::QueueNeeds::Shader);
                 require_same_context(self->recorder().owner(), image->owner(), "clear_image");
                 std::array<float, 4> rgba{0.0f, 0.0f, 0.0f, 1.0f};
                 auto seq = py::cast<py::sequence>(color);
@@ -417,7 +506,7 @@ void bind_commands(py::module_& m)
                uint32_t offset,
                std::string_view data)
             {
-                guard(*self, Pass::VerbScope::Any, "push_constants");
+                guard(*self, Pass::VerbScope::Any, "push_constants", Pass::QueueNeeds::Shader);
                 require_same_context(self->recorder().owner(), pipeline->owner(), "push_constants");
                 self->recorder().push_constants(pipeline, offset, static_cast<uint32_t>(data.size()), data.data());
                 return self;
@@ -432,7 +521,7 @@ void bind_commands(py::module_& m)
             "push_constants",
             [](std::shared_ptr<Pass> self, uint32_t offset, std::string_view data)
             {
-                guard(*self, Pass::VerbScope::Any, "push_constants");
+                guard(*self, Pass::VerbScope::Any, "push_constants", Pass::QueueNeeds::Shader);
                 unwrap(
                     self->recorder().push_constants(offset, static_cast<uint32_t>(data.size()), data.data()), nullptr);
                 return self;
@@ -446,7 +535,7 @@ void bind_commands(py::module_& m)
                const std::shared_ptr<Pipeline>& pipeline,
                uint32_t set)
             {
-                guard(*self, Pass::VerbScope::Any, "bind_descriptor_set");
+                guard(*self, Pass::VerbScope::Any, "bind_descriptor_set", Pass::QueueNeeds::Shader);
                 require_same_context(self->recorder().owner(), descriptor_set->owner(), "bind_descriptor_set");
                 require_same_context(self->recorder().owner(), pipeline->owner(), "bind_descriptor_set");
                 self->recorder().bind_descriptor_set(descriptor_set, pipeline, set);
@@ -464,7 +553,7 @@ void bind_commands(py::module_& m)
             "bind_descriptor_set",
             [](std::shared_ptr<Pass> self, const std::shared_ptr<DescriptorSet>& descriptor_set)
             {
-                guard(*self, Pass::VerbScope::Any, "bind_descriptor_set");
+                guard(*self, Pass::VerbScope::Any, "bind_descriptor_set", Pass::QueueNeeds::Shader);
                 require_same_context(self->recorder().owner(), descriptor_set->owner(), "bind_descriptor_set");
                 unwrap(self->recorder().bind_descriptor_set(descriptor_set), nullptr);
                 return self;

@@ -357,6 +357,43 @@ inline constexpr VkPolygonMode to_vk(PolygonMode mode)
     return VK_POLYGON_MODE_FILL;
 }
 
+// Which pixels a primitive produces fragments for (0.30). OFF is ordinary
+// Vulkan: a pixel gets a fragment when the primitive covers its sample point,
+// so a triangle that crosses a pixel without reaching the sample produces
+// nothing there.
+//
+// The other two are the two directions to be wrong in on purpose:
+// OVERESTIMATE covers every pixel the primitive TOUCHES, so nothing that the
+// primitive reaches is ever missed and some pixels are shaded that a strict
+// test would not; UNDERESTIMATE covers only the pixels the primitive contains
+// ENTIRELY, so every fragment is a pixel fully inside and some are dropped.
+// The first is for building a grid or a coverage mask with no holes, the
+// second for an occlusion test that must not claim more than it can prove.
+//
+// Both need Feature::CONSERVATIVE_RASTER, and UNDERESTIMATE additionally needs
+// a device whose primitiveUnderestimation property is true — build() refuses
+// where it is not, because the layers do.
+enum class ConservativeRaster
+{
+    OFF,
+    OVERESTIMATE,
+    UNDERESTIMATE
+};
+
+inline constexpr VkConservativeRasterizationModeEXT to_vk(ConservativeRaster mode)
+{
+    switch (mode)
+    {
+        case ConservativeRaster::OVERESTIMATE:
+            return VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT;
+        case ConservativeRaster::UNDERESTIMATE:
+            return VK_CONSERVATIVE_RASTERIZATION_MODE_UNDERESTIMATE_EXT;
+        case ConservativeRaster::OFF:
+            return VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT;
+    }
+    return VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT;
+}
+
 inline constexpr VkPrimitiveTopology to_vk(Topology topology)
 {
     switch (topology)
@@ -902,6 +939,26 @@ public:
         return *this;
     }
 
+    // Rasterize by what the primitive touches rather than by where the samples
+    // land — see ConservativeRaster for what each mode covers. Per pipeline,
+    // never per device: Feature::CONSERVATIVE_RASTER only makes this call
+    // legal, so every other pipeline on the same Context rasterizes normally
+    // and pays nothing.
+    //
+    // extra_overestimation pushes the covered area further out, in pixels, on
+    // top of what OVERESTIMATE already covers. It is the knob for a grid whose
+    // cells must catch a surface that only grazes them. The driver holds it to
+    // limits.max_extra_overestimation and rounds it down to a multiple of
+    // limits.extra_overestimation_granularity, so build() refuses a value
+    // above the maximum rather than letting it be silently clamped. It means
+    // nothing to the other two modes and build() refuses it there too.
+    GraphicsPipelineBuilder& conservative_raster(ConservativeRaster mode, float extra_overestimation = 0.0f)
+    {
+        conservative_raster_ = mode;
+        extra_overestimation_ = extra_overestimation;
+        return *this;
+    }
+
     // restart= turns the largest representable index (0xFFFF or 0xFFFFFFFF, by
     // the index type) into "end this strip and start another", so one draw can
     // carry many strips. Opt-in rather than always on, because it takes that
@@ -1044,6 +1101,8 @@ private:
         FrontFace front_face = FrontFace::COUNTER_CLOCKWISE;
         PolygonMode polygon_mode = PolygonMode::FILL;
         bool depth_clamp = false;
+        ConservativeRaster conservative_raster = ConservativeRaster::OFF;
+        float extra_overestimation = 0.0f;
         float line_width = 1.0f;
         float depth_bias_constant = 0.0f;
         float depth_bias_slope = 0.0f;
@@ -1137,6 +1196,8 @@ private:
     FrontFace front_face_ = FrontFace::COUNTER_CLOCKWISE;
     PolygonMode polygon_mode_ = PolygonMode::FILL;
     bool depth_clamp_ = false;
+    ConservativeRaster conservative_raster_ = ConservativeRaster::OFF;
+    float extra_overestimation_ = 0.0f;
     float line_width_ = 1.0f;
     float depth_bias_constant_ = 0.0f;
     float depth_bias_slope_ = 0.0f;

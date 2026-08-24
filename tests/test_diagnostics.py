@@ -17,8 +17,8 @@ def test_debug_names_are_accepted_and_render_cleanly(ctx):
     name (or a handle/type mismatch) would surface there. Asserting the name
     text inside a validation message would need a provoked error and is
     layer-version specific, so it's a manual check only."""
-    buf = ctx.create_buffer([0.0, 0.0, 0.0], bz.BufferType.VERTEX,
-                            bz.MemoryUsage.STATIC, bz.DataType.FLOAT, name="verts")
+    buf = ctx.create_buffer([0.0, 0.0, 0.0], bz.BufferUsage.VERTEX,
+                            bz.MemoryUsage.STATIC, name="verts")
     img = ctx.create_image(8, 8, name="scratch")
     vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
@@ -96,7 +96,7 @@ def test_timer_handle_reports_positive_time_headless(ctx):
     import numpy as np
     pipeline = _double_pipeline(ctx)
     sbuf = ctx.create_buffer(np.arange(4096, dtype=np.float32),
-                             bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                             bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=4, storage_buffers=4)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, sbuf)
@@ -128,7 +128,7 @@ def test_stale_timer_handle_raises_state_error(ctx):
     pipeline = _double_pipeline(ctx)
     import numpy as np
     sbuf = ctx.create_buffer(np.arange(64, dtype=np.float32),
-                             bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                             bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=4, storage_buffers=4)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, sbuf)
@@ -558,3 +558,16 @@ def test_a_precise_occlusion_query_counts_samples(ctx, extra_context):
     precise.submit(g)
 
     assert q.samples >= 64, "a precise query counts every covered sample"
+
+
+def test_resources_report_their_debug_name(ctx):
+    """name= lives on the object since 0.30, not only in the debug-utils
+    layer: graph.explain() cannot ask Vulkan for the string back. Never a
+    key — the Pass.name contract."""
+    import numpy as np
+    assert ctx.create_image(4, 4, name="hdr").name == "hdr"
+    assert ctx.create_image(4, 4).name == ""
+    named = ctx.create_buffer(np.zeros(4, np.float32), bz.BufferUsage.STORAGE,
+                              bz.MemoryUsage.STATIC, name="counts")
+    assert named.name == "counts"
+    assert ctx.create_buffer(16, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC).name == ""

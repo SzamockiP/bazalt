@@ -131,3 +131,59 @@ def test_compute_written_image_sampled_by_graphics(ctx, fullscreen_vert):
 
     assert np.allclose(target.color[0].read()[16, 16, :3], [64, 128, 191], atol=2), \
         target.color[0].read()[16, 16]
+
+
+# ── clear_image -> graphics storage write -> read() ────────────────────────
+
+
+def test_cleared_graphics_storage_image_reads_back_clean():
+    """clear_image on an image that a fragment shader also writes as storage.
+
+    Two verbs mark one image in one graph, and record order is not execution
+    order: the clear marked SHADER_READ_ONLY, the draw then moved the image to
+    GENERAL, and read()'s barrier sourced from the layout the image had left.
+    The graph now writes the fold's answer back instead.
+
+    Owns its Context instead of taking `ctx`. The subject of the test IS the
+    validation output, and the fixture's referee runs in teardown, so the same
+    filter runs here in the body where the assertion can name it.
+
+    All three parts are load-bearing: drop the clear, drop the storage_image
+    binding, or drop the read() and the layers stay quiet. Neither the image
+    being 3D nor the format matters — this is the 2D RGBA8 shape of it.
+    """
+    messages = []
+    logger = bz.Logger(min_severity=bz.Severity.INFO)
+    logger.on_message(messages.append)
+    context = bz.Context(logger, validation="on", features=[bz.Feature.FRAGMENT_STORES])
+
+    vert = context.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+    frag = context.compile_shader(str(SHADER_DIR / "refl_frag_store.frag"), bz.ShaderStage.FRAGMENT)
+    target = context.create_render_target(16, 16)
+    pipeline = (context.graphics_pipeline()
+                .vertex_shader(vert)
+                .fragment_shader(frag)
+                .storage_image(0, bz.ShaderStage.FRAGMENT, set=0)
+                .build(target))
+
+    dst = context.create_image(16, 16, bz.Format.RGBA8)
+    pool = context.create_descriptor_pool()
+    dset = pool.allocate_set(pipeline, set=0)
+    dset.set_storage_image(0, dst)
+
+    g = context.graph()
+    with g.add_pass(name="clear") as c:
+        c.clear_image(dst)
+    with g.add_pass(target) as p:
+        p.bind_pipeline(pipeline)
+        p.bind_descriptor_set(dset, pipeline, set=0)
+        p.draw(3)
+    context.submit(g)
+    dst.read()
+
+    logger.flush()
+    errors = [
+        m for m in messages
+        if m.source == bz.Source.VALIDATION and m.severity >= bz.Severity.ERROR
+    ]
+    assert not errors, "validation errors:\n" + "\n".join(f"  {m.text}" for m in errors)

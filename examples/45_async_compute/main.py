@@ -82,9 +82,9 @@ def run(queue):
     test is the GPU's rather than Python's.
     """
     source = ctx.create_buffer(np.zeros(N, dtype=np.uint32),
-                              bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                              bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     destination = ctx.create_buffer(np.zeros(N, dtype=np.uint32),
-                                    bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                                    bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     pool = ctx.create_descriptor_pool()
     produce_set = pool.allocate_set(produce)

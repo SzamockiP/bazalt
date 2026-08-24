@@ -60,9 +60,9 @@ def main():
     data = np.arange(words, dtype=np.uint32)
     # Staged in 64 MiB pieces, so this needs 64 MiB of host memory rather than
     # another {args.mib}. That is what lets the number above go up.
-    big = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC, name="big")
+    big = ctx.create_buffer(data, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC, name="big")
     out = ctx.create_buffer(
-        np.zeros(group, dtype=np.uint32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC, name="out")
+        np.zeros(group, dtype=np.uint32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC, name="out")
     print(f"uploaded in {time.perf_counter() - started:.2f} s")
 
     pipeline = (ctx.compute_pipeline()

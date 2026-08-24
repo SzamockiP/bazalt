@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from enum import IntEnum
-from typing import Any, Callable, Optional, Sequence, overload
+from enum import IntEnum, IntFlag
+from typing import Any, Callable, Optional, Sequence, Union, overload
 
 import numpy as np
 
@@ -220,20 +220,37 @@ class Feature(IntEnum):
     #: `Context(features=[Feature.ASYNC_COMPUTE])` refuses a device that has
     #: none.
     ASYNC_COMPUTE = 25
+    #: A queue family that does transfer and neither graphics nor compute
+    #: (0.30) — the DMA engine of a discrete GPU. True means uploads and
+    #: `Queue.TRANSFER` passes copy beside the graphics and compute work.
+    #: False means the transfer queue is the graphics queue under its own
+    #: timeline: the same program, without the overlap.
+    #: `Context(features=[Feature.ASYNC_TRANSFER])` refuses a device that has
+    #: none.
+    ASYNC_TRANSFER = 26
+    #: Rasterizing by what a primitive touches rather than by where the
+    #: samples land (0.30). Enabling it changes nothing on its own — it makes
+    #: `graphics_pipeline().conservative_raster(...)` legal, and that call is
+    #: per pipeline, so everything else still rasterizes normally.
+    #: `VK_EXT_conservative_rasterization`, which most desktop GPUs have and
+    #: MoltenVK does not.
+    CONSERVATIVE_RASTER = 27
 
 # ── Enums ──────────────────────────────────────────────────────────────
 
-class BufferType(IntEnum):
-    VERTEX = 0
-    INDEX = 1
-    UNIFORM = 2
-    STORAGE = 3
+class BufferUsage(IntFlag):
+    """What a buffer can be bound as. Members combine with `|`, so one buffer
+    can be a vertex buffer and a storage buffer:
 
-class DataType(IntEnum):
-    FLOAT = 0
-    UINT32 = 1
-    UINT16 = 2
-    INT32 = 3
+        BufferUsage.VERTEX | BufferUsage.STORAGE
+
+    STORAGE also carries the vertex, index and indirect bits, so a compute
+    shader can write vertices, indices or draw arguments into one buffer.
+    Bits since 0.30; the name was `BufferType` before."""
+    VERTEX = 1
+    INDEX = 2
+    UNIFORM = 4
+    STORAGE = 8
 
 class ShaderStage(IntEnum):
     """Which stage a shader is compiled for.
@@ -361,6 +378,28 @@ class PolygonMode(IntEnum):
     FILL = 0
     LINE = 1
     POINT = 2
+
+class ConservativeRaster(IntEnum):
+    """Which pixels a primitive produces fragments for.
+
+    OFF is ordinary Vulkan: a pixel gets a fragment when the primitive covers
+    its sample point, so a triangle that crosses a pixel without reaching the
+    sample produces nothing there.
+
+    The other two are the two directions to be wrong in on purpose, and both
+    need Feature.CONSERVATIVE_RASTER.
+    """
+    OFF = 0
+    #: Every pixel the primitive TOUCHES gets a fragment. Nothing the
+    #: primitive reaches is missed, and some pixels are shaded that a strict
+    #: test would not be. This is what makes a voxel grid or a coverage mask
+    #: come out with no holes.
+    OVERESTIMATE = 1
+    #: Only the pixels the primitive covers ENTIRELY get a fragment. Every
+    #: fragment is a pixel fully inside, and some are dropped. This is what
+    #: makes an occlusion test a guarantee rather than a guess. Needs a device
+    #: whose `Limits.conservative_underestimation` is True.
+    UNDERESTIMATE = 2
 
 class StencilOp(IntEnum):
     """What happens to a stencil value when a fragment arrives, 1:1 with
@@ -743,8 +782,11 @@ class Buffer:
         """
         ...
     @overload
-    def update(self, data: list, data_type: Optional[DataType] = None, *,
-               offset: int = 0) -> None: ...
+    def update(self, data: list, *, dtype: Any = None, offset: int = 0) -> None:
+        """From a list, packed as `dtype`: np.float32, np.uint32, np.uint16 or
+        np.int32. Without `dtype` the first element decides: a float packs as
+        float32, an int as int32."""
+        ...
 
     def read(self, dtype: Any) -> Any:
         """Copy the buffer back to host memory as a 1-D numpy array.
@@ -759,6 +801,11 @@ class Buffer:
         """
         ...
 
+    @property
+    def name(self) -> str:
+        """The name= the buffer was created with, or "". A debug label for
+        graph.explain() and the validation layer. Never a key."""
+        ...
     @property
     def ready(self) -> bool:
         """Non-blocking: is the data on the GPU?
@@ -879,6 +926,11 @@ class Image:
     @property
     def mip_levels(self) -> int: ...
     @property
+    def name(self) -> str:
+        """The name= the image was created with, or "". A debug label for
+        graph.explain() and the validation layer. Never a key."""
+        ...
+    @property
     def array_layers(self) -> int:
         """Number of layers: 1 for a plain 2D image, N for a texture array,
         6 for a cubemap."""
@@ -978,19 +1030,36 @@ class Pipeline: ...
 
 class DescriptorSet:
     def set_image(self, binding: int, image: Image,
-                  sampler: Optional[Sampler] = None, *, index: int = 0) -> None:
+                  sampler: Optional[Sampler] = None, *, index: int = 0,
+                  layer: Optional[int] = None, mip: Optional[int] = None) -> None:
         """Bind an image (+ sampler; None means linear/repeat/anisotropic).
 
         `index` selects the element of a binding declared with count>1, and
         raises ResourceError outside that count (so index>0 on a plain binding
         is refused). Writing the same (binding, index) again replaces what was
         there rather than adding a second reference to it.
+
+        `layer` and `mip` bind ONE layer or ONE mip level (0.30), the sampling
+        twin of target.layer(i, mip=). A named layer gives a 2D view of it, so
+        one face of a cubemap samples as a sampler2D; `mip` alone keeps the
+        image's own view type. A 3D image refuses `layer` — a volume has
+        depth, not layers — and a subresource outside the image names its
+        counts.
+
+        The graph barriers exactly what the descriptor names, so one pass can
+        sample level N-1 while it writes level N as a storage image. That is a
+        bloom pyramid, and it needed one Image per level before.
         """
         ...
-    def set_storage_image(self, binding: int, image: Image, *, index: int = 0) -> None:
+    def set_storage_image(self, binding: int, image: Image, *, index: int = 0,
+                          layer: Optional[int] = None, mip: Optional[int] = None) -> None:
         """Bind a storage image (no sampler) to a binding declared with
         .storage_image(). The image is accessed in GENERAL layout; the tracker
-        adds the transition and any barrier around the dispatch automatically."""
+        adds the transition and any barrier around the dispatch automatically.
+
+        `layer` and `mip` narrow it to one subresource, exactly as on
+        set_image — and a narrowed write claims only what it writes, so the
+        rest of the chain keeps its contents."""
         ...
     def set_buffer(self, binding: int, buffer: Buffer, *, index: int = 0) -> None: ...
 
@@ -1169,6 +1238,24 @@ class GraphicsPipelineBuilder:
         no call at all.
         """
         ...
+    def conservative_raster(self, mode: ConservativeRaster,
+                            extra_overestimation: float = 0.0) -> GraphicsPipelineBuilder:
+        """Rasterize by what the primitive touches, not by where the samples land.
+
+        Per pipeline, never per device: Feature.CONSERVATIVE_RASTER only makes
+        this call legal, so every other pipeline on the same Context
+        rasterizes normally and pays nothing.
+
+        `extra_overestimation` pushes the covered area further out, in pixels,
+        on top of what OVERESTIMATE already covers — the knob for a grid whose
+        cells must catch a surface that only grazes them. build() raises
+        UnsupportedError above `ctx.limits.max_extra_overestimation` rather
+        than letting the driver clamp it, and the driver rounds what it does
+        take down to a multiple of
+        `ctx.limits.extra_overestimation_granularity`. It means nothing to
+        the other two modes and build() refuses it there.
+        """
+        ...
     def blend(self, enable: bool, mode: Optional[BlendMode] = None, *,
               src: Optional[BlendFactor] = None, dst: Optional[BlendFactor] = None,
               op: Optional[BlendOp] = None,
@@ -1258,20 +1345,20 @@ class GraphicsPipelineBuilder:
         comes from the target build() is called with — there is no samples knob
         here."""
         ...
-    def push_constant(self, size: int, stage: ShaderStage) -> GraphicsPipelineBuilder: ...
-    # Declaring the same (set, binding) twice MERGES the stages rather than
-    # conflicting, so a camera UBO that both stages read is spelled:
+    def push_constant(self, size: int, stage: Union[ShaderStage, Sequence[ShaderStage]]) -> GraphicsPipelineBuilder: ...
+    # A binding read by two stages takes both in one call (0.30):
     #
-    #     .uniform_buffer(0, bz.ShaderStage.VERTEX, set=0)
-    #     .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
+    #     .uniform_buffer(0, [bz.ShaderStage.VERTEX, bz.ShaderStage.FRAGMENT])
     #
-    # This has always worked and the stub never said so, which made it look like
-    # a mistake (0.24). It applies to every declarator below, not only this one.
-    def uniform_buffer(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
+    # Declaring the same (set, binding) twice, once per stage, still MERGES the
+    # stages rather than conflicting — the sequence is the same merge, spelled
+    # once. Re-declaring with a DIFFERENT declarator or count raises at
+    # build(). This applies to every declarator below and to push_constant.
+    def uniform_buffer(self, binding: int, stage: Union[ShaderStage, Sequence[ShaderStage]], set: int = 0, count: int = 1,
                        update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder: ...
-    def storage_buffer(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
+    def storage_buffer(self, binding: int, stage: Union[ShaderStage, Sequence[ShaderStage]], set: int = 0, count: int = 1,
                        update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder: ...
-    def texture(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
+    def texture(self, binding: int, stage: Union[ShaderStage, Sequence[ShaderStage]], set: int = 0, count: int = 1,
                 update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder:
         """A sampled image binding.
 
@@ -1301,7 +1388,7 @@ class GraphicsPipelineBuilder:
         budget, so off is the cheaper side.
         """
         ...
-    def storage_image(self, binding: int, stage: ShaderStage, set: int = 0, count: int = 1,
+    def storage_image(self, binding: int, stage: Union[ShaderStage, Sequence[ShaderStage]], set: int = 0, count: int = 1,
                       update_after_bind: Optional[bool] = None) -> GraphicsPipelineBuilder:
         """A read/write image addressed by coordinate (imageLoad/imageStore) in a
         graphics shader.
@@ -1375,17 +1462,24 @@ class Queue(IntEnum):
 
     GRAPHICS is the default and runs everything. COMPUTE (0.29) runs a pass
     without a render target on the device's compute queue, beside the graphics
-    work. A pass on COMPUTE cannot draw, blit or generate mipmaps, and each
-    refusal names the fix.
+    work. TRANSFER (0.30) runs a pass of copies on the device's transfer
+    queue — the DMA engine of a discrete GPU — which is also where bazalt's
+    own uploads go. A pass on COMPUTE cannot draw, blit or generate mipmaps;
+    a pass on TRANSFER additionally cannot dispatch, bind a pipeline or clear
+    an image. Each refusal names the fix. What a TRANSFER pass runs:
+    copy_buffer, copy_image, fill_buffer, update_buffer, copy_buffer_to_image,
+    copy_image_to_buffer, barrier and label. A timer is refused too: the
+    query-pool reset it records needs a shader queue.
 
     What the graph waits for by itself: inside one graph the passes order
-    themselves across both queues, and a graph you submit again waits for its
+    themselves across every queue, and a graph you submit again waits for its
     own previous submit. What it does not: two DIFFERENT graphs on different
     queues have no order between them. Use submit(after=...) there.
 
     Without Feature.ASYNC_COMPUTE the device has no compute-only queue family,
     so a COMPUTE pass runs on the graphics queue under its own timeline. The
     program and the ordering are the same; only the overlap is missing.
+    Feature.ASYNC_TRANSFER answers the same question for TRANSFER.
 
     The choice is always yours: a compute pass on GRAPHICS stays legal, and
     bazalt never moves a pass between queues on its own.
@@ -1393,6 +1487,7 @@ class Queue(IntEnum):
 
     GRAPHICS = 0
     COMPUTE = 1
+    TRANSFER = 2
 
 class Serial:
     """The identity of one submit, returned by Context.submit().
@@ -1402,8 +1497,8 @@ class Serial:
     is opaque on purpose: it has no attributes and no ordering.
 
     One Serial covers every queue the submit used, so wait() and after= reach
-    both. It belongs to the Context that returned it; another Context refuses
-    it with ResourceError.
+    all of them. It belongs to the Context that returned it; another Context
+    refuses it with ResourceError.
     """
 
 class Pass:
@@ -1452,12 +1547,12 @@ class Pass:
     def bind_index_buffer(self, buffer: Buffer) -> Pass:
         """Bind the index buffer.
 
-        Takes a `BufferType.INDEX` buffer, or a `BufferType.STORAGE` one when a
-        compute shader writes the indices (0.29). Any other type raises
-        `ResourceError`.
+        Takes a buffer whose usage has `BufferUsage.INDEX`, or
+        `BufferUsage.STORAGE` when a compute shader writes the indices (0.29).
+        Any other usage raises `ResourceError`.
 
         The indices are 32-bit unless the buffer was made with
-        `DataType.UINT16` or from a uint16 array."""
+        `dtype=np.uint16` or from a uint16 array."""
         ...
     def draw(self, vertex_count: int, instances: int = 1) -> Pass: ...
     def draw_indexed(self, index_count: int, first_index: int = 0,
@@ -1478,14 +1573,14 @@ class Pass:
         """Draw with arguments read out of a buffer, so a compute pass decides what
         gets drawn and the CPU never learns the answer (0.19).
 
-        `buffer` must be BufferType.STORAGE — the only type carrying the indirect
-        usage flag, and what a compute shader needs anyway. bazalt declares no
+        `buffer` must have BufferUsage.STORAGE — the only usage carrying the
+        indirect flag, and what a compute shader needs anyway. bazalt declares no
         struct type: the layout is VkDrawIndirectCommand, four uint32s, and numpy
         writes it directly.
 
             args = ctx.create_buffer(
                 np.array([vertex_count, instances, 0, 0], dtype=np.uint32),
-                bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
             p.draw_indirect(args)
 
         A std430 GLSL struct of four uints is byte-identical, so a compute shader
@@ -1495,7 +1590,7 @@ class Pass:
 
         `count_buffer` moves the number of draws onto the GPU too (0.21): `count`
         becomes the maximum, and the 4 bytes at `count_offset` say how many of
-        those commands to issue. It must also be a BufferType.STORAGE buffer, and
+        those commands to issue. It must also have BufferUsage.STORAGE, and
         it needs Feature.DRAW_INDIRECT_COUNT. Without a count buffer the way to
         draw nothing is to write 0 into instanceCount — count=0 is refused,
         because only one of the two can be decided on the GPU.
@@ -1614,12 +1709,57 @@ class Pass:
         """
         ...
 
+    def update_buffer(self, buffer: Buffer, data: Any, *, offset: int = 0) -> Pass:
+        """Write up to 65536 bytes into a buffer from the command stream itself.
+
+        No staging buffer and no second submit, so a small patch — a counter,
+        a few uniforms — lands inside the frame that needs it. `data` is bytes
+        or any C-contiguous array. Legal on every queue, including
+        Queue.TRANSFER.
+
+        The size and offset must be multiples of 4, and 65536 bytes is the
+        command's own limit. Anything larger is copy_buffer from a staging
+        buffer, or buffer.update(). Only in a pass without a target.
+        """
+        ...
+
+    def copy_buffer_to_image(self, buffer: Buffer, image: Image, *,
+                             layer: int = 0, mip: int = 0,
+                             buffer_offset: int = 0) -> Pass:
+        """Copy one (layer, mip) of an image out of a buffer, tightly packed.
+
+        The whole level is written, so the old contents are discarded rather
+        than waited for, and the level ends in its sampleable layout. The
+        bytes start at buffer_offset. Legal on every queue, including
+        Queue.TRANSFER — this is how a texture atlas streams beside the frame.
+
+        A missing subresource or a buffer too short for the level is refused
+        with the counts. Only in a pass without a target.
+        """
+        ...
+
+    def copy_image_to_buffer(self, image: Image, buffer: Buffer, *,
+                             layer: int = 0, mip: int = 0,
+                             buffer_offset: int = 0,
+                             src_access: Access = Access.SHADER_READ) -> Pass:
+        """The mirror: one (layer, mip) into a buffer, tightly packed.
+
+        A readback that rides the graph instead of blocking the CPU the way
+        image.read() does. src_access names where the image rests, exactly as
+        copy_image's does; the level ends in its sampleable layout. Legal on
+        every queue, including Queue.TRANSFER. Only in a pass without a
+        target.
+        """
+        ...
+
     def clear_image(self, image: Image,
                     color: Sequence[float] = (0.0, 0.0, 0.0, 1.0)) -> Pass:
         """Fill a colour image with one value, with no pipeline and no pass.
 
         Resets an accumulation or history buffer. A depth image is refused: its
-        clear belongs to the pass that renders into it (clear_depth=).
+        clear belongs to the pass that renders into it (clear_depth=). Needs a
+        queue that runs shaders (GRAPHICS or COMPUTE), because the command
+        does.
         """
         ...
 
@@ -1880,6 +2020,17 @@ class Graph:
         """Drop every pass and keep the GPU objects. The rebuild-per-frame
         idiom: reset(), add the passes again, submit. Timer and occlusion
         handles made before the reset report StateError."""
+        ...
+
+    def explain(self) -> str:
+        """A debugging aid: what the compile decided, as text.
+
+        Each enabled pass with its queue, batch and timeline waits, and every
+        barrier, wait and attachment transition the compile emitted, with the
+        pass that produced each dependency. Compiles the graph first when it
+        changed, exactly as a submit would. A manual pass's unordered uses are
+        listed as UNORDERED. The text is not API: read it, do not parse it.
+        """
         ...
 
 class Window:
@@ -2360,6 +2511,21 @@ class Limits:
     def max_subgroup_size(self) -> int:
         """The widest subgroup this device runs."""
         ...
+    @property
+    def conservative_underestimation(self) -> bool:
+        """Whether this device rasterizes ConservativeRaster.UNDERESTIMATE.
+        False on a device without Feature.CONSERVATIVE_RASTER, and on some
+        that have it — OVERESTIMATE works wherever the feature does."""
+        ...
+    @property
+    def max_extra_overestimation(self) -> float:
+        """The largest `extra_overestimation` this device takes, in pixels.
+        0.0 means it allows no extra dilation, which is legal and common."""
+        ...
+    @property
+    def extra_overestimation_granularity(self) -> float:
+        """The step this device rounds `extra_overestimation` down to."""
+        ...
 
 class Context:
     """The GPU device, and the factory for everything that lives on it.
@@ -2503,15 +2669,22 @@ class Context:
         ...
 
     @overload
-    def create_buffer(self, data: list, type: BufferType, usage: MemoryUsage,
-                      data_type: Optional[DataType] = None, *, name: str = "") -> Buffer: ...
+    def create_buffer(self, data: list, usage: BufferUsage, memory: MemoryUsage,
+                      *, dtype: Any = None, name: str = "") -> Buffer: ...
     @overload
-    def create_buffer(self, data: Any, type: BufferType, usage: MemoryUsage,
+    def create_buffer(self, data: Any, usage: BufferUsage, memory: MemoryUsage,
                       *, name: str = "") -> Buffer: ...
     @overload
-    def create_buffer(self, data: int, type: BufferType,
-                      usage: MemoryUsage, *, name: str = "") -> Buffer:
+    def create_buffer(self, data: int, usage: BufferUsage,
+                      memory: MemoryUsage, *, name: str = "") -> Buffer:
         """A GPU buffer from a list, any C-contiguous array, or a size in bytes.
+
+        `usage` says what the buffer can be bound as and `memory` how it is
+        filled (0.30; the keywords were `type=` and `usage=` before). A list
+        is packed as `dtype` — np.float32, np.uint32, np.uint16 or np.int32 —
+        or, without one, as float32 for a float list and int32 for an int list
+        (uint32 when the usage has INDEX). An array is uploaded as its own
+        bytes.
 
         A STATIC buffer is device-local and filled by a staging copy. That copy
         is ASYNCHRONOUS since 0.18.0: it is submitted here — so a failure still

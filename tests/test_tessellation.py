@@ -71,8 +71,8 @@ def test_tessellation_level_changes_what_is_drawn(extra_context):
     tese = ctx.compile_shader(str(SHADER_DIR / "disc.tese"), bz.ShaderStage.TESS_EVALUATION)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
 
-    vbuf = ctx.create_buffer(TRIANGLE_ON_CIRCLE, bz.BufferType.VERTEX,
-                             bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    vbuf = ctx.create_buffer(TRIANGLE_ON_CIRCLE, bz.BufferUsage.VERTEX,
+                             bz.MemoryUsage.STATIC)
     target = ctx.create_render_target(128, 128)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
@@ -241,8 +241,8 @@ def test_geometry_shader_turns_points_into_surfaces(extra_context):
     geom = ctx.compile_shader(str(SHADER_DIR / "point_quad.geom"), bz.ShaderStage.GEOMETRY)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
 
-    vbuf = ctx.create_buffer([0.0, 0.0], bz.BufferType.VERTEX,
-                             bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    vbuf = ctx.create_buffer([0.0, 0.0], bz.BufferUsage.VERTEX,
+                             bz.MemoryUsage.STATIC)
     target = ctx.create_render_target(128, 128)
 
     def draw(with_geometry):
@@ -302,10 +302,10 @@ def test_a_barrier_is_legal_on_a_tessellating_context(extra_context):
     tese = ctx.compile_shader(str(SHADER_DIR / "disc.tese"), bz.ShaderStage.TESS_EVALUATION)
     frag = ctx.compile_shader(str(SHADER_DIR / "ssbo_solid.frag"), bz.ShaderStage.FRAGMENT)
 
-    buf = ctx.create_buffer([0.0, 1.0, 0.0, 1.0], bz.BufferType.STORAGE,
-                            bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
-    vbuf = ctx.create_buffer(TRIANGLE_ON_CIRCLE, bz.BufferType.VERTEX,
-                             bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    buf = ctx.create_buffer([0.0, 1.0, 0.0, 1.0], bz.BufferUsage.STORAGE,
+                            bz.MemoryUsage.STATIC)
+    vbuf = ctx.create_buffer(TRIANGLE_ON_CIRCLE, bz.BufferUsage.VERTEX,
+                             bz.MemoryUsage.STATIC)
     target = ctx.create_render_target(64, 64)
     pipeline = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
@@ -363,8 +363,8 @@ def test_tessellation_stages_reach_a_specialization_constant(extra_context):
     tese = ctx.compile_shader(str(SHADER_DIR / "disc.tese"), bz.ShaderStage.TESS_EVALUATION)
     frag = ctx.compile_shader(str(SHADER_DIR / "solid_red.frag"), bz.ShaderStage.FRAGMENT)
 
-    vbuf = ctx.create_buffer(TRIANGLE_ON_CIRCLE, bz.BufferType.VERTEX,
-                             bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    vbuf = ctx.create_buffer(TRIANGLE_ON_CIRCLE, bz.BufferUsage.VERTEX,
+                             bz.MemoryUsage.STATIC)
     target = ctx.create_render_target(128, 128)
 
     def draw(level):

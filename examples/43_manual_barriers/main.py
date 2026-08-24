@@ -71,9 +71,10 @@ def run(manual_middle):
     between the second scaling and everything around it.
     """
     values = ctx.create_buffer(np.ones(N, dtype=np.float32),
-                               bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                               bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC,
+                               name="values")
     accumulator = ctx.create_buffer(np.zeros(1, dtype=np.uint32),
-                                    bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                                    bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     pool = ctx.create_descriptor_pool()
     scale_set = pool.allocate_set(scale)
@@ -92,12 +93,20 @@ def run(manual_middle):
         .dispatch(GROUPS))
 
     # The middle pass. With auto_barriers=False nothing is computed for it,
-    # so the write-after-write against the pass above is spelled by hand.
+    # so the hazards against the pass above are spelled by hand. Bazalt reads
+    # what you wrote and warns about a use no barrier of yours covers, naming
+    # the resource and the call that fixes it — which is how the missing half
+    # below was found in the first place.
     middle = graph.add_pass(
         name="scale by 2 (manual)" if manual_middle else "scale by 2",
         auto_barriers=False if manual_middle else None)
     if manual_middle:
-        # WAW: this dispatch overwrites what the pass above just wrote.
+        # scale.comp is a read-modify-write (`values[i] = values[i] * f`), so
+        # this dispatch does BOTH to what the pass above wrote, and each half
+        # is its own barrier: bz.Access names one access, so "visible to reads
+        # and to writes" is two calls rather than one combined mask. Both land
+        # before the dispatch and bazalt folds them together.
+        middle.barrier(values, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)
         middle.barrier(values, bz.Access.SHADER_WRITE, bz.Access.SHADER_WRITE)
     (middle.bind_pipeline(scale)
         .bind_descriptor_set(scale_set, scale)

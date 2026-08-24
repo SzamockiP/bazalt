@@ -30,14 +30,14 @@ void bind_resources(py::module_& m)
             py::arg("offset") = 0)
         .def(
             "update",
-            [](Buffer& buffer, const py::list& list, std::optional<DataType> dataType, size_t offset)
+            [](Buffer& buffer, const py::list& list, const py::object& dtype, size_t offset)
             {
                 require_open(buffer.owner(), "Buffer.update");
                 if (list.empty())
                 {
                     return;
                 }
-                DataType actualType = resolve_data_type(list, dataType, DataType::INT32);
+                DataType actualType = resolve_dtype(list, dtype, DataType::INT32);
                 with_list_bytes(
                     list,
                     actualType,
@@ -45,8 +45,8 @@ void bind_resources(py::module_& m)
                     { unwrap(buffer.update({static_cast<const std::byte*>(data), nbytes}, offset), nullptr); });
             },
             py::arg("data"),
-            py::arg("data_type") = py::none(),
             py::kw_only(),
+            py::arg("dtype") = py::none(),
             py::arg("offset") = 0)
         // dtype is mandatory: buffers carry no format (unlike Images), so the
         // caller has to say how to interpret the bytes.
@@ -78,6 +78,7 @@ void bind_resources(py::module_& m)
         // waits CPU-side — which leaves these for loading screens and for
         // timing a setup phase.
         .def_property_readonly("ready", &Buffer::ready)
+        .def_property_readonly("name", &Buffer::name)
         .def_property_readonly(
             "address",
             [](Buffer& buffer)
@@ -138,6 +139,7 @@ void bind_resources(py::module_& m)
         .def_property_readonly("depth", &Image::depth)
         .def_property_readonly("format", &Image::format)
         .def_property_readonly("mip_levels", &Image::mip_levels)
+        .def_property_readonly("name", &Image::name)
         .def_property_readonly("array_layers", &Image::array_layers)
         .def_property_readonly("is_cube", &Image::is_cube)
         .def_property_readonly("samples", &Image::samples)

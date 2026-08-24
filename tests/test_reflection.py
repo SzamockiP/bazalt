@@ -112,7 +112,7 @@ def test_a_fragment_write_is_ordered_against_a_later_read(ctx, extra_context):
 
     target = ctx.create_render_target(32, 32)
     img = ctx.create_image(32, 32, bz.Format.RGBA8)
-    out = ctx.create_buffer(16, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    out = ctx.create_buffer(16, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
     graphics = (ctx.graphics_pipeline()
                 .vertex_shader(vert)
@@ -203,9 +203,9 @@ def test_two_dispatches_reading_one_buffer_need_no_barrier(ctx):
                 .storage_buffer(0, set=0)
                 .storage_buffer(1, set=1)
                 .build())
-    written = ctx.create_buffer(64, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    written = ctx.create_buffer(64, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     read_only = ctx.create_buffer(np.arange(16, dtype=np.uint32),
-                                  bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                                  bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=8, storage_buffers=8)
     set0 = pool.allocate_set(pipeline, set=0)
     set0.set_buffer(0, written)
@@ -231,7 +231,7 @@ def test_a_draw_with_no_pipeline_bound_stays_conservative(ctx):
     barrier. A draw with no pipeline is a bug the layers name precisely, so bazalt
     adds no error of its own; what it must not do is get quieter about barriers.
     """
-    buf = ctx.create_buffer(64, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = ctx.create_buffer(64, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     g = ctx.graph()
     # No bind_pipeline, so nothing is recorded to consult. Recording must not throw.
     g.add_pass().barrier(buf, bz.Access.SHADER_WRITE, bz.Access.SHADER_READ)

@@ -12,13 +12,28 @@
 #include "Context.hpp"
 #include "ImmediateSubmit.hpp"
 
-enum class BufferType
+// Bits since 0.30, so one buffer can be several things: a compute shader
+// writes vertices into a STORAGE buffer the draw then binds as VERTEX, or a
+// uniform block the GPU fills. Chosen now rather than later because
+// test_stubs.py and 1.0 freeze the member ints, and VERTEX = 0 can never
+// become a bit afterwards.
+enum class BufferUsage : std::uint32_t
 {
-    VERTEX,
-    INDEX,
-    UNIFORM,
-    STORAGE
+    VERTEX = 1u << 0,
+    INDEX = 1u << 1,
+    UNIFORM = 1u << 2,
+    STORAGE = 1u << 3
 };
+
+inline constexpr BufferUsage operator|(BufferUsage a, BufferUsage b)
+{
+    return static_cast<BufferUsage>(static_cast<std::uint32_t>(a) | static_cast<std::uint32_t>(b));
+}
+
+inline constexpr bool has(BufferUsage usage, BufferUsage bit)
+{
+    return (static_cast<std::uint32_t>(usage) & static_cast<std::uint32_t>(bit)) != 0;
+}
 
 enum class DataType
 {
@@ -34,25 +49,27 @@ enum class MemoryUsage
     DYNAMIC
 };
 
-inline constexpr const char* buffer_type_name(BufferType type)
+// "VERTEX|STORAGE": the spelling a user wrote, for the messages that name a
+// buffer's usage. A pybind enum accepts any int, so unknown bits print as one.
+inline std::string buffer_usage_name(BufferUsage usage)
 {
-    switch (type)
+    std::string out;
+    const auto add = [&](BufferUsage bit, const char* name)
     {
-        case BufferType::VERTEX:
-            return "vertex";
-        case BufferType::INDEX:
-            return "index";
-        case BufferType::UNIFORM:
-            return "uniform";
-        case BufferType::STORAGE:
-            return "storage";
-    }
-    // Not std::unreachable: a pybind enum accepts any int.
-    return "unknown";
+        if (has(usage, bit))
+        {
+            out += out.empty() ? name : std::string("|") + name;
+        }
+    };
+    add(BufferUsage::VERTEX, "VERTEX");
+    add(BufferUsage::INDEX, "INDEX");
+    add(BufferUsage::UNIFORM, "UNIFORM");
+    add(BufferUsage::STORAGE, "STORAGE");
+    return out.empty() ? "unknown" : out;
 }
 
-// What a buffer of this type must be able to do. One function for both memory
-// usages, because the answer is a property of the TYPE and nothing else — and
+// What a buffer of this usage must be able to do. One function for both memory
+// usages, because the answer is a property of the USAGE and nothing else — and
 // because the two had drifted: StaticBuffer switched on the type while
 // DynamicBuffer asked "is it STORAGE?" and called everything else a uniform
 // buffer. A DYNAMIC vertex buffer — geometry rebuilt every frame, which is what
@@ -69,44 +86,45 @@ inline constexpr const char* buffer_type_name(BufferType type)
 // the two kinds of buffer to disagree. They already had, once — the static path
 // got the flag and the dynamic one did not, which a DYNAMIC buffer only reports
 // at the vkGetBufferDeviceAddress that needs it.
-inline constexpr VkBufferUsageFlags buffer_usage_for(BufferType type, bool device_address = false)
+inline constexpr VkBufferUsageFlags buffer_usage_for(BufferUsage usage_bits, bool device_address = false)
 {
     // TRANSFER_SRC so read() can copy the contents back out.
     VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    switch (type)
+    if (has(usage_bits, BufferUsage::VERTEX))
     {
-        case BufferType::VERTEX:
-            usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-            break;
-        case BufferType::INDEX:
-            usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-            break;
-        // VERTEX also: a compute shader writing vertices into an SSBO that
-        // the graphics pipeline then consumes via bind_vertex_buffer is the
-        // canonical compute->graphics hand-off (examples/11_particles).
-        //
-        // INDIRECT too, and unconditionally (0.19). The whole point of an
-        // indirect draw is a compute shader writing the draw arguments, so the
-        // type that carries STORAGE_BUFFER is the type that carries this.
-        // Gating it behind a fifth BufferType would make "which buffers can be
-        // indirect" a second rule to remember for a usage bit that costs
-        // nothing — the same reasoning that gave DYNAMIC buffers the transfer
-        // bits in 0.18. It matters for a DYNAMIC storage buffer too: draw
-        // arguments the CPU rewrites every frame are exactly that.
-        // INDEX joined them in 0.29, and the argument is the VERTEX one seen
-        // from the other end: a compute shader that compacts or rewrites an
-        // index list is the same hand-off as one that writes vertices, and it
-        // was the only third of GPU-driven work bazalt could not spell.
-        case BufferType::STORAGE:
-            usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                     VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-            break;
-        // Constant data that never changes (e.g. baked matrices) is a legitimate
-        // STATIC uniform buffer. Without this the buffer was created with only
-        // TRANSFER usage and failed at bind time with a cryptic validation error.
-        case BufferType::UNIFORM:
-            usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-            break;
+        usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    }
+    if (has(usage_bits, BufferUsage::INDEX))
+    {
+        usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    }
+    // VERTEX also: a compute shader writing vertices into an SSBO that
+    // the graphics pipeline then consumes via bind_vertex_buffer is the
+    // canonical compute->graphics hand-off (examples/11_particles).
+    //
+    // INDIRECT too, and unconditionally (0.19). The whole point of an
+    // indirect draw is a compute shader writing the draw arguments, so the
+    // usage that carries STORAGE_BUFFER is the usage that carries this.
+    // Gating it behind a fifth member would make "which buffers can be
+    // indirect" a second rule to remember for a usage bit that costs
+    // nothing — the same reasoning that gave DYNAMIC buffers the transfer
+    // bits in 0.18. It matters for a DYNAMIC storage buffer too: draw
+    // arguments the CPU rewrites every frame are exactly that.
+    // INDEX joined them in 0.29, and the argument is the VERTEX one seen
+    // from the other end: a compute shader that compacts or rewrites an
+    // index list is the same hand-off as one that writes vertices, and it
+    // was the only third of GPU-driven work bazalt could not spell.
+    if (has(usage_bits, BufferUsage::STORAGE))
+    {
+        usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                 VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    }
+    // Constant data that never changes (e.g. baked matrices) is a legitimate
+    // STATIC uniform buffer. Without this the buffer was created with only
+    // TRANSFER usage and failed at bind time with a cryptic validation error.
+    if (has(usage_bits, BufferUsage::UNIFORM))
+    {
+        usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
     }
     // The allocator opted in for the whole Context (see
     // create_allocator_and_pool_), so this is the buffer's half of the same
@@ -178,12 +196,24 @@ public:
     // command buffer remembers which buffers a recording touches), read_bytes
     // waits on it CPU-side, and ready/wait are the explicit-control verbs.
     //
-    // 0 means "nothing pending", which is the honest answer for a DYNAMIC
-    // buffer (host-visible, written by mapping, never staged) and for a STATIC
-    // one whose copy is already complete.
-    virtual std::uint64_t upload_serial() const
+    // All zeros means "nothing pending", which is the honest answer for a
+    // DYNAMIC buffer (host-visible, written by mapping, never staged) and for
+    // a STATIC one whose copy is already complete. One value per queue since
+    // 0.30: the staging copy signals the transfer timeline.
+    virtual QueueSerials upload_serial() const
     {
-        return 0;
+        return {};
+    }
+
+    // The name= the buffer was created with, or empty. A debug label for
+    // graph.explain() and the validation layer — never a key.
+    const std::string& name() const
+    {
+        return name_;
+    }
+    void set_name(std::string name)
+    {
+        name_ = std::move(name);
     }
     virtual bool ready() const
     {
@@ -215,25 +245,26 @@ public:
     // it from a plain Buffer&: only a STORAGE buffer carries
     // VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, so this turns a layers-only VUID into a
     // bazalt error that names the fix. Set once, in Buffer::create.
-    BufferType buffer_type() const
+    BufferUsage buffer_usage() const
     {
-        return buffer_type_;
+        return buffer_usage_;
     }
-    void set_buffer_type(BufferType type)
+    void set_buffer_usage(BufferUsage usage)
     {
-        buffer_type_ = type;
+        buffer_usage_ = usage;
     }
 
     static std::expected<std::shared_ptr<Buffer>, Error> create(
         Context& context,
         const void* data,
         size_t data_size,
-        BufferType type,
+        BufferUsage type,
         MemoryUsage usage);
 
 protected:
     DataType data_type_ = DataType::FLOAT;
-    BufferType buffer_type_ = BufferType::UNIFORM;
+    std::string name_;
+    BufferUsage buffer_usage_ = BufferUsage::UNIFORM;
 };
 
 class StaticBuffer : public Buffer
@@ -263,21 +294,28 @@ public:
         return size_;
     }
 
-    std::uint64_t upload_serial() const override
+    QueueSerials upload_serial() const override
     {
         return upload_serial_;
     }
     bool ready() const override
     {
-        return context_->completed_submit_serial() >= upload_serial_;
+        for (std::size_t i = 0; i < kQueueCount; ++i)
+        {
+            if (context_->completed_submit_serial(static_cast<QueueKind>(i)) < upload_serial_[i])
+            {
+                return false;
+            }
+        }
+        return true;
     }
     void wait() override
     {
-        static_cast<void>(context_->wait_for_serial(upload_serial_));
+        static_cast<void>(context_->wait_for_serials(upload_serial_));
     }
-    void set_upload_serial(std::uint64_t serial)
+    void set_upload_serial(const QueueSerials& serials)
     {
-        upload_serial_ = serial;
+        upload_serial_ = serials;
     }
 
     // Blocking round trip through a readback staging buffer — device-local
@@ -288,7 +326,7 @@ public:
         Context& context,
         const void* data,
         size_t data_size,
-        BufferType type);
+        BufferUsage type);
 
 private:
     // How much host memory one upload may hold at a time. A staging buffer the
@@ -319,9 +357,10 @@ private:
     VkBuffer buffer_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
     size_t size_ = 0;
-    // Which submit fills this buffer. Plain, not atomic: it is written once by
-    // create() before the shared_ptr escapes, and only read afterwards.
-    std::uint64_t upload_serial_ = 0;
+    // Which submit fills this buffer, per queue. Plain, not atomic: it is
+    // written once by create() before the shared_ptr escapes, and only read
+    // afterwards.
+    QueueSerials upload_serial_{};
 };
 
 class DynamicBuffer : public Buffer
@@ -339,7 +378,7 @@ public:
         std::vector<VkBuffer> buffers,
         std::vector<VmaAllocation> allocations,
         size_t size,
-        BufferType type);
+        BufferUsage type);
 
     ~DynamicBuffer() override;
 
@@ -373,14 +412,14 @@ public:
         Context& context,
         const void* data,
         size_t data_size,
-        BufferType type);
+        BufferUsage type);
 
 private:
     std::shared_ptr<Context> context_;
     std::vector<VkBuffer> buffers_;
     std::vector<VmaAllocation> allocations_;
     size_t size_ = 0;
-    BufferType type_ = BufferType::UNIFORM;
+    BufferUsage type_ = BufferUsage::UNIFORM;
 };
 
 // Keep backward-compatible alias

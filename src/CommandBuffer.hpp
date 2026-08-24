@@ -38,6 +38,18 @@ struct UseEvent
     VkAccessFlags access = 0;
     bool writes = false;
     bool shader_writable = false;
+    // Recorded by a pass with auto_barriers=False (0.30). The fold never
+    // commits such a use — the pass's notes are all it tells the fold — but
+    // it PEEKS it: a use the notes do not cover is a possible hazard, and
+    // the compile logs one warning naming the fix.
+    bool manual = false;
+    // Which subresources the use touches (0.30). layer_count == 0 means the
+    // whole image, which is what every verb but a narrowed descriptor says.
+    // `layers`/`mips` are the image's own counts, so the fold can size a
+    // split without dereferencing the Image.
+    ImageRange range{};
+    std::uint32_t layers = 1;
+    std::uint32_t mips = 1;
     // "Only if something already wrote this image" — the sampled-image rule.
     // An uploaded texture the tracker never saw rests in SHADER_READ_ONLY
     // already, and transitioning it from a tracker's UNDEFINED would DISCARD
@@ -80,6 +92,31 @@ void record_render_pass_transitions_out(const VolkDeviceTable& vk, VkCommandBuff
 // The recorded lambdas take a FrameContext rather than a SwapchainRenderer&.
 // That is what lets one recording be replayed against a window, an offscreen
 // image or a compute-only submit: this file does not know swapchains exist.
+// The debug-utils label pair, shared by cmd.begin_label/end_label and the
+// per-pass label Graph::execute wraps every named pass in (0.30). Loaded by
+// volkLoadInstanceOnly, null without VK_EXT_debug_utils — then both are no-ops.
+inline void begin_debug_label(VkCommandBuffer cmd, const std::string& name)
+{
+    if (vkCmdBeginDebugUtilsLabelEXT == nullptr)
+    {
+        return;
+    }
+    VkDebugUtilsLabelEXT label{
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
+        .pNext = nullptr,
+        .pLabelName = name.c_str(),
+        .color = {0.0f, 0.0f, 0.0f, 0.0f}};
+    vkCmdBeginDebugUtilsLabelEXT(cmd, &label);
+}
+
+inline void end_debug_label(VkCommandBuffer cmd)
+{
+    if (vkCmdEndDebugUtilsLabelEXT != nullptr)
+    {
+        vkCmdEndDebugUtilsLabelEXT(cmd);
+    }
+}
+
 class CommandBuffer
 {
 public:
@@ -134,7 +171,10 @@ public:
     // feeds: 0 is vertex_format (per vertex), 1 is instance_format (per
     // instance). A kwarg on the existing verb rather than a second method —
     // binding one buffer and binding the other are the same operation.
-    CommandBuffer& bind_vertex_buffer(const std::shared_ptr<Buffer>& buffer, std::uint32_t binding = 0);
+    // Returns expected since 0.30, for the reason bind_index_buffer gives: a
+    // usage is a set of bits now, and a buffer without VERTEX or STORAGE used
+    // to reach the layers as VUID-vkCmdBindVertexBuffers-pBuffers-00627.
+    std::expected<void, Error> bind_vertex_buffer(const std::shared_ptr<Buffer>& buffer, std::uint32_t binding = 0);
 
     // Returns expected since 0.29: a STORAGE buffer is a legitimate index
     // buffer now (a compute shader that rewrites an index list), so the verb
@@ -302,6 +342,38 @@ public:
         VkDeviceSize offset = 0,
         VkDeviceSize size = 0);
 
+    // Writes up to 65536 bytes into a buffer from the command stream itself
+    // (vkCmdUpdateBuffer) — no staging buffer, no second submit, so a small
+    // patch (a counter, a few uniforms) lands inside the frame that needs it.
+    // Legal on every queue, including Queue.TRANSFER. Size and offset must be
+    // multiples of 4; anything larger is copy_buffer's job.
+    std::expected<void, Error> update_buffer(
+        std::shared_ptr<Buffer> buffer,
+        std::vector<std::byte> data,
+        VkDeviceSize offset = 0);
+
+    // Copies one (layer, mip) of an image out of a buffer, tightly packed —
+    // the whole level, so the old contents are discarded rather than waited
+    // for. The buffer bytes start at buffer_offset. Legal on every queue,
+    // including Queue.TRANSFER; the subresource ends in SHADER_READ_ONLY.
+    std::expected<void, Error> copy_buffer_to_image(
+        const std::shared_ptr<Buffer>& buffer,
+        const std::shared_ptr<Image>& image,
+        std::uint32_t layer = 0,
+        std::uint32_t mip = 0,
+        VkDeviceSize buffer_offset = 0);
+
+    // The mirror: one (layer, mip) into a buffer at buffer_offset, tightly
+    // packed. src_access names the image's resting state exactly as
+    // copy_image's does; the subresource ends in SHADER_READ_ONLY.
+    std::expected<void, Error> copy_image_to_buffer(
+        const std::shared_ptr<Image>& image,
+        const std::shared_ptr<Buffer>& buffer,
+        std::uint32_t layer = 0,
+        std::uint32_t mip = 0,
+        VkDeviceSize buffer_offset = 0,
+        Access src_access = Access::SHADER_READ);
+
     // Fill an image with one colour, with no pipeline and no pass. Resetting an
     // accumulation or history buffer, or clearing a storage image a compute
     // shader only writes part of. A depth image is refused: clearing depth is
@@ -432,11 +504,24 @@ public:
     // The buffers this recording binds or copies, for the same reason
     // used_sets exists: a STATIC buffer's fill is a submit of its own since
     // 0.18.0, and the submit path waits on it. Recorded by record_buffer_use_,
-    // which is deliberately NOT part of track_use_ — that one returns early
-    // with auto_barriers=False, and residency is not a barrier question.
+    // which is deliberately NOT part of track_use_ — residency is not a
+    // barrier question, and a manual pass needs it just as much.
     const std::vector<std::shared_ptr<Buffer>>& used_buffers() const
     {
         return used_buffers_;
+    }
+
+    // The images this recording copies, blits, clears or barriers WITHOUT a
+    // descriptor set (0.30). The descriptor path is covered by used_sets, and
+    // until the transfer queue these verbs needed nothing: the upload
+    // submitted on the graphics queue, this recording replays on the graphics
+    // queue, and a pipeline barrier's first scope covers everything submitted
+    // earlier there. An upload on the TRANSFER queue is out of that reach, so
+    // the image has to be named for the submit's timeline wait — the same
+    // thing used_buffers has done for a staged buffer since 0.18.
+    const std::vector<std::shared_ptr<Image>>& used_images() const
+    {
+        return used_images_;
     }
 
     // ── The replay surface the graph executor drives ────────────────────────
@@ -513,6 +598,7 @@ private:
     // pending upload are skipped, so a recording of DYNAMIC buffers stores
     // nothing.
     void record_buffer_use_(const std::shared_ptr<Buffer>& buffer);
+    void record_image_use_(const std::shared_ptr<Image>& image);
 
     // Everything the three indirect verbs check, in one place so they cannot
     // disagree about which buffer is legal or what the message says.
@@ -552,7 +638,8 @@ private:
         VkPipelineStageFlags stages,
         VkAccessFlags access,
         bool writes,
-        bool only_if_tracked = false);
+        bool only_if_tracked = false,
+        const ImageRange& range = {});
 
     // Does the pipeline bound at this bind point write (set, binding)?
     //
@@ -603,6 +690,7 @@ private:
     std::vector<std::function<void(VkCommandBuffer, const FrameContext&)>> commands_;
     std::vector<std::shared_ptr<DescriptorSet>> used_sets_;
     std::vector<std::shared_ptr<Buffer>> used_buffers_;
+    std::vector<std::shared_ptr<Image>> used_images_;
 
     // Where resource uses are reported, for the graph to fold. Owned by the
     // Pass that owns this recorder, and set before anything is recorded.

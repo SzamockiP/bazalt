@@ -143,6 +143,27 @@ void Pipeline::destroy()
 
 // ── PipelineLayoutBuilder ─────────────────────────────────────────────────────
 
+namespace
+{
+    // The declarator a descriptor type came from, for the mismatch message.
+    const char* declarator_name(VkDescriptorType type)
+    {
+        switch (type)
+        {
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+                return "uniform_buffer";
+            case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+                return "storage_buffer";
+            case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+                return "texture";
+            case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+                return "storage_image";
+            default:
+                return "?";
+        }
+    }
+} // namespace
+
 void PipelineLayoutBuilder::add_binding(
     uint32_t binding,
     VkShaderStageFlags stageFlags,
@@ -165,6 +186,21 @@ void PipelineLayoutBuilder::add_binding(
         // one of the two numbers is wrong and the layout can only hold one, so
         // it is a user error rather than something to merge. The builder verbs
         // chain and have no error channel, so the diagnosis waits for build().
+        // A different TYPE is the count mismatch's twin and gets the same
+        // channel (0.30). The first declaration used to win silently, so
+        // .texture(0, VERTEX).storage_buffer(0, FRAGMENT) built a layout the
+        // second call never described.
+        if (it->descriptorType != descriptorType)
+        {
+            error_ = err_shader(
+                std::format(
+                    "binding {} of set {} is declared as .{}() and again as .{}(). "
+                    "Use one declarator for a binding, or two bindings.",
+                    binding,
+                    setIndex,
+                    declarator_name(it->descriptorType),
+                    declarator_name(descriptorType)));
+        }
         if (it->descriptorCount != count)
         {
             error_ = err_shader(
@@ -679,6 +715,51 @@ std::expected<std::shared_ptr<Pipeline>, Error> GraphicsPipelineBuilder::build(
             "line_width other than 1.0 requires the WIDE_LINES feature. Create the "
             "Context with features=[bz.Feature.WIDE_LINES] (or optional=[...])"));
     }
+    if (conservative_raster_ != ConservativeRaster::OFF)
+    {
+        if (!context_.supports(Feature::CONSERVATIVE_RASTER))
+        {
+            return std::unexpected(err_unsupported(
+                "conservative_raster requires the CONSERVATIVE_RASTER feature. Create the "
+                "Context with features=[bz.Feature.CONSERVATIVE_RASTER] (or optional=[...])"));
+        }
+        // A property rather than a feature, so the Context could not have
+        // negotiated it away: the device either rasterizes underestimated or
+        // it does not, and asking anyway is a validation error.
+        if (conservative_raster_ == ConservativeRaster::UNDERESTIMATE &&
+            !context_.limits().conservative_underestimation)
+        {
+            return std::unexpected(err_unsupported(
+                "conservative_raster(UNDERESTIMATE) is not supported by this GPU (its "
+                "primitiveUnderestimation property is false). OVERESTIMATE works on every "
+                "device that has the feature at all"));
+        }
+    }
+    if (extra_overestimation_ != 0.0f)
+    {
+        if (conservative_raster_ != ConservativeRaster::OVERESTIMATE)
+        {
+            return std::unexpected(err_shader(
+                "extra_overestimation only means something with "
+                "conservative_raster(bz.ConservativeRaster.OVERESTIMATE): there is no area to "
+                "grow when the mode is OFF or UNDERESTIMATE"));
+        }
+        // Refused rather than clamped: the driver would silently take the
+        // maximum, and a grid built on a dilation it did not get is wrong in a
+        // way nothing reports.
+        if (extra_overestimation_ < 0.0f || extra_overestimation_ > context_.limits().max_extra_overestimation)
+        {
+            return std::unexpected(err_unsupported(
+                std::format(
+                    "extra_overestimation={} is outside what this GPU allows (0.0 to {}). Read "
+                    "the maximum from ctx.limits.max_extra_overestimation; the driver rounds "
+                    "the value down to a multiple of "
+                    "ctx.limits.extra_overestimation_granularity ({})",
+                    extra_overestimation_,
+                    context_.limits().max_extra_overestimation,
+                    context_.limits().extra_overestimation_granularity)));
+        }
+    }
     // A fragment shader is optional only when there is nothing to shade:
     // a depth-only pass (shadow maps) rasterizes straight into the depth
     // attachment and is valid Vulkan without one.
@@ -825,6 +906,8 @@ std::expected<std::shared_ptr<Pipeline>, Error> GraphicsPipelineBuilder::build(
         .front_face = front_face_,
         .polygon_mode = polygon_mode_,
         .depth_clamp = depth_clamp_,
+        .conservative_raster = conservative_raster_,
+        .extra_overestimation = extra_overestimation_,
         .line_width = line_width_,
         .depth_bias_constant = depth_bias_constant_,
         .depth_bias_slope = depth_bias_slope_,
@@ -952,7 +1035,19 @@ std::expected<VkPipeline, Error> GraphicsPipelineBuilder::create_pipeline_(
         .scissorCount = 1,
         .pScissors = nullptr};
 
-    const VkPipelineRasterizationStateCreateInfo rasterizer = rasterization_state_(s);
+    // Outside rasterization_state_ and not inside it: the struct has to outlive
+    // vkCreateGraphicsPipelines, and that function returns its state by value.
+    const VkPipelineRasterizationConservativeStateCreateInfoEXT conservative{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_CONSERVATIVE_STATE_CREATE_INFO_EXT,
+        .pNext = nullptr,
+        .flags = 0,
+        .conservativeRasterizationMode = to_vk(s.conservative_raster),
+        .extraPrimitiveOverestimationSize = s.extra_overestimation};
+    VkPipelineRasterizationStateCreateInfo rasterizer = rasterization_state_(s);
+    if (s.conservative_raster != ConservativeRaster::OFF)
+    {
+        rasterizer.pNext = &conservative;
+    }
 
     // rasterizationSamples must match the sample count of the target this
     // pipeline draws into — build(target) reads it off the target so the two

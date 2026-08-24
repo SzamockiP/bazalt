@@ -27,10 +27,10 @@ vertices = [
     -0.5,  0.5, 0.0,   0.0, 1.0, 0.0, # Bottom-Left / Green
      0.5,  0.5, 0.0,   0.0, 0.0, 1.0, # Bottom-Right / Blue
 ]
-vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+vbuf = ctx.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
 indices = [0, 1, 2]
-ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
+ibuf = ctx.create_buffer(indices, bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 
 # Build the graph once
 g = ctx.graph()

@@ -64,13 +64,13 @@ for normal, corners in faces:
     idx += [base, base + 1, base + 2, base + 2, base + 3, base]
 
 vbuf = ctx.create_buffer(np.array(verts, dtype=np.float32),
-                         bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+                         bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 ibuf = ctx.create_buffer(np.array(idx, dtype=np.uint32),
-                         bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
+                         bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 
 # UBO: { mat4 mvp; mat4 model; }
 ubuf = ctx.create_buffer(np.zeros(32, dtype=np.float32),
-                         bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+                         bz.BufferUsage.UNIFORM, bz.MemoryUsage.DYNAMIC)
 
 pool = ctx.create_descriptor_pool()
 

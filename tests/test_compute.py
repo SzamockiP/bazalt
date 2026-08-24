@@ -47,7 +47,7 @@ def test_dispatch_doubles_a_storage_buffer(ctx):
     pipeline = ctx.compute_pipeline().shader(comp).storage_buffer(0).build()
 
     data = np.arange(128, dtype=np.float32)
-    sbuf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    sbuf = ctx.create_buffer(data, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=8, storage_buffers=8)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, sbuf)
@@ -73,7 +73,7 @@ def test_push_constants_reach_a_compute_shader(ctx):
                 .build())
 
     data = np.arange(64, dtype=np.float32)
-    sbuf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    sbuf = ctx.create_buffer(data, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=8, storage_buffers=8)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, sbuf)
@@ -98,9 +98,9 @@ def test_uniform_buffer_reaches_a_compute_shader(ctx):
                 .build())
 
     data = np.arange(64, dtype=np.float32)
-    sbuf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    sbuf = ctx.create_buffer(data, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     ubuf = ctx.create_buffer(np.array([3.0], dtype=np.float32),
-                             bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+                             bz.BufferUsage.UNIFORM, bz.MemoryUsage.DYNAMIC)
     pool = ctx.create_descriptor_pool(max_sets=8, storage_buffers=8, uniform_buffers=8)
     dset = pool.allocate_frame_set(pipeline, set=0)
     dset.set_buffer(0, sbuf)

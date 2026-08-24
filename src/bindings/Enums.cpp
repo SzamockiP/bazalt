@@ -52,7 +52,9 @@ void bind_enums(py::module_& m)
         .value("WORKGROUP_SIZE", Feature::WORKGROUP_SIZE)
         // The first row that names a fact about the device's queues rather
         // than a bit it can be asked to turn on.
-        .value("ASYNC_COMPUTE", Feature::ASYNC_COMPUTE);
+        .value("ASYNC_COMPUTE", Feature::ASYNC_COMPUTE)
+        .value("ASYNC_TRANSFER", Feature::ASYNC_TRANSFER)
+        .value("CONSERVATIVE_RASTER", Feature::CONSERVATIVE_RASTER);
 
     // The gamepad layout GLFW maps every known pad onto, renamed rather than
     // translated: the values ARE the GLFW ones, so the two cannot drift.
@@ -236,17 +238,18 @@ void bind_enums(py::module_& m)
         .value("RESIZE_ALL", Cursor::RESIZE_ALL)
         .value("NOT_ALLOWED", Cursor::NOT_ALLOWED);
 
-    py::enum_<BufferType>(m, "BufferType")
-        .value("VERTEX", BufferType::VERTEX)
-        .value("INDEX", BufferType::INDEX)
-        .value("UNIFORM", BufferType::UNIFORM)
-        .value("STORAGE", BufferType::STORAGE);
-
-    py::enum_<DataType>(m, "DataType")
-        .value("FLOAT", DataType::FLOAT)
-        .value("UINT32", DataType::UINT32)
-        .value("UINT16", DataType::UINT16)
-        .value("INT32", DataType::INT32);
+    // A real enum.IntFlag (pybind11 3's native_enum) rather than a py::enum_:
+    // `BufferUsage.VERTEX | BufferUsage.STORAGE` has to be a BufferUsage, and
+    // py::enum_ gives a scoped enum no `|` at all (its arithmetic operators
+    // exist only for enums convertible to int). The stub says IntFlag, and it
+    // is one. DataType is not bound since 0.30: the list overloads take a
+    // numpy dtype, which is the spelling Buffer.read already used.
+    py::native_enum<BufferUsage>(m, "BufferUsage", "enum.IntFlag")
+        .value("VERTEX", BufferUsage::VERTEX)
+        .value("INDEX", BufferUsage::INDEX)
+        .value("UNIFORM", BufferUsage::UNIFORM)
+        .value("STORAGE", BufferUsage::STORAGE)
+        .finalize();
 
     py::enum_<ShaderStage>(m, "ShaderStage")
         .value("VERTEX", ShaderStage::VERTEX)
@@ -299,7 +302,10 @@ void bind_enums(py::module_& m)
     // VALUE in 0.29, which is the whole point of that split: async compute
     // arrived as a new member rather than a new parameter, and a program
     // written for 0.28 schedules exactly as it did.
-    py::enum_<QueueKind>(m, "Queue").value("GRAPHICS", QueueKind::Graphics).value("COMPUTE", QueueKind::Compute);
+    py::enum_<QueueKind>(m, "Queue")
+        .value("GRAPHICS", QueueKind::Graphics)
+        .value("COMPUTE", QueueKind::Compute)
+        .value("TRANSFER", QueueKind::Transfer);
 
     // Pixel formats — the name VertexFormat freed in 0.4.
     py::enum_<Format>(m, "Format")
@@ -381,6 +387,11 @@ void bind_enums(py::module_& m)
         .value("FILL", PolygonMode::FILL)
         .value("LINE", PolygonMode::LINE)
         .value("POINT", PolygonMode::POINT);
+
+    py::enum_<ConservativeRaster>(m, "ConservativeRaster")
+        .value("OFF", ConservativeRaster::OFF)
+        .value("OVERESTIMATE", ConservativeRaster::OVERESTIMATE)
+        .value("UNDERESTIMATE", ConservativeRaster::UNDERESTIMATE);
 
     py::enum_<CullMode>(m, "CullMode")
         .value("NONE", CullMode::NONE)

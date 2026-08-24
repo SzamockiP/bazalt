@@ -405,8 +405,8 @@ def test_wide_lines_thicken_the_wireframe(extra_context):
         -0.5, +0.5, 0.0, 0.0, 1.0, 0.0,
         +0.5, +0.5, 0.0, 0.0, 0.0, 1.0,
     ]
-    vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
-    ibuf = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
+    vbuf = ctx.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
+    ibuf = ctx.create_buffer([0, 1, 2], bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC, dtype=np.uint32)
     target = ctx.create_render_target(64, 64)
 
     def painted(width):
@@ -501,8 +501,8 @@ def test_line_mode_draws_edges_and_leaves_the_interior(extra_context):
         -0.5, +0.5, 0.0, 0.0, 1.0, 0.0,
         +0.5, +0.5, 0.0, 0.0, 0.0, 1.0,
     ]
-    vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
-    ibuf = ctx.create_buffer([0, 1, 2], bz.BufferType.INDEX, bz.MemoryUsage.STATIC, bz.DataType.UINT32)
+    vbuf = ctx.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
+    ibuf = ctx.create_buffer([0, 1, 2], bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC, dtype=np.uint32)
     target = ctx.create_render_target(64, 64)
 
     def render(mode):
@@ -604,8 +604,7 @@ def test_a_triangle_fan_draws_from_one_vertex(ctx, triangle_shaders):
         +0.9, +0.9, 0.0, 1.0, 1.0, 1.0,
         -0.9, +0.9, 0.0, 1.0, 1.0, 1.0,
     ]
-    vbuf = ctx.create_buffer(corners, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC,
-                             bz.DataType.FLOAT)
+    vbuf = ctx.create_buffer(corners, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
     def render(topology):
         target = ctx.create_render_target(64, 64)

@@ -118,17 +118,17 @@ spheres[:, 1] = rng.uniform(-6.0, 6.0, COUNT)
 spheres[:, 2] = rng.uniform(-60.0, 60.0, COUNT)
 spheres[:, 3] = rng.uniform(0.5, 1.1, COUNT)
 
-candidates = ctx.create_buffer(spheres, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+candidates = ctx.create_buffer(spheres, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 # Device-local. NOT MemoryUsage.DYNAMIC: that is host-visible memory allocated for
 # sequential CPU writes, and a compute shader writing into it does not come back.
-visible = ctx.create_buffer(COUNT * 16, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
-args = ctx.create_buffer(20, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+visible = ctx.create_buffer(COUNT * 16, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+args = ctx.create_buffer(20, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
 # Culling off: everything is "visible", so the draw runs over all of them.
-all_visible = ctx.create_buffer(spheres, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+all_visible = ctx.create_buffer(spheres, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 no_cull_args = ctx.create_buffer(
     np.array([INDEX_COUNT, COUNT, 0, 0, 0], dtype=np.uint32),
-    bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
 
 # ── a unit cube ───────────────────────────────────────────────────────────
 vertices = np.array([
@@ -165,8 +165,8 @@ indices = np.array([
     16, 17, 18, 18, 19, 16,
     23, 22, 21, 21, 20, 23,
 ], dtype=np.uint32)
-vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
-ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
+vbuf = ctx.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
+ibuf = ctx.create_buffer(indices, bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 
 # The 12 edges of a frustum, as pairs of the 8 clip-space corners. Vulkan's depth
 # range is 0..1, so the near plane is z=0 and the far plane z=1.
@@ -178,7 +178,7 @@ FRUSTUM_EDGES = [(0, 1), (1, 2), (2, 3), (3, 0),
                  (4, 5), (5, 6), (6, 7), (7, 4),
                  (0, 4), (1, 5), (2, 6), (3, 7)]
 frustum_lines = ctx.create_buffer(len(FRUSTUM_EDGES) * 2 * 3 * 4,
-                                  bz.BufferType.VERTEX, bz.MemoryUsage.DYNAMIC)
+                                  bz.BufferUsage.VERTEX, bz.MemoryUsage.DYNAMIC)
 
 # ── pipelines ─────────────────────────────────────────────────────────────
 comp = ctx.compile_shader("cull.comp", bz.ShaderStage.COMPUTE)

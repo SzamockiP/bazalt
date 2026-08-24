@@ -128,7 +128,7 @@ def test_uniform_buffer_via_frame_descriptor_set(ctx, fullscreen_vert):
                 .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(target))
 
-    ubuf = ctx.create_buffer([0.0, 1.0, 0.0, 1.0], bz.BufferType.UNIFORM,
+    ubuf = ctx.create_buffer([0.0, 1.0, 0.0, 1.0], bz.BufferUsage.UNIFORM,
                              bz.MemoryUsage.DYNAMIC)
     pool = ctx.create_descriptor_pool(max_sets=8, uniform_buffers=8)
     dset = pool.allocate_frame_set(pipeline, set=0)
@@ -162,7 +162,7 @@ def test_static_uniform_buffer_binds_and_reads(ctx, fullscreen_vert):
                 .uniform_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(target))
 
-    ubuf = ctx.create_buffer([0.0, 0.5, 1.0, 1.0], bz.BufferType.UNIFORM,
+    ubuf = ctx.create_buffer([0.0, 0.5, 1.0, 1.0], bz.BufferUsage.UNIFORM,
                              bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=4, uniform_buffers=4)
     dset = pool.allocate_set(pipeline, set=0)  # static set for a static buffer
@@ -190,7 +190,7 @@ def test_storage_buffer_read_in_fragment_shader(ctx, fullscreen_vert, usage):
                 .storage_buffer(0, bz.ShaderStage.FRAGMENT, set=0)
                 .build(target))
 
-    sbuf = ctx.create_buffer([0.0, 0.0, 1.0, 1.0], bz.BufferType.STORAGE, usage)
+    sbuf = ctx.create_buffer([0.0, 0.0, 1.0, 1.0], bz.BufferUsage.STORAGE, usage)
     pool = ctx.create_descriptor_pool(max_sets=8, storage_buffers=8)
     if usage == bz.MemoryUsage.DYNAMIC:
         dset = pool.allocate_frame_set(pipeline, set=0)
@@ -300,3 +300,52 @@ def test_set_image_on_buffer_binding_points_to_set_buffer(ctx, fullscreen_vert, 
     with pytest.raises(bz.ResourceError) as info:
         dset.set_image(7, tex)
     assert "7" in str(info.value)
+
+
+def test_redeclaring_a_binding_with_another_type_is_refused(ctx, triangle_shaders):
+    """The stage merge is for one binding read by two stages, and the second
+    declarator's TYPE used to be ignored silently — the layout held whatever
+    the first call said. Refused at build(), the count mismatch's channel."""
+    vert, frag = triangle_shaders
+    target = ctx.create_render_target(8, 8)
+    with pytest.raises(bz.ShaderError, match=r"\.texture\(\) and again as \.storage_buffer\(\)"):
+        (ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
+         .texture(0, bz.ShaderStage.VERTEX)
+         .storage_buffer(0, bz.ShaderStage.FRAGMENT)
+         .build(target))
+    comp = ctx.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
+    with pytest.raises(bz.ShaderError, match=r"\.storage_buffer\(\) and again as \.texture\(\)"):
+        ctx.compute_pipeline().shader(comp).storage_buffer(0).texture(0).build()
+
+
+def test_a_declarator_takes_a_stage_sequence(ctx, fullscreen_vert):
+    """Ergonomics #6: a binding read by two stages is one call. The sequence
+    loops the same C++ merge the two-call spelling uses, so the two spellings
+    cannot disagree — both build the same layout."""
+    vert = fullscreen_vert
+    frag = ctx.compile_shader(str(SHADER_DIR / "ubo.frag"), bz.ShaderStage.FRAGMENT)
+    target = ctx.create_render_target(16, 16)
+    both = (ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
+            .uniform_buffer(0, [bz.ShaderStage.VERTEX, bz.ShaderStage.FRAGMENT])
+            .build(target))
+    twice = (ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
+             .uniform_buffer(0, bz.ShaderStage.VERTEX)
+             .uniform_buffer(0, bz.ShaderStage.FRAGMENT)
+             .build(target))
+    assert both is not None and twice is not None
+
+
+def test_push_constant_takes_a_stage_sequence(ctx, triangle_shaders):
+    vert, frag = triangle_shaders
+    target = ctx.create_render_target(8, 8)
+    pipe = (ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
+            .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
+            .push_constant(16, [bz.ShaderStage.VERTEX, bz.ShaderStage.FRAGMENT])
+            .build(target))
+    assert pipe is not None
+
+
+def test_an_empty_stage_sequence_is_refused(ctx, triangle_shaders):
+    vert, frag = triangle_shaders
+    with pytest.raises(bz.ResourceError, match="empty sequence"):
+        ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag).texture(0, [])

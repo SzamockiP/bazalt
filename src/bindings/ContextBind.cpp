@@ -37,6 +37,9 @@ void bind_context(py::module_& m)
         .def_readonly("max_dispatch", &DeviceLimits::max_dispatch)
         .def_readonly("min_subgroup_size", &DeviceLimits::min_subgroup_size)
         .def_readonly("max_subgroup_size", &DeviceLimits::max_subgroup_size)
+        .def_readonly("conservative_underestimation", &DeviceLimits::conservative_underestimation)
+        .def_readonly("max_extra_overestimation", &DeviceLimits::max_extra_overestimation)
+        .def_readonly("extra_overestimation_granularity", &DeviceLimits::extra_overestimation_granularity)
         .def(
             "__repr__",
             [](const DeviceLimits& self)
@@ -197,9 +200,9 @@ void bind_context(py::module_& m)
             "create_buffer",
             [](Context& self,
                const py::list& list,
-               BufferType type,
-               MemoryUsage usage,
-               std::optional<DataType> dataType,
+               BufferUsage usage,
+               MemoryUsage memory,
+               const py::object& dtype,
                const std::string& name) -> py::object
             {
                 require_open(self, "create_buffer");
@@ -208,14 +211,16 @@ void bind_context(py::module_& m)
                     raise_error(err_resource("Cannot create buffer from empty list"));
                 }
 
+                // An int list into an INDEX buffer is indices, whatever else the
+                // usage carries.
                 DataType actualType =
-                    resolve_data_type(list, dataType, type == BufferType::INDEX ? DataType::UINT32 : DataType::INT32);
+                    resolve_dtype(list, dtype, has(usage, BufferUsage::INDEX) ? DataType::UINT32 : DataType::INT32);
 
                 auto buffer = with_list_bytes(
                     list,
                     actualType,
                     [&](const void* data, size_t nbytes)
-                    { return unwrap(Buffer::create(self, data, nbytes, type, usage), self.logger().get()); });
+                    { return unwrap(Buffer::create(self, data, nbytes, usage, memory), self.logger().get()); });
                 // Recorded so bind_index_buffer can pick VK_INDEX_TYPE_UINT16 vs UINT32
                 // instead of assuming.
                 buffer->set_data_type(actualType);
@@ -224,21 +229,23 @@ void bind_context(py::module_& m)
             },
             // One name across the three overloads, so the keyword spelling works
             // whichever body the argument picks — and `list` shadowed a builtin (0.23).
+            // `usage`/`memory` since 0.30: `type` shadowed a builtin too, and
+            // `usage` meaning the memory placement contradicted Vulkan's word.
             py::arg("data"),
-            py::arg("type"),
             py::arg("usage"),
-            py::arg("data_type") = py::none(),
+            py::arg("memory"),
             py::kw_only(),
+            py::arg("dtype") = py::none(),
             py::arg("name") = "")
         .def(
             "create_buffer",
-            [](Context& self, const py::buffer& b, BufferType type, MemoryUsage usage, const std::string& name)
+            [](Context& self, const py::buffer& b, BufferUsage usage, MemoryUsage memory, const std::string& name)
                 -> py::object
             {
                 require_open(self, "create_buffer");
                 py::buffer_info info = b.request();
                 auto buffer = unwrap(
-                    Buffer::create(self, info.ptr, contiguous_nbytes(info, "create_buffer"), type, usage),
+                    Buffer::create(self, info.ptr, contiguous_nbytes(info, "create_buffer"), usage, memory),
                     self.logger().get());
                 // The list overload above records the data type so
                 // bind_index_buffer can pick UINT16; this one never did, so a
@@ -253,23 +260,23 @@ void bind_context(py::module_& m)
                 return py::cast(buffer);
             },
             py::arg("data"),
-            py::arg("type"),
             py::arg("usage"),
+            py::arg("memory"),
             py::kw_only(),
             py::arg("name") = "")
         .def(
             "create_buffer",
-            [](Context& self, size_t size_in_bytes, BufferType type, MemoryUsage usage, const std::string& name)
+            [](Context& self, size_t size_in_bytes, BufferUsage usage, MemoryUsage memory, const std::string& name)
                 -> py::object
             {
                 require_open(self, "create_buffer");
-                auto buffer = unwrap(Buffer::create(self, nullptr, size_in_bytes, type, usage), self.logger().get());
+                auto buffer = unwrap(Buffer::create(self, nullptr, size_in_bytes, usage, memory), self.logger().get());
                 name_buffer(self, buffer, name);
                 return py::cast(buffer);
             },
             py::arg("data"),
-            py::arg("type"),
             py::arg("usage"),
+            py::arg("memory"),
             py::kw_only(),
             py::arg("name") = "")
         .def(
@@ -392,7 +399,7 @@ void bind_context(py::module_& m)
                 std::vector<std::byte> bytes(view.size());
                 std::memcpy(bytes.data(), view.data(), view.size());
                 auto image = unwrap(manager->load_memory(std::move(bytes), mipmaps), self.logger().get());
-                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                name_image(self, image, name);
                 return py::cast(image);
             },
             py::arg("data"),
@@ -417,7 +424,7 @@ void bind_context(py::module_& m)
                 // explicit-control verbs.
                 auto* manager = self.upload_manager();
                 auto image = unwrap(manager->load(path, mipmaps), self.logger().get());
-                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                name_image(self, image, name);
                 if (auto* hr = self.hot_reload())
                 {
                     hr->watch_image(image, path);
@@ -441,7 +448,7 @@ void bind_context(py::module_& m)
                 require_open(self, "load_image");
                 auto* manager = self.upload_manager();
                 auto image = unwrap(manager->load_layered(paths, cube, mipmaps), self.logger().get());
-                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                name_image(self, image, name);
                 return py::cast(image);
             },
             py::arg("paths"),
@@ -523,7 +530,7 @@ void bind_context(py::module_& m)
                     Image::create_empty(
                         self, width, height, format, mip_levels, layers, cube, VK_SAMPLE_COUNT_1_BIT, depth),
                     self.logger().get());
-                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                name_image(self, image, name);
                 return py::cast(image);
             },
             py::arg("width"),
@@ -563,7 +570,7 @@ void bind_context(py::module_& m)
                     Image::create_from_pixels(
                         self, info.ptr, spec.width, spec.height, spec.format, mipmaps, spec.depth),
                     self.logger().get());
-                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                name_image(self, image, name);
                 return py::cast(image);
             },
             py::arg("array"),
@@ -645,7 +652,7 @@ void bind_context(py::module_& m)
                         spec->format,
                         mipmaps),
                     self.logger().get());
-                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                name_image(self, image, name);
                 return py::cast(image);
             },
             py::arg("images"),
@@ -740,7 +747,7 @@ void bind_context(py::module_& m)
                         }
                     }
                 }
-                name_object(self, VK_OBJECT_TYPE_IMAGE, image->vk_image(), name);
+                name_image(self, image, name);
                 return py::cast(image);
             },
             py::arg("source"),

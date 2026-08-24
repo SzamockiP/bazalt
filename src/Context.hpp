@@ -238,10 +238,10 @@ public:
     }
     // ── The queues ────────────────────────────────────────────────────────────
     //
-    // Two runtimes since 0.29 (see QueueRuntime below). Every accessor comes in
-    // a pair: the bare name answers for the graphics queue, which is what the
-    // upload worker, the one-shot submits and the swapchain all mean, and the
-    // QueueKind overload answers for whichever queue a batch runs on.
+    // Three runtimes since 0.30 (see QueueRuntime below). Every accessor comes
+    // in a pair: the bare name answers for the graphics queue, which is what
+    // the swapchain and the readback path mean, and the QueueKind overload
+    // answers for whichever queue a batch or an upload runs on.
     VkQueue queue(QueueKind kind) const
     {
         return runtime(kind).queue;
@@ -279,8 +279,9 @@ public:
         return graphics_q_.pool;
     }
     // How buffers and images must be shared between the families. CONCURRENT
-    // over both when they differ, EXCLUSIVE when the compute runtime aliases
-    // the graphics queue — CONCURRENT with one repeated index is invalid.
+    // over every DISTINCT family when there are two or more, EXCLUSIVE when
+    // every runtime aliases the graphics queue — CONCURRENT with one repeated
+    // index is invalid, so the list is deduplicated at device creation.
     struct Sharing
     {
         VkSharingMode mode = VK_SHARING_MODE_EXCLUSIVE;
@@ -503,14 +504,24 @@ public:
     // passed its own half.
     QueueSerials retire_key() const
     {
-        return {graphics_q_.serial.load(), compute_q_.serial.load()};
+        QueueSerials key{};
+        for (std::size_t i = 0; i < kQueueCount; ++i)
+        {
+            key[i] = runtimes_[i]->serial.load();
+        }
+        return key;
     }
 
     // The newest serial each queue has really been given, for a caller that
     // has to order itself behind everything already in flight.
     QueueSerials submitted_serials() const
     {
-        return {graphics_q_.submitted.load(), compute_q_.submitted.load()};
+        QueueSerials key{};
+        for (std::size_t i = 0; i < kQueueCount; ++i)
+        {
+            key[i] = runtimes_[i]->submitted.load();
+        }
+        return key;
     }
 
     std::uint64_t completed_submit_serial(QueueKind kind) const;
@@ -544,11 +555,13 @@ public:
     // Cheap when the slot is free: a timeline wait on a value already reached
     // returns immediately, and 0 is always reached.
     //
-    // `only` narrows it to one queue, which is what a window needs: its fence
+    // `except` drops one queue from it, which is what a window needs: its fence
     // already covers the graphics half, and waiting that half again would make
     // each window's acquire block on whatever the windows before it submitted
-    // in the SAME frame.
-    void wait_for_slot(std::optional<QueueKind> only = std::nullopt);
+    // in the SAME frame. Drop-one rather than keep-one since 0.30: with three
+    // queues "everything but graphics" is two halves, and keep-one waited only
+    // the compute one.
+    void wait_for_slot(std::optional<QueueKind> except = std::nullopt);
 
     // Blocks until everything this Context started has finished — the uploads
     // still decoding on the worker as well as every submit — then reclaims what
@@ -559,24 +572,30 @@ public:
     // vkDeviceWaitIdle would also stall the other Contexts sharing the device.
     std::expected<void, Error> wait_for_submits();
 
-    // Submits one already-recorded command buffer on the graphics queue and
-    // signals the submission timeline with the serial it returns. Every
-    // one-shot submit goes through here — deferred_submit for the main thread,
-    // the upload worker for its own — so there is one description of what a
+    // Submits one already-recorded command buffer on the queue `kind` names and
+    // signals THAT queue's timeline with the serial it returns. Every one-shot
+    // submit goes through here — deferred_submit for the main thread, the
+    // upload worker for its own — so there is one description of what a
     // submit signals. Takes the queue mutex: the worker is not the only thread
-    // that submits.
+    // that submits. The command buffer must come from the pool of the same
+    // queue.
     //
     // Who frees the command buffer afterwards is the caller's business, and it
     // differs: the main thread parks it in the deletion queue, while the worker
     // must free it back into its own pool from its own thread.
-    // after: a serial this work must not start before, or 0 for "no ordering".
+    // after: one serial per queue this work must not start before, 0 meaning
+    // "no ordering" on that queue. Waited on each queue's own timeline, so the
+    // mip cascade of an upload can wait for the copy that ran on another queue.
     //
     // Submitting in order does NOT execute in order: two submits on one queue
     // overlap unless something says otherwise, and the spec is explicit about it.
     // That is what `after` is for — the upload worker promises that two updates of
     // one image land in call order, and one thread submitting them in sequence is
     // not enough to keep the promise.
-    std::expected<std::uint64_t, Error> submit_one_shot(VkCommandBuffer cmd, std::uint64_t after = 0);
+    std::expected<std::uint64_t, Error> submit_one_shot(
+        VkCommandBuffer cmd,
+        QueueKind kind = QueueKind::Graphics,
+        const QueueSerials& after = {});
 
     // ── Submitting a graph ────────────────────────────────────────────────────
     //
@@ -611,11 +630,13 @@ public:
 
     // Submits a graph's batches, in order, one vkQueueSubmit each.
     //
-    // Every batch waits: the uploads it may read (on the graphics timeline —
-    // uploads never leave that queue), whatever `after` names, the previous
-    // replay of this graph on the OTHER queues, and the batches of this submit
-    // it depends on. Its own queue needs no wait: submission order plus the
-    // replay wrap-around barrier already cover it.
+    // Every batch waits: the uploads it may read (one serial per queue since
+    // 0.30 — a copy signals the transfer timeline, a mip cascade the graphics
+    // one), whatever `after` names, the previous replay of this graph on the
+    // OTHER queues, and the batches of this submit it depends on. Its own queue
+    // needs no wait for the replay: submission order plus the wrap-around
+    // barrier already cover it. The upload and `after` waits are taken on the
+    // own queue too, because those were submitted by somebody else.
     //
     // Every wait names a value that was reserved AND submitted earlier in this
     // same loop, or by a submit that already returned. Timeline semaphores
@@ -627,7 +648,7 @@ public:
     // the ring and the next replay against them anyway.
     std::expected<void, Error> submit_batches(
         std::span<const SubmitBatch> batches,
-        std::uint64_t upload_serial,
+        const QueueSerials& uploads,
         const QueueSerials& after,
         const QueueSerials& previous_replay,
         QueueSerials& signalled,
@@ -680,7 +701,7 @@ public:
     // submit on the calling thread and only skip the wait. It still counts as
     // an upload, so it joins the worker's batch instead of being tracked
     // beside it.
-    void note_upload_serial(std::uint64_t serial);
+    void note_upload_serial(const QueueSerials& serials);
 
     // ── Hot reload ────────────────────────────────────────────────────────────
     //
@@ -784,31 +805,34 @@ public:
     // thread, so this mutex is uncontended — it exists because 0.5's upload
     // worker submits from its own thread, and every vkQueueSubmit/Present/
     // WaitIdle must hold it from then on.
-    // The mutex guarding one queue. On a device with no separate compute family
-    // the two runtimes share a VkQueue, and therefore share this: external
-    // synchronization is about the QUEUE, not about the runtime that names it.
+    // The mutex guarding one queue. On a device with no separate compute (or
+    // transfer) family the runtimes share a VkQueue, and therefore share this:
+    // external synchronization is about the QUEUE, not about the runtime that
+    // names it.
     std::mutex& queue_mutex(QueueKind kind)
     {
         return *runtime(kind).mutex;
     }
 
-    // Both queue mutexes, for the callers that idle the whole device
-    // (swapchain recreation, the upload worker's destructor). Graphics first,
-    // always, and the compute lock is skipped when it IS the graphics one —
-    // locking one mutex twice is undefined.
+    // Every queue mutex, for the callers that idle the whole device (swapchain
+    // recreation, the upload worker's destructor). In index order, always, and
+    // a runtime that aliases another's mutex is skipped — locking one mutex
+    // twice is undefined.
     struct QueueLocks
     {
-        std::unique_lock<std::mutex> graphics;
-        std::unique_lock<std::mutex> compute;
+        std::array<std::unique_lock<std::mutex>, kQueueCount> locks;
     };
     QueueLocks lock_queues()
     {
-        QueueLocks locks{std::unique_lock(graphics_q_.own_mutex), {}};
-        if (compute_q_.mutex != &graphics_q_.own_mutex)
+        QueueLocks held;
+        for (std::size_t i = 0; i < kQueueCount; ++i)
         {
-            locks.compute = std::unique_lock(compute_q_.own_mutex);
+            if (runtimes_[i]->mutex == &runtimes_[i]->own_mutex)
+            {
+                held.locks[i] = std::unique_lock(runtimes_[i]->own_mutex);
+            }
         }
-        return locks;
+        return held;
     }
 
     std::mutex& queue_mutex()
@@ -870,14 +894,19 @@ private:
     // serial counter that timeline signals, the mutex that externally
     // synchronizes it, and a command pool on its family.
     //
-    // Two instances since 0.29. On a device with a compute-only family they are
-    // two real queues. On one without — lavapipe, MoltenVK, plenty of iGPUs —
-    // the compute runtime ALIASES the graphics VkQueue: same handle, same
-    // mutex (external synchronization is about the queue, so a second lock over
-    // one handle would be a race wearing a lock), but its own timeline and its
-    // own command pool. That keeps one code path for both, so the cross-queue
-    // machinery runs everywhere and Feature::ASYNC_COMPUTE reports whether the
-    // overlap is real.
+    // Three instances since 0.30 (two since 0.29). On a device with a
+    // compute-only family the compute runtime is a real second queue, and on
+    // one with a transfer-only family (the DMA engine of a discrete GPU) the
+    // transfer runtime is a real third. Without the family — lavapipe,
+    // MoltenVK, plenty of iGPUs — a runtime ALIASES the graphics VkQueue: same
+    // handle, same mutex (external synchronization is about the queue, so a
+    // second lock over one handle would be a race wearing a lock), but its own
+    // timeline and its own command pool. That keeps one code path for every
+    // device, so the cross-queue machinery runs everywhere and
+    // Feature::ASYNC_COMPUTE / ASYNC_TRANSFER report whether the overlap is
+    // real. The transfer runtime never borrows the compute family: a staging
+    // copy is DMA, not shader work, and the compute queue is the wrong home
+    // for it (DESIGN.md, "Uploads on a TRANSFER queue").
     struct QueueRuntime
     {
         VkQueue queue = VK_NULL_HANDLE;
@@ -901,14 +930,19 @@ private:
 
     QueueRuntime graphics_q_;
     QueueRuntime compute_q_;
+    QueueRuntime transfer_q_;
+    // Indexed by queue_index(). Pointers because a QueueRuntime holds a mutex
+    // and two atomics, so an array of them could not be brace-initialized;
+    // declared AFTER the three so the addresses exist.
+    std::array<QueueRuntime*, kQueueCount> runtimes_{&graphics_q_, &compute_q_, &transfer_q_};
 
     QueueRuntime& runtime(QueueKind kind)
     {
-        return kind == QueueKind::Compute ? compute_q_ : graphics_q_;
+        return *runtimes_[queue_index(kind)];
     }
     const QueueRuntime& runtime(QueueKind kind) const
     {
-        return kind == QueueKind::Compute ? compute_q_ : graphics_q_;
+        return *runtimes_[queue_index(kind)];
     }
 
     VmaAllocator allocator_ = VK_NULL_HANDLE;
@@ -954,9 +988,10 @@ private:
     std::uint64_t frame_serial_ = 0;
     std::int32_t acquired_images_ = 0;
 
-    // How buffers and images are shared between the two families, decided once
-    // at device creation. The array is a member so the pointer handed out by
-    // sharing() stays valid: a Context is neither copied nor moved.
+    // How buffers and images are shared between the families, decided once at
+    // device creation: the distinct family indices, deduplicated. The array is
+    // a member so the pointer handed out by sharing() stays valid: a Context is
+    // neither copied nor moved.
     std::array<std::uint32_t, kQueueCount> sharing_families_{};
     Sharing sharing_;
 

@@ -128,7 +128,7 @@ def test_foreign_target_in_begin_rendering_is_refused(pair):
 
 def test_foreign_buffer_in_a_descriptor_set_is_refused(pair):
     a, b = pair
-    buffer = a.create_buffer([1.0, 2.0, 3.0, 4.0], bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buffer = a.create_buffer([1.0, 2.0, 3.0, 4.0], bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     shader = b.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
     pipeline = b.compute_pipeline().shader(shader).storage_buffer(0).build()
     pool = b.create_descriptor_pool(max_sets=1, storage_buffers=1)
@@ -245,7 +245,7 @@ def test_a_serial_from_another_context_is_refused(ctx, extra_context):
     serial used to be accepted: it waited THIS Context's timeline for that
     number, which returns too early or hangs, and never says why."""
     other = extra_context()
-    buf = other.create_buffer(16, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = other.create_buffer(16, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     g = other.graph()
     with g.add_pass(name="clear") as p:
         p.fill_buffer(buf, 0)

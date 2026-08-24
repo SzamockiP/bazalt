@@ -36,7 +36,7 @@ def test_readme_triangle(ctx):
         +0.0, -0.5, 0.0, 1.0, 0.0, 0.0,
         -0.5, +0.5, 0.0, 0.0, 1.0, 0.0,
         +0.5, +0.5, 0.0, 0.0, 0.0, 1.0,
-    ], bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    ], bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
     g = ctx.graph()
     with g.add_pass(target, clear_color=[0.1, 0.2, 0.3, 1.0]) as p:
@@ -172,7 +172,7 @@ def test_readme_negative_viewport_flips(ctx):
         -0.8, -0.9, 0.0, 1.0, 1.0, 1.0,
         +0.8, -0.9, 0.0, 1.0, 1.0, 1.0,
         +0.0, -0.2, 0.0, 1.0, 1.0, 1.0,
-    ], bz.BufferType.VERTEX, bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    ], bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
     def halves(flip):
         g = ctx.graph()

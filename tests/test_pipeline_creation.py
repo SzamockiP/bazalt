@@ -88,7 +88,7 @@ def test_compute_takes_constants_without_a_stage(ctx):
                 .build())
 
     data = np.zeros(8, dtype=np.int32)
-    buf = ctx.create_buffer(data, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = ctx.create_buffer(data, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=1, storage_buffers=1)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, buf)
@@ -328,7 +328,7 @@ def test_uint4_attribute_arrives_unconverted(ctx):
     # (cull BACK, COUNTER_CLOCKWISE) — the trap 29_bindless documented.
     data["pos"] = [(-1, -1), (-1, 3), (3, -1)]
     data["joints"] = (10, 20, 30, 255)
-    vbuf = ctx.create_buffer(data, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+    vbuf = ctx.create_buffer(data, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
     g = ctx.graph()
     with g.add_pass(target, clear_color=[0, 0, 0, 0]) as p:

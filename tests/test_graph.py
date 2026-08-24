@@ -6,6 +6,8 @@ commands, what invalidates the compiled barriers, and what the two structural
 verbs (enabled, remove) do to a frame.
 """
 
+import struct
+
 import numpy as np
 import pytest
 
@@ -19,7 +21,7 @@ def add_one(ctx):
     comp = ctx.compile_shader(str(SHADER_DIR / "add_one.comp"), bz.ShaderStage.COMPUTE)
     pipeline = ctx.compute_pipeline().shader(comp).storage_buffer(0).build()
     buf = ctx.create_buffer(np.zeros(4, dtype=np.float32),
-                            bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                            bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=8, storage_buffers=8)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, buf)
@@ -75,7 +77,7 @@ def test_passes_run_in_add_order(ctx):
     adder = ctx.compute_pipeline().shader(comp_add).storage_buffer(0).build()
 
     buf = ctx.create_buffer(np.full(4, 3.0, dtype=np.float32),
-                            bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                            bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=8, storage_buffers=8)
     d_double = pool.allocate_set(doubler, set=0)
     d_double.set_buffer(0, buf)
@@ -199,7 +201,7 @@ def test_a_disabled_pass_is_not_a_hazard_for_the_ones_after_it(ctx, fullscreen_v
            .build(target))
 
     sbuf = ctx.create_buffer(np.array([0.0, 0.0, 1.0, 1.0], dtype=np.float32),
-                             bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                             bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     pool = ctx.create_descriptor_pool(max_sets=8, storage_buffers=8)
     comp_set = pool.allocate_set(doubler, set=0)
     comp_set.set_buffer(0, sbuf)
@@ -236,7 +238,7 @@ def test_a_pass_without_a_target_refuses_the_draw_verbs(ctx):
 def test_a_render_pass_refuses_the_compute_and_transfer_verbs(ctx):
     target = ctx.create_render_target(16, 16)
     buf = ctx.create_buffer(np.zeros(4, dtype=np.float32),
-                            bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+                            bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     g = ctx.graph()
     p = g.add_pass(target)
     for call in (lambda: p.dispatch(1),
@@ -277,19 +279,58 @@ def test_the_queue_enum_gained_compute_as_a_value(ctx):
     async compute additive: a program written against 0.28 schedules exactly as
     it did, and the new queue is one more thing to pass rather than a new way
     to say anything."""
-    assert list(bz.Queue.__members__) == ["GRAPHICS", "COMPUTE"]
+    assert list(bz.Queue.__members__) == ["GRAPHICS", "COMPUTE", "TRANSFER"]
     assert int(bz.Queue.COMPUTE) == 1
+    assert int(bz.Queue.TRANSFER) == 2
     assert ctx.graph().add_pass(queue=bz.Queue.COMPUTE) is not None
 
 
 def test_a_render_pass_refuses_the_compute_queue(ctx):
-    """A compute queue has no rasterizer, so a pass with a target cannot run
-    there. Refused where the pass is made rather than at submit, because the
-    target is what says it draws."""
+    """Only the graphics queue has a rasterizer, so a pass with a target cannot
+    run anywhere else. Refused where the pass is made rather than at submit,
+    because the target is what says it draws."""
     target = ctx.create_render_target(16, 16)
     g = ctx.graph()
     with pytest.raises(bz.StateError, match="cannot draw"):
         g.add_pass(target, queue=bz.Queue.COMPUTE)
+    with pytest.raises(bz.StateError, match="cannot draw"):
+        g.add_pass(target, queue=bz.Queue.TRANSFER)
+
+
+def test_a_transfer_queue_pass_refuses_shader_and_blit_verbs(ctx):
+    """A transfer family runs copies only, so every verb that needs a shader —
+    a dispatch, a bound pipeline, a descriptor set, a clear — is refused by
+    Queue.TRANSFER, the same way Queue.COMPUTE refuses a blit: by the enum,
+    not by the family the device happens to have. What remains is exactly the
+    copy vocabulary, and the pass submits clean."""
+    comp = ctx.compile_shader(str(SHADER_DIR / "double.comp"), bz.ShaderStage.COMPUTE)
+    pipeline = ctx.compute_pipeline().shader(comp).storage_buffer(0).build()
+    src = ctx.create_image(np.zeros((16, 16, 4), np.uint8))
+    dst = ctx.create_image(16, 16, bz.Format.RGBA8)
+    mipped = ctx.create_image(32, 32, bz.Format.RGBA8, mip_levels=4)
+    a = ctx.create_buffer(np.arange(16, dtype=np.uint32), bz.BufferUsage.STORAGE,
+                          bz.MemoryUsage.STATIC)
+    b = ctx.create_buffer(64, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
+    g = ctx.graph()
+    with g.add_pass(name="transfer", queue=bz.Queue.TRANSFER) as p:
+        for verb in (lambda: p.bind_pipeline(pipeline),
+                     lambda: p.dispatch(1),
+                     lambda: p.clear_image(dst),
+                     # vkCmdResetQueryPool needs graphics or compute, so a
+                     # transfer pass cannot be timed. Accepted ceiling.
+                     lambda: p.timer()):
+            with pytest.raises(bz.StateError, match="Queue.GRAPHICS or Queue.COMPUTE"):
+                verb()
+        with pytest.raises(bz.StateError, match="Queue.GRAPHICS"):
+            p.blit_image(src, dst)
+        with pytest.raises(bz.StateError, match="Queue.GRAPHICS"):
+            p.generate_mipmaps(mipped)
+        # The copy vocabulary works, and validation is the referee.
+        with p.label("copies"):
+            p.copy_buffer(a, b)
+            p.fill_buffer(b, 7, offset=0, size=4)
+            p.copy_image(src, dst)
+    ctx.submit(g)
 
 
 def test_a_compute_queue_pass_refuses_the_blit_verbs(ctx):
@@ -315,7 +356,7 @@ def test_a_compute_queue_pass_refuses_the_blit_verbs(ctx):
         # What a compute pass CAN do: copies, clears and fills are legal on a
         # compute family, and the suite's referee is the validation layers.
         p.copy_image(src, ctx.create_image(32, 32, bz.Format.RGBA8))
-        p.fill_buffer(ctx.create_buffer(16, bz.BufferType.STORAGE, bz.MemoryUsage.STATIC), 0)
+        p.fill_buffer(ctx.create_buffer(16, bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC), 0)
         p.clear_image(dst, [0, 0, 0, 1])
     ctx.submit(g)
 
@@ -325,7 +366,7 @@ def test_passes_on_two_queues_run_in_add_order(ctx):
     passes are not commutative, so a reordered or unsynchronized run gives a
     different number: (3*2)+1 then *2 is 14, any other order is not."""
     pipeline, _, _, pool = add_one(ctx)
-    buf = ctx.create_buffer(np.full(4, 3.0, np.float32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+    buf = ctx.create_buffer(np.full(4, 3.0, np.float32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
     dset = pool.allocate_set(pipeline)
     dset.set_buffer(0, buf)
     double = (ctx.compute_pipeline()
@@ -357,7 +398,7 @@ def test_toggling_a_pass_recomputes_the_batches(ctx):
               .build())
 
     def fresh_buffer():
-        buf = ctx.create_buffer(np.full(4, 3.0, np.float32), bz.BufferType.STORAGE, bz.MemoryUsage.STATIC)
+        buf = ctx.create_buffer(np.full(4, 3.0, np.float32), bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC)
         add_set = pool.allocate_set(pipeline)
         add_set.set_buffer(0, buf)
         double_set = pool.allocate_set(double)
@@ -424,3 +465,51 @@ def test_a_timer_from_before_a_reset_is_stale(ctx):
     g.reset()
     with pytest.raises(bz.StateError):
         _ = t.ms
+
+
+def _write_then_sample(ctx):
+    """A compute pass writes a storage image, a render pass samples it — the
+    smallest graph whose compile decides a barrier with a named producer."""
+    pattern = ctx.compile_shader(str(SHADER_DIR / "pattern.comp"), bz.ShaderStage.COMPUTE)
+    write = ctx.compute_pipeline().shader(pattern).storage_image(0).push_constant(4).build()
+    vert = ctx.compile_shader(str(SHADER_DIR / "fullscreen.vert"), bz.ShaderStage.VERTEX)
+    frag = ctx.compile_shader(str(SHADER_DIR / "textured.frag"), bz.ShaderStage.FRAGMENT)
+    target = ctx.create_render_target(32, 32)
+    read = (ctx.graphics_pipeline().vertex_shader(vert).fragment_shader(frag)
+            .texture(0, bz.ShaderStage.FRAGMENT).build(target))
+    image = ctx.create_image(32, 32, bz.Format.RGBA8, name="hdr_color")
+    pool = ctx.create_descriptor_pool()
+    ws = pool.allocate_set(write)
+    ws.set_storage_image(0, image)
+    rs = pool.allocate_set(read)
+    rs.set_image(0, image)
+
+    g = ctx.graph()
+    with g.add_pass(name="write") as p:
+        p.bind_pipeline(write).bind_descriptor_set(ws)
+        p.push_constants(0, struct.pack("f", 0.5)).dispatch(4, 4)
+    with g.add_pass(target, name="sample") as p:
+        p.bind_pipeline(read).bind_descriptor_set(rs).draw(3)
+    return g
+
+
+def test_explain_names_the_producer_pass(ctx):
+    """The report shows the barrier the compile decided, with the resource's
+    name= and the pass that produced the dependency. The text is a debugging
+    aid — these substrings are what a reader greps for, not API."""
+    g = _write_then_sample(ctx)
+    text = g.explain()
+    assert 'GENERAL -> SHADER_READ_ONLY_OPTIMAL' in text
+    assert 'image "hdr_color"' in text
+    assert 'producer: pass [0] "write"' in text
+    assert "UNORDERED" not in text
+    ctx.submit(g)
+    assert g.explain() == g.explain()
+
+
+def test_explain_compiles_a_dirty_graph(ctx):
+    """explain() before any submit compiles exactly as a submit would, and the
+    submit afterwards is still clean."""
+    g = _write_then_sample(ctx)
+    assert "graph: 2 passes" in g.explain()
+    ctx.submit(g)

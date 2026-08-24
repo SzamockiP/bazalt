@@ -9,6 +9,7 @@ A shader that says hello would then break every test around it.
 import pytest
 
 import bazalt as bz
+import numpy as np
 
 
 PRINTF_COMPUTE = """
@@ -144,8 +145,8 @@ def test_a_context_with_printf_still_runs_ordinary_shaders(extra_context):
     shader = context.compile_shader(source=PLAIN_COMPUTE, stage=bz.ShaderStage.COMPUTE)
     pipeline = context.compute_pipeline().shader(shader).storage_buffer(0).build()
 
-    buf = context.create_buffer([0, 0, 0, 0], bz.BufferType.STORAGE, bz.MemoryUsage.STATIC,
-                                bz.DataType.UINT32)
+    buf = context.create_buffer([0, 0, 0, 0], bz.BufferUsage.STORAGE, bz.MemoryUsage.STATIC,
+                                dtype=np.uint32)
     pool = context.create_descriptor_pool(max_sets=1, storage_buffers=1)
     dset = pool.allocate_set(pipeline, set=0)
     dset.set_buffer(0, buf)

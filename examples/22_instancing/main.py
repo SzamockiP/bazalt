@@ -80,7 +80,7 @@ vertices = np.array([
      0.5,  0.5,  0.5,   0.0, 1.0, 0.0,
     -0.5,  0.5,  0.5,   0.0, 1.0, 0.0,
 ], dtype=np.float32)
-vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+vbuf = ctx.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 
 indices = np.array([
     0, 1, 2, 2, 3, 0,
@@ -90,7 +90,7 @@ indices = np.array([
     16, 17, 18, 18, 19, 16,
     23, 22, 21, 21, 20, 23,
 ], dtype=np.uint32)
-ibuf = ctx.create_buffer(indices, bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
+ibuf = ctx.create_buffer(indices, bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 
 # ── the instances: a grid, packed by hand ─────────────────────────────────
 # 20 bytes each: 3 floats of offset, 1 float of scale, 4 bytes of colour. The
@@ -105,11 +105,11 @@ for i in range(COUNTS[0]):
     r, g, b = (rng.integers(60, 256), rng.integers(60, 256), rng.integers(60, 256))
     rows.append(struct.pack("<4f4B", x, 0.0, z, float(rng.uniform(0.3, 0.8)), r, g, b, 255))
 instances = ctx.create_buffer(np.frombuffer(b"".join(rows), dtype=np.uint8),
-                              bz.BufferType.VERTEX, bz.MemoryUsage.STATIC,
+                              bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC,
                               name="instances")
 print(f"instance buffer: {len(rows) * 20 / 1024:.0f} KiB for {len(rows)} cubes")
 
-ubuf = ctx.create_buffer(20 * 4, bz.BufferType.UNIFORM, bz.MemoryUsage.DYNAMIC)
+ubuf = ctx.create_buffer(20 * 4, bz.BufferUsage.UNIFORM, bz.MemoryUsage.DYNAMIC)
 pool = ctx.create_descriptor_pool()
 desc_set = pool.allocate_frame_set(solid)
 desc_set.set_buffer(0, ubuf)

@@ -60,9 +60,9 @@ vertices = np.array([
      1.0,  1.0,  1.0, 1.0,
      1.0, -1.0,  1.0, 0.0,
 ], dtype=np.float32)
-vbuf = ctx.create_buffer(vertices, bz.BufferType.VERTEX, bz.MemoryUsage.STATIC)
+vbuf = ctx.create_buffer(vertices, bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC)
 ibuf = ctx.create_buffer(np.array([0, 1, 2, 2, 3, 0], dtype=np.uint32),
-                         bz.BufferType.INDEX, bz.MemoryUsage.STATIC)
+                         bz.BufferUsage.INDEX, bz.MemoryUsage.STATIC)
 
 # ── the instances: a grid, each cell naming a texture ─────────────────────
 # 16 bytes each: two floats of offset, one of scale, one uint of texture index.
@@ -72,7 +72,7 @@ for i in range(COLUMNS * ROWS):
     y = (i // COLUMNS + 0.5) / ROWS * 2.0 - 1.0
     rows.append(struct.pack("<3fI", x, y, 0.9 / COLUMNS, i % TEXTURE_COUNT))
 instances = ctx.create_buffer(np.frombuffer(b"".join(rows), dtype=np.uint8),
-                              bz.BufferType.VERTEX, bz.MemoryUsage.STATIC,
+                              bz.BufferUsage.VERTEX, bz.MemoryUsage.STATIC,
                               name="instances")
 
 

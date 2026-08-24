@@ -21,8 +21,8 @@ U32_MAX = 2**32 - 1
 
 def test_dynamic_buffer_update_refuses_a_wrapping_offset(ctx):
     """The one that reached memcpy: a wild destination pointer, not a slow path."""
-    buf = ctx.create_buffer([0.0] * 16, bz.BufferType.UNIFORM,
-                            bz.MemoryUsage.DYNAMIC, bz.DataType.FLOAT)
+    buf = ctx.create_buffer([0.0] * 16, bz.BufferUsage.UNIFORM,
+                            bz.MemoryUsage.DYNAMIC)
     payload = np.zeros(4, dtype=np.float32)
 
     # offset + 16 wraps to 6, which is <= the 64-byte buffer.
@@ -52,10 +52,10 @@ def test_image_read_refuses_a_wrapping_layer(ctx):
 
 
 def test_copy_buffer_refuses_a_wrapping_offset(ctx):
-    src = ctx.create_buffer([0.0] * 16, bz.BufferType.STORAGE,
-                            bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
-    dst = ctx.create_buffer([0.0] * 16, bz.BufferType.STORAGE,
-                            bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    src = ctx.create_buffer([0.0] * 16, bz.BufferUsage.STORAGE,
+                            bz.MemoryUsage.STATIC)
+    dst = ctx.create_buffer([0.0] * 16, bz.BufferUsage.STORAGE,
+                            bz.MemoryUsage.STATIC)
     g = ctx.graph()
     p = g.add_pass()
 
@@ -66,8 +66,8 @@ def test_copy_buffer_refuses_a_wrapping_offset(ctx):
 
 
 def test_fill_buffer_refuses_a_wrapping_offset(ctx):
-    buf = ctx.create_buffer([0.0] * 16, bz.BufferType.STORAGE,
-                            bz.MemoryUsage.STATIC, bz.DataType.FLOAT)
+    buf = ctx.create_buffer([0.0] * 16, bz.BufferUsage.STORAGE,
+                            bz.MemoryUsage.STATIC)
     g = ctx.graph()
     p = g.add_pass()
 
@@ -84,8 +84,8 @@ def test_draw_indirect_refuses_a_wrapping_offset(ctx, triangle_shaders):
                 .fragment_shader(frag)
                 .vertex_format([bz.VertexFormat.FLOAT3, bz.VertexFormat.FLOAT3])
                 .build(target))
-    args = ctx.create_buffer([3, 1, 0, 0], bz.BufferType.STORAGE,
-                             bz.MemoryUsage.STATIC, bz.DataType.UINT32)
+    args = ctx.create_buffer([3, 1, 0, 0], bz.BufferUsage.STORAGE,
+                             bz.MemoryUsage.STATIC, dtype=np.uint32)
 
     g = ctx.graph()
     p = g.add_pass(target, clear_color=[0, 0, 0, 1])
@@ -99,8 +99,8 @@ def test_draw_indirect_refuses_a_wrapping_offset(ctx, triangle_shaders):
 def test_the_ordinary_offsets_still_work(ctx):
     """The guard rejects the wrap, not the feature. Without this the whole file
     would pass on a bounds check hardcoded to refuse everything."""
-    buf = ctx.create_buffer([0.0] * 16, bz.BufferType.UNIFORM,
-                            bz.MemoryUsage.DYNAMIC, bz.DataType.FLOAT)
+    buf = ctx.create_buffer([0.0] * 16, bz.BufferUsage.UNIFORM,
+                            bz.MemoryUsage.DYNAMIC)
     buf.update(np.zeros(4, dtype=np.float32), offset=48)  # last 16 bytes, exact fit
     with pytest.raises(bz.ResourceError):
         buf.update(np.zeros(4, dtype=np.float32), offset=52)  # one float past the end
